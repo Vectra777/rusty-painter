@@ -1,229 +1,45 @@
 use eframe::egui;
-use eframe::egui::{Color32, ColorImage, TextureHandle, TextureOptions};
+use eframe::egui::{Color32, TextureHandle, TextureOptions};
+mod brush;
+mod canvas;
+mod color;
+mod vector;
 
-#[derive(Clone, Copy, Debug)]
-struct Color {
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
-}
+use crate::brush::{Brush, StrokeState};
+use crate::canvas::Canvas;
+use crate::color::Color;
+use crate::vector::Vec2;
 
-impl Color {
-    fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self {
-            r: r as f32 / 255.0,
-            g: g as f32 / 255.0,
-            b: b as f32 / 255.0,
-            a: a as f32 / 255.0,
-        }
-    }
+const TILE_SIZE: usize = 256;
 
-    fn white() -> Self {
-        Self::rgba(255, 255, 255, 255)
-    }
-
-    fn to_color32(&self) -> Color32 {
-        Color32::from_rgba_premultiplied(
-            (self.r * 255.0) as u8,
-            (self.g * 255.0) as u8,
-            (self.b * 255.0) as u8,
-            (self.a * 255.0) as u8,
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Vec2 {
-    x: f32,
-    y: f32,
-}
-
-fn distance(a: Vec2, b: Vec2) -> f32 {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    (dx * dx + dy * dy).sqrt()
-}
-
-struct Canvas {
-    width: usize,
-    height: usize,
-    pixels: Vec<Color>,
-}
-
-impl Canvas {
-    fn new(width: usize, height: usize, clear_color: Color) -> Self {
-        Self {
-            width,
-            height,
-            pixels: vec![clear_color; width * height],
-        }
-    }
-
-    fn clear(&mut self, color: Color) {
-        self.pixels.fill(color);
-    }
-
-    fn index(&self, x: i32, y: i32) -> Option<usize> {
-        if x < 0 || y < 0 {
-            return None;
-        }
-        let (x, y) = (x as usize, y as usize);
-        if x >= self.width || y >= self.height {
-            return None;
-        }
-        Some(y * self.width + x)
-    }
-
-    fn blend_pixel(&mut self, x: i32, y: i32, src: Color) {
-        if let Some(idx) = self.index(x, y) {
-            let dst = self.pixels[idx];
-            self.pixels[idx] = alpha_over(src, dst);
-        }
-    }
-
-    fn to_color_image(&self) -> ColorImage {
-        let pixels: Vec<Color32> = self.pixels.iter().map(|c| c.to_color32()).collect();
-        ColorImage {
-            size: [self.width, self.height],
-            pixels,
-        }
-    }
-}
-
-// "source over" alpha compositing
-fn alpha_over(src: Color, dst: Color) -> Color {
-    let out_a = src.a + dst.a * (1.0 - src.a);
-    if out_a <= 0.0 {
-        return Color {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        };
-    }
-
-    let r = (src.r * src.a + dst.r * dst.a * (1.0 - src.a)) / out_a;
-    let g = (src.g * src.a + dst.g * dst.a * (1.0 - src.a)) / out_a;
-    let b = (src.b * src.a + dst.b * dst.a * (1.0 - src.a)) / out_a;
-
-    Color { r, g, b, a: out_a }
-}
-
-struct Brush {
-    radius: f32,
-    hardness: f32, // 0..1
-    color: Color,
-    spacing: f32, // multiple of radius
-}
-
-impl Brush {
-    fn dab(&self, canvas: &mut Canvas, center: Vec2) {
-        let r = self.radius;
-        let r_i32 = r.ceil() as i32;
-
-        let min_x = (center.x.floor() as i32) - r_i32;
-        let max_x = (center.x.floor() as i32) + r_i32;
-        let min_y = (center.y.floor() as i32) - r_i32;
-        let max_y = (center.y.floor() as i32) + r_i32;
-
-        for y in min_y..=max_y {
-            for x in min_x..=max_x {
-                let dx = x as f32 + 0.5 - center.x;
-                let dy = y as f32 + 0.5 - center.y;
-                let dist = (dx * dx + dy * dy).sqrt();
-
-                if dist > r {
-                    continue;
-                }
-
-                let t = dist / r; // 0 center, 1 edge
-                let softness = (1.0 - t).powf(2.0);
-                let hardness = self.hardness.clamp(0.0, 1.0);
-                let alpha = hardness + (1.0 - hardness) * softness;
-
-                let src = Color {
-                    r: self.color.r,
-                    g: self.color.g,
-                    b: self.color.b,
-                    a: self.color.a * alpha,
-                };
-
-                canvas.blend_pixel(x, y, src);
-            }
-        }
-    }
-}
-
-struct StrokeState {
-    last_pos: Option<Vec2>,
-    distance_since_last_dab: f32,
-}
-
-impl StrokeState {
-    fn new() -> Self {
-        Self {
-            last_pos: None,
-            distance_since_last_dab: 0.0,
-        }
-    }
-
-    fn add_point(&mut self, canvas: &mut Canvas, brush: &Brush, pos: Vec2) {
-        let step = brush.radius * brush.spacing.max(0.01);
-
-        if let Some(prev) = self.last_pos {
-            let segment_len = distance(prev, pos);
-
-            if segment_len == 0.0 {
-                // Just dab once at this position
-                brush.dab(canvas, pos);
-                return;
-            }
-
-            let mut d = self.distance_since_last_dab;
-            let mut t = d / segment_len;
-
-            while t <= 1.0 {
-                let x = prev.x + (pos.x - prev.x) * t;
-                let y = prev.y + (pos.y - prev.y) * t;
-                let p = Vec2 { x, y };
-                brush.dab(canvas, p);
-
-                d += step;
-                t = d / segment_len;
-            }
-
-            self.distance_since_last_dab = d - segment_len;
-            if self.distance_since_last_dab < 0.0 {
-                self.distance_since_last_dab = 0.0;
-            }
-        } else {
-            // first point
-            brush.dab(canvas, pos);
-            self.distance_since_last_dab = 0.0;
-        }
-
-        self.last_pos = Some(pos);
-    }
-
-    fn end(&mut self) {
-        self.last_pos = None;
-        self.distance_since_last_dab = 0.0;
-    }
+struct CanvasTile {
+    texture: TextureHandle,
+    dirty: bool,
+    // tile index in the grid
+    tx: usize,
+    ty: usize,
 }
 
 struct PainterApp {
     canvas: Canvas,
     brush: Brush,
     stroke: Option<StrokeState>,
-    texture: Option<TextureHandle>,
+
+    tiles: Vec<CanvasTile>,
+    tiles_x: usize,
+    tiles_y: usize,
+
+    zoom: f32,
+    offset: Vec2,
+    first_frame: bool,
 }
 
 impl PainterApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let width = 800;
-        let height = 600;
-        let canvas = Canvas::new(width, height, Color::white());
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let canvas_w = 4000;
+        let canvas_h = 4000;
+        let canvas = Canvas::new(canvas_w, canvas_h, Color::white());
+
         let brush = Brush {
             radius: 12.0,
             hardness: 0.2,
@@ -231,69 +47,191 @@ impl PainterApp {
             spacing: 0.25,
         };
 
+        let tiles_x = (canvas_w + TILE_SIZE - 1) / TILE_SIZE;
+        let tiles_y = (canvas_h + TILE_SIZE - 1) / TILE_SIZE;
+
+        let mut tiles = Vec::new();
+
+        for ty in 0..tiles_y {
+            for tx in 0..tiles_x {
+                let tile_w = TILE_SIZE.min(canvas_w - tx * TILE_SIZE);
+                let tile_h = TILE_SIZE.min(canvas_h - ty * TILE_SIZE);
+
+                let img = egui::ColorImage::new([tile_w, tile_h], Color32::WHITE);
+
+                let texture = cc.egui_ctx.load_texture(
+                    format!("canvas_tile_{}_{}", tx, ty),
+                    img,
+                    TextureOptions::NEAREST,
+                );
+
+                tiles.push(CanvasTile {
+                    texture,
+                    dirty: true,
+                    tx,
+                    ty,
+                });
+            }
+        }
+
         Self {
             canvas,
             brush,
             stroke: None,
-            texture: None,
+            tiles,
+            tiles_x,
+            tiles_y,
+            zoom: 1.0,
+            offset: Vec2 { x: 0.0, y: 0.0 },
+            first_frame: true,
         }
+    }
+
+    fn mark_segment_dirty(&mut self, start: Vec2, end: Vec2, radius: f32) {
+        let r_i32 = radius.ceil() as i32;
+
+        let min_x_f = start.x.min(end.x).floor() as i32 - r_i32;
+        let max_x_f = start.x.max(end.x).ceil() as i32 + r_i32;
+        let min_y_f = start.y.min(end.y).floor() as i32 - r_i32;
+        let max_y_f = start.y.max(end.y).ceil() as i32 + r_i32;
+        let canvas_w = self.canvas.width() as i32;
+        let canvas_h = self.canvas.height() as i32;
+
+        if max_x_f < 0 || min_x_f >= canvas_w || max_y_f < 0 || min_y_f >= canvas_h {
+            return;
+        }
+
+        let min_x = min_x_f.max(0) as usize;
+        let max_x = max_x_f.min(canvas_w - 1) as usize;
+        let min_y = min_y_f.max(0) as usize;
+        let max_y = max_y_f.min(canvas_h - 1) as usize;
+
+
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
+
+        let min_tx = min_x / TILE_SIZE;
+        let max_tx = max_x / TILE_SIZE;
+        let min_ty = min_y / TILE_SIZE;
+        let max_ty = max_y / TILE_SIZE;
+
+        for ty in min_ty..=max_ty {
+            for tx in min_tx..=max_tx {
+                if let Some(tile) = self.tile_mut(tx, ty) {
+                    tile.dirty = true;
+                }
+            }
+        }
+    }
+
+    fn tile_mut(&mut self, tx: usize, ty: usize) -> Option<&mut CanvasTile> {
+        if tx >= self.tiles_x || ty >= self.tiles_y {
+            return None;
+        }
+        let idx = ty * self.tiles_x + tx;
+        self.tiles.get_mut(idx)
     }
 }
 
 impl eframe::App for PainterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.first_frame {
+                let available = ui.available_size();
+                let canvas_w = self.canvas.width() as f32;
+                let canvas_h = self.canvas.height() as f32;
+
+                let zoom_x = available.x / canvas_w;
+                let zoom_y = available.y / canvas_h;
+                self.zoom = zoom_x.min(zoom_y) * 0.9; // 90% fit
+                self.first_frame = false;
+            }
+
             ui.heading("Rust Dab Painter (eframe + egui)");
             ui.label("Left click to paint. 'C' to clear.");
 
-            // Update texture
-            let image = self.canvas.to_color_image();
-            self.texture = Some(ui.ctx().load_texture(
-                "canvas",
-                image,
-                TextureOptions::NEAREST,
-            ));
+            // sync dirty tiles to GPU
+            for tile in &mut self.tiles {
+                if tile.dirty {
+                    let x = tile.tx * TILE_SIZE;
+                    let y = tile.ty * TILE_SIZE;
+                    let w = TILE_SIZE.min(self.canvas.width() - x);
+                    let h = TILE_SIZE.min(self.canvas.height() - y);
 
-            if let Some(texture) = &self.texture {
-                let size = texture.size_vec2();
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::drag());
-                
-                // Draw the texture
+                    let img = self.canvas.region_to_color_image(x, y, w, h);
+                    tile.texture.set(img, TextureOptions::NEAREST);
+                    tile.dirty = false;
+                }
+            }
+
+            let desired_size = egui::vec2(self.canvas.width() as f32, self.canvas.height() as f32);
+            let (rect, response) =
+                ui.allocate_exact_size(desired_size * self.zoom, egui::Sense::click_and_drag());
+
+            // Top-left of the canvas in UI coordinates
+            let origin = rect.min + egui::vec2(self.offset.x, self.offset.y);
+
+            for tile in &self.tiles {
+                let x = (tile.tx * TILE_SIZE) as f32 * self.zoom;
+                let y = (tile.ty * TILE_SIZE) as f32 * self.zoom;
+
+                let w =
+                    (TILE_SIZE.min(self.canvas.width() - tile.tx * TILE_SIZE)) as f32 * self.zoom;
+                let h =
+                    (TILE_SIZE.min(self.canvas.height() - tile.ty * TILE_SIZE)) as f32 * self.zoom;
+
+                let tile_rect =
+                    egui::Rect::from_min_size(origin + egui::vec2(x, y), egui::vec2(w, h));
+
                 ui.painter().image(
-                    texture.id(),
-                    rect,
+                    tile.texture.id(),
+                    tile_rect,
                     egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0)),
                     Color32::WHITE,
                 );
+            }
 
-                // Handle input
-                if response.dragged() || response.clicked() {
-                    if let Some(pointer_pos) = response.interact_pointer_pos() {
-                        // Convert pointer pos to canvas coordinates
-                        let canvas_pos = pointer_pos - rect.min;
-                        let pos = Vec2 {
-                            x: canvas_pos.x,
-                            y: canvas_pos.y,
-                        };
+            if response.dragged() || response.clicked() {
+                if let Some(pointer_pos) = response.interact_pointer_pos() {
+                    // convert from screen space to canvas space
+                    let local = (pointer_pos - origin) / self.zoom;
 
+                    let pos = Vec2 {
+                        x: local.x,
+                        y: local.y,
+                    };
+
+                    // ignore clicks outside the canvas
+                    // if pos.x >= 0.0 && pos.y >= 0.0
+                    //     && pos.x < self.canvas.width() as f32
+                    //     && pos.y < self.canvas.height() as f32
+                    {
                         if self.stroke.is_none() {
                             self.stroke = Some(StrokeState::new());
                         }
-
                         if let Some(stroke) = &mut self.stroke {
+                            let prev = stroke.last_pos.unwrap_or(pos);
                             stroke.add_point(&mut self.canvas, &self.brush, pos);
+                            self.mark_segment_dirty(prev, pos, self.brush.radius);
+                            ctx.request_repaint();
                         }
                     }
-                } else if response.drag_stopped() {
-                     if let Some(stroke) = &mut self.stroke {
-                        stroke.end();
-                    }
-                    self.stroke = None;
                 }
+            } else if response.drag_stopped() {
+                if let Some(stroke) = &mut self.stroke {
+                    stroke.end();
+                }
+                self.stroke = None;
             }
-            
+
             if ui.input(|i| i.key_pressed(egui::Key::C)) {
                 self.canvas.clear(Color::white());
+                // mark all tiles dirty
+                for tile in &mut self.tiles {
+                    tile.dirty = true;
+                }
+                ctx.request_repaint();
             }
         });
     }
@@ -302,8 +240,7 @@ impl eframe::App for PainterApp {
 fn main() -> eframe::Result<()> {
     env_logger::init();
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 600.0]),
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native(
