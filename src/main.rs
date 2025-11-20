@@ -24,6 +24,7 @@ struct PainterApp {
     canvas: Canvas,
     brush: Brush,
     stroke: Option<StrokeState>,
+    is_drawing: bool,
 
     tiles: Vec<CanvasTile>,
     tiles_x: usize,
@@ -36,8 +37,8 @@ struct PainterApp {
 
 impl PainterApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let canvas_w = 4000;
-        let canvas_h = 4000;
+        let canvas_w = 8000;
+        let canvas_h = 8000;
         let canvas = Canvas::new(canvas_w, canvas_h, Color::white());
 
         let brush = Brush {
@@ -84,6 +85,7 @@ impl PainterApp {
             zoom: 1.0,
             offset: Vec2 { x: 0.0, y: 0.0 },
             first_frame: true,
+            is_drawing: false,
         }
     }
 
@@ -105,7 +107,6 @@ impl PainterApp {
         let max_x = max_x_f.min(canvas_w - 1) as usize;
         let min_y = min_y_f.max(0) as usize;
         let max_y = max_y_f.min(canvas_h - 1) as usize;
-
 
         if min_x > max_x || min_y > max_y {
             return;
@@ -192,37 +193,84 @@ impl eframe::App for PainterApp {
                 );
             }
 
-            if response.dragged() || response.clicked() {
-                if let Some(pointer_pos) = response.interact_pointer_pos() {
-                    // convert from screen space to canvas space
-                    let local = (pointer_pos - origin) / self.zoom;
+            let events = ctx.input(|i| i.events.clone());
 
-                    let pos = Vec2 {
-                        x: local.x,
-                        y: local.y,
-                    };
+            for event in events {
+                match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        ..
+                    } => {
+                        // Only care if click is inside our canvas rect:
+                        if rect.contains(pos) {
+                            let local = (pos - origin) / self.zoom;
+                            let pos = Vec2 {
+                                x: local.x,
+                                y: local.y,
+                            };
 
-                    // ignore clicks outside the canvas
-                    // if pos.x >= 0.0 && pos.y >= 0.0
-                    //     && pos.x < self.canvas.width() as f32
-                    //     && pos.y < self.canvas.height() as f32
-                    {
-                        if self.stroke.is_none() {
-                            self.stroke = Some(StrokeState::new());
-                        }
-                        if let Some(stroke) = &mut self.stroke {
-                            let prev = stroke.last_pos.unwrap_or(pos);
-                            stroke.add_point(&mut self.canvas, &self.brush, pos);
-                            self.mark_segment_dirty(prev, pos, self.brush.radius);
-                            ctx.request_repaint();
+                            if pressed {
+                                // Start stroke:
+                                if pos.x >= 0.0
+                                    && pos.y >= 0.0
+                                    && pos.x < self.canvas.width() as f32
+                                    && pos.y < self.canvas.height() as f32
+                                {
+                                    self.stroke = Some(StrokeState::new());
+                                    self.is_drawing = true;
+
+                                    if let Some(stroke) = &mut self.stroke {
+                                        stroke.add_point(&mut self.canvas, &self.brush, pos);
+                                        self.mark_segment_dirty(pos, pos, self.brush.radius);
+                                    }
+                                }
+                            } else {
+                                // Button released -> end stroke
+                                if let Some(stroke) = &mut self.stroke {
+                                    stroke.end();
+                                }
+                                self.stroke = None;
+                                self.is_drawing = false;
+                            }
+                        } else if !pressed {
+                            // Released outside canvas: also end stroke if any
+                            if let Some(stroke) = &mut self.stroke {
+                                stroke.end();
+                            }
+                            self.stroke = None;
+                            self.is_drawing = false;
                         }
                     }
+
+                    egui::Event::PointerMoved(pos) => {
+                        if self.is_drawing {
+                            if rect.contains(pos) {
+                                let local = (pos - origin) / self.zoom;
+                                let pos = Vec2 {
+                                    x: local.x,
+                                    y: local.y,
+                                };
+
+                                if let Some(stroke) = &mut self.stroke {
+                                    let prev = stroke.last_pos.unwrap_or(pos);
+                                    stroke.add_point(&mut self.canvas, &self.brush, pos);
+                                    self.mark_segment_dirty(prev, pos, self.brush.radius);
+                                }
+                            } else {
+                                // pointer left canvas: you can either stop drawing or just ignore
+                            }
+                        }
+                    }
+
+                    _ => {}
                 }
-            } else if response.drag_stopped() {
-                if let Some(stroke) = &mut self.stroke {
-                    stroke.end();
-                }
-                self.stroke = None;
+            }
+
+            // 4) Request repaint only while drawing
+            if self.is_drawing {
+                ctx.request_repaint();
             }
 
             if ui.input(|i| i.key_pressed(egui::Key::C)) {
