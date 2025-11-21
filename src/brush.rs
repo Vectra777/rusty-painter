@@ -1,8 +1,8 @@
-use crate::canvas::{alpha_over, Canvas};
+use crate::canvas::{Canvas, alpha_over};
 use crate::color::Color;
 use crate::profiler::ScopeTimer;
-use crate::vector::{distance, Vec2};
-use rayon::{prelude::*, ThreadPool};
+use crate::vector::{Vec2, distance};
+use rayon::{ThreadPool, prelude::*};
 
 pub struct Brush {
     pub radius: f32,
@@ -26,7 +26,11 @@ impl Brush {
     }
 
     pub fn set_masked(&mut self, masked: bool) {
-        self.mode = if masked { DabMode::Masked } else { DabMode::Naive };
+        self.mode = if masked {
+            DabMode::Masked
+        } else {
+            DabMode::Naive
+        };
         if !masked {
             self.mask = None;
         }
@@ -179,13 +183,7 @@ impl StrokeState {
         }
     }
 
-    pub fn add_point(
-        &mut self,
-        pool: &ThreadPool,
-        canvas: &Canvas,
-        brush: &mut Brush,
-        pos: Vec2,
-    ) {
+    pub fn add_point(&mut self, pool: &ThreadPool, canvas: &Canvas, brush: &mut Brush, pos: Vec2) {
         let step = brush.radius * brush.spacing.max(0.01);
 
         if let Some(prev) = self.last_pos {

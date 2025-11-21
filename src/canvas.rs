@@ -57,8 +57,7 @@ impl Canvas {
     }
 
     fn tile_cell(&self, tx: usize, ty: usize) -> Option<&Mutex<TileCell>> {
-        self.tile_index(tx, ty)
-            .and_then(|idx| self.tiles.get(idx))
+        self.tile_index(tx, ty).and_then(|idx| self.tiles.get(idx))
     }
 
     fn get_tile(&self, tx: usize, ty: usize) -> Option<std::sync::MutexGuard<'_, TileCell>> {
@@ -79,11 +78,7 @@ impl Canvas {
         let _ = self.ensure_tile(tx, ty);
     }
 
-    pub fn lock_tile(
-        &self,
-        tx: usize,
-        ty: usize,
-    ) -> Option<std::sync::MutexGuard<'_, TileCell>> {
+    pub fn lock_tile(&self, tx: usize, ty: usize) -> Option<std::sync::MutexGuard<'_, TileCell>> {
         self.ensure_tile(tx, ty)
     }
 
