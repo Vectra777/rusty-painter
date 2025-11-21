@@ -3,11 +3,13 @@ use eframe::egui::{Color32, TextureHandle, TextureOptions};
 mod brush;
 mod canvas;
 mod color;
+mod profiler;
 mod vector;
 
 use crate::brush::{Brush, StrokeState};
 use crate::canvas::Canvas;
 use crate::color::Color;
+use crate::profiler::ScopeTimer;
 use crate::vector::Vec2;
 
 const TILE_SIZE: usize = 256;
@@ -15,6 +17,7 @@ const TILE_SIZE: usize = 256;
 struct CanvasTile {
     texture: TextureHandle,
     dirty: bool,
+    image: egui::ColorImage,
     // tile index in the grid
     tx: usize,
     ty: usize,
@@ -69,6 +72,7 @@ impl PainterApp {
                 tiles.push(CanvasTile {
                     texture,
                     dirty: true,
+                    image: egui::ColorImage::new([tile_w, tile_h], Color32::WHITE),
                     tx,
                     ty,
                 });
@@ -96,6 +100,8 @@ impl PainterApp {
         let max_x_f = start.x.max(end.x).ceil() as i32 + r_i32;
         let min_y_f = start.y.min(end.y).floor() as i32 - r_i32;
         let max_y_f = start.y.max(end.y).ceil() as i32 + r_i32;
+
+        
         let canvas_w = self.canvas.width() as i32;
         let canvas_h = self.canvas.height() as i32;
 
@@ -160,14 +166,18 @@ impl eframe::App for PainterApp {
                     let w = TILE_SIZE.min(self.canvas.width() - x);
                     let h = TILE_SIZE.min(self.canvas.height() - y);
 
-                    let img = self.canvas.region_to_color_image(x, y, w, h);
-                    tile.texture.set(img, TextureOptions::NEAREST);
+                    self.canvas
+                        .write_region_to_color_image(x, y, w, h, &mut tile.image);
+                    {
+                        let _timer = ScopeTimer::new("texture_set");
+                        tile.texture.set(tile.image.clone(), TextureOptions::NEAREST);
+                    }
                     tile.dirty = false;
                 }
             }
 
             let desired_size = egui::vec2(self.canvas.width() as f32, self.canvas.height() as f32);
-            let (rect, response) =
+            let (rect, _response) =
                 ui.allocate_exact_size(desired_size * self.zoom, egui::Sense::click_and_drag());
 
             // Top-left of the canvas in UI coordinates

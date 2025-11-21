@@ -1,6 +1,7 @@
 use crate::canvas::Canvas;
 use crate::color::Color;
-use crate::vector::{Vec2, distance};
+use crate::profiler::ScopeTimer;
+use crate::vector::{distance, Vec2};
 
 pub struct Brush {
     pub radius: f32,
@@ -29,7 +30,6 @@ impl Brush {
                     continue;
                 }
 
-                let t = dist / r; // 0 center, 1 edge
                 let softness = 0.05;
                 let hardness = self.hardness.clamp(0.0, 1.0);
                 let alpha = hardness + (1.0 - hardness) * softness;
@@ -50,6 +50,7 @@ impl Brush {
 pub struct StrokeState {
     pub last_pos: Option<Vec2>,
     distance_since_last_dab: f32,
+    stroke_timer: Option<ScopeTimer>,
 }
 
 impl StrokeState {
@@ -57,6 +58,7 @@ impl StrokeState {
         Self {
             last_pos: None,
             distance_since_last_dab: 0.0,
+            stroke_timer: Some(ScopeTimer::new("stroke")),
         }
     }
 
@@ -99,5 +101,7 @@ impl StrokeState {
     pub fn end(&mut self) {
         self.last_pos = None;
         self.distance_since_last_dab = 0.0;
+        // Drop the timer so stroke-level duration is reported when the stroke ends.
+        self.stroke_timer.take();
     }
 }

@@ -1,19 +1,23 @@
-use eframe::egui::ColorImage;
+use eframe::egui::{Color32, ColorImage};
 
 use crate::color::Color;
+use crate::profiler::ScopeTimer;
 
 pub struct Canvas {
     width: usize,
     height: usize,
     pixels: Vec<Color>,
+    pixels_rgba: Vec<Color32>,
 }
 
 impl Canvas {
     pub fn new(width: usize, height: usize, clear_color: Color) -> Self {
+        let clear_color32 = clear_color.to_color32();
         Self {
             width,
             height,
             pixels: vec![clear_color; width * height],
+            pixels_rgba: vec![clear_color32; width * height],
         }
     }
 
@@ -25,35 +29,32 @@ impl Canvas {
         self.height
     }
 
-    pub fn get_pixel(&self, x: usize, y: usize) -> Color {
-        if x >= self.width || y >= self.height {
-            return Color::rgba(0, 0, 0, 0);
-        }
-        self.pixels[y * self.width + x]
-    }
-
-    pub fn region_to_color_image(
+    pub fn write_region_to_color_image(
         &self,
         x: usize,
         y: usize,
         w: usize,
         h: usize,
-    ) -> ColorImage {
-        let mut pixels = Vec::with_capacity(w * h);
-        for yy in 0..h {
-            for xx in 0..w {
-                let c = self.get_pixel(x + xx, y + yy);
-                pixels.push(c.to_color32());
-            }
+        out: &mut ColorImage,
+    ) {
+        let _timer = ScopeTimer::new("region_to_color_image");
+
+        if out.size != [w, h] {
+            out.size = [w, h];
+            out.pixels.resize(w * h, Color32::TRANSPARENT);
         }
-        ColorImage {
-            size: [w, h],
-            pixels,
+
+        for yy in 0..h {
+            let src_start = (y + yy) * self.width + x;
+            let dst_start = yy * w;
+            let src_slice = &self.pixels_rgba[src_start..src_start + w];
+            out.pixels[dst_start..dst_start + w].copy_from_slice(src_slice);
         }
     }
 
     pub fn clear(&mut self, color: Color) {
         self.pixels.fill(color);
+        self.pixels_rgba.fill(color.to_color32());
     }
 
     pub fn index(&self, x: i32, y: i32) -> Option<usize> {
@@ -70,7 +71,9 @@ impl Canvas {
     pub fn blend_pixel(&mut self, x: i32, y: i32, src: Color) {
         if let Some(idx) = self.index(x, y) {
             let dst = self.pixels[idx];
-            self.pixels[idx] = alpha_over(src, dst);
+            let blended = alpha_over(src, dst);
+            self.pixels[idx] = blended;
+            self.pixels_rgba[idx] = blended.to_color32();
         }
     }
 
