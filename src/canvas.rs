@@ -69,38 +69,39 @@ impl Canvas {
         w: usize,
         h: usize,
         out: &mut ColorImage,
+        step: usize,
     ) {
         let _timer = ScopeTimer::new("region_to_color_image");
 
-        if out.size != [w, h] {
-            out.size = [w, h];
-            out.pixels.resize(w * h, Color32::TRANSPARENT);
+        let step = step.max(1);
+        let dst_w = (w + step - 1) / step;
+        let dst_h = (h + step - 1) / step;
+
+        if out.size != [dst_w, dst_h] {
+            out.size = [dst_w, dst_h];
+            out.pixels.resize(dst_w * dst_h, Color32::TRANSPARENT);
         }
 
-        for yy in 0..h {
-            let global_y = y + yy;
-            let mut xx = 0;
-            while xx < w {
-                let global_x = x + xx;
+        for dst_y in 0..dst_h {
+            let global_y = y + dst_y * step;
+            let mut dst_x = 0;
+            while dst_x < dst_w {
+                let global_x = x + dst_x * step;
                 let tx = global_x / self.tile_size;
                 let ty = global_y / self.tile_size;
                 let local_x = global_x % self.tile_size;
                 let local_y = global_y % self.tile_size;
 
-                let max_from_tile = (self.tile_size - local_x).min(w - xx);
-                let dst_start = yy * w + xx;
+                let dst_start = dst_y * dst_w + dst_x;
 
                 if let Some(tile) = self.get_tile(tx, ty) {
                     let src_start = local_y * self.tile_size + local_x;
-                    let src_slice = &tile[src_start..src_start + max_from_tile];
-                    out.pixels[dst_start..dst_start + max_from_tile].copy_from_slice(src_slice);
+                    out.pixels[dst_start] = tile[src_start];
                 } else {
-                    // Fill with clear color when tile is not allocated.
-                    out.pixels[dst_start..dst_start + max_from_tile]
-                        .fill(self.clear_color);
+                    out.pixels[dst_start] = self.clear_color;
                 }
 
-                xx += max_from_tile;
+                dst_x += 1;
             }
         }
     }

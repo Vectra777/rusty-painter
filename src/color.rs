@@ -23,11 +23,21 @@ impl Color {
     }
 
     pub fn to_color32(&self) -> Color32 {
-        Color32::from_rgba_premultiplied(
+        Color32::from_rgba_unmultiplied(
             (self.r * 255.0) as u8,
             (self.g * 255.0) as u8,
             (self.b * 255.0) as u8,
             (self.a * 255.0) as u8,
         )
+    }
+
+    pub fn from_color32(c: Color32) -> Self {
+        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        Self {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: a as f32 / 255.0,
+        }
     }
 }
