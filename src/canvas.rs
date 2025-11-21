@@ -6,18 +6,25 @@ use crate::profiler::ScopeTimer;
 pub struct Canvas {
     width: usize,
     height: usize,
-    pixels: Vec<Color>,
-    pixels_rgba: Vec<Color32>,
+    tile_size: usize,
+    tiles_x: usize,
+    tiles_y: usize,
+    clear_color: Color32,
+    tiles: Vec<Option<Vec<Color32>>>, // lazily allocated tiles
 }
 
 impl Canvas {
-    pub fn new(width: usize, height: usize, clear_color: Color) -> Self {
-        let clear_color32 = clear_color.to_color32();
+    pub fn new(width: usize, height: usize, clear_color: Color, tile_size: usize) -> Self {
+        let tiles_x = (width + tile_size - 1) / tile_size;
+        let tiles_y = (height + tile_size - 1) / tile_size;
         Self {
             width,
             height,
-            pixels: vec![clear_color; width * height],
-            pixels_rgba: vec![clear_color32; width * height],
+            tile_size,
+            tiles_x,
+            tiles_y,
+            clear_color: clear_color.to_color32(),
+            tiles: vec![None; tiles_x * tiles_y],
         }
     }
 
@@ -27,6 +34,32 @@ impl Canvas {
 
     pub fn height(&self) -> usize {
         self.height
+    }
+
+    fn tile_index(&self, tx: usize, ty: usize) -> Option<usize> {
+        if tx >= self.tiles_x || ty >= self.tiles_y {
+            return None;
+        }
+        Some(ty * self.tiles_x + tx)
+    }
+
+    fn get_tile(&self, tx: usize, ty: usize) -> Option<&Vec<Color32>> {
+        self.tile_index(tx, ty)
+            .and_then(|idx| self.tiles.get(idx))
+            .and_then(|t| t.as_ref())
+    }
+
+    fn ensure_tile(&mut self, tx: usize, ty: usize) -> Option<&mut Vec<Color32>> {
+        let idx = self.tile_index(tx, ty)?;
+        if self.tiles[idx].is_none() {
+            let data = vec![self.clear_color; self.tile_size * self.tile_size];
+            self.tiles[idx] = Some(data);
+        }
+        self.tiles[idx].as_mut()
+    }
+
+    pub fn ensure_tile_exists(&mut self, tx: usize, ty: usize) {
+        let _ = self.ensure_tile(tx, ty);
     }
 
     pub fn write_region_to_color_image(
@@ -45,19 +78,41 @@ impl Canvas {
         }
 
         for yy in 0..h {
-            let src_start = (y + yy) * self.width + x;
-            let dst_start = yy * w;
-            let src_slice = &self.pixels_rgba[src_start..src_start + w];
-            out.pixels[dst_start..dst_start + w].copy_from_slice(src_slice);
+            let global_y = y + yy;
+            let mut xx = 0;
+            while xx < w {
+                let global_x = x + xx;
+                let tx = global_x / self.tile_size;
+                let ty = global_y / self.tile_size;
+                let local_x = global_x % self.tile_size;
+                let local_y = global_y % self.tile_size;
+
+                let max_from_tile = (self.tile_size - local_x).min(w - xx);
+                let dst_start = yy * w + xx;
+
+                if let Some(tile) = self.get_tile(tx, ty) {
+                    let src_start = local_y * self.tile_size + local_x;
+                    let src_slice = &tile[src_start..src_start + max_from_tile];
+                    out.pixels[dst_start..dst_start + max_from_tile].copy_from_slice(src_slice);
+                } else {
+                    // Fill with clear color when tile is not allocated.
+                    out.pixels[dst_start..dst_start + max_from_tile]
+                        .fill(self.clear_color);
+                }
+
+                xx += max_from_tile;
+            }
         }
     }
 
     pub fn clear(&mut self, color: Color) {
-        self.pixels.fill(color);
-        self.pixels_rgba.fill(color.to_color32());
+        self.clear_color = color.to_color32();
+        for tile in &mut self.tiles {
+            *tile = None;
+        }
     }
 
-    pub fn index(&self, x: i32, y: i32) -> Option<usize> {
+    pub fn index(&self, x: i32, y: i32) -> Option<(usize, usize, usize)> {
         if x < 0 || y < 0 {
             return None;
         }
@@ -65,18 +120,22 @@ impl Canvas {
         if x >= self.width || y >= self.height {
             return None;
         }
-        Some(y * self.width + x)
+        let tx = x / self.tile_size;
+        let ty = y / self.tile_size;
+        let local_x = x % self.tile_size;
+        let local_y = y % self.tile_size;
+        Some((tx, ty, local_y * self.tile_size + local_x))
     }
 
     pub fn blend_pixel(&mut self, x: i32, y: i32, src: Color) {
-        if let Some(idx) = self.index(x, y) {
-            let dst = self.pixels[idx];
-            let blended = alpha_over(src, dst);
-            self.pixels[idx] = blended;
-            self.pixels_rgba[idx] = blended.to_color32();
+        if let Some((tx, ty, idx)) = self.index(x, y) {
+            if let Some(tile) = self.ensure_tile(tx, ty) {
+                let dst = Color::from_color32(tile[idx]);
+                let blended = alpha_over(src, dst);
+                tile[idx] = blended.to_color32();
+            }
         }
     }
-
 }
 
 pub fn alpha_over(src: Color, dst: Color) -> Color {

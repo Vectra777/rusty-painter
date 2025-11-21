@@ -1,5 +1,6 @@
 use eframe::egui;
 use eframe::egui::{Color32, TextureHandle, TextureOptions};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 mod brush;
 mod canvas;
 mod color;
@@ -17,7 +18,6 @@ const TILE_SIZE: usize = 256;
 struct CanvasTile {
     texture: TextureHandle,
     dirty: bool,
-    image: egui::ColorImage,
     // tile index in the grid
     tx: usize,
     ty: usize,
@@ -40,9 +40,9 @@ struct PainterApp {
 
 impl PainterApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let canvas_w = 8000;
-        let canvas_h = 8000;
-        let canvas = Canvas::new(canvas_w, canvas_h, Color::white());
+        let canvas_w = 18000;
+        let canvas_h = 18000;
+        let canvas = Canvas::new(canvas_w, canvas_h, Color::white(), TILE_SIZE);
 
         let brush = Brush {
             radius: 12.0,
@@ -72,7 +72,6 @@ impl PainterApp {
                 tiles.push(CanvasTile {
                     texture,
                     dirty: true,
-                    image: egui::ColorImage::new([tile_w, tile_h], Color32::WHITE),
                     tx,
                     ty,
                 });
@@ -127,6 +126,8 @@ impl PainterApp {
             for tx in min_tx..=max_tx {
                 if let Some(tile) = self.tile_mut(tx, ty) {
                     tile.dirty = true;
+                    // Warm tiles so allocation happens off the upload loop.
+                    self.canvas.ensure_tile_exists(tx, ty);
                 }
             }
         }
@@ -158,20 +159,47 @@ impl eframe::App for PainterApp {
             ui.heading("Rust Dab Painter (eframe + egui)");
             ui.label("Left click to paint. 'C' to clear.");
 
-            // sync dirty tiles to GPU
-            for tile in &mut self.tiles {
-                if tile.dirty {
+            // sync dirty tiles to GPU, with simple LOD when zoomed out
+            let lod_step = if self.zoom < 1.0 {
+                (1.0 / self.zoom).ceil() as usize
+            } else {
+                1
+            }
+            .clamp(1, TILE_SIZE);
+
+            let canvas_ref = &self.canvas;
+            let dirty_images: Vec<(usize, egui::ColorImage)> = self
+                .tiles
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.dirty)
+                .collect::<Vec<_>>()
+                .par_iter()
+                .map(|(idx, tile)| {
                     let x = tile.tx * TILE_SIZE;
                     let y = tile.ty * TILE_SIZE;
-                    let w = TILE_SIZE.min(self.canvas.width() - x);
-                    let h = TILE_SIZE.min(self.canvas.height() - y);
+                    let w = TILE_SIZE.min(canvas_ref.width() - x);
+                    let h = TILE_SIZE.min(canvas_ref.height() - y);
 
-                    self.canvas
-                        .write_region_to_color_image(x, y, w, h, &mut tile.image);
-                    {
-                        let _timer = ScopeTimer::new("texture_set");
-                        tile.texture.set(tile.image.clone(), TextureOptions::NEAREST);
-                    }
+                    let out_w = (w + lod_step - 1) / lod_step;
+                    let out_h = (h + lod_step - 1) / lod_step;
+                    let mut img = egui::ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
+                    canvas_ref.write_region_to_color_image(
+                        x,
+                        y,
+                        w,
+                        h,
+                        &mut img,
+                        lod_step,
+                    );
+                    (*idx, img)
+                })
+                .collect();
+
+            for (idx, img) in dirty_images {
+                if let Some(tile) = self.tiles.get_mut(idx) {
+                    let _timer = ScopeTimer::new("texture_set");
+                    tile.texture.set(img, TextureOptions::NEAREST);
                     tile.dirty = false;
                 }
             }
@@ -256,20 +284,17 @@ impl eframe::App for PainterApp {
 
                     egui::Event::PointerMoved(pos) => {
                         if self.is_drawing {
-                            if rect.contains(pos) {
-                                let local = (pos - origin) / self.zoom;
-                                let pos = Vec2 {
-                                    x: local.x,
-                                    y: local.y,
-                                };
+                            let local = (pos - origin) / self.zoom;
+                            // Clamp to canvas bounds so drawing continues along the edge while cursor is outside.
+                            let clamped = Vec2 {
+                                x: local.x.clamp(0.0, self.canvas.width() as f32),
+                                y: local.y.clamp(0.0, self.canvas.height() as f32),
+                            };
 
-                                if let Some(stroke) = &mut self.stroke {
-                                    let prev = stroke.last_pos.unwrap_or(pos);
-                                    stroke.add_point(&mut self.canvas, &self.brush, pos);
-                                    self.mark_segment_dirty(prev, pos, self.brush.radius);
-                                }
-                            } else {
-                                // pointer left canvas: you can either stop drawing or just ignore
+                            if let Some(stroke) = &mut self.stroke {
+                                let prev = stroke.last_pos.unwrap_or(clamped);
+                                stroke.add_point(&mut self.canvas, &self.brush, clamped);
+                                self.mark_segment_dirty(prev, clamped, self.brush.radius);
                             }
                         }
                     }
