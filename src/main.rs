@@ -1,6 +1,8 @@
 use eframe::egui;
 use eframe::egui::{Color32, TextureHandle, TextureOptions};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::{ThreadPool, ThreadPoolBuilder};
+use std::thread;
 mod brush;
 mod canvas;
 mod color;
@@ -36,20 +38,29 @@ struct PainterApp {
     zoom: f32,
     offset: Vec2,
     first_frame: bool,
+    use_masked_brush: bool,
+    thread_count: usize,
+    max_threads: usize,
+    pool: ThreadPool,
 }
 
 impl PainterApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let canvas_w = 18000;
-        let canvas_h = 18000;
+        let canvas_w = 4000;
+        let canvas_h = 4000;
         let canvas = Canvas::new(canvas_w, canvas_h, Color::white(), TILE_SIZE);
 
-        let brush = Brush {
-            radius: 12.0,
-            hardness: 0.2,
-            color: Color::rgba(0, 0, 0, 255),
-            spacing: 0.25,
-        };
+        let brush = Brush::new(12.0, 0.2, Color::rgba(0, 0, 0, 255), 0.25);
+
+        let max_threads = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .max(1);
+        let thread_count = max_threads.saturating_sub(1).max(1);
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()
+            .expect("failed to build thread pool");
 
         let tiles_x = (canvas_w + TILE_SIZE - 1) / TILE_SIZE;
         let tiles_y = (canvas_h + TILE_SIZE - 1) / TILE_SIZE;
@@ -88,6 +99,10 @@ impl PainterApp {
             zoom: 1.0,
             offset: Vec2 { x: 0.0, y: 0.0 },
             first_frame: true,
+            use_masked_brush: true,
+            thread_count,
+            max_threads,
+            pool,
             is_drawing: false,
         }
     }
@@ -158,6 +173,22 @@ impl eframe::App for PainterApp {
 
             ui.heading("Rust Dab Painter (eframe + egui)");
             ui.label("Left click to paint. 'C' to clear.");
+            ui.checkbox(&mut self.use_masked_brush, "Use masked brush (fast)");
+            self.brush.set_masked(self.use_masked_brush);
+            let threads_changed = ui
+                .add(
+                    egui::Slider::new(&mut self.thread_count, 1..=self.max_threads)
+                        .text("Brush threads"),
+                )
+                .changed();
+            if threads_changed {
+                if let Ok(pool) = ThreadPoolBuilder::new()
+                    .num_threads(self.thread_count)
+                    .build()
+                {
+                    self.pool = pool;
+                }
+            }
 
             // sync dirty tiles to GPU, with simple LOD when zoomed out
             let lod_step = if self.zoom < 1.0 {
@@ -168,33 +199,34 @@ impl eframe::App for PainterApp {
             .clamp(1, TILE_SIZE);
 
             let canvas_ref = &self.canvas;
-            let dirty_images: Vec<(usize, egui::ColorImage)> = self
-                .tiles
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t.dirty)
-                .collect::<Vec<_>>()
-                .par_iter()
-                .map(|(idx, tile)| {
-                    let x = tile.tx * TILE_SIZE;
-                    let y = tile.ty * TILE_SIZE;
-                    let w = TILE_SIZE.min(canvas_ref.width() - x);
-                    let h = TILE_SIZE.min(canvas_ref.height() - y);
+            let dirty_images: Vec<(usize, egui::ColorImage)> = self.pool.install(|| {
+                self.tiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.dirty)
+                    .collect::<Vec<_>>()
+                    .par_iter()
+                    .map(|(idx, tile)| {
+                        let x = tile.tx * TILE_SIZE;
+                        let y = tile.ty * TILE_SIZE;
+                        let w = TILE_SIZE.min(canvas_ref.width() - x);
+                        let h = TILE_SIZE.min(canvas_ref.height() - y);
 
-                    let out_w = (w + lod_step - 1) / lod_step;
-                    let out_h = (h + lod_step - 1) / lod_step;
-                    let mut img = egui::ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
-                    canvas_ref.write_region_to_color_image(
-                        x,
-                        y,
-                        w,
-                        h,
-                        &mut img,
-                        lod_step,
-                    );
-                    (*idx, img)
-                })
-                .collect();
+                        let out_w = (w + lod_step - 1) / lod_step;
+                        let out_h = (h + lod_step - 1) / lod_step;
+                        let mut img = egui::ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
+                        canvas_ref.write_region_to_color_image(
+                            x,
+                            y,
+                            w,
+                            h,
+                            &mut img,
+                            lod_step,
+                        );
+                        (*idx, img)
+                    })
+                    .collect()
+            });
 
             for (idx, img) in dirty_images {
                 if let Some(tile) = self.tiles.get_mut(idx) {
@@ -260,7 +292,7 @@ impl eframe::App for PainterApp {
                                     self.is_drawing = true;
 
                                     if let Some(stroke) = &mut self.stroke {
-                                        stroke.add_point(&mut self.canvas, &self.brush, pos);
+                                        stroke.add_point(&self.pool, &self.canvas, &mut self.brush, pos);
                                         self.mark_segment_dirty(pos, pos, self.brush.radius);
                                     }
                                 }
@@ -293,7 +325,7 @@ impl eframe::App for PainterApp {
 
                             if let Some(stroke) = &mut self.stroke {
                                 let prev = stroke.last_pos.unwrap_or(clamped);
-                                stroke.add_point(&mut self.canvas, &self.brush, clamped);
+                                stroke.add_point(&self.pool, &self.canvas, &mut self.brush, clamped);
                                 self.mark_segment_dirty(prev, clamped, self.brush.radius);
                             }
                         }

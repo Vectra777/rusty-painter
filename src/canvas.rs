@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use eframe::egui::{Color32, ColorImage};
 
 use crate::color::Color;
@@ -10,13 +12,20 @@ pub struct Canvas {
     tiles_x: usize,
     tiles_y: usize,
     clear_color: Color32,
-    tiles: Vec<Option<Vec<Color32>>>, // lazily allocated tiles
+    tiles: Vec<Mutex<TileCell>>, // lazily allocated tiles behind per-tile locks
+}
+
+pub(crate) struct TileCell {
+    pub data: Option<Vec<Color32>>,
 }
 
 impl Canvas {
     pub fn new(width: usize, height: usize, clear_color: Color, tile_size: usize) -> Self {
         let tiles_x = (width + tile_size - 1) / tile_size;
         let tiles_y = (height + tile_size - 1) / tile_size;
+        let tiles = (0..tiles_x * tiles_y)
+            .map(|_| Mutex::new(TileCell { data: None }))
+            .collect();
         Self {
             width,
             height,
@@ -24,7 +33,7 @@ impl Canvas {
             tiles_x,
             tiles_y,
             clear_color: clear_color.to_color32(),
-            tiles: vec![None; tiles_x * tiles_y],
+            tiles,
         }
     }
 
@@ -36,6 +45,10 @@ impl Canvas {
         self.height
     }
 
+    pub fn tile_size(&self) -> usize {
+        self.tile_size
+    }
+
     fn tile_index(&self, tx: usize, ty: usize) -> Option<usize> {
         if tx >= self.tiles_x || ty >= self.tiles_y {
             return None;
@@ -43,23 +56,35 @@ impl Canvas {
         Some(ty * self.tiles_x + tx)
     }
 
-    fn get_tile(&self, tx: usize, ty: usize) -> Option<&Vec<Color32>> {
+    fn tile_cell(&self, tx: usize, ty: usize) -> Option<&Mutex<TileCell>> {
         self.tile_index(tx, ty)
             .and_then(|idx| self.tiles.get(idx))
-            .and_then(|t| t.as_ref())
     }
 
-    fn ensure_tile(&mut self, tx: usize, ty: usize) -> Option<&mut Vec<Color32>> {
-        let idx = self.tile_index(tx, ty)?;
-        if self.tiles[idx].is_none() {
+    fn get_tile(&self, tx: usize, ty: usize) -> Option<std::sync::MutexGuard<'_, TileCell>> {
+        self.tile_cell(tx, ty).map(|cell| cell.lock().unwrap())
+    }
+
+    fn ensure_tile(&self, tx: usize, ty: usize) -> Option<std::sync::MutexGuard<'_, TileCell>> {
+        let cell = self.tile_cell(tx, ty)?;
+        let mut guard = cell.lock().unwrap();
+        if guard.data.is_none() {
             let data = vec![self.clear_color; self.tile_size * self.tile_size];
-            self.tiles[idx] = Some(data);
+            guard.data = Some(data);
         }
-        self.tiles[idx].as_mut()
+        Some(guard)
     }
 
-    pub fn ensure_tile_exists(&mut self, tx: usize, ty: usize) {
+    pub fn ensure_tile_exists(&self, tx: usize, ty: usize) {
         let _ = self.ensure_tile(tx, ty);
+    }
+
+    pub fn lock_tile(
+        &self,
+        tx: usize,
+        ty: usize,
+    ) -> Option<std::sync::MutexGuard<'_, TileCell>> {
+        self.ensure_tile(tx, ty)
     }
 
     pub fn write_region_to_color_image(
@@ -95,8 +120,12 @@ impl Canvas {
                 let dst_start = dst_y * dst_w + dst_x;
 
                 if let Some(tile) = self.get_tile(tx, ty) {
-                    let src_start = local_y * self.tile_size + local_x;
-                    out.pixels[dst_start] = tile[src_start];
+                    if let Some(data) = tile.data.as_ref() {
+                        let src_start = local_y * self.tile_size + local_x;
+                        out.pixels[dst_start] = data[src_start];
+                    } else {
+                        out.pixels[dst_start] = self.clear_color;
+                    }
                 } else {
                     out.pixels[dst_start] = self.clear_color;
                 }
@@ -108,8 +137,9 @@ impl Canvas {
 
     pub fn clear(&mut self, color: Color) {
         self.clear_color = color.to_color32();
-        for tile in &mut self.tiles {
-            *tile = None;
+        for tile in &self.tiles {
+            let mut cell = tile.lock().unwrap();
+            cell.data = None;
         }
     }
 
@@ -128,12 +158,14 @@ impl Canvas {
         Some((tx, ty, local_y * self.tile_size + local_x))
     }
 
-    pub fn blend_pixel(&mut self, x: i32, y: i32, src: Color) {
+    pub fn blend_pixel(&self, x: i32, y: i32, src: Color) {
         if let Some((tx, ty, idx)) = self.index(x, y) {
-            if let Some(tile) = self.ensure_tile(tx, ty) {
-                let dst = Color::from_color32(tile[idx]);
-                let blended = alpha_over(src, dst);
-                tile[idx] = blended.to_color32();
+            if let Some(mut tile) = self.ensure_tile(tx, ty) {
+                if let Some(data) = tile.data.as_mut() {
+                    let dst = Color::from_color32(data[idx]);
+                    let blended = alpha_over(src, dst);
+                    data[idx] = blended.to_color32();
+                }
             }
         }
     }
