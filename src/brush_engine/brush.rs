@@ -5,18 +5,32 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::ThreadPool;
 use std::collections::HashSet;
 
+/// Available shapes for how a brush applies paint.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BrushType {
     Soft,
     Pixel,
 }
 
+/// Blending strategy for how source color affects the destination.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BlendMode {
     Normal,
     Eraser,
 }
 
+/// Rectangular region inside a tile that needs to be touched by a dab.
+#[derive(Clone, Copy, Debug)]
+struct TileRegion {
+    tx: usize,
+    ty: usize,
+    x0: usize,
+    y0: usize,
+    width: usize,
+    height: usize,
+}
+
+/// Cached soft mask used to avoid rebuilding the kernel for every dab.
 #[derive(Clone, Debug)]
 struct BrushMaskCache {
     diameter: f32,
@@ -25,6 +39,7 @@ struct BrushMaskCache {
     data: Vec<f32>,
 }
 
+/// User-facing brush configuration and scratch buffers.
 #[derive(Clone, Debug)]
 pub struct Brush {
     pub diameter: f32,
@@ -44,6 +59,7 @@ pub struct Brush {
 }
 
 impl Brush {
+    /// Create a standard soft brush with the given radius, hardness, base color and spacing.
     pub fn new(diameter: f32, hardness: f32, color: Color, spacing: f32) -> Self {
         Self {
             diameter,
@@ -63,6 +79,7 @@ impl Brush {
     }
 
     #[allow(dead_code)]
+    /// Convenience constructor for a pixel-perfect pen.
     pub fn new_pixel(diameter: f32, color: Color) -> Self {
         Self {
             diameter,
@@ -81,6 +98,7 @@ impl Brush {
         }
     }
 
+    /// Paint a single dab with the currently selected brush type.
     fn dab(
         &mut self,
         pool: &ThreadPool,
@@ -95,6 +113,7 @@ impl Brush {
         }
     }
     
+    /// Ensure a soft brush mask exists for the current diameter/hardness and return it.
     fn ensure_mask(&mut self) -> &BrushMaskCache {
         let need_new = match &self.mask_cache {
             Some(cache) => (cache.diameter - self.diameter).abs() > f32::EPSILON
@@ -144,42 +163,46 @@ impl Brush {
         self.mask_cache.as_ref().unwrap()
     }
 
+    /// Snapshot tiles about to be modified so undo can restore them later.
     fn snapshot_tiles(
         &self,
         canvas: &Canvas,
-        tiles: &[(usize, usize)],
+        regions: &[TileRegion],
         undo_action: &mut UndoAction,
         modified_tiles: &mut HashSet<(usize, usize)>,
     ) {
         let layer_idx = canvas.active_layer_idx;
-        for &(tx, ty) in tiles {
-            if !modified_tiles.contains(&(tx, ty)) {
-                if let Some(data) = canvas.get_layer_tile_data(layer_idx, tx, ty) {
-                    undo_action.tiles.push(TileSnapshot {
-                        tx,
-                        ty,
-                        layer_idx,
-                        data,
-                    });
-                    modified_tiles.insert((tx, ty));
-                } else {
-                    // If tile doesn't exist yet, we should probably ensure it exists or handle it.
-                    // For now, ensure it exists so we can snapshot the "blank" state.
-                    canvas.ensure_tile_exists(tx, ty);
-                    if let Some(data) = canvas.get_layer_tile_data(layer_idx, tx, ty) {
-                        undo_action.tiles.push(TileSnapshot {
-                            tx,
-                            ty,
-                            layer_idx,
-                            data,
-                        });
-                        modified_tiles.insert((tx, ty));
-                    }
-                }
+        let tile_size = canvas.tile_size();
+
+        for region in regions {
+            if modified_tiles.contains(&(region.tx, region.ty)) {
+                continue;
+            }
+
+            canvas.ensure_layer_tile_exists(layer_idx, region.tx, region.ty);
+
+            if let Some(mut tile) = canvas.lock_layer_tile(layer_idx, region.tx, region.ty) {
+                let data = tile.data.as_mut().unwrap();
+
+                // Snapshot the ENTIRE tile to avoid artifacts if we draw on other parts of it later
+                let patch = data.clone();
+
+                undo_action.tiles.push(TileSnapshot {
+                    tx: region.tx,
+                    ty: region.ty,
+                    layer_idx,
+                    x0: 0,
+                    y0: 0,
+                    width: tile_size,
+                    height: tile_size,
+                    data: patch,
+                });
+                modified_tiles.insert((region.tx, region.ty));
             }
         }
     }
 
+    /// Render a hard-edged dab for the pixel brush using a serial loop.
     fn pixel_dab(
         &self,
         _pool: &ThreadPool,
@@ -223,7 +246,25 @@ impl Brush {
             .flat_map(|ty| (min_tx..=max_tx).map(move |tx| (tx, ty)))
             .collect();
 
-        self.snapshot_tiles(canvas, &tiles, undo_action, modified_tiles);
+        let mut regions = Vec::with_capacity(tiles.len());
+        for (tx, ty) in &tiles {
+            let tile_x0 = tx * tile_size;
+            let tile_y0 = ty * tile_size;
+            let overlap_min_x = start_x.max(tile_x0);
+            let overlap_max_x = end_x.min(tile_x0 + tile_size - 1);
+            let overlap_min_y = start_y.max(tile_y0);
+            let overlap_max_y = end_y.min(tile_y0 + tile_size - 1);
+            regions.push(TileRegion {
+                tx: *tx,
+                ty: *ty,
+                x0: overlap_min_x - tile_x0,
+                y0: overlap_min_y - tile_y0,
+                width: overlap_max_x - overlap_min_x + 1,
+                height: overlap_max_y - overlap_min_y + 1,
+            });
+        }
+
+        self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
         let color = self.color;
         let alpha = color.a * self.opacity * (self.flow / 100.0);
@@ -268,6 +309,7 @@ impl Brush {
         }
     }
 
+    /// Render a soft, anti-aliased dab using the cached mask and parallel tiling.
     fn soft_dab(
         &mut self,
         _pool: &ThreadPool,
@@ -311,7 +353,25 @@ impl Brush {
             .flat_map(|ty| (min_tx..=max_tx).map(move |tx| (tx, ty)))
             .collect();
 
-        self.snapshot_tiles(canvas, &tiles, undo_action, modified_tiles);
+        let mut regions = Vec::with_capacity(tiles.len());
+        for (tx, ty) in &tiles {
+            let tile_x0 = tx * tile_size;
+            let tile_y0 = ty * tile_size;
+            let overlap_min_x = start_x.max(tile_x0);
+            let overlap_max_x = end_x.min(tile_x0 + tile_size - 1);
+            let overlap_min_y = start_y.max(tile_y0);
+            let overlap_max_y = end_y.min(tile_y0 + tile_size - 1);
+            regions.push(TileRegion {
+                tx: *tx,
+                ty: *ty,
+                x0: overlap_min_x - tile_x0,
+                y0: overlap_min_y - tile_y0,
+                width: overlap_max_x - overlap_min_x + 1,
+                height: overlap_max_y - overlap_min_y + 1,
+            });
+        }
+
+        self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
         let base_color = self.color;
         let flow_alpha = self.opacity * (self.flow / 100.0);
@@ -404,6 +464,7 @@ impl Brush {
     }
 }
 
+/// Tracks per-stroke state like the last position and spacing accumulator.
 pub struct StrokeState {
     pub last_pos: Option<Vec2>,
     dist_until_next_blit: f32,
@@ -411,6 +472,7 @@ pub struct StrokeState {
 }
 
 impl StrokeState {
+    /// Create an empty stroke state and start the profiling timer.
     pub fn new() -> Self {
         Self {
             last_pos: None,
@@ -419,6 +481,7 @@ impl StrokeState {
         }
     }
 
+    /// Add a new sample to the stroke, interpolating dabs based on spacing and jitter.
     pub fn add_point(
         &mut self,
         pool: &ThreadPool,
@@ -497,6 +560,7 @@ impl StrokeState {
         self.last_pos = Some(pos);
     }
 
+    /// Pixel-perfect Bresenham line stepping to avoid gaps when snapping to pixels.
     fn add_point_pixel_perfect(
         &mut self,
         pool: &ThreadPool,
@@ -566,6 +630,7 @@ impl StrokeState {
         self.last_pos = Some(pos);
     }
 
+    /// Reset the stroke state and emit the profiling metric.
     pub fn end(&mut self) {
         self.last_pos = None;
         self.dist_until_next_blit = 0.0;
@@ -574,6 +639,7 @@ impl StrokeState {
     }
 }
 
+/// Named preset that can be displayed in the UI and cloned into the active brush.
 #[derive(Clone, Debug)]
 pub struct BrushPreset {
     pub name: String,

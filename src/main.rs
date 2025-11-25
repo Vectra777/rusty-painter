@@ -10,6 +10,7 @@ mod canvas;
 mod ui;
 mod brush_engine;
 mod utils;
+mod gpu_painter;
 
 use canvas::canvas::Canvas;
 use canvas::history::{History, UndoAction};
@@ -19,6 +20,35 @@ use utils::{profiler::ScopeTimer, vector::Vec2, color::Color};
 const TILE_SIZE: usize = 64;
 const ATLAS_SIZE: usize = 2048;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PaintBackend {
+    Cpu,
+    Gpu,
+}
+
+fn parse_backend_arg() -> PaintBackend {
+    let mut backend = PaintBackend::Cpu;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--gpu" | "--backend=gpu" => backend = PaintBackend::Gpu,
+            "--cpu" | "--backend=cpu" => backend = PaintBackend::Cpu,
+            "--backend" => {
+                if let Some(next) = args.next() {
+                    if next.eq_ignore_ascii_case("gpu") {
+                        backend = PaintBackend::Gpu;
+                    } else if next.eq_ignore_ascii_case("cpu") {
+                        backend = PaintBackend::Cpu;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    backend
+}
+
+/// Metadata that links a canvas tile to its slot in the GPU atlas.
 struct CanvasTile {
     dirty: bool,
     atlas_idx: usize,
@@ -31,10 +61,12 @@ struct CanvasTile {
     ty: usize,
 }
 
+/// Wrapper so we can swap out atlas textures easily.
 struct TextureAtlas {
     texture: TextureHandle,
 }
 
+/// Main egui application that owns the canvas, brush state, UI and rendering caches.
 struct PainterApp {
     canvas: Canvas,
     brush: Brush,
@@ -68,6 +100,7 @@ struct PainterApp {
 }
 
 impl PainterApp {
+    /// Initialize the UI, canvas, thread pool and GPU atlases.
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let canvas_w = 8000;
         let canvas_h = 8000;
@@ -189,9 +222,11 @@ impl PainterApp {
             max_threads,
             pool,
             disable_lod: false,
+            force_full_upload: false,
         }
     }
 
+    /// Mark all tiles that intersect a stroke segment as dirty so they re-upload to the atlas.
     fn mark_segment_dirty(&mut self, start: Vec2, end: Vec2, radius: f32) {
         let r_i32 = radius.ceil() as i32;
 
@@ -231,6 +266,7 @@ impl PainterApp {
         }
     }
 
+    /// Get a mutable reference to a tile entry if coordinates are valid.
     fn tile_mut(&mut self, tx: usize, ty: usize) -> Option<&mut CanvasTile> {
         if tx >= self.tiles_x || ty >= self.tiles_y {
             return None;
@@ -239,6 +275,7 @@ impl PainterApp {
         self.tiles.get_mut(idx)
     }
 
+    /// Begin a stroke at the given canvas coordinate and register undo state.
     fn start_stroke(&mut self, pos: Vec2) {
         self.stroke = Some(StrokeState::new());
         self.is_drawing = true;
@@ -258,6 +295,7 @@ impl PainterApp {
         }
     }
 
+    /// Finalize the current stroke and push it to the undo stack.
     fn finish_stroke(&mut self) {
         if let Some(stroke) = &mut self.stroke {
             stroke.end();
@@ -271,6 +309,7 @@ impl PainterApp {
         self.is_drawing = false;
     }
 
+    /// Rotate a point around a center by the given cos/sin pair.
     fn rotate_point(point: egui::Pos2, center: egui::Pos2, cos: f32, sin: f32) -> egui::Pos2 {
         let delta = point - center;
         egui::Pos2::new(
@@ -279,6 +318,7 @@ impl PainterApp {
         )
     }
 
+    /// Convert a screen-space position into canvas space considering zoom and rotation.
     fn screen_to_canvas(
         &self,
         pos: egui::Pos2,
@@ -307,6 +347,7 @@ impl PainterApp {
 }
 
 impl eframe::App for PainterApp {
+    /// Handle UI, input, painting updates, and tile uploads each frame.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle Undo/Redo
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
@@ -577,15 +618,28 @@ impl eframe::App for PainterApp {
     }
 }
 
+/// Launch the native egui application.
 fn main() -> eframe::Result<()> {
     env_logger::init();
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Rust Dab Painter",
-        options,
-        Box::new(|cc| Ok(Box::new(PainterApp::new(cc)))),
-    )
+
+    match parse_backend_arg() {
+        PaintBackend::Gpu => {
+            println!("Launching GPU painting backend (wgpu)");
+            if let Err(err) = gpu_painter::run() {
+                eprintln!("Failed to start GPU backend: {err}");
+            }
+            Ok(())
+        }
+        PaintBackend::Cpu => {
+            let options = eframe::NativeOptions {
+                viewport: eframe::egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
+                ..Default::default()
+            };
+            eframe::run_native(
+                "Rust Dab Painter",
+                options,
+                Box::new(|cc| Ok(Box::new(PainterApp::new(cc)))),
+            )
+        }
+    }
 }

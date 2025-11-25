@@ -7,6 +7,7 @@ use crate::utils::color::Color;
 use crate::utils::profiler::ScopeTimer;
 
 #[derive(Debug)]
+/// Single painting layer with its own opacity, visibility and tile storage.
 pub struct Layer {
     pub name: String,
     pub visible: bool,
@@ -15,6 +16,7 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// Allocate a new layer backing store but keep tile data lazy.
     fn new(name: String, width: usize, height: usize, tile_size: usize) -> Self {
         let tiles_x = (width + tile_size - 1) / tile_size;
         let tiles_y = (height + tile_size - 1) / tile_size;
@@ -30,6 +32,7 @@ impl Layer {
     }
 }
 
+/// Main drawing surface that owns tile grids and blending rules across layers.
 pub struct Canvas {
     width: usize,
     height: usize,
@@ -43,11 +46,13 @@ pub struct Canvas {
 }
 
 #[derive(Debug)]
+/// Tile container that is lazily filled with pixel data.
 pub(crate) struct TileCell {
     pub data: Option<Vec<Color32>>,
 }
 
 impl Canvas {
+    /// Create a new canvas with a single background layer and configured tile size.
     pub fn new(width: usize, height: usize, clear_color: Color, tile_size: usize) -> Self {
         let tiles_x = (width + tile_size - 1) / tile_size;
         let tiles_y = (height + tile_size - 1) / tile_size;
@@ -80,18 +85,22 @@ impl Canvas {
         self.active_layer_idx = self.layers.len() - 1;
     }
 
+    /// Current canvas width in pixels.
     pub fn width(&self) -> usize {
         self.width
     }
 
+    /// Current canvas height in pixels.
     pub fn height(&self) -> usize {
         self.height
     }
 
+    /// Size of a tile edge in pixels.
     pub fn tile_size(&self) -> usize {
         self.tile_size
     }
 
+    /// Flatten a tile coordinate into the backing vector index.
     fn tile_index(&self, tx: usize, ty: usize) -> Option<usize> {
         if tx >= self.tiles_x || ty >= self.tiles_y {
             return None;
@@ -99,7 +108,7 @@ impl Canvas {
         Some(ty * self.tiles_x + tx)
     }
 
-    // Access the active layer's tile
+    /// Access the active layer's tile.
     fn tile_cell(&self, tx: usize, ty: usize) -> Option<&Mutex<TileCell>> {
         if self.active_layer_idx >= self.layers.len() {
             return None;
@@ -108,7 +117,7 @@ impl Canvas {
         self.tile_index(tx, ty).and_then(|idx| layer.tiles.get(idx))
     }
 
-    // Access a specific layer's tile (for compositing)
+    /// Access a specific layer's tile by index (used for compositing).
     fn layer_tile_cell(&self, layer_idx: usize, tx: usize, ty: usize) -> Option<&Mutex<TileCell>> {
         if layer_idx >= self.layers.len() {
             return None;
@@ -117,6 +126,7 @@ impl Canvas {
         self.tile_index(tx, ty).and_then(|idx| layer.tiles.get(idx))
     }
 
+    /// Ensure the tile exists on a specific layer, initializing it if needed.
     fn ensure_layer_tile(
         &self,
         layer_idx: usize,
@@ -138,6 +148,7 @@ impl Canvas {
         Some(guard)
     }
 
+    /// Ensure the active layer has storage for the given tile.
     fn ensure_tile(&self, tx: usize, ty: usize) -> Option<std::sync::MutexGuard<'_, TileCell>> {
         let cell = self.tile_cell(tx, ty)?;
         let mut guard = cell.lock().unwrap();
@@ -160,18 +171,22 @@ impl Canvas {
         Some(guard)
     }
 
+    /// Guarantee a tile exists on the active layer.
     pub fn ensure_tile_exists(&self, tx: usize, ty: usize) {
         let _ = self.ensure_tile(tx, ty);
     }
 
+    /// Guarantee a tile exists on the specified layer.
     pub fn ensure_layer_tile_exists(&self, layer_idx: usize, tx: usize, ty: usize) {
         let _ = self.ensure_layer_tile(layer_idx, tx, ty);
     }
 
+    /// Lock a tile in the active layer, initializing it if absent.
     pub fn lock_tile(&self, tx: usize, ty: usize) -> Option<std::sync::MutexGuard<'_, TileCell>> {
         self.ensure_tile(tx, ty)
     }
 
+    /// Lock a tile in a specific layer, initializing it if absent.
     pub fn lock_layer_tile(
         &self,
         layer_idx: usize,
@@ -181,6 +196,7 @@ impl Canvas {
         self.ensure_layer_tile(layer_idx, tx, ty)
     }
 
+    /// Clone the raw pixel buffer for a tile in a given layer.
     pub fn get_layer_tile_data(
         &self,
         layer_idx: usize,
@@ -192,6 +208,7 @@ impl Canvas {
         guard.data.clone()
     }
 
+    /// Overwrite a tile's pixel buffer for a given layer.
     pub fn set_layer_tile_data(&self, layer_idx: usize, tx: usize, ty: usize, data: Vec<Color32>) {
         if let Some(cell) = self.layer_tile_cell(layer_idx, tx, ty) {
             let mut guard = cell.lock().unwrap();
@@ -210,6 +227,7 @@ impl Canvas {
         }
     }
 
+    /// Composite a canvas region into a `ColorImage`, optionally downsampled by `step`.
     pub fn write_region_to_color_image(
         &self,
         x: usize,
@@ -251,41 +269,101 @@ impl Canvas {
                     .collect();
 
                 for dst_y in 0..dst_h {
-                    let global_y = y + dst_y * step;
-                    let local_y = global_y % self.tile_size;
+                    let global_y_start = y + dst_y * step;
                     let row_start = dst_y * dst_w;
 
                     for dst_x in 0..dst_w {
-                        let global_x = x + dst_x * step;
-                        let local_x = global_x % self.tile_size;
-                        let src_idx = local_y * self.tile_size + local_x;
+                        let global_x_start = x + dst_x * step;
+                        
+                        if step == 1 {
+                            // Fast path for 1:1 rendering
+                            let local_y = global_y_start % self.tile_size;
+                            let local_x = global_x_start % self.tile_size;
+                            let src_idx = local_y * self.tile_size + local_x;
 
-                        let mut final_color = Color::rgba(0, 0, 0, 0);
+                            let mut final_color = Color::rgba(0, 0, 0, 0);
+                            for (layer_idx, guard_opt) in layer_guards.iter().enumerate() {
+                                let layer = &self.layers[layer_idx];
+                                if !layer.visible || layer.opacity <= 0.0 { continue; }
 
-                        for (layer_idx, guard_opt) in layer_guards.iter().enumerate() {
-                            let layer = &self.layers[layer_idx];
-                            if !layer.visible || layer.opacity <= 0.0 {
-                                continue;
-                            }
-
-                            if let Some(guard) = guard_opt {
-                                if let Some(data) = &guard.data {
-                                    let pixel = data[src_idx];
-                                    let mut src_color = Color::from_color32(pixel);
-                                    src_color.a *= layer.opacity;
-                                    final_color = alpha_over(src_color, final_color);
+                                if let Some(guard) = guard_opt {
+                                    if let Some(data) = &guard.data {
+                                        let pixel = data[src_idx];
+                                        let mut src_color = Color::from_color32(pixel);
+                                        src_color.a *= layer.opacity;
+                                        final_color = alpha_over(src_color, final_color);
+                                    } else if layer_idx == 0 {
+                                        let mut src_color = Color::from_color32(self.clear_color);
+                                        src_color.a *= layer.opacity;
+                                        final_color = alpha_over(src_color, final_color);
+                                    }
                                 } else if layer_idx == 0 {
                                     let mut src_color = Color::from_color32(self.clear_color);
                                     src_color.a *= layer.opacity;
                                     final_color = alpha_over(src_color, final_color);
                                 }
-                            } else if layer_idx == 0 {
-                                let mut src_color = Color::from_color32(self.clear_color);
-                                src_color.a *= layer.opacity;
-                                final_color = alpha_over(src_color, final_color);
+                            }
+                            out.pixels[row_start + dst_x] = final_color.to_color32();
+                        } else {
+                            // High quality downsampling (box filter)
+                            let mut r_acc = 0.0;
+                            let mut g_acc = 0.0;
+                            let mut b_acc = 0.0;
+                            let mut a_acc = 0.0;
+                            let mut count = 0.0;
+
+                            for sy in 0..step {
+                                let global_y = global_y_start + sy;
+                                if global_y >= y + h { continue; }
+                                let local_y = global_y % self.tile_size;
+
+                                for sx in 0..step {
+                                    let global_x = global_x_start + sx;
+                                    if global_x >= x + w { continue; }
+                                    let local_x = global_x % self.tile_size;
+                                    
+                                    let src_idx = local_y * self.tile_size + local_x;
+                                    let mut pixel_color = Color::rgba(0, 0, 0, 0);
+
+                                    for (layer_idx, guard_opt) in layer_guards.iter().enumerate() {
+                                        let layer = &self.layers[layer_idx];
+                                        if !layer.visible || layer.opacity <= 0.0 { continue; }
+
+                                        if let Some(guard) = guard_opt {
+                                            if let Some(data) = &guard.data {
+                                                let pixel = data[src_idx];
+                                                let mut src_color = Color::from_color32(pixel);
+                                                src_color.a *= layer.opacity;
+                                                pixel_color = alpha_over(src_color, pixel_color);
+                                            } else if layer_idx == 0 {
+                                                let mut src_color = Color::from_color32(self.clear_color);
+                                                src_color.a *= layer.opacity;
+                                                pixel_color = alpha_over(src_color, pixel_color);
+                                            }
+                                        } else if layer_idx == 0 {
+                                            let mut src_color = Color::from_color32(self.clear_color);
+                                            src_color.a *= layer.opacity;
+                                            pixel_color = alpha_over(src_color, pixel_color);
+                                        }
+                                    }
+                                    
+                                    r_acc += pixel_color.r;
+                                    g_acc += pixel_color.g;
+                                    b_acc += pixel_color.b;
+                                    a_acc += pixel_color.a;
+                                    count += 1.0;
+                                }
+                            }
+
+                            if count > 0.0 {
+                                out.pixels[row_start + dst_x] = Color {
+                                    r: r_acc / count,
+                                    g: g_acc / count,
+                                    b: b_acc / count,
+                                    a: a_acc / count,
+                                }.to_color32();
                             }
                         }
-                        out.pixels[row_start + dst_x] = final_color.to_color32();
                     }
                 }
             }
@@ -352,6 +430,7 @@ impl Canvas {
         }
     }
 
+    /// Clear the active layer to the provided color (or transparent for non-background).
     pub fn clear(&mut self, color: Color) {
         self.clear_color = color.to_color32();
         // Clear all layers? Or just active?
@@ -367,6 +446,7 @@ impl Canvas {
     }
 }
 
+/// Erase blend mode: reduce destination alpha by the source alpha.
 pub fn blend_erase(src: Color, dst: Color) -> Color {
     // src.a is the strength of the eraser
     let out_a = dst.a * (1.0 - src.a);
@@ -378,6 +458,7 @@ pub fn blend_erase(src: Color, dst: Color) -> Color {
     }
 }
 
+/// Standard "source over" alpha compositing.
 pub fn alpha_over(src: Color, dst: Color) -> Color {
     let out_a = src.a + dst.a * (1.0 - src.a);
     if out_a <= 0.0 {

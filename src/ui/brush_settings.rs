@@ -1,7 +1,8 @@
-use crate::brush::{BlendMode, Brush, BrushPreset, BrushType};
-use eframe::egui::{self};
+use crate::brush_engine::brush::{Brush, BrushType, BlendMode};
+use eframe::egui;
 
 
+/// Panel for tweaking the currently selected brush properties.
 pub fn brush_settings_window(ctx: &egui::Context, brush: &mut Brush) {
     egui::Window::new("Brush Settings")
         .default_width(200.0)

@@ -1,5 +1,6 @@
 use eframe::egui::Color32;
 
+/// Simple RGBA color stored as linear floats in 0..1.
 #[derive(Clone, Copy, Debug)]
 pub struct Color {
     pub r: f32,
@@ -9,6 +10,7 @@ pub struct Color {
 }
 
 impl Color {
+    /// Construct from 0-255 channel values.
     pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self {
             r: r as f32 / 255.0,
@@ -18,10 +20,12 @@ impl Color {
         }
     }
 
+    /// Solid white convenience color.
     pub fn white() -> Self {
         Self::rgba(255, 255, 255, 255)
     }
 
+    /// Convert HSVA values (0..1) into an RGBA color.
     pub fn from_hsva(h: f32, s: f32, v: f32, a: f32) -> Self {
         // h is wrapped into [0,1) so callers can pass any float
         let h = ((h % 1.0) + 1.0) % 1.0;
@@ -50,6 +54,7 @@ impl Color {
         }
     }
 
+    /// Convert RGBA into HSVA for UI sliders.
     pub fn to_hsva(&self) -> (f32, f32, f32, f32) {
         let r = self.r;
         let g = self.g;
@@ -80,6 +85,7 @@ impl Color {
         (h, s, v, a)
     }
 
+    /// Convert to egui's 8-bit color format.
     pub fn to_color32(&self) -> Color32 {
         Color32::from_rgba_unmultiplied(
             (self.r * 255.0) as u8,
@@ -89,6 +95,7 @@ impl Color {
         )
     }
 
+    /// Convert from egui's 8-bit color format to linear floats.
     pub fn from_color32(c: Color32) -> Self {
         let [r, g, b, a] = c.to_srgba_unmultiplied();
         Self {

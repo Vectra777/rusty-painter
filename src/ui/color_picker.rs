@@ -1,58 +1,9 @@
-use eframe::egui::{self, Color32};
-use crate::color::Color;
-use crate::brush::{Brush, BrushType, BlendMode, BrushPreset};
-use crate::canvas::Canvas;
+use crate::brush_engine::brush::{Brush};
+use eframe::egui;
+use crate::utils::color::Color;
+use egui::Color32;
 
-pub fn brush_settings_window(ctx: &egui::Context, brush: &mut Brush) {
-    egui::Window::new("Brush Settings")
-        .default_width(200.0)
-        .show(ctx, |ui| {
-            ui.heading("Brush Properties");
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                ui.label("Type:");
-                ui.selectable_value(&mut brush.brush_type, BrushType::Soft, "Soft");
-                ui.selectable_value(&mut brush.brush_type, BrushType::Pixel, "Pixel");
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Mode:");
-                ui.selectable_value(&mut brush.blend_mode, BlendMode::Normal, "Normal");
-                ui.selectable_value(&mut brush.blend_mode, BlendMode::Eraser, "Eraser");
-            });
-
-            ui.add_space(5.0);
-
-            ui.label("Size:");
-            ui.add(egui::Slider::new(&mut brush.diameter, 1.0..=200.0).logarithmic(true));
-
-            if brush.brush_type == BrushType::Soft {
-                ui.label("Hardness:");
-                ui.add(egui::Slider::new(&mut brush.hardness, 0.0..=100.0));
-            }
-
-            ui.label("Opacity:");
-            ui.add(egui::Slider::new(&mut brush.opacity, 0.0..=1.0));
-
-            ui.label("Flow:");
-            ui.add(egui::Slider::new(&mut brush.flow, 0.0..=100.0));
-
-            ui.label("Spacing (%):");
-            ui.add(egui::Slider::new(&mut brush.spacing, 1.0..=200.0));
-
-            ui.label("Jitter:");
-            ui.add(egui::Slider::new(&mut brush.jitter, 0.0..=50.0));
-
-            ui.label("Stabilizer:");
-            ui.add(egui::Slider::new(&mut brush.stabilizer, 0.0..=1.0));
-
-            ui.separator();
-            ui.checkbox(&mut brush.pixel_perfect, "Pixel Perfect Mode");
-            ui.checkbox(&mut brush.anti_alias, "Anti-Aliasing");
-        });
-}
-
+/// Interactive HSVA picker that updates the active brush color.
 pub fn color_picker_window(ctx: &egui::Context, brush: &mut Brush) {
     egui::Window::new("Color Picker")
         .default_size([220.0, 300.0])
@@ -60,6 +11,7 @@ pub fn color_picker_window(ctx: &egui::Context, brush: &mut Brush) {
             let (mut hue, mut sat, mut val, mut alpha) = brush.color.to_hsva();
             let mut color_changed = false;
 
+            // Barycentric coordinate helper to locate cursor inside the triangle.
             fn barycentric(
                 p: egui::Pos2,
                 a: egui::Pos2,
@@ -146,7 +98,8 @@ pub fn color_picker_window(ctx: &egui::Context, brush: &mut Brush) {
             let pointer_down = ui.input(|i| i.pointer.primary_down());
             if (response.hovered() || response.dragged()) && pointer_down {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    let (w_top, w_left, w_right) = barycentric(pointer, tri_top, tri_left, tri_right);
+                    let (w_top, w_left, w_right) =
+                        barycentric(pointer, tri_top, tri_left, tri_right);
                     if w_top >= -0.01 && w_left >= -0.01 && w_right >= -0.01 {
                         let mut w_top = w_top.clamp(0.0, 1.0);
                         let w_left = w_left.clamp(0.0, 1.0);
@@ -194,8 +147,10 @@ pub fn color_picker_window(ctx: &egui::Context, brush: &mut Brush) {
              -> bool {
                 ui.label(label);
                 let bar_height = 18.0;
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(side, bar_height), egui::Sense::click_and_drag());
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(side, bar_height),
+                    egui::Sense::click_and_drag(),
+                );
                 let painter = ui.painter();
                 let radius = bar_height * 0.5;
                 if checker {
@@ -295,71 +250,6 @@ pub fn color_picker_window(ctx: &egui::Context, brush: &mut Brush) {
 
             if color_changed {
                 brush.color = Color::from_hsva(hue, sat, val, alpha);
-            }
-        });
-}
-
-pub fn brush_list_window(ctx: &egui::Context, brush: &mut Brush, presets: &Vec<BrushPreset>) {
-    egui::Window::new("Brush Presets")
-        .default_width(200.0)
-        .show(ctx, |ui| {
-            ui.heading("Presets");
-            ui.separator();
-            
-            for preset in presets {
-                if ui.button(&preset.name).clicked() {
-                    // Keep the current color, but copy other properties
-                    let current_color = brush.color;
-                    *brush = preset.brush.clone();
-                    brush.color = current_color;
-                }
-            }
-        });
-}
-
-pub fn layers_window(ctx: &egui::Context, canvas: &mut Canvas) {
-    egui::Window::new("Layers")
-        .default_width(200.0)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("New Layer").clicked() {
-                    canvas.add_layer();
-                }
-            });
-            ui.separator();
-
-            // Iterate in reverse so top layers are at the top of the list
-            let mut to_delete = None;
-            let mut active_idx = canvas.active_layer_idx;
-            
-            for i in (0..canvas.layers.len()).rev() {
-                ui.horizontal(|ui| {
-                    let layer = &mut canvas.layers[i];
-                    ui.checkbox(&mut layer.visible, "");
-                    
-                    let is_active = i == active_idx;
-                    if ui.selectable_label(is_active, &layer.name).clicked() {
-                        active_idx = i;
-                    }
-
-                    // Opacity slider
-                    ui.add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).show_value(false));
-
-                    if canvas.layers.len() > 1 {
-                        if ui.button("X").clicked() {
-                            to_delete = Some(i);
-                        }
-                    }
-                });
-            }
-            
-            canvas.active_layer_idx = active_idx;
-
-            if let Some(idx) = to_delete {
-                canvas.layers.remove(idx);
-                if canvas.active_layer_idx >= canvas.layers.len() {
-                    canvas.active_layer_idx = canvas.layers.len().saturating_sub(1);
-                }
             }
         });
 }

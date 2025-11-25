@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+/// Minimal scope timer used to gather aggregated metrics with low overhead.
 pub struct ScopeTimer {
     name: &'static str,
     start: Instant,
@@ -9,6 +10,7 @@ pub struct ScopeTimer {
 }
 
 impl ScopeTimer {
+    /// Start a new timer for the given label; disabled when `ENABLE` is false.
     pub fn new(name: &'static str) -> Self {
         // Toggle profiling here; when disabled this becomes a cheap no-op.
         const ENABLE: bool = false;
@@ -38,6 +40,7 @@ impl Drop for ScopeTimer {
 }
 
 #[derive(Default)]
+/// Aggregated timing statistics for a particular label.
 struct Stats {
     total: u128,
     count: u128,
@@ -46,10 +49,12 @@ struct Stats {
 }
 
 impl Stats {
+    /// Start with zeroed counters.
     fn new() -> Self {
         Self::default()
     }
 
+    /// Record an elapsed duration into the totals.
     fn update(&mut self, elapsed: std::time::Duration) {
         self.total += elapsed.as_nanos();
         self.count += 1;
