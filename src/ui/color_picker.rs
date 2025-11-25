@@ -104,8 +104,10 @@ fn gradient_slider(
 
 fn hsva_triangle(ui: &mut egui::Ui, hue: &mut f32, sat: &mut f32, val: &mut f32) -> bool {
     let tri_height = TRI_SIDE * (3.0_f32).sqrt() * 0.5;
-    let (rect, response) =
-        ui.allocate_at_least(egui::vec2(TRI_SIDE, tri_height), egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_at_least(
+        egui::vec2(TRI_SIDE, tri_height),
+        egui::Sense::click_and_drag(),
+    );
 
     let base_x = rect.center().x - TRI_SIDE * 0.5;
     let base_y = rect.top();
@@ -317,106 +319,8 @@ fn rgba_picker(ui: &mut egui::Ui, brush: &mut Brush) {
     let (mut hue, mut sat, mut val, mut alpha) = brush.color.to_hsva();
     let mut color_changed = false;
 
-    // Barycentric coordinate helper to locate cursor inside the triangle.
-    fn barycentric(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2, c: egui::Pos2) -> (f32, f32, f32) {
-        let v0 = b - a;
-        let v1 = c - a;
-        let v2 = p - a;
-        let denom = v0.x * v1.y - v1.x * v0.y;
-        if denom.abs() < f32::EPSILON {
-            return (0.0, 0.0, 0.0);
-        }
-        let inv_denom = 1.0 / denom;
-        let v = (v2.x * v1.y - v1.x * v2.y) * inv_denom;
-        let w = (v0.x * v2.y - v2.x * v0.y) * inv_denom;
-        let u = 1.0 - v - w;
-        (u, v, w)
-    }
+    color_changed |= hsva_triangle(ui, &mut hue, &mut sat, &mut val);
 
-    let side = 200.0;
-    let tri_height = side * (3.0_f32).sqrt() * 0.5;
-    let (rect, response) =
-        ui.allocate_at_least(egui::vec2(side, tri_height), egui::Sense::click_and_drag());
-
-    let base_x = rect.center().x - side * 0.5;
-    let base_y = rect.top();
-    let tri_top = egui::pos2(base_x + side * 0.5, base_y);
-    let tri_left = egui::pos2(base_x, base_y + tri_height);
-    let tri_right = egui::pos2(base_x + side, base_y + tri_height);
-
-    let hue_color = Color::from_hsva(hue, 1.0, 1.0, 1.0).to_color32();
-
-    let mut mesh = egui::Mesh::default();
-    let top_idx = mesh.vertices.len();
-    mesh.vertices.push(egui::epaint::Vertex {
-        pos: tri_top,
-        uv: egui::Pos2::ZERO,
-        color: Color32::WHITE,
-    });
-    let left_idx = mesh.vertices.len();
-    mesh.vertices.push(egui::epaint::Vertex {
-        pos: tri_left,
-        uv: egui::Pos2::ZERO,
-        color: Color32::BLACK,
-    });
-    let right_idx = mesh.vertices.len();
-    mesh.vertices.push(egui::epaint::Vertex {
-        pos: tri_right,
-        uv: egui::Pos2::ZERO,
-        color: hue_color,
-    });
-    mesh.indices
-        .extend_from_slice(&[top_idx as u32, left_idx as u32, right_idx as u32]);
-    ui.painter().add(egui::Shape::mesh(mesh));
-    ui.painter().add(egui::Shape::line(
-        vec![tri_top, tri_right, tri_left, tri_top],
-        egui::Stroke::new(1.5, Color32::from_gray(80)),
-    ));
-
-    let tri_sat = sat.clamp(0.0, 1.0);
-    let tri_val = val.clamp(0.0, 1.0);
-    let mut w_hue = tri_sat.min(tri_val);
-    let mut w_white = (tri_val - w_hue).max(0.0);
-    let mut w_black = (1.0 - w_hue - w_white).max(0.0);
-    let sum = w_hue + w_white + w_black;
-    if sum > 0.0 {
-        w_hue /= sum;
-        w_white /= sum;
-        w_black /= sum;
-    }
-    let indicator = egui::pos2(
-        tri_top.x * w_white + tri_left.x * w_black + tri_right.x * w_hue,
-        tri_top.y * w_white + tri_left.y * w_black + tri_right.y * w_hue,
-    );
-    ui.painter()
-        .circle_filled(indicator, 7.0, Color32::from_white_alpha(32));
-    ui.painter().circle_stroke(
-        indicator,
-        7.0,
-        egui::Stroke::new(2.0, Color32::from_gray(30)),
-    );
-
-    let pointer_down = ui.input(|i| i.pointer.primary_down());
-    if (response.hovered() || response.dragged()) && pointer_down {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let (w_top, w_left, w_right) = barycentric(pointer, tri_top, tri_left, tri_right);
-            if w_top >= -0.01 && w_left >= -0.01 && w_right >= -0.01 {
-                let mut w_top = w_top.clamp(0.0, 1.0);
-                let w_left = w_left.clamp(0.0, 1.0);
-                let mut w_right = w_right.clamp(0.0, 1.0);
-                let total = w_top + w_left + w_right;
-                if total > 0.0 {
-                    w_top /= total;
-                    w_right /= total;
-                }
-                sat = w_right;
-                val = (w_top + w_right).clamp(0.0, 1.0);
-                color_changed = true;
-            }
-        }
-    }
-
-    ui.add_space(8.0);
     color_changed |= gradient_slider(
         ui,
         SLIDER_WIDTH,
