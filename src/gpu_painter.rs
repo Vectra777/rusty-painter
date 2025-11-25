@@ -5,13 +5,13 @@ use wgpu::util::DeviceExt;
 
 use egui_wgpu::wgpu;
 use egui_winit::{
+    State as EguiWinitState,
     winit::{
         self,
-        event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent, Modifiers},
+        event::{ElementState, Event, Modifiers, MouseButton, MouseScrollDelta, WindowEvent},
         event_loop::EventLoop,
         window::{Window, WindowAttributes},
     },
-    State as EguiWinitState,
 };
 
 const BRUSH_WGSL: &str = include_str!("./shaders/brush.wgsl");
@@ -117,7 +117,11 @@ impl History {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("History Push Encoder"),
         });
-        encoder.copy_texture_to_texture(texture.as_image_copy(), texture_copy.as_image_copy(), texture.size());
+        encoder.copy_texture_to_texture(
+            texture.as_image_copy(),
+            texture_copy.as_image_copy(),
+            texture.size(),
+        );
         queue.submit(std::iter::once(encoder.finish()));
 
         let len = self.textures.len();
@@ -251,7 +255,10 @@ impl State {
         let max_texture_dim = limits.max_texture_dimension_2d;
         let canvas_dim = 10000u32.min(max_texture_dim);
         if canvas_dim < 10000 {
-            println!("Warning: Requested canvas size of 10000x10000 exceeds the hardware limit of {}x{}. Canvas will be created with size {}x{}", max_texture_dim, max_texture_dim, canvas_dim, canvas_dim);
+            println!(
+                "Warning: Requested canvas size of 10000x10000 exceeds the hardware limit of {}x{}. Canvas will be created with size {}x{}",
+                max_texture_dim, max_texture_dim, canvas_dim, canvas_dim
+            );
         }
         let canvas_width = canvas_dim;
         let canvas_height = canvas_dim;
@@ -274,7 +281,8 @@ impl State {
             view_formats: &[],
         });
 
-        let canvas_texture_view = canvas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let canvas_texture_view =
+            canvas_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -293,19 +301,20 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let view_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-            label: Some("view_bind_group_layout"),
-        });
+        let view_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("view_bind_group_layout"),
+            });
 
         let view_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &view_bind_group_layout,
@@ -316,27 +325,28 @@ impl State {
             label: Some("view_bind_group"),
         });
 
-        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-            label: Some("texture_bind_group_layout"),
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("texture_bind_group_layout"),
+            });
 
         let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
@@ -358,11 +368,12 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(QUAD_WGSL.into()),
         });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout, &view_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&texture_bind_group_layout, &view_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -431,19 +442,20 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let brush_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-            label: Some("brush_bind_group_layout"),
-        });
+        let brush_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("brush_bind_group_layout"),
+            });
 
         let brush_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &brush_bind_group_layout,
@@ -454,11 +466,12 @@ impl State {
             label: Some("brush_bind_group"),
         });
 
-        let brush_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Brush Pipeline Layout"),
-            bind_group_layouts: &[&brush_bind_group_layout, &view_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let brush_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Brush Pipeline Layout"),
+                bind_group_layouts: &[&brush_bind_group_layout, &view_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let brush_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Brush Pipeline"),
@@ -489,34 +502,35 @@ impl State {
             multiview: None,
         });
 
-        let square_brush_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Square Brush Pipeline"),
-            layout: Some(&brush_pipeline_layout),
-            cache: None,
-            vertex: wgpu::VertexState {
-                module: &square_brush_shader,
-                entry_point: "vs_main",
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &square_brush_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: canvas_texture.format(),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
+        let square_brush_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Square Brush Pipeline"),
+                layout: Some(&brush_pipeline_layout),
+                cache: None,
+                vertex: wgpu::VertexState {
+                    module: &square_brush_shader,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &square_brush_shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: canvas_texture.format(),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            });
 
         let egui_ctx = egui::Context::default();
         let egui_state = EguiWinitState::new(
@@ -633,7 +647,8 @@ impl State {
             WindowEvent::MouseInput { state, button, .. } => {
                 if *button == MouseButton::Left {
                     if *state == ElementState::Released {
-                        self.history.push(&self.device, &self.queue, &self.canvas_texture);
+                        self.history
+                            .push(&self.device, &self.queue, &self.canvas_texture);
                         self.last_paint_position = None;
                     } else {
                         self.last_paint_position = None;
@@ -741,9 +756,11 @@ impl State {
     }
 
     fn clear_canvas(&mut self) {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Clear Canvas Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Clear Canvas Encoder"),
+            });
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Canvas Clear Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -818,11 +835,15 @@ impl State {
 
     fn render(&mut self, window: &Window) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         if self.mouse_down && !self.egui_ctx.is_pointer_over_area() {
             if let Some(mut position) = self.cursor_to_canvas_coords() {
@@ -848,8 +869,11 @@ impl State {
                         radius,
                         _padding: 0,
                     };
-                    self.queue
-                        .write_buffer(&self.brush_uniform_buffer, 0, bytemuck::cast_slice(&[brush]));
+                    self.queue.write_buffer(
+                        &self.brush_uniform_buffer,
+                        0,
+                        bytemuck::cast_slice(&[brush]),
+                    );
 
                     let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Brush Pass"),
@@ -948,7 +972,10 @@ impl State {
                 });
                 let mut rotation_degrees = self.rotation.to_degrees();
                 if ui
-                    .add(egui::Slider::new(&mut rotation_degrees, -180.0..=180.0).text("Rotation (deg)"))
+                    .add(
+                        egui::Slider::new(&mut rotation_degrees, -180.0..=180.0)
+                            .text("Rotation (deg)"),
+                    )
                     .changed()
                 {
                     self.rotation = rotation_degrees.to_radians();
@@ -998,9 +1025,11 @@ impl State {
         }
         if undo {
             if let Some(texture) = self.history.undo() {
-                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Undo Encoder"),
-                });
+                let mut encoder =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Undo Encoder"),
+                        });
                 encoder.copy_texture_to_texture(
                     texture.as_image_copy(),
                     self.canvas_texture.as_image_copy(),
@@ -1011,9 +1040,11 @@ impl State {
         }
         if redo {
             if let Some(texture) = self.history.redo() {
-                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Redo Encoder"),
-                });
+                let mut encoder =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Redo Encoder"),
+                        });
                 encoder.copy_texture_to_texture(
                     texture.as_image_copy(),
                     self.canvas_texture.as_image_copy(),
@@ -1026,7 +1057,9 @@ impl State {
             self.recreate_canvas_texture(self.canvas_width, self.canvas_height);
         }
 
-        let tris = self.egui_ctx.tessellate(full_output.shapes, window.scale_factor() as f32);
+        let tris = self
+            .egui_ctx
+            .tessellate(full_output.shapes, window.scale_factor() as f32);
         for (id, image_delta) in &full_output.textures_delta.set {
             self.egui_renderer
                 .update_texture(&self.device, &self.queue, *id, image_delta);
@@ -1062,7 +1095,8 @@ impl State {
             let mut egui_pass = encoder.begin_render_pass(&egui_desc);
             // The egui renderer requires a 'static render pass; transmute is safe
             // here because the pass does not outlive the encoder scope.
-            let mut egui_pass: wgpu::RenderPass<'static> = unsafe { std::mem::transmute(egui_pass) };
+            let mut egui_pass: wgpu::RenderPass<'static> =
+                unsafe { std::mem::transmute(egui_pass) };
             self.egui_renderer
                 .render(&mut egui_pass, &tris, &screen_descriptor);
         }
@@ -1087,7 +1121,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     event_loop
         .run(move |event, elwt| match event {
-            Event::WindowEvent { ref event, window_id } if window_id == window.id() => {
+            Event::WindowEvent {
+                ref event,
+                window_id,
+            } if window_id == window.id() => {
                 if !state.input(event, &window) {
                     match event {
                         WindowEvent::CloseRequested => elwt.exit(),

@@ -1,7 +1,6 @@
+use crate::PainterApp;
 use eframe::egui;
 use rayon::ThreadPoolBuilder;
-use crate::PainterApp;
-
 
 /// Window with app-wide toggles that affect rendering performance and controls.
 pub fn general_settings_ui(app: &mut PainterApp, ctx: &egui::Context) {
@@ -11,8 +10,7 @@ pub fn general_settings_ui(app: &mut PainterApp, ctx: &egui::Context) {
         // self.brush.set_masked(self.use_masked_brush);
         let threads_changed = ui
             .add(
-                egui::Slider::new(&mut app.thread_count, 1..=app.max_threads)
-                    .text("Brush threads"),
+                egui::Slider::new(&mut app.thread_count, 1..=app.max_threads).text("Brush threads"),
             )
             .changed();
         if threads_changed {

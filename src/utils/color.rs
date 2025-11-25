@@ -105,4 +105,67 @@ impl Color {
             a: a as f32 / 255.0,
         }
     }
+
+    pub fn to_grayscale_value(&self) -> f32 {
+        // Luminance coefficients for sRGB
+        (self.r * 0.2126 + self.g * 0.7152 + self.b * 0.0722).clamp(0.0, 1.0)
+    }
+
+    pub fn to_grayscale_color(&self) -> Self {
+        let g = self.to_grayscale_value();
+        Self {
+            r: g,
+            g,
+            b: g,
+            a: self.a,
+        }
+    }
+
+    pub fn from_gray(v: f32, a: f32) -> Self {
+        let v = v.clamp(0.0, 1.0);
+        Self {
+            r: v,
+            g: v,
+            b: v,
+            a: a.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn to_cmyk(&self) -> (f32, f32, f32, f32, f32) {
+        let r = self.r.clamp(0.0, 1.0);
+        let g = self.g.clamp(0.0, 1.0);
+        let b = self.b.clamp(0.0, 1.0);
+        let k = 1.0 - r.max(g).max(b);
+        if k >= 0.9999 {
+            return (0.0, 0.0, 0.0, 1.0, self.a);
+        }
+        let inv = 1.0 - k;
+        let c = (1.0 - r - k) / inv;
+        let m = (1.0 - g - k) / inv;
+        let y = (1.0 - b - k) / inv;
+        (
+            c.clamp(0.0, 1.0),
+            m.clamp(0.0, 1.0),
+            y.clamp(0.0, 1.0),
+            k.clamp(0.0, 1.0),
+            self.a,
+        )
+    }
+
+    pub fn from_cmyk(c: f32, m: f32, y: f32, k: f32, a: f32) -> Self {
+        let c = c.clamp(0.0, 1.0);
+        let m = m.clamp(0.0, 1.0);
+        let y = y.clamp(0.0, 1.0);
+        let k = k.clamp(0.0, 1.0);
+
+        let r = (1.0 - c) * (1.0 - k);
+        let g = (1.0 - m) * (1.0 - k);
+        let b = (1.0 - y) * (1.0 - k);
+        Self {
+            r,
+            g,
+            b,
+            a: a.clamp(0.0, 1.0),
+        }
+    }
 }

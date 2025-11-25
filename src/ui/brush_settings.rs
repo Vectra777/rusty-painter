@@ -1,6 +1,5 @@
-use crate::brush_engine::brush::{Brush, BrushType, BlendMode};
+use crate::brush_engine::brush::{BlendMode, Brush, BrushType};
 use eframe::egui;
-
 
 /// Panel for tweaking the currently selected brush properties.
 pub fn brush_settings_window(ctx: &egui::Context, brush: &mut Brush) {

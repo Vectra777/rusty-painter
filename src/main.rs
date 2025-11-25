@@ -3,22 +3,72 @@ use eframe::egui::{Color32, TextureHandle, TextureOptions};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::collections::HashSet;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
-mod canvas;
-mod ui;
 mod brush_engine;
-mod utils;
+mod canvas;
 mod gpu_painter;
+mod ui;
+mod utils;
 
+use brush_engine::brush::{Brush, BrushPreset, StrokeState};
 use canvas::canvas::Canvas;
 use canvas::history::{History, UndoAction};
-use brush_engine::brush::{Brush,BrushPreset, StrokeState};
-use utils::{profiler::ScopeTimer, vector::Vec2, color::Color};
+use utils::{color::Color, profiler::ScopeTimer, vector::Vec2};
 
 const TILE_SIZE: usize = 64;
 const ATLAS_SIZE: usize = 2048;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CanvasUnit {
+    Pixels,
+    Inches,
+    Millimeters,
+    Centimeters,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Orientation {
+    Portrait,
+    Landscape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackgroundChoice {
+    Transparent,
+    White,
+    Black,
+    Custom,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ColorModel {
+    Rgba,
+    Grayscale,
+    Cmyk,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ColorDepth {
+    Bit8,
+    Bit16,
+    Float32,
+}
+
+#[derive(Clone)]
+pub(crate) struct NewCanvasSettings {
+    name: String,
+    width: f32,
+    height: f32,
+    unit: CanvasUnit,
+    resolution: f32,
+    orientation: Orientation,
+    background: BackgroundChoice,
+    custom_bg: Color32,
+    color_model: ColorModel,
+    color_depth: ColorDepth,
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum PaintBackend {
@@ -46,6 +96,94 @@ fn parse_backend_arg() -> PaintBackend {
         }
     }
     backend
+}
+
+impl CanvasUnit {
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            CanvasUnit::Pixels => "px",
+            CanvasUnit::Inches => "in",
+            CanvasUnit::Millimeters => "mm",
+            CanvasUnit::Centimeters => "cm",
+        }
+    }
+}
+
+impl NewCanvasSettings {
+    pub(crate) fn from_canvas(canvas: &Canvas) -> Self {
+        let width = canvas.width() as f32;
+        let height = canvas.height() as f32;
+        let orientation = if width >= height {
+            Orientation::Landscape
+        } else {
+            Orientation::Portrait
+        };
+        Self {
+            name: "Untitled".to_string(),
+            width,
+            height,
+            unit: CanvasUnit::Pixels,
+            resolution: 300.0,
+            orientation,
+            background: BackgroundChoice::White,
+            custom_bg: Color32::WHITE,
+            color_model: ColorModel::Rgba,
+            color_depth: ColorDepth::Bit8,
+        }
+    }
+
+    pub(crate) fn sync_from_canvas(&mut self, canvas: &Canvas) {
+        self.width = canvas.width() as f32;
+        self.height = canvas.height() as f32;
+        self.orientation = if self.width >= self.height {
+            Orientation::Landscape
+        } else {
+            Orientation::Portrait
+        };
+    }
+
+    pub(crate) fn dimensions_in_pixels(&self) -> (usize, usize) {
+        let dpi = self.resolution.max(1.0);
+        let to_px = |value: f32| -> f32 {
+            match self.unit {
+                CanvasUnit::Pixels => value,
+                CanvasUnit::Inches => value * dpi,
+                CanvasUnit::Millimeters => value / 25.4 * dpi,
+                CanvasUnit::Centimeters => value / 2.54 * dpi,
+            }
+        };
+
+        let mut w = to_px(self.width.max(1.0));
+        let mut h = to_px(self.height.max(1.0));
+
+        match self.orientation {
+            Orientation::Portrait if w > h => std::mem::swap(&mut w, &mut h),
+            Orientation::Landscape if h > w => std::mem::swap(&mut w, &mut h),
+            _ => {}
+        }
+
+        (w.round().max(1.0) as usize, h.round().max(1.0) as usize)
+    }
+
+    pub(crate) fn background_color32(&self, model: ColorModel) -> Color32 {
+        let base = match self.background {
+            BackgroundChoice::Transparent => Color32::TRANSPARENT,
+            BackgroundChoice::White => Color32::WHITE,
+            BackgroundChoice::Black => Color32::BLACK,
+            BackgroundChoice::Custom => self.custom_bg,
+        };
+
+        let color = Color::from_color32(base);
+        match model {
+            ColorModel::Rgba => color,
+            ColorModel::Grayscale => color.to_grayscale_color(),
+            ColorModel::Cmyk => {
+                let (c, m, y, k, a) = color.to_cmyk();
+                Color::from_cmyk(c, m, y, k, a)
+            }
+        }
+        .to_color32()
+    }
 }
 
 /// Metadata that links a canvas tile to its slot in the GPU atlas.
@@ -91,12 +229,15 @@ struct PainterApp {
     max_threads: usize,
     pool: ThreadPool,
     is_panning: bool,
-    is_zooming: bool,
     is_rotating: bool,
     rotation: f32,
     is_primary_down: bool,
     disable_lod: bool,
     force_full_upload: bool,
+    show_new_canvas_modal: bool,
+    new_canvas: NewCanvasSettings,
+    color_model: ColorModel,
+    texture_generation: u64,
 }
 
 impl PainterApp {
@@ -105,6 +246,8 @@ impl PainterApp {
         let canvas_w = 8000;
         let canvas_h = 8000;
         let canvas = Canvas::new(canvas_w, canvas_h, Color::white(), TILE_SIZE);
+        let new_canvas = NewCanvasSettings::from_canvas(&canvas);
+        let color_model = new_canvas.color_model;
 
         let brush = Brush::new(24.0, 20.0, Color::rgba(0, 0, 0, 255), 25.0);
 
@@ -203,7 +346,6 @@ impl PainterApp {
             stroke: None,
             is_drawing: false,
             is_panning: false,
-            is_zooming: false,
             is_rotating: false,
             rotation: 0.0,
             is_primary_down: false,
@@ -223,6 +365,10 @@ impl PainterApp {
             pool,
             disable_lod: false,
             force_full_upload: false,
+            show_new_canvas_modal: false,
+            new_canvas,
+            color_model,
+            texture_generation: 0,
         }
     }
 
@@ -344,6 +490,92 @@ impl PainterApp {
             && canvas_point.y <= self.canvas.height() as f32;
         (clamped, is_inside)
     }
+
+    /// Recreate the canvas, tile metadata, atlases and undo history with new dimensions.
+    fn rebuild_canvas(
+        &mut self,
+        ctx: &egui::Context,
+        width: usize,
+        height: usize,
+        background: Color32,
+    ) {
+        self.canvas = Canvas::new(width, height, Color::from_color32(background), TILE_SIZE);
+        self.history = History::new();
+        self.current_undo_action = None;
+        self.modified_tiles.clear();
+        self.stroke = None;
+        self.is_drawing = false;
+        self.is_panning = false;
+        self.is_rotating = false;
+        self.is_primary_down = false;
+
+        self.tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE;
+        self.tiles_y = (height + TILE_SIZE - 1) / TILE_SIZE;
+
+        let atlas_cols = (ATLAS_SIZE / TILE_SIZE).max(1);
+        let atlas_capacity = atlas_cols * atlas_cols;
+        let total_tiles = self.tiles_x * self.tiles_y;
+        let atlas_count = (total_tiles + atlas_capacity - 1) / atlas_capacity;
+
+        self.texture_generation = self.texture_generation.wrapping_add(1);
+        self.atlases.clear();
+        for idx in 0..atlas_count {
+            let img = egui::ColorImage::new([ATLAS_SIZE, ATLAS_SIZE], Color32::TRANSPARENT);
+            let texture = ctx.load_texture(
+                format!("canvas_atlas_{}_{}", self.texture_generation, idx),
+                img,
+                TextureOptions::NEAREST,
+            );
+            self.atlases.push(TextureAtlas { texture });
+        }
+
+        self.tiles.clear();
+        for ty in 0..self.tiles_y {
+            for tx in 0..self.tiles_x {
+                let flat_idx = ty * self.tiles_x + tx;
+                let atlas_idx = flat_idx / atlas_capacity;
+                let atlas_local = flat_idx % atlas_capacity;
+                let atlas_tile_x = (atlas_local % atlas_cols) * TILE_SIZE;
+                let atlas_tile_y = (atlas_local / atlas_cols) * TILE_SIZE;
+                let tile_w = TILE_SIZE.min(width - tx * TILE_SIZE);
+                let tile_h = TILE_SIZE.min(height - ty * TILE_SIZE);
+                self.tiles.push(CanvasTile {
+                    dirty: true,
+                    atlas_idx,
+                    atlas_x: atlas_tile_x,
+                    atlas_y: atlas_tile_y,
+                    pixel_w: tile_w,
+                    pixel_h: tile_h,
+                    tx,
+                    ty,
+                });
+            }
+        }
+
+        self.offset = Vec2 { x: 0.0, y: 0.0 };
+        self.zoom = 1.0;
+        self.rotation = 0.0;
+        self.first_frame = true;
+    }
+
+    fn apply_new_canvas(&mut self, ctx: &egui::Context) {
+        let (width, height) = self.new_canvas.dimensions_in_pixels();
+        self.color_model = self.new_canvas.color_model;
+        let background = self.new_canvas.background_color32(self.color_model);
+        self.rebuild_canvas(ctx, width, height, background);
+        self.brush.color = Self::convert_color_for_model(self.brush.color, self.color_model);
+    }
+
+    fn convert_color_for_model(color: Color, model: ColorModel) -> Color {
+        match model {
+            ColorModel::Rgba => color,
+            ColorModel::Grayscale => color.to_grayscale_color(),
+            ColorModel::Cmyk => {
+                let (c, m, y, k, a) = color.to_cmyk();
+                Color::from_cmyk(c, m, y, k, a)
+            }
+        }
+    }
 }
 
 impl eframe::App for PainterApp {
@@ -365,10 +597,11 @@ impl eframe::App for PainterApp {
             ctx.request_repaint();
         }
         ui::brush_settings::brush_settings_window(ctx, &mut self.brush);
-        ui::color_picker::color_picker_window(ctx, &mut self.brush);
+        ui::color_picker::color_picker_window(ctx, &mut self.brush, self.color_model);
         ui::brush_list::brush_list_window(ctx, &mut self.brush, &self.presets);
         ui::layers::layers_window(ctx, &mut self.canvas);
         ui::general_settings::general_settings_ui(self, ctx);
+        ui::canvas_creation::canvas_creation_modal(self, ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.first_frame {
@@ -408,8 +641,7 @@ impl eframe::App for PainterApp {
 
                         let out_w = (w + lod_step - 1) / lod_step;
                         let out_h = (h + lod_step - 1) / lod_step;
-                        let mut img =
-                            egui::ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
+                        let mut img = egui::ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
                         canvas_ref.write_region_to_color_image(x, y, w, h, &mut img, lod_step);
                         (*idx, img)
                     })
@@ -422,9 +654,11 @@ impl eframe::App for PainterApp {
                     let img_w = img.size[0];
                     let img_h = img.size[1];
                     if let Some(atlas) = self.atlases.get_mut(tile.atlas_idx) {
-                        atlas
-                            .texture
-                            .set_partial([tile.atlas_x, tile.atlas_y], img, TextureOptions::NEAREST);
+                        atlas.texture.set_partial(
+                            [tile.atlas_x, tile.atlas_y],
+                            img,
+                            TextureOptions::NEAREST,
+                        );
                     }
                     tile.pixel_w = img_w;
                     tile.pixel_h = img_h;
@@ -460,8 +694,10 @@ impl eframe::App for PainterApp {
                 let tile_h =
                     (TILE_SIZE.min(self.canvas.height() - tile.ty * TILE_SIZE)) as f32 * self.zoom;
 
-                let tile_rect =
-                    egui::Rect::from_min_size(origin + egui::vec2(x, y), egui::vec2(tile_w, tile_h));
+                let tile_rect = egui::Rect::from_min_size(
+                    origin + egui::vec2(x, y),
+                    egui::vec2(tile_w, tile_h),
+                );
 
                 let corners = [
                     Self::rotate_point(tile_rect.left_top(), canvas_center, cos, sin),
@@ -472,10 +708,10 @@ impl eframe::App for PainterApp {
 
                 let u0 = (tile.atlas_x as f32 + half_texel) / ATLAS_SIZE as f32;
                 let v0 = (tile.atlas_y as f32 + half_texel) / ATLAS_SIZE as f32;
-                let u1 = (tile.atlas_x as f32 + tile.pixel_w as f32 - half_texel)
-                    / ATLAS_SIZE as f32;
-                let v1 = (tile.atlas_y as f32 + tile.pixel_h as f32 - half_texel)
-                    / ATLAS_SIZE as f32;
+                let u1 =
+                    (tile.atlas_x as f32 + tile.pixel_w as f32 - half_texel) / ATLAS_SIZE as f32;
+                let v1 =
+                    (tile.atlas_y as f32 + tile.pixel_h as f32 - half_texel) / ATLAS_SIZE as f32;
 
                 let uv_coords = [
                     egui::Pos2::new(u0, v0),
@@ -493,8 +729,14 @@ impl eframe::App for PainterApp {
                             color: Color32::WHITE,
                         });
                     }
-                    mesh.indices
-                        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    mesh.indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base,
+                        base + 2,
+                        base + 3,
+                    ]);
                 }
             }
 
@@ -514,48 +756,54 @@ impl eframe::App for PainterApp {
                         pressed,
                         ..
                     } => {
-                        if button == egui::PointerButton::Middle {
-                            self.is_zooming = pressed;
-                        } else if button == egui::PointerButton::Secondary {
-                            self.is_rotating = pressed;
-                        }
-
                         let canvas_pos = self.screen_to_canvas(pos, origin, canvas_center);
-                        if button == egui::PointerButton::Primary {
-                            self.is_primary_down = pressed;
-                            let space_down = ctx.input(|i| i.key_down(egui::Key::Space));
-                            if pressed && space_down {
-                                self.is_panning = true;
-                            }
-                            if !pressed {
-                                self.is_panning = false;
-                            }
-
-                            if pressed && !self.is_panning && response.hovered() {
-                                if canvas_pos.1 {
-                                    self.start_stroke(canvas_pos.0);
+                        match button {
+                            egui::PointerButton::Primary => {
+                                self.is_primary_down = pressed;
+                                let (space_down, secondary_down) = ctx.input(|i| {
+                                    (
+                                        i.key_down(egui::Key::Space),
+                                        i.pointer.button_down(egui::PointerButton::Secondary),
+                                    )
+                                });
+                                if pressed && space_down {
+                                    self.is_panning = true;
                                 }
-                            } else if !pressed {
-                                self.finish_stroke();
-                            }
-                        }
+                                if !pressed && !secondary_down {
+                                    self.is_panning = false;
+                                }
 
-                        if !pressed {
-                            if button == egui::PointerButton::Middle {
-                                self.is_zooming = false;
-                            } else if button == egui::PointerButton::Secondary {
-                                self.is_rotating = false;
+                                if pressed && !self.is_panning && response.hovered() {
+                                    if canvas_pos.1 {
+                                        self.start_stroke(canvas_pos.0);
+                                    }
+                                } else if !pressed {
+                                    self.finish_stroke();
+                                }
                             }
+                            egui::PointerButton::Secondary => {
+                                if pressed && response.hovered() {
+                                    self.is_panning = true;
+                                }
+                                if !pressed {
+                                    self.is_panning = false;
+                                }
+                            }
+                            egui::PointerButton::Middle => {
+                                if pressed && response.hovered() {
+                                    self.is_rotating = true;
+                                }
+                                if !pressed {
+                                    self.is_rotating = false;
+                                }
+                            }
+                            _ => {}
                         }
                     }
 
                     egui::Event::PointerMoved(pos) => {
                         let delta = ctx.input(|i| i.pointer.delta());
-                        if self.is_zooming {
-                            let zoom_change = -delta.y * 0.005;
-                            self.zoom = (self.zoom * (1.0 + zoom_change)).clamp(0.1, 20.0);
-                            ctx.request_repaint();
-                        } else if self.is_rotating {
+                        if self.is_rotating {
                             self.rotation += delta.x * -0.005;
                             ctx.request_repaint();
                         } else if self.is_panning {
@@ -563,7 +811,8 @@ impl eframe::App for PainterApp {
                             self.offset.y += delta.y;
                             ctx.request_repaint();
                         } else if self.is_drawing {
-                            let (clamped, _is_inside) = self.screen_to_canvas(pos, origin, canvas_center);
+                            let (clamped, _is_inside) =
+                                self.screen_to_canvas(pos, origin, canvas_center);
                             if let Some(stroke) = &mut self.stroke {
                                 let prev = stroke.last_pos.unwrap_or(clamped);
                                 stroke.add_point(
@@ -574,17 +823,27 @@ impl eframe::App for PainterApp {
                                     self.current_undo_action.as_mut().unwrap(),
                                     &mut self.modified_tiles,
                                 );
-                                self.mark_segment_dirty(
-                                    prev,
-                                    clamped,
-                                    self.brush.diameter / 2.0,
-                                );
+                                self.mark_segment_dirty(prev, clamped, self.brush.diameter / 2.0);
                             }
                         } else if self.is_primary_down && !self.is_panning && response.hovered() {
-                            let (clamped, is_inside) = self.screen_to_canvas(pos, origin, canvas_center);
+                            let (clamped, is_inside) =
+                                self.screen_to_canvas(pos, origin, canvas_center);
                             if is_inside {
                                 self.start_stroke(clamped);
                             }
+                        }
+                    }
+
+                    egui::Event::MouseWheel { unit, delta, .. } => {
+                        if response.hovered() {
+                            let scroll = match unit {
+                                egui::MouseWheelUnit::Point => delta.y / 120.0_f32,
+                                egui::MouseWheelUnit::Line => delta.y,
+                                egui::MouseWheelUnit::Page => delta.y * 10.0_f32,
+                            };
+                            let zoom_factor = (1.0 - scroll * 0.1_f32).clamp(0.5_f32, 2.0_f32);
+                            self.zoom = (self.zoom * zoom_factor).clamp(0.1, 20.0);
+                            ctx.request_repaint();
                         }
                     }
 
@@ -594,6 +853,11 @@ impl eframe::App for PainterApp {
 
             egui::TopBottomPanel::top("quick settings").show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    if ui.button("New Canvas").clicked() {
+                        self.new_canvas.sync_from_canvas(&self.canvas);
+                        self.new_canvas.color_model = self.color_model;
+                        self.show_new_canvas_modal = true;
+                    }
                     ui.add(egui::Slider::new(&mut self.brush.diameter, 1.0..=300.0))
                 });
             });

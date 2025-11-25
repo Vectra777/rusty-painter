@@ -2,7 +2,6 @@ use std::sync::Mutex;
 
 use eframe::egui::{Color32, ColorImage};
 
-
 use crate::utils::color::Color;
 use crate::utils::profiler::ScopeTimer;
 
@@ -274,7 +273,7 @@ impl Canvas {
 
                     for dst_x in 0..dst_w {
                         let global_x_start = x + dst_x * step;
-                        
+
                         if step == 1 {
                             // Fast path for 1:1 rendering
                             let local_y = global_y_start % self.tile_size;
@@ -284,7 +283,9 @@ impl Canvas {
                             let mut final_color = Color::rgba(0, 0, 0, 0);
                             for (layer_idx, guard_opt) in layer_guards.iter().enumerate() {
                                 let layer = &self.layers[layer_idx];
-                                if !layer.visible || layer.opacity <= 0.0 { continue; }
+                                if !layer.visible || layer.opacity <= 0.0 {
+                                    continue;
+                                }
 
                                 if let Some(guard) = guard_opt {
                                     if let Some(data) = &guard.data {
@@ -314,20 +315,26 @@ impl Canvas {
 
                             for sy in 0..step {
                                 let global_y = global_y_start + sy;
-                                if global_y >= y + h { continue; }
+                                if global_y >= y + h {
+                                    continue;
+                                }
                                 let local_y = global_y % self.tile_size;
 
                                 for sx in 0..step {
                                     let global_x = global_x_start + sx;
-                                    if global_x >= x + w { continue; }
+                                    if global_x >= x + w {
+                                        continue;
+                                    }
                                     let local_x = global_x % self.tile_size;
-                                    
+
                                     let src_idx = local_y * self.tile_size + local_x;
                                     let mut pixel_color = Color::rgba(0, 0, 0, 0);
 
                                     for (layer_idx, guard_opt) in layer_guards.iter().enumerate() {
                                         let layer = &self.layers[layer_idx];
-                                        if !layer.visible || layer.opacity <= 0.0 { continue; }
+                                        if !layer.visible || layer.opacity <= 0.0 {
+                                            continue;
+                                        }
 
                                         if let Some(guard) = guard_opt {
                                             if let Some(data) = &guard.data {
@@ -336,17 +343,19 @@ impl Canvas {
                                                 src_color.a *= layer.opacity;
                                                 pixel_color = alpha_over(src_color, pixel_color);
                                             } else if layer_idx == 0 {
-                                                let mut src_color = Color::from_color32(self.clear_color);
+                                                let mut src_color =
+                                                    Color::from_color32(self.clear_color);
                                                 src_color.a *= layer.opacity;
                                                 pixel_color = alpha_over(src_color, pixel_color);
                                             }
                                         } else if layer_idx == 0 {
-                                            let mut src_color = Color::from_color32(self.clear_color);
+                                            let mut src_color =
+                                                Color::from_color32(self.clear_color);
                                             src_color.a *= layer.opacity;
                                             pixel_color = alpha_over(src_color, pixel_color);
                                         }
                                     }
-                                    
+
                                     r_acc += pixel_color.r;
                                     g_acc += pixel_color.g;
                                     b_acc += pixel_color.b;
@@ -361,7 +370,8 @@ impl Canvas {
                                     g: g_acc / count,
                                     b: b_acc / count,
                                     a: a_acc / count,
-                                }.to_color32();
+                                }
+                                .to_color32();
                             }
                         }
                     }

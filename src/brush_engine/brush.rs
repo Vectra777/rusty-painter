@@ -1,8 +1,11 @@
-use crate::canvas::{history::{TileSnapshot, UndoAction}, canvas::{Canvas, alpha_over, blend_erase}};
-use crate::utils::{vector::Vec2, profiler::ScopeTimer, color::Color};
+use crate::canvas::{
+    canvas::{Canvas, alpha_over, blend_erase},
+    history::{TileSnapshot, UndoAction},
+};
+use crate::utils::{color::Color, profiler::ScopeTimer, vector::Vec2};
 use rand::Rng;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::ThreadPool;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashSet;
 
 /// Available shapes for how a brush applies paint.
@@ -112,12 +115,14 @@ impl Brush {
             BrushType::Pixel => self.pixel_dab(pool, canvas, center, undo_action, modified_tiles),
         }
     }
-    
+
     /// Ensure a soft brush mask exists for the current diameter/hardness and return it.
     fn ensure_mask(&mut self) -> &BrushMaskCache {
         let need_new = match &self.mask_cache {
-            Some(cache) => (cache.diameter - self.diameter).abs() > f32::EPSILON
-                || (cache.hardness - self.hardness).abs() > f32::EPSILON,
+            Some(cache) => {
+                (cache.diameter - self.diameter).abs() > f32::EPSILON
+                    || (cache.hardness - self.hardness).abs() > f32::EPSILON
+            }
             None => true,
         };
 
