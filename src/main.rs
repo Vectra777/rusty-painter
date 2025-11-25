@@ -1,7 +1,6 @@
 mod app;
 mod brush_engine;
 mod canvas;
-mod gpu_painter;
 mod ui;
 mod utils;
 
@@ -15,13 +14,6 @@ fn main() -> eframe::Result<()> {
     env_logger::init();
 
     match parse_backend_arg() {
-        PaintBackend::Gpu => {
-            println!("Launching GPU painting backend (wgpu)");
-            if let Err(err) = gpu_painter::run() {
-                eprintln!("Failed to start GPU backend: {err}");
-            }
-            Ok(())
-        }
         PaintBackend::Cpu => {
             let options = eframe::NativeOptions {
                 viewport: eframe::egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),

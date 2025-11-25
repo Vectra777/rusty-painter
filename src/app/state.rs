@@ -54,7 +54,6 @@ pub struct NewCanvasSettings {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PaintBackend {
     Cpu,
-    Gpu,
 }
 
 pub struct CanvasTile {
@@ -165,13 +164,10 @@ pub fn parse_backend_arg() -> PaintBackend {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--gpu" | "--backend=gpu" => backend = PaintBackend::Gpu,
             "--cpu" | "--backend=cpu" => backend = PaintBackend::Cpu,
             "--backend" => {
                 if let Some(next) = args.next() {
-                    if next.eq_ignore_ascii_case("gpu") {
-                        backend = PaintBackend::Gpu;
-                    } else if next.eq_ignore_ascii_case("cpu") {
+                    if next.eq_ignore_ascii_case("cpu") {
                         backend = PaintBackend::Cpu;
                     }
                 }

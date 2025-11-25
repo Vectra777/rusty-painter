@@ -100,7 +100,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
             ui.horizontal(|ui| {
                 ui.label("Color Model");
-                egui::ComboBox::from_id_source("color_model")
+                egui::ComboBox::from_id_salt("color_model")
                     .selected_text(match settings.color_model {
                         ColorModel::Rgba => "RGBA",
                         ColorModel::Grayscale => "Grayscale",
@@ -116,7 +116,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                         ui.selectable_value(&mut settings.color_model, ColorModel::Cmyk, "CMYK");
                     });
                 ui.label("Depth");
-                egui::ComboBox::from_id_source("color_depth")
+                egui::ComboBox::from_id_salt("color_depth")
                     .selected_text(match settings.color_depth {
                         ColorDepth::Bit8 => "8-bit integer",
                         ColorDepth::Bit16 => "16-bit integer",

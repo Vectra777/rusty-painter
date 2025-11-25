@@ -13,6 +13,7 @@ use eframe::egui::{Color32, TextureOptions};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::collections::HashSet;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -50,7 +51,14 @@ pub struct PainterApp {
     pub(crate) disable_lod: bool,
     pub(crate) force_full_upload: bool,
     pub(crate) show_new_canvas_modal: bool,
+    pub(crate) show_export_modal: bool,
     pub(crate) new_canvas: NewCanvasSettings,
+    pub(crate) export_settings: crate::ui::export_modal::ExportSettings,
+    pub(crate) export_message: Option<String>,
+    pub(crate) export_in_progress: bool,
+    pub(crate) export_task: Option<std::thread::JoinHandle<Result<String, String>>>,
+    pub(crate) export_progress: f32,
+    pub(crate) export_progress_rx: Option<mpsc::Receiver<crate::ui::export_modal::ExportProgress>>,
     pub(crate) color_model: ColorModel,
     pub(crate) texture_generation: u64,
 }
@@ -58,8 +66,8 @@ pub struct PainterApp {
 impl PainterApp {
     /// Initialize the UI, canvas, thread pool and GPU atlases.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let canvas_w = 8000;
-        let canvas_h = 8000;
+        let canvas_w = 4000;
+        let canvas_h = 4000;
         let canvas = Canvas::new(canvas_w, canvas_h, Color::white(), TILE_SIZE);
         let new_canvas = NewCanvasSettings::from_canvas(&canvas);
         let color_model = new_canvas.color_model;
@@ -125,7 +133,7 @@ impl PainterApp {
             let texture = cc.egui_ctx.load_texture(
                 format!("canvas_atlas_{}", idx),
                 img,
-                TextureOptions::NEAREST,
+                TextureOptions::LINEAR,
             );
             atlases.push(TextureAtlas { texture });
         }
@@ -181,7 +189,14 @@ impl PainterApp {
             disable_lod: false,
             force_full_upload: false,
             show_new_canvas_modal: false,
+            show_export_modal: false,
             new_canvas,
+            export_settings: crate::ui::export_modal::ExportSettings::new(),
+            export_message: None,
+            export_in_progress: false,
+            export_task: None,
+            export_progress: 0.0,
+            export_progress_rx: None,
             color_model,
             texture_generation: 0,
         }
@@ -411,12 +426,44 @@ impl eframe::App for PainterApp {
             }
             ctx.request_repaint();
         }
+
+        // Poll export tasks
+        if let Some(handle) = self.export_task.as_ref() {
+            if handle.is_finished() {
+                let result = self
+                    .export_task
+                    .take()
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_else(|| Err("Export thread panicked".to_string()));
+                self.export_in_progress = false;
+                match result {
+                    Ok(msg) => {
+                        self.export_message = Some(msg);
+                        self.show_export_modal = false;
+                    }
+                    Err(err) => {
+                        self.export_message = Some(err);
+                    }
+                }
+            }
+        }
+
+        // Drain progress updates
+        if let Some(rx) = &self.export_progress_rx {
+            for update in rx.try_iter() {
+                self.export_progress = update.progress;
+                if let Some(msg) = update.message {
+                    self.export_message = Some(msg);
+                }
+            }
+        }
         ui::brush_settings::brush_settings_window(ctx, &mut self.brush);
         ui::color_picker::color_picker_window(ctx, &mut self.brush, self.color_model);
         ui::brush_list::brush_list_window(ctx, &mut self.brush, &self.presets);
         ui::layers::layers_window(ctx, &mut self.canvas);
         ui::general_settings::general_settings_ui(self, ctx);
         ui::canvas_creation::canvas_creation_modal(self, ctx);
+        ui::export_modal::export_modal(self, ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.first_frame {
@@ -673,7 +720,12 @@ impl eframe::App for PainterApp {
                         self.new_canvas.color_model = self.color_model;
                         self.show_new_canvas_modal = true;
                     }
-                    ui.add(egui::Slider::new(&mut self.brush.diameter, 1.0..=300.0))
+                    ui.add(egui::Slider::new(&mut self.brush.diameter, 1.0..=300.0));
+                    if ui.button("Export").clicked() {
+                        self.export_settings.chosen_path = None;
+                        self.export_message = None;
+                        self.show_export_modal = true;
+                    }
                 });
             });
 
