@@ -94,6 +94,10 @@ impl Canvas {
         self.height
     }
 
+    pub fn clear_color(&self) -> Color32 {
+        self.clear_color
+    }
+
     /// Size of a tile edge in pixels.
     pub fn tile_size(&self) -> usize {
         self.tile_size
@@ -193,6 +197,17 @@ impl Canvas {
         ty: usize,
     ) -> Option<std::sync::MutexGuard<'_, TileCell>> {
         self.ensure_layer_tile(layer_idx, tx, ty)
+    }
+
+    /// Lock a tile in a specific layer only if it already exists; avoids allocating new data.
+    pub fn lock_layer_tile_if_exists(
+        &self,
+        layer_idx: usize,
+        tx: usize,
+        ty: usize,
+    ) -> Option<std::sync::MutexGuard<'_, TileCell>> {
+        self.layer_tile_cell(layer_idx, tx, ty)
+            .map(|m| m.lock().unwrap())
     }
 
     /// Clone the raw pixel buffer for a tile in a given layer.

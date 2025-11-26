@@ -1,6 +1,7 @@
 mod app;
 mod brush_engine;
 mod canvas;
+mod styling;
 mod ui;
 mod utils;
 
@@ -22,7 +23,10 @@ fn main() -> eframe::Result<()> {
             eframe::run_native(
                 "Rust Dab Painter",
                 options,
-                Box::new(|cc| Ok(Box::new(PainterApp::new(cc)))),
+                Box::new(|cc| {
+                    styling::apply_global_style(&cc.egui_ctx);
+                    Ok(Box::new(PainterApp::new(cc)))
+                }),
             )
         }
     }

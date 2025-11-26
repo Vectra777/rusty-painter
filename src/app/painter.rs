@@ -12,7 +12,7 @@ use eframe::egui;
 use eframe::egui::{Color32, TextureOptions};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -28,7 +28,7 @@ pub struct PainterApp {
     pub(crate) stroke: Option<StrokeState>,
     pub(crate) is_drawing: bool,
 
-    pub(crate) history: History,
+    pub(crate) histories: Vec<History>,
     pub(crate) current_undo_action: Option<UndoAction>,
     pub(crate) modified_tiles: HashSet<(usize, usize)>,
 
@@ -36,6 +36,10 @@ pub struct PainterApp {
     pub(crate) atlases: Vec<TextureAtlas>,
     pub(crate) tiles_x: usize,
     pub(crate) tiles_y: usize,
+    pub(crate) layer_caches: Vec<HashMap<(usize, usize), egui::ColorImage>>,
+    pub(crate) layer_cache_dirty: Vec<HashSet<(usize, usize)>>,
+    pub(crate) layer_ui_colors: Vec<Color32>,
+    pub(crate) layer_dragging: Option<usize>,
 
     pub(crate) zoom: f32,
     pub(crate) offset: Vec2,
@@ -69,6 +73,7 @@ impl PainterApp {
         let canvas_w = 4000;
         let canvas_h = 4000;
         let canvas = Canvas::new(canvas_w, canvas_h, Color::white(), TILE_SIZE);
+        let layer_count = canvas.layers.len();
         let new_canvas = NewCanvasSettings::from_canvas(&canvas);
         let color_model = new_canvas.color_model;
 
@@ -172,15 +177,19 @@ impl PainterApp {
             is_rotating: false,
             rotation: 0.0,
             is_primary_down: false,
-            history: History::new(),
+            histories: vec![History::new()],
             current_undo_action: None,
             modified_tiles: HashSet::new(),
             tiles,
             atlases,
             tiles_x,
             tiles_y,
+            layer_caches: vec![HashMap::new(); layer_count],
+            layer_cache_dirty: vec![HashSet::new(); layer_count],
+            layer_ui_colors: vec![Color32::from_gray(40); layer_count],
+            layer_dragging: None,
             zoom: 1.0,
-            offset: Vec2 { x: 0.0, y: 0.0 },
+            offset: Vec2 { x: 300.0, y: 100.0 },
             first_frame: true,
             use_masked_brush: true,
             thread_count,
@@ -278,7 +287,9 @@ impl PainterApp {
         }
         if let Some(action) = self.current_undo_action.take() {
             if !action.tiles.is_empty() {
-                self.history.push_action(action);
+                if let Some(hist) = self.active_history_mut() {
+                    hist.push_action(action);
+                }
             }
         }
         self.stroke = None;
@@ -330,7 +341,12 @@ impl PainterApp {
         background: Color32,
     ) {
         self.canvas = Canvas::new(width, height, Color::from_color32(background), TILE_SIZE);
-        self.history = History::new();
+        let layer_count = self.canvas.layers.len();
+        self.histories = (0..layer_count).map(|_| History::new()).collect();
+        self.layer_caches = vec![HashMap::new(); layer_count];
+        self.layer_cache_dirty = vec![HashSet::new(); layer_count];
+        self.layer_ui_colors = vec![Color32::from_gray(40); layer_count];
+        self.layer_dragging = None;
         self.current_undo_action = None;
         self.modified_tiles.clear();
         self.stroke = None;
@@ -406,6 +422,128 @@ impl PainterApp {
             }
         }
     }
+
+    fn layer_tile_image(
+        layer_idx: usize,
+        tx: usize,
+        ty: usize,
+        canvas: &Canvas,
+        layer_caches: &mut [HashMap<(usize, usize), egui::ColorImage>],
+        layer_cache_dirty: &mut [HashSet<(usize, usize)>],
+    ) -> egui::ColorImage {
+        if let Some(dirty) = layer_cache_dirty.get_mut(layer_idx) {
+            if dirty.remove(&(tx, ty)) {
+                layer_caches
+                    .get_mut(layer_idx)
+                    .and_then(|m| m.remove(&(tx, ty)));
+            }
+        }
+
+        if let Some(img) = layer_caches.get(layer_idx).and_then(|m| m.get(&(tx, ty))) {
+            return img.clone();
+        }
+
+        let tile_w = TILE_SIZE.min(canvas.width() - tx * TILE_SIZE);
+        let tile_h = TILE_SIZE.min(canvas.height() - ty * TILE_SIZE);
+        let mut img = egui::ColorImage::new([tile_w, tile_h], Color32::TRANSPARENT);
+
+        if let Some(data) = canvas.get_layer_tile_data(layer_idx, tx, ty) {
+            let tile_size = canvas.tile_size();
+            for y in 0..tile_h {
+                for x in 0..tile_w {
+                    let src_idx = y * tile_size + x;
+                    img.pixels[y * tile_w + x] = data[src_idx];
+                }
+            }
+        } else if layer_idx == 0 {
+            for px in &mut img.pixels {
+                *px = canvas.clear_color();
+            }
+        }
+
+        if let Some(cache) = layer_caches.get_mut(layer_idx) {
+            cache.insert((tx, ty), img.clone());
+        }
+        img
+    }
+
+    fn active_history_mut(&mut self) -> Option<&mut History> {
+        self.histories.get_mut(self.canvas.active_layer_idx)
+    }
+
+    pub(crate) fn ensure_layer_history_len(&mut self) {
+        let target = self.canvas.layers.len();
+        if self.histories.len() < target {
+            self.histories
+                .extend((self.histories.len()..target).map(|_| History::new()));
+        } else if self.histories.len() > target {
+            self.histories.truncate(target);
+        }
+    }
+
+    pub(crate) fn mark_all_tiles_dirty(&mut self) {
+        for tile in &mut self.tiles {
+            tile.dirty = true;
+        }
+    }
+
+    pub(crate) fn mark_layer_tiles_with_data_dirty(&mut self, layer_idx: usize) {
+        let tiles_x = self.tiles_x;
+        let tiles_y = self.tiles_y;
+        for ty in 0..tiles_y {
+            for tx in 0..tiles_x {
+                let has_data = self
+                    .canvas
+                    .lock_layer_tile_if_exists(layer_idx, tx, ty)
+                    .map(|cell| cell.data.is_some())
+                    .unwrap_or(false);
+                if has_data {
+                    if let Some(tile) = self.tile_mut(tx, ty) {
+                        tile.dirty = true;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn reorder_layers(&mut self, from: usize, to: usize) {
+        let len = self.canvas.layers.len();
+        if from >= len {
+            return;
+        }
+        let to = to.min(len.saturating_sub(1));
+        if from == to {
+            return;
+        }
+
+        let layer = self.canvas.layers.remove(from);
+        self.canvas.layers.insert(to, layer);
+
+        let hist = self.histories.remove(from);
+        self.histories.insert(to, hist);
+
+        let cache = self.layer_caches.remove(from);
+        self.layer_caches.insert(to, cache);
+
+        let cache_dirty = self.layer_cache_dirty.remove(from);
+        self.layer_cache_dirty.insert(to, cache_dirty);
+
+        let ui_color = self.layer_ui_colors.remove(from);
+        self.layer_ui_colors.insert(to, ui_color);
+
+        let active = self.canvas.active_layer_idx;
+        self.canvas.active_layer_idx = if active == from {
+            to
+        } else if from < active && active <= to {
+            active - 1
+        } else if to <= active && active < from {
+            active + 1
+        } else {
+            active
+        };
+
+        self.mark_all_tiles_dirty();
+    }
 }
 
 impl eframe::App for PainterApp {
@@ -413,10 +551,17 @@ impl eframe::App for PainterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle Undo/Redo
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+            let active_idx = self.canvas.active_layer_idx;
             let affected = if ctx.input(|i| i.modifiers.shift) {
-                self.history.redo(&self.canvas)
+                self.histories
+                    .get_mut(active_idx)
+                    .map(|h| h.redo(&self.canvas))
+                    .unwrap_or_default()
             } else {
-                self.history.undo(&self.canvas)
+                self.histories
+                    .get_mut(active_idx)
+                    .map(|h| h.undo(&self.canvas))
+                    .unwrap_or_default()
             };
 
             for (tx, ty) in affected {
@@ -457,10 +602,11 @@ impl eframe::App for PainterApp {
                 }
             }
         }
+
         ui::brush_settings::brush_settings_window(ctx, &mut self.brush);
         ui::color_picker::color_picker_window(ctx, &mut self.brush, self.color_model);
         ui::brush_list::brush_list_window(ctx, &mut self.brush, &self.presets);
-        ui::layers::layers_window(ctx, &mut self.canvas);
+        ui::layers::layers_window(ctx, self);
         ui::general_settings::general_settings_ui(self, ctx);
         ui::canvas_creation::canvas_creation_modal(self, ctx);
         ui::export_modal::export_modal(self, ctx);
@@ -474,6 +620,12 @@ impl eframe::App for PainterApp {
                 let zoom_x = available.x / canvas_w;
                 let zoom_y = available.y / canvas_h;
                 self.zoom = zoom_x.min(zoom_y) * 0.9; // 90% fit
+                let canvas_size = egui::vec2(canvas_w, canvas_h) * self.zoom;
+                let offset = (available - canvas_size) * 0.5;
+                self.offset = Vec2 {
+                    x: offset.x,
+                    y: offset.y,
+                };
                 self.first_frame = false;
             }
 
