@@ -16,7 +16,6 @@ Prerequisites: Rust toolchain (`cargo`, `rustc`) installed.
 
 ```bash
 cargo run            # CPU/egui path (default)
-cargo run -- --gpu   # GPU path (wgpu backend)
 ```
 
 That launches the native egui window with the default canvas and brush settings.
