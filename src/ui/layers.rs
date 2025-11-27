@@ -75,7 +75,7 @@ pub fn layers_window(ctx: &egui::Context, app: &mut PainterApp) {
 
                     // Opacity slider
                     let response = content
-                        .add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).show_value(false));
+                        .add(egui::Slider::new(&mut layer.opacity, 0..=255).show_value(false));
                     opacity_released =
                         response.drag_stopped() || (response.changed() && !response.dragged());
 

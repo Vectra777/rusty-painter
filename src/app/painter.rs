@@ -70,9 +70,9 @@ pub struct PainterApp {
 impl PainterApp {
     /// Initialize the UI, canvas, thread pool and GPU atlases.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let canvas_w = 4000;
-        let canvas_h = 4000;
-        let canvas = Canvas::new(canvas_w, canvas_h, Color::white(), TILE_SIZE);
+        let canvas_w = 8000;
+        let canvas_h = 8000;
+        let canvas = Canvas::new(canvas_w, canvas_h, Color32::WHITE, TILE_SIZE);
         let layer_count = canvas.layers.len();
         let new_canvas = NewCanvasSettings::from_canvas(&canvas);
         let color_model = new_canvas.color_model;
@@ -340,7 +340,7 @@ impl PainterApp {
         height: usize,
         background: Color32,
     ) {
-        self.canvas = Canvas::new(width, height, Color::from_color32(background), TILE_SIZE);
+        self.canvas = Canvas::new(width, height, background, TILE_SIZE);
         let layer_count = self.canvas.layers.len();
         self.histories = (0..layer_count).map(|_| History::new()).collect();
         self.layer_caches = vec![HashMap::new(); layer_count];
@@ -415,11 +415,7 @@ impl PainterApp {
     fn convert_color_for_model(color: Color, model: ColorModel) -> Color {
         match model {
             ColorModel::Rgba => color,
-            ColorModel::Grayscale => color.to_grayscale_color(),
-            ColorModel::Cmyk => {
-                let (c, m, y, k, a) = color.to_cmyk();
-                Color::from_cmyk(c, m, y, k, a)
-            }
+            ColorModel::Grayscale => color,
         }
     }
 

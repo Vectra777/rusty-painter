@@ -27,7 +27,6 @@ pub enum BackgroundChoice {
 pub enum ColorModel {
     Rgba,
     Grayscale,
-    Cmyk,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,16 +145,11 @@ impl NewCanvasSettings {
             BackgroundChoice::Custom => self.custom_bg,
         };
 
-        let color = Color::from_color32(base);
+        let color = base;
         match model {
             ColorModel::Rgba => color,
-            ColorModel::Grayscale => color.to_grayscale_color(),
-            ColorModel::Cmyk => {
-                let (c, m, y, k, a) = color.to_cmyk();
-                Color::from_cmyk(c, m, y, k, a)
-            }
+            ColorModel::Grayscale => color,
         }
-        .to_color32()
     }
 }
 

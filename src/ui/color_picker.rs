@@ -208,7 +208,6 @@ pub fn color_picker_window(ctx: &egui::Context, brush: &mut Brush, color_model: 
         .show(ctx, |ui| match color_model {
             ColorModel::Rgba => rgba_picker(ui, brush),
             ColorModel::Grayscale => grayscale_picker(ui, brush),
-            ColorModel::Cmyk => cmyk_picker(ui, brush),
         });
 }
 

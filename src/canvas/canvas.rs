@@ -305,14 +305,16 @@ impl Canvas {
                                 if let Some(guard) = guard_opt {
                                     if let Some(data) = &guard.data {
                                         let pixel = data[src_idx];
-                                        let src_color = apply_opacity(pixel, layer.opacity);
+                                        let src_color = apply_opacity_scale(pixel, layer.opacity as u32);
                                         final_color = alpha_over(src_color, final_color);
                                     } else if layer_idx == 0 {
-                                        let src_color = apply_opacity(self.clear_color, layer.opacity);
+                                        let src_color =
+                                            apply_opacity_scale(self.clear_color, layer.opacity as u32);
                                         final_color = alpha_over(src_color, final_color);
                                     }
                                 } else if layer_idx == 0 {
-                                    let src_color = apply_opacity(self.clear_color, layer.opacity);
+                                    let src_color =
+                                        apply_opacity_scale(self.clear_color, layer.opacity as u32);
                                     final_color = alpha_over(src_color, final_color);
                                 }
                             }
@@ -351,16 +353,23 @@ impl Canvas {
                                         if let Some(guard) = guard_opt {
                                             if let Some(data) = &guard.data {
                                                 let pixel = data[src_idx];
-                                                let src_color = apply_opacity(pixel, layer.opacity);
+                                                let src_color =
+                                                    apply_opacity_scale(pixel, layer.opacity as u32);
                                                 pixel_color = alpha_over(src_color, pixel_color);
                                             } else if layer_idx == 0 {
                                                 let src_color =
-                                                    apply_opacity(self.clear_color, layer.opacity);
+                                                    apply_opacity_scale(
+                                                        self.clear_color,
+                                                        layer.opacity as u32,
+                                                    );
                                                 pixel_color = alpha_over(src_color, pixel_color);
                                             }
                                         } else if layer_idx == 0 {
                                             let src_color =
-                                                apply_opacity(self.clear_color, layer.opacity);
+                                                apply_opacity_scale(
+                                                    self.clear_color,
+                                                    layer.opacity as u32,
+                                                );
                                             pixel_color = alpha_over(src_color, pixel_color);
                                         }
                                     }
@@ -420,16 +429,16 @@ impl Canvas {
                         if let Some(data) = guard.data.as_ref() {
                             let src_idx = local_y * self.tile_size + local_x;
                             let pixel = data[src_idx];
-                            let src_color = apply_opacity(pixel, layer_opacity);
+                            let src_color = apply_opacity_scale(pixel, layer_opacity as u32);
                             final_color = alpha_over(src_color, final_color);
                         } else if layer_idx == 0 {
                             // Background layer default color
-                            let src_color = apply_opacity(self.clear_color, layer_opacity);
+                            let src_color = apply_opacity_scale(self.clear_color, layer_opacity as u32);
                             final_color = alpha_over(src_color, final_color);
                         }
                     } else if layer_idx == 0 {
                         // Background layer default color
-                        let src_color = apply_opacity(self.clear_color, layer_opacity);
+                        let src_color = apply_opacity_scale(self.clear_color, layer_opacity as u32);
                         final_color = alpha_over(src_color, final_color);
                     }
                 }
@@ -500,10 +509,14 @@ pub fn alpha_over(src: Color32, dst: Color32) -> Color32 {
 
 
 
-fn apply_opacity(color: Color32, opacity: u8) -> Color32 {
-    if opacity >= 255 {
+#[inline]
+fn apply_opacity_scale(color: Color32, opacity_scale: u32) -> Color32 {
+    if opacity_scale >= 255 {
         return color;
     }
-    let a = (color.a() as u32 * opacity as u32 + 127) / 255;
-    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a as u8)
+    let a = (color.a() as u32 * opacity_scale + 127) / 255;
+    let r = (color.r() as u32 * opacity_scale + 127) / 255;
+    let g = (color.g() as u32 * opacity_scale + 127) / 255;
+    let b = (color.b() as u32 * opacity_scale + 127) / 255;
+    Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
 }
