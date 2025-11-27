@@ -71,7 +71,7 @@ impl Canvas {
             tile_size,
             tiles_x,
             tiles_y,
-            clear_color,
+            clear_color: premultiply(clear_color),
             layers: vec![bg_layer],
             active_layer_idx: 0,
         }
@@ -451,7 +451,7 @@ impl Canvas {
 
     /// Clear the active layer to the provided color (or transparent for non-background).
     pub fn clear(&mut self, color: Color) {
-        self.clear_color = color.to_color32();
+        self.clear_color = premultiply(color.to_color32());
         // Clear all layers? Or just active?
         // Usually "Clear" clears the active layer.
         // But if it's "New File", it clears everything.
@@ -468,43 +468,39 @@ impl Canvas {
 /// Erase blend mode: reduce destination alpha by the source alpha.
 pub fn blend_erase(src: Color32, dst: Color32) -> Color32 {
     let src_a = src.a() as u32;
-    let dst_a = dst.a() as u32;
-    let out_a = (dst_a * (255 - src_a) + 127) / 255;
-    Color32::from_rgba_unmultiplied(dst.r(), dst.g(), dst.b(), out_a as u8)
+    let inv = 255 - src_a;
+    let out_a = (dst.a() as u32 * inv + 127) / 255;
+    let out_r = (dst.r() as u32 * inv + 127) / 255;
+    let out_g = (dst.g() as u32 * inv + 127) / 255;
+    let out_b = (dst.b() as u32 * inv + 127) / 255;
+    Color32::from_rgba_unmultiplied(
+        out_r.min(255) as u8,
+        out_g.min(255) as u8,
+        out_b.min(255) as u8,
+        out_a.min(255) as u8,
+    )
 }
 
-/// Standard "source over" alpha compositing.
+/// Standard "source over" alpha compositing for premultiplied colors.
 pub fn alpha_over(src: Color32, dst: Color32) -> Color32 {
-
-    let sa = src.a() as u32; // source alpha 0..255
-    let da = dst.a() as u32; // dest alpha 0..255
-
-    let inv_sa = 255 - sa;
-
-    // Out alpha: A_out = A_s + A_d * (1 - A_s)
-    let out_a = sa + (da * inv_sa + 127) / 255;
+    let src_a = src.a() as u32;
+    let dst_a = dst.a() as u32;
+    let inv = 255 - src_a;
+    let out_a = src_a + (dst_a * inv + 127) / 255;
     if out_a == 0 {
         return Color32::TRANSPARENT;
     }
 
-    // These two scales are reused across R,G,B
-    let src_scale = sa;
-    let dst_scale = (da * inv_sa + 127) / 255;
+    let out_r = src.r() as u32 + (dst.r() as u32 * inv + 127) / 255;
+    let out_g = src.g() as u32 + (dst.g() as u32 * inv + 127) / 255;
+    let out_b = src.b() as u32 + (dst.b() as u32 * inv + 127) / 255;
 
-    let src_r = src.r() as u32;
-    let src_g = src.g() as u32;
-    let src_b = src.b() as u32;
-
-    let dst_r = dst.r() as u32;
-    let dst_g = dst.g() as u32;
-    let dst_b = dst.b() as u32;
-
-    // Straight-alpha result from premultiplied math, with rounding
-    let out_r = (src_r * src_scale + dst_r * dst_scale + out_a / 2) / out_a;
-    let out_g = (src_g * src_scale + dst_g * dst_scale + out_a / 2) / out_a;
-    let out_b = (src_b * src_scale + dst_b * dst_scale + out_a / 2) / out_a;
-
-    Color32::from_rgba_unmultiplied(out_r as u8, out_g as u8, out_b as u8, out_a as u8)
+    Color32::from_rgba_unmultiplied(
+        out_r.min(255) as u8,
+        out_g.min(255) as u8,
+        out_b.min(255) as u8,
+        out_a.min(255) as u8,
+    )
 }
 
 
@@ -518,5 +514,27 @@ fn apply_opacity_scale(color: Color32, opacity_scale: u32) -> Color32 {
     let r = (color.r() as u32 * opacity_scale + 127) / 255;
     let g = (color.g() as u32 * opacity_scale + 127) / 255;
     let b = (color.b() as u32 * opacity_scale + 127) / 255;
+    Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
+}
+
+fn premultiply(color: Color32) -> Color32 {
+    let a = color.a() as u32;
+    if a >= 255 {
+        return color;
+    }
+    let r = (color.r() as u32 * a + 127) / 255;
+    let g = (color.g() as u32 * a + 127) / 255;
+    let b = (color.b() as u32 * a + 127) / 255;
+    Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
+}
+
+fn unpremultiply(color: Color32) -> Color32 {
+    let a = color.a() as u32;
+    if a == 0 || a >= 255 {
+        return color;
+    }
+    let r = ((color.r() as u32 * 255 + a / 2) / a).min(255);
+    let g = ((color.g() as u32 * 255 + a / 2) / a).min(255);
+    let b = ((color.b() as u32 * 255 + a / 2) / a).min(255);
     Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
 }
