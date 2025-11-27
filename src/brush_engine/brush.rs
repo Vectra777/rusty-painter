@@ -3,6 +3,7 @@ use crate::canvas::{
     history::{TileSnapshot, UndoAction},
 };
 use crate::utils::{color::Color, profiler::ScopeTimer, vector::Vec2};
+use eframe::egui::Color32;
 use rand::Rng;
 use rayon::ThreadPool;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -52,11 +53,11 @@ pub struct Brush {
     pub flow: f32,    // 0..100
     pub opacity: f32, // 0..1
     pub blend_mode: BlendMode,
+    pub is_changed: bool,
 
     pub brush_type: BrushType,
     pub pixel_perfect: bool,
     pub jitter: f32,
-    pub anti_alias: bool,
     pub stabilizer: f32, // 0..1 (0 = off, 1 = max smoothing)
     mask_cache: Option<BrushMaskCache>,
 }
@@ -75,9 +76,9 @@ impl Brush {
             brush_type: BrushType::Soft,
             pixel_perfect: false,
             jitter: 0.0,
-            anti_alias: true,
             stabilizer: 0.0,
             mask_cache: None,
+            is_changed: false,
         }
     }
 
@@ -95,9 +96,9 @@ impl Brush {
             brush_type: BrushType::Pixel,
             pixel_perfect: true,
             jitter: 0.0,
-            anti_alias: false,
             stabilizer: 0.0,
             mask_cache: None,
+            is_changed: false,
         }
     }
 
@@ -118,15 +119,9 @@ impl Brush {
 
     /// Ensure a soft brush mask exists for the current diameter/hardness and return it.
     fn ensure_mask(&mut self) -> &BrushMaskCache {
-        let need_new = match &self.mask_cache {
-            Some(cache) => {
-                (cache.diameter - self.diameter).abs() > f32::EPSILON
-                    || (cache.hardness - self.hardness).abs() > f32::EPSILON
-            }
-            None => true,
-        };
+        let should_rebuild = self.is_changed || self.mask_cache.is_none();
 
-        if need_new {
+        if should_rebuild {
             let r = self.diameter / 2.0;
             let r_sq = r * r;
             let r_ceil = r.ceil() as usize;
@@ -143,19 +138,20 @@ impl Brush {
                     if dist2 > r_sq {
                         data.push(0.0);
                         continue;
-                    }
-                    let dist = dist2.sqrt();
-                    let t = dist / r;
-                    let alpha_factor = if t < hardness {
-                        1.0
-                    } else {
-                        let v = (t - hardness) / (1.0 - hardness);
-                        let falloff = (1.0 - v.clamp(0.0, 1.0)).max(0.0);
-                        falloff.powf(1.5)
-                    };
-                    data.push(alpha_factor);
                 }
+                let dist = dist2.sqrt();
+                let t = dist / r;
+                let alpha_factor = if t < hardness {
+                    1.0
+                } else {
+                    let v = (t - hardness) / (1.0 - hardness);
+                    let falloff = 1.0 - v.clamp(0.0, 1.0);
+                    let f2 = falloff * falloff;
+                    f2 * (3.0 - 2.0 * falloff)
+                };
+                data.push(alpha_factor);
             }
+        }
 
             self.mask_cache = Some(BrushMaskCache {
                 diameter: self.diameter,
@@ -163,6 +159,7 @@ impl Brush {
                 size,
                 data,
             });
+            self.is_changed = false;
         }
 
         self.mask_cache.as_ref().unwrap()
@@ -271,9 +268,14 @@ impl Brush {
 
         self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
-        let color = self.color;
-        let alpha = color.a * self.opacity * (self.flow / 100.0);
-        let src_color = Color { a: alpha, ..color };
+        let src_base = self.color.to_color32();
+        let src_alpha = (self.color.a * self.opacity * (self.flow / 100.0)).clamp(0.0, 1.0);
+        let src_color = Color32::from_rgba_unmultiplied(
+            src_base.r(),
+            src_base.g(),
+            src_base.b(),
+            (src_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+        );
 
         // Serial execution for pixel dab
         for (tx, ty) in tiles {
@@ -301,12 +303,12 @@ impl Brush {
                             let local_x = gx - tile_x0;
                             let idx = local_y * tile_size + local_x;
 
-                            let dst = Color::from_color32(data[idx]);
+                            let dst = data[idx];
                             let blended = match self.blend_mode {
                                 BlendMode::Normal => alpha_over(src_color, dst),
                                 BlendMode::Eraser => blend_erase(src_color, dst),
                             };
-                            data[idx] = blended.to_color32();
+                            data[idx] = blended;
                         }
                     }
                 }
@@ -378,7 +380,7 @@ impl Brush {
 
         self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
-        let base_color = self.color;
+        let base_color = self.color.to_color32();
         let flow_alpha = self.opacity * (self.flow / 100.0);
         let blend_mode = self.blend_mode;
         let mask = self.ensure_mask();
@@ -444,23 +446,28 @@ impl Brush {
                                 continue;
                             }
 
-                            let src = Color {
-                                r: base_color.r,
-                                g: base_color.g,
-                                b: base_color.b,
-                                a: base_color.a * alpha_factor * flow_alpha,
-                            };
+                            let src_a = ((base_color.a() as f32 / 255.0) * flow_alpha * alpha_factor)
+                                .clamp(0.0, 1.0);
+                            if src_a <= 0.0 {
+                                continue;
+                            }
+                            let src = Color32::from_rgba_unmultiplied(
+                                base_color.r(),
+                                base_color.g(),
+                                base_color.b(),
+                                (src_a * 255.0).round().clamp(0.0, 255.0) as u8,
+                            );
 
                             let local_y = gy - tile_y0;
                             let local_x = gx - tile_x0;
                             let idx = local_y * tile_size + local_x;
 
-                            let dst = Color::from_color32(data[idx]);
+                            let dst = data[idx];
                             let blended = match blend_mode {
                                 BlendMode::Normal => alpha_over(src, dst),
                                 BlendMode::Eraser => blend_erase(src, dst),
                             };
-                            data[idx] = blended.to_color32();
+                            data[idx] = blended;
                         }
                     }
                 }

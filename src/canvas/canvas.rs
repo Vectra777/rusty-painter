@@ -10,7 +10,7 @@ use crate::utils::profiler::ScopeTimer;
 pub struct Layer {
     pub name: String,
     pub visible: bool,
-    pub opacity: f32, // 0.0..1.0
+    pub opacity: u8, // 0..255
     tiles: Vec<Mutex<TileCell>>,
 }
 
@@ -25,7 +25,7 @@ impl Layer {
         Self {
             name,
             visible: true,
-            opacity: 1.0,
+            opacity: 255,
             tiles,
         }
     }
@@ -52,7 +52,7 @@ pub(crate) struct TileCell {
 
 impl Canvas {
     /// Create a new canvas with a single background layer and configured tile size.
-    pub fn new(width: usize, height: usize, clear_color: Color, tile_size: usize) -> Self {
+    pub fn new(width: usize, height: usize, clear_color: Color32, tile_size: usize) -> Self {
         let tiles_x = (width + tile_size - 1) / tile_size;
         let tiles_y = (height + tile_size - 1) / tile_size;
 
@@ -71,7 +71,7 @@ impl Canvas {
             tile_size,
             tiles_x,
             tiles_y,
-            clear_color: clear_color.to_color32(),
+            clear_color,
             layers: vec![bg_layer],
             active_layer_idx: 0,
         }
@@ -295,31 +295,28 @@ impl Canvas {
                             let local_x = global_x_start % self.tile_size;
                             let src_idx = local_y * self.tile_size + local_x;
 
-                            let mut final_color = Color::rgba(0, 0, 0, 0);
+                            let mut final_color = Color32::TRANSPARENT;
                             for (layer_idx, guard_opt) in layer_guards.iter().enumerate() {
                                 let layer = &self.layers[layer_idx];
-                                if !layer.visible || layer.opacity <= 0.0 {
+                                if !layer.visible || layer.opacity == 0 {
                                     continue;
                                 }
 
                                 if let Some(guard) = guard_opt {
                                     if let Some(data) = &guard.data {
                                         let pixel = data[src_idx];
-                                        let mut src_color = Color::from_color32(pixel);
-                                        src_color.a *= layer.opacity;
+                                        let src_color = apply_opacity(pixel, layer.opacity);
                                         final_color = alpha_over(src_color, final_color);
                                     } else if layer_idx == 0 {
-                                        let mut src_color = Color::from_color32(self.clear_color);
-                                        src_color.a *= layer.opacity;
+                                        let src_color = apply_opacity(self.clear_color, layer.opacity);
                                         final_color = alpha_over(src_color, final_color);
                                     }
                                 } else if layer_idx == 0 {
-                                    let mut src_color = Color::from_color32(self.clear_color);
-                                    src_color.a *= layer.opacity;
+                                    let src_color = apply_opacity(self.clear_color, layer.opacity);
                                     final_color = alpha_over(src_color, final_color);
                                 }
                             }
-                            out.pixels[row_start + dst_x] = final_color.to_color32();
+                            out.pixels[row_start + dst_x] = final_color;
                         } else {
                             // High quality downsampling (box filter)
                             let mut r_acc = 0.0;
@@ -343,50 +340,47 @@ impl Canvas {
                                     let local_x = global_x % self.tile_size;
 
                                     let src_idx = local_y * self.tile_size + local_x;
-                                    let mut pixel_color = Color::rgba(0, 0, 0, 0);
+                                    let mut pixel_color = Color32::TRANSPARENT;
 
                                     for (layer_idx, guard_opt) in layer_guards.iter().enumerate() {
                                         let layer = &self.layers[layer_idx];
-                                        if !layer.visible || layer.opacity <= 0.0 {
+                                        if !layer.visible || layer.opacity == 0 {
                                             continue;
                                         }
 
                                         if let Some(guard) = guard_opt {
                                             if let Some(data) = &guard.data {
                                                 let pixel = data[src_idx];
-                                                let mut src_color = Color::from_color32(pixel);
-                                                src_color.a *= layer.opacity;
+                                                let src_color = apply_opacity(pixel, layer.opacity);
                                                 pixel_color = alpha_over(src_color, pixel_color);
                                             } else if layer_idx == 0 {
-                                                let mut src_color =
-                                                    Color::from_color32(self.clear_color);
-                                                src_color.a *= layer.opacity;
+                                                let src_color =
+                                                    apply_opacity(self.clear_color, layer.opacity);
                                                 pixel_color = alpha_over(src_color, pixel_color);
                                             }
                                         } else if layer_idx == 0 {
-                                            let mut src_color =
-                                                Color::from_color32(self.clear_color);
-                                            src_color.a *= layer.opacity;
+                                            let src_color =
+                                                apply_opacity(self.clear_color, layer.opacity);
                                             pixel_color = alpha_over(src_color, pixel_color);
                                         }
                                     }
 
-                                    r_acc += pixel_color.r;
-                                    g_acc += pixel_color.g;
-                                    b_acc += pixel_color.b;
-                                    a_acc += pixel_color.a;
+                                    r_acc += pixel_color.r() as f32;
+                                    g_acc += pixel_color.g() as f32;
+                                    b_acc += pixel_color.b() as f32;
+                                    a_acc += pixel_color.a() as f32;
                                     count += 1.0;
                                 }
                             }
 
                             if count > 0.0 {
-                                out.pixels[row_start + dst_x] = Color {
-                                    r: r_acc / count,
-                                    g: g_acc / count,
-                                    b: b_acc / count,
-                                    a: a_acc / count,
-                                }
-                                .to_color32();
+                                let inv = 1.0 / count;
+                                let r = (r_acc * inv).clamp(0.0, 255.0) as u8;
+                                let g = (g_acc * inv).clamp(0.0, 255.0) as u8;
+                                let b = (b_acc * inv).clamp(0.0, 255.0) as u8;
+                                let a = (a_acc * inv).clamp(0.0, 255.0) as u8;
+                                out.pixels[row_start + dst_x] =
+                                    Color32::from_rgba_unmultiplied(r, g, b, a);
                             }
                         }
                     }
@@ -409,10 +403,7 @@ impl Canvas {
                 let dst_start = dst_y * dst_w + dst_x;
 
                 // Composite layers
-                let mut final_color = Color::rgba(0, 0, 0, 0); // Start transparent
-
-                // Background color (if we want one)
-                // final_color = Color::from_color32(self.clear_color);
+                let mut final_color = Color32::TRANSPARENT; // Start transparent
 
                 for (layer_idx, layer) in self.layers.iter().enumerate() {
                     if !layer.visible {
@@ -420,7 +411,7 @@ impl Canvas {
                     }
 
                     let layer_opacity = layer.opacity;
-                    if layer_opacity <= 0.0 {
+                    if layer_opacity == 0 {
                         continue;
                     }
 
@@ -429,27 +420,21 @@ impl Canvas {
                         if let Some(data) = guard.data.as_ref() {
                             let src_idx = local_y * self.tile_size + local_x;
                             let pixel = data[src_idx];
-                            let mut src_color = Color::from_color32(pixel);
-                            src_color.a *= layer_opacity;
-
-                            // Simple alpha blending
-                            // dst = src + dst * (1 - src.a)
+                            let src_color = apply_opacity(pixel, layer_opacity);
                             final_color = alpha_over(src_color, final_color);
                         } else if layer_idx == 0 {
                             // Background layer default color
-                            let mut src_color = Color::from_color32(self.clear_color);
-                            src_color.a *= layer_opacity;
+                            let src_color = apply_opacity(self.clear_color, layer_opacity);
                             final_color = alpha_over(src_color, final_color);
                         }
                     } else if layer_idx == 0 {
                         // Background layer default color
-                        let mut src_color = Color::from_color32(self.clear_color);
-                        src_color.a *= layer_opacity;
+                        let src_color = apply_opacity(self.clear_color, layer_opacity);
                         final_color = alpha_over(src_color, final_color);
                     }
                 }
 
-                out.pixels[dst_start] = final_color.to_color32();
+                out.pixels[dst_start] = final_color;
                 dst_x += 1;
             }
         }
@@ -472,32 +457,53 @@ impl Canvas {
 }
 
 /// Erase blend mode: reduce destination alpha by the source alpha.
-pub fn blend_erase(src: Color, dst: Color) -> Color {
-    // src.a is the strength of the eraser
-    let out_a = dst.a * (1.0 - src.a);
-    Color {
-        r: dst.r,
-        g: dst.g,
-        b: dst.b,
-        a: out_a,
-    }
+pub fn blend_erase(src: Color32, dst: Color32) -> Color32 {
+    let src_a = src.a() as u32;
+    let dst_a = dst.a() as u32;
+    let out_a = (dst_a * (255 - src_a) + 127) / 255;
+    Color32::from_rgba_unmultiplied(dst.r(), dst.g(), dst.b(), out_a as u8)
 }
 
 /// Standard "source over" alpha compositing.
-pub fn alpha_over(src: Color, dst: Color) -> Color {
-    let out_a = src.a + dst.a * (1.0 - src.a);
-    if out_a <= 0.0 {
-        return Color {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        };
+pub fn alpha_over(src: Color32, dst: Color32) -> Color32 {
+
+    let sa = src.a() as u32; // source alpha 0..255
+    let da = dst.a() as u32; // dest alpha 0..255
+
+    let inv_sa = 255 - sa;
+
+    // Out alpha: A_out = A_s + A_d * (1 - A_s)
+    let out_a = sa + (da * inv_sa + 127) / 255;
+    if out_a == 0 {
+        return Color32::TRANSPARENT;
     }
 
-    let r = (src.r * src.a + dst.r * dst.a * (1.0 - src.a)) / out_a;
-    let g = (src.g * src.a + dst.g * dst.a * (1.0 - src.a)) / out_a;
-    let b = (src.b * src.a + dst.b * dst.a * (1.0 - src.a)) / out_a;
+    // These two scales are reused across R,G,B
+    let src_scale = sa;
+    let dst_scale = (da * inv_sa + 127) / 255;
 
-    Color { r, g, b, a: out_a }
+    let src_r = src.r() as u32;
+    let src_g = src.g() as u32;
+    let src_b = src.b() as u32;
+
+    let dst_r = dst.r() as u32;
+    let dst_g = dst.g() as u32;
+    let dst_b = dst.b() as u32;
+
+    // Straight-alpha result from premultiplied math, with rounding
+    let out_r = (src_r * src_scale + dst_r * dst_scale + out_a / 2) / out_a;
+    let out_g = (src_g * src_scale + dst_g * dst_scale + out_a / 2) / out_a;
+    let out_b = (src_b * src_scale + dst_b * dst_scale + out_a / 2) / out_a;
+
+    Color32::from_rgba_unmultiplied(out_r as u8, out_g as u8, out_b as u8, out_a as u8)
+}
+
+
+
+fn apply_opacity(color: Color32, opacity: u8) -> Color32 {
+    if opacity >= 255 {
+        return color;
+    }
+    let a = (color.a() as u32 * opacity as u32 + 127) / 255;
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a as u8)
 }
