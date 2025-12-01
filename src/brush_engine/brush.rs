@@ -48,7 +48,7 @@ struct BrushMaskCache {
 pub struct Brush {
     pub diameter: f32,
     pub hardness: f32, // 0..100
-    pub color: Color,
+    pub color: Color32,
     pub spacing: f32, // Percentage of diameter (0..100+)
     pub flow: f32,    // 0..100
     pub opacity: f32, // 0..1
@@ -64,7 +64,7 @@ pub struct Brush {
 
 impl Brush {
     /// Create a standard soft brush with the given radius, hardness, base color and spacing.
-    pub fn new(diameter: f32, hardness: f32, color: Color, spacing: f32) -> Self {
+    pub fn new(diameter: f32, hardness: f32, color: Color32, spacing: f32) -> Self {
         Self {
             diameter,
             hardness,
@@ -84,7 +84,7 @@ impl Brush {
 
     #[allow(dead_code)]
     /// Convenience constructor for a pixel-perfect pen.
-    pub fn new_pixel(diameter: f32, color: Color) -> Self {
+    pub fn new_pixel(diameter: f32, color: Color32) -> Self {
         Self {
             diameter,
             hardness: 100.0,
@@ -109,7 +109,7 @@ impl Brush {
         canvas: &Canvas,
         center: Vec2,
         undo_action: &mut UndoAction,
-        modified_tiles: &mut HashSet<(usize, usize)>,
+        modified_tiles: &mut HashSet<(usize, usize)>
     ) {
         match self.brush_type {
             BrushType::Soft => self.soft_dab(pool, canvas, center, undo_action, modified_tiles),
@@ -138,20 +138,20 @@ impl Brush {
                     if dist2 > r_sq {
                         data.push(0.0);
                         continue;
+                    }
+                    let dist = dist2.sqrt();
+                    let t = dist / r;
+                    let alpha_factor = if t < hardness {
+                        1.0
+                    } else {
+                        let v = (t - hardness) / (1.0 - hardness);
+                        let falloff = 1.0 - v.clamp(0.0, 1.0);
+                        let f2 = falloff * falloff;
+                        f2 * (3.0 - 2.0 * falloff)
+                    };
+                    data.push(alpha_factor);
                 }
-                let dist = dist2.sqrt();
-                let t = dist / r;
-                let alpha_factor = if t < hardness {
-                    1.0
-                } else {
-                    let v = (t - hardness) / (1.0 - hardness);
-                    let falloff = 1.0 - v.clamp(0.0, 1.0);
-                    let f2 = falloff * falloff;
-                    f2 * (3.0 - 2.0 * falloff)
-                };
-                data.push(alpha_factor);
             }
-        }
 
             self.mask_cache = Some(BrushMaskCache {
                 diameter: self.diameter,
@@ -268,8 +268,8 @@ impl Brush {
 
         self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
-        let src_base = self.color.to_color32();
-        let src_alpha = (self.color.a * self.opacity * (self.flow / 100.0)).clamp(0.0, 1.0);
+        let src_base = self.color;
+        let src_alpha = (self.color.a() as f32 * self.opacity * (self.flow / 100.0)).clamp(0.0, 1.0);
         let src_color = Color32::from_rgba_unmultiplied(
             src_base.r(),
             src_base.g(),
@@ -380,7 +380,7 @@ impl Brush {
 
         self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
-        let base_color = self.color.to_color32();
+        let base_color = self.color;
         let flow_alpha = self.opacity * (self.flow / 100.0);
         let blend_mode = self.blend_mode;
         let mask = self.ensure_mask();

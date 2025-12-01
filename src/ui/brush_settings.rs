@@ -27,7 +27,7 @@ pub fn brush_settings_window(ctx: &egui::Context, brush: &mut Brush) {
 
             ui.label("Size:");
             if ui
-                .add(egui::Slider::new(&mut brush.diameter, 1.0..=300.0).logarithmic(true))
+                .add(egui::Slider::new(&mut brush.diameter, 1.0..=3000.0).logarithmic(true))
                 .changed()
             {
                 mask_dirty = true;
