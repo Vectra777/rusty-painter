@@ -57,6 +57,7 @@ pub struct Brush {
 
     pub brush_type: BrushType,
     pub pixel_perfect: bool,
+    pub anti_aliasing: bool,
     pub jitter: f32,
     pub stabilizer: f32, // 0..1 (0 = off, 1 = max smoothing)
     mask_cache: Option<BrushMaskCache>,
@@ -75,6 +76,7 @@ impl Brush {
             blend_mode: BlendMode::Normal,
             brush_type: BrushType::Soft,
             pixel_perfect: false,
+            anti_aliasing: true,
             jitter: 0.0,
             stabilizer: 0.0,
             mask_cache: None,
@@ -95,6 +97,7 @@ impl Brush {
             blend_mode: BlendMode::Normal,
             brush_type: BrushType::Pixel,
             pixel_perfect: true,
+            anti_aliasing: false,
             jitter: 0.0,
             stabilizer: 0.0,
             mask_cache: None,
@@ -383,6 +386,8 @@ impl Brush {
         let base_color = self.color;
         let flow_alpha = self.opacity * (self.flow / 100.0);
         let blend_mode = self.blend_mode;
+        let anti_aliasing = self.anti_aliasing;
+        let hardness_val = (self.hardness / 100.0).clamp(0.0, 0.97);
         let mask = self.ensure_mask();
         let mask_size = mask.size as isize;
         let center_x = center.x;
@@ -392,8 +397,36 @@ impl Brush {
         let end_x = end_x;
         let end_y = end_y;
 
+        let fade_start = (r - 1.0).max(0.0);
+        let fade_width = r - fade_start;
+
+        // Pre-calculate alpha at the fade start boundary
+        let alpha_at_fade_start = {
+            let t = fade_start / r;
+            if t < hardness_val {
+                1.0
+            } else {
+                let v = (t - hardness_val) / (1.0 - hardness_val);
+                let falloff = 1.0 - v.clamp(0.0, 1.0);
+                let f2 = falloff * falloff;
+                f2 * (3.0 - 2.0 * falloff)
+            }
+        };
+
         _pool.install(|| {
             tiles.par_iter().for_each(|(tx, ty)| {
+                let compute_base = |d: f32| -> f32 {
+                    let t = d / r;
+                    if t < hardness_val {
+                        1.0
+                    } else {
+                        let v = (t - hardness_val) / (1.0 - hardness_val);
+                        let falloff = 1.0 - v.clamp(0.0, 1.0);
+                        let f2 = falloff * falloff;
+                        f2 * (3.0 - 2.0 * falloff)
+                    }
+                };
+
                 let tile_x0 = tx * tile_size;
                 let tile_y0 = ty * tile_size;
                 let tile_x1 = tile_x0 + tile_size;
@@ -430,18 +463,33 @@ impl Brush {
                     let overlap_max_y = end_y.min(tile_y0 + tile_size - 1);
 
                     for gy in overlap_min_y..=overlap_max_y {
-                        let mask_y = ((gy as f32 + 0.5 - center_y + r).floor()) as isize;
-                        if mask_y < 0 || mask_y >= mask_size {
-                            continue;
-                        }
-                        let mask_row = (mask_y as usize) * mask.size;
                         for gx in overlap_min_x..=overlap_max_x {
-                            let mask_x = ((gx as f32 + 0.5 - center_x + r).floor()) as isize;
-                            if mask_x < 0 || mask_x >= mask_size {
-                                continue;
-                            }
+                            let alpha_factor = if anti_aliasing {
+                                let px = gx as f32 + 0.5;
+                                let py = gy as f32 + 0.5;
+                                let pdx = px - center_x;
+                                let pdy = py - center_y;
+                                let dist = (pdx * pdx + pdy * pdy).sqrt();
 
-                            let alpha_factor = mask.data[mask_row + mask_x as usize];
+                                if dist >= r {
+                                    0.0
+                                } else if dist > fade_start {
+                                    let fraction = (dist - fade_start) / fade_width;
+                                    alpha_at_fade_start * (1.0 - fraction)
+                                } else {
+                                    compute_base(dist)
+                                }
+                            } else {
+                                let mask_x = ((gx as f32 + 0.5 - center_x + r).floor()) as isize;
+                                let mask_y = ((gy as f32 + 0.5 - center_y + r).floor()) as isize;
+
+                                if mask_x < 0 || mask_x >= mask_size || mask_y < 0 || mask_y >= mask_size {
+                                    0.0
+                                } else {
+                                    mask.data[(mask_y as usize) * mask.size + (mask_x as usize)]
+                                }
+                            };
+
                             if alpha_factor <= 0.0 {
                                 continue;
                             }

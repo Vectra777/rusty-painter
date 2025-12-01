@@ -60,6 +60,7 @@ pub fn brush_settings_window(ctx: &egui::Context, brush: &mut Brush) {
 
             ui.separator();
             ui.checkbox(&mut brush.pixel_perfect, "Pixel Perfect Mode");
+            ui.checkbox(&mut brush.anti_aliasing, "Anti-aliasing");
         });
 
     if mask_dirty {

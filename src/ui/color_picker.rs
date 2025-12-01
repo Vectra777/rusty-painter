@@ -1,6 +1,6 @@
 use crate::ColorModel;
 use crate::brush_engine::brush::Brush;
-use crate::utils::color::Color;
+use crate::utils::color::ColorManipulation;
 use eframe::egui;
 use egui::Color32;
 
@@ -115,7 +115,7 @@ fn hsva_triangle(ui: &mut egui::Ui, hue: &mut f32, sat: &mut f32, val: &mut f32)
     let tri_left = egui::pos2(base_x, base_y + tri_height);
     let tri_right = egui::pos2(base_x + TRI_SIDE, base_y + tri_height);
 
-    let hue_color = Color::from_hsva(*hue, 1.0, 1.0, 1.0).to_color32();
+    let hue_color = Color32::from_hsva(*hue, 1.0, 1.0, 1.0);
 
     let mut mesh = egui::Mesh::default();
     let top_idx = mesh.vertices.len();
@@ -212,8 +212,8 @@ pub fn color_picker_window(ctx: &egui::Context, brush: &mut Brush, color_model: 
 }
 
 fn grayscale_picker(ui: &mut egui::Ui, brush: &mut Brush) {
-    let mut value = brush.color.to_grayscale_value();
-    let mut alpha = brush.color.a;
+    let mut value = (brush.color.r() as u16 + brush.color.g() as u16 + brush.color.b() as u16) as f32 / (3.0 * 255.0);
+    let mut alpha = brush.color.a() as f32 / 255.0;
     let mut changed = false;
 
     ui.label("Grayscale");
@@ -222,7 +222,7 @@ fn grayscale_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut value,
         "Value",
-        &|t| Color::from_gray(t, 1.0).to_color32(),
+        &|t| Color32::from_gray_alpha(t, 1.0),
         false,
     );
     changed |= gradient_slider(
@@ -230,31 +230,31 @@ fn grayscale_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut alpha,
         "Opacity",
-        &|t| Color::from_gray(value, t).to_color32(),
+        &|t| Color32::from_gray_alpha(value, t),
         true,
     );
 
-    let mut preview = Color::from_gray(value, alpha).to_color32();
+    let mut preview = Color32::from_gray_alpha(value, alpha);
     ui.horizontal(|ui| {
         ui.label("Preview");
         ui.color_edit_button_srgba(&mut preview);
     });
 
     if changed {
-        brush.color = Color::from_gray(value, alpha);
+        brush.color = Color32::from_gray_alpha(value, alpha);
     }
 }
 
 fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
     let (mut c, mut m, mut y, mut k, mut a) = brush.color.to_cmyk();
     let mut changed = false;
-    let mut color = Color::from_cmyk(c, m, y, k, a);
+    let mut color = Color32::from_cmyk(c, m, y, k, a);
 
     ui.label("CMYK");
     let (mut hue, mut sat, mut val, _) = color.to_hsva();
     changed |= hsva_triangle(ui, &mut hue, &mut sat, &mut val);
     if changed {
-        color = Color::from_hsva(hue, sat, val, a);
+        color = Color32::from_hsva(hue, sat, val, a);
         let (nc, nm, ny, nk, _) = color.to_cmyk();
         c = nc;
         m = nm;
@@ -267,7 +267,7 @@ fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut c,
         "Cyan",
-        &|t| Color::from_cmyk(t, m, y, k, 1.0).to_color32(),
+        &|t| Color32::from_cmyk(t, m, y, k, 1.0),
         false,
     );
     changed |= gradient_slider(
@@ -275,7 +275,7 @@ fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut m,
         "Magenta",
-        &|t| Color::from_cmyk(c, t, y, k, 1.0).to_color32(),
+        &|t| Color32::from_cmyk(c, t, y, k, 1.0),
         false,
     );
     changed |= gradient_slider(
@@ -283,7 +283,7 @@ fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut y,
         "Yellow",
-        &|t| Color::from_cmyk(c, m, t, k, 1.0).to_color32(),
+        &|t| Color32::from_cmyk(c, m, t, k, 1.0),
         false,
     );
     changed |= gradient_slider(
@@ -291,7 +291,7 @@ fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut k,
         "Key (Black)",
-        &|t| Color::from_cmyk(c, m, y, t, 1.0).to_color32(),
+        &|t| Color32::from_cmyk(c, m, y, t, 1.0),
         false,
     );
     changed |= gradient_slider(
@@ -299,18 +299,18 @@ fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut a,
         "Opacity",
-        &|t| Color::from_cmyk(c, m, y, k, t).to_color32(),
+        &|t| Color32::from_cmyk(c, m, y, k, t),
         true,
     );
 
-    let mut preview = Color::from_cmyk(c, m, y, k, a).to_color32();
+    let mut preview = Color32::from_cmyk(c, m, y, k, a);
     ui.horizontal(|ui| {
         ui.label("Preview");
         ui.color_edit_button_srgba(&mut preview);
     });
 
     if changed {
-        brush.color = Color::from_cmyk(c, m, y, k, a);
+        brush.color = Color32::from_cmyk(c, m, y, k, a);
     }
 }
 
@@ -325,7 +325,7 @@ fn rgba_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut hue,
         "Hue:",
-        &|t| Color::from_hsva(t, 1.0, 1.0, 1.0).to_color32(),
+        &|t| Color32::from_hsva(t, 1.0, 1.0, 1.0),
         false,
     );
     color_changed |= gradient_slider(
@@ -333,7 +333,7 @@ fn rgba_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut val,
         "Brightness:",
-        &|t| Color::from_hsva(hue, sat, t, 1.0).to_color32(),
+        &|t| Color32::from_hsva(hue, sat, t, 1.0),
         false,
     );
     color_changed |= gradient_slider(
@@ -341,7 +341,7 @@ fn rgba_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut sat,
         "Saturation:",
-        &|t| Color::from_hsva(hue, t, val, 1.0).to_color32(),
+        &|t| Color32::from_hsva(hue, t, val, 1.0),
         false,
     );
     color_changed |= gradient_slider(
@@ -349,11 +349,11 @@ fn rgba_picker(ui: &mut egui::Ui, brush: &mut Brush) {
         SLIDER_WIDTH,
         &mut alpha,
         "Opacity:",
-        &|t| Color::from_hsva(hue, sat, val, t).to_color32(),
+        &|t| Color32::from_hsva(hue, sat, val, t),
         true,
     );
 
     if color_changed {
-        brush.color = Color::from_hsva(hue, sat, val, alpha);
+        brush.color = Color32::from_hsva(hue, sat, val, alpha);
     }
 }

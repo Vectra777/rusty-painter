@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use eframe::egui::{Color32, ColorImage};
 
-use crate::utils::color::Color;
+use crate::utils::color::{Color, ColorManipulation};
 use crate::utils::profiler::ScopeTimer;
 
 #[derive(Debug)]

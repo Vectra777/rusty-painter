@@ -5,6 +5,7 @@ use crate::{
         canvas::Canvas,
         history::{History, UndoAction},
     },
+    tablet::{TabletInput, TabletPhase},
     ui,
     utils::{color::Color, profiler::ScopeTimer, vector::Vec2},
 };
@@ -65,6 +66,7 @@ pub struct PainterApp {
     pub(crate) export_progress_rx: Option<mpsc::Receiver<crate::ui::export_modal::ExportProgress>>,
     pub(crate) color_model: ColorModel,
     pub(crate) texture_generation: u64,
+    pub(crate) tablet: Option<TabletInput>,
 }
 
 impl PainterApp {
@@ -77,25 +79,26 @@ impl PainterApp {
         let new_canvas = NewCanvasSettings::from_canvas(&canvas);
         let color_model = new_canvas.color_model;
 
-        let brush = Brush::new(24.0, 20.0, Color::rgba(0, 0, 0, 255), 25.0);
+        let black = Color32::from_rgba_unmultiplied(0, 0, 0, 255);
+        let brush = Brush::new(24.0, 20.0, black, 25.0);
 
         let presets = vec![
             BrushPreset {
                 name: "Soft Round".to_string(),
-                brush: Brush::new(24.0, 20.0, Color::rgba(0, 0, 0, 255), 25.0),
+                brush: Brush::new(24.0, 20.0, black, 25.0),
             },
             BrushPreset {
                 name: "Hard Round".to_string(),
-                brush: Brush::new(20.0, 100.0, Color::rgba(0, 0, 0, 255), 10.0),
+                brush: Brush::new(20.0, 100.0, black, 10.0),
             },
             BrushPreset {
                 name: "Pixel".to_string(),
-                brush: Brush::new_pixel(1.0, Color::rgba(0, 0, 0, 255)),
+                brush: Brush::new_pixel(1.0, black),
             },
             BrushPreset {
                 name: "Airbrush".to_string(),
                 brush: {
-                    let mut b = Brush::new(50.0, 0.0, Color::rgba(0, 0, 0, 255), 20.0);
+                    let mut b = Brush::new(50.0, 0.0, black, 20.0);
                     b.flow = 10.0;
                     b
                 },
@@ -103,7 +106,7 @@ impl PainterApp {
             BrushPreset {
                 name: "Stabilized".to_string(),
                 brush: {
-                    let mut b = Brush::new(20.0, 80.0, Color::rgba(0, 0, 0, 255), 10.0);
+                    let mut b = Brush::new(20.0, 80.0, black, 10.0);
                     b.stabilizer = 0.8;
                     b
                 },
@@ -195,7 +198,7 @@ impl PainterApp {
             thread_count,
             max_threads,
             pool,
-            disable_lod: false,
+            disable_lod: true,
             force_full_upload: false,
             show_new_canvas_modal: false,
             show_export_modal: false,
@@ -208,6 +211,7 @@ impl PainterApp {
             export_progress_rx: None,
             color_model,
             texture_generation: 0,
+            tablet: TabletInput::new(cc),
         }
     }
 
@@ -412,7 +416,7 @@ impl PainterApp {
         self.brush.color = Self::convert_color_for_model(self.brush.color, self.color_model);
     }
 
-    fn convert_color_for_model(color: Color, model: ColorModel) -> Color {
+    fn convert_color_for_model(color: Color32, model: ColorModel) -> Color32 {
         match model {
             ColorModel::Rgba => color,
             ColorModel::Grayscale => color,
@@ -756,6 +760,41 @@ impl eframe::App for PainterApp {
                 }
             }
 
+            // Pump tablet input and feed into stroke pipeline.
+            if let Some(tablet) = &mut self.tablet {
+                let scale = ctx.input(|i| i.pixels_per_point());
+                for sample in tablet.poll(scale) {
+                    let pos = egui::Pos2::new(sample.pos[0], sample.pos[1]);
+                    let (canvas_pos, inside) = self.screen_to_canvas(pos, origin, canvas_center);
+                    if !inside {
+                        continue;
+                    }
+                    if sample.phase == TabletPhase::Down {
+                        self.start_stroke(canvas_pos);
+                    } else if sample.phase == TabletPhase::Move {
+                        if let Some(stroke) = &mut self.stroke {
+                            let base_diam = self.brush.diameter;
+                            self.brush.diameter = (base_diam * sample.pressure).max(1.0);
+                            let prev = stroke.last_pos.unwrap_or(canvas_pos);
+                            stroke.add_point(
+                                &self.pool,
+                                &self.canvas,
+                                &mut self.brush,
+                                canvas_pos,
+                                self.current_undo_action.as_mut().unwrap(),
+                                &mut self.modified_tiles,
+                            );
+                            self.mark_segment_dirty(prev, canvas_pos, self.brush.diameter / 2.0);
+                            self.brush.diameter = base_diam;
+                        } else {
+                            self.start_stroke(canvas_pos);
+                        }
+                    } else if sample.phase == TabletPhase::Up {
+                        self.finish_stroke();
+                    }
+                }
+            }
+
             let events = ctx.input(|i| i.events.clone());
 
             for event in events {
@@ -868,7 +907,7 @@ impl eframe::App for PainterApp {
                         self.new_canvas.color_model = self.color_model;
                         self.show_new_canvas_modal = true;
                     }
-                    ui.add(egui::Slider::new(&mut self.brush.diameter, 1.0..=300.0));
+                    ui.add(egui::Slider::new(&mut self.brush.diameter, 1.0..=3000.0));
                     if ui.button("Export").clicked() {
                         self.export_settings.chosen_path = None;
                         self.export_message = None;
@@ -883,7 +922,7 @@ impl eframe::App for PainterApp {
             }
 
             if ui.input(|i| i.key_pressed(egui::Key::C)) {
-                self.canvas.clear(Color::white());
+                self.canvas.clear(Color32::WHITE);
                 // mark all tiles dirty
                 for tile in &mut self.tiles {
                     tile.dirty = true;

@@ -4,6 +4,7 @@ pub mod canvas;
 pub mod styling;
 pub mod ui;
 pub mod utils;
+pub mod tablet;
 
 pub use app::state::{
     BackgroundChoice, CanvasUnit, ColorDepth, ColorModel, NewCanvasSettings, Orientation,
