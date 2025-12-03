@@ -599,10 +599,20 @@ impl Brush {
         self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
         let base_color = self.color;
+        let (sr, sg, sb) = if base_color.a() == 0 {
+            (0, 0, 0)
+        } else {
+            let a = base_color.a() as f32;
+            (
+                (base_color.r() as f32 * 255.0 / a).round().clamp(0.0, 255.0) as u8,
+                (base_color.g() as f32 * 255.0 / a).round().clamp(0.0, 255.0) as u8,
+                (base_color.b() as f32 * 255.0 / a).round().clamp(0.0, 255.0) as u8,
+            )
+        };
         let flow_alpha = self.opacity * (self.flow / 100.0);
         let blend_mode = self.blend_mode;
         let anti_aliasing = self.anti_aliasing;
-        let hardness_val = (self.hardness / 100.0).clamp(0.0, 0.97);
+        let hardness_val = (self.hardness / 100.0).clamp(0.0, 0.999);
         let softness_selector = self.softness_selector;
         let softness_curve = self.softness_curve.clone();
         let pixel_shape = self.pixel_shape.clone(); // Clone for use in closure
@@ -616,7 +626,7 @@ impl Brush {
         let end_x = end_x;
         let end_y = end_y;
 
-        let fade_start = (r - 1.5).max(0.0);
+        let fade_start = (r - 1.0).max(0.0);
         let fade_width = r - fade_start;
 
         // Helper to get base alpha factor for a given point (dx, dy) and radius r
@@ -809,9 +819,9 @@ impl Brush {
                                 continue;
                             }
                             let src = Color32::from_rgba_unmultiplied(
-                                base_color.r(),
-                                base_color.g(),
-                                base_color.b(),
+                                sr,
+                                sg,
+                                sb,
                                 (src_a * 255.0).round().clamp(0.0, 255.0) as u8,
                             );
 

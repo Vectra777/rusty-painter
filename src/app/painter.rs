@@ -243,7 +243,7 @@ impl PainterApp {
             is_primary_down: false,
             brushes_path,
             loaded_brush_tips: Vec::new(),
-            histories: vec![History::new()],
+            histories: (0..layer_count).map(|_| History::new()).collect(),
             current_undo_action: None,
             modified_tiles: HashSet::new(),
             tiles,

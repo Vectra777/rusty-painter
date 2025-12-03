@@ -482,7 +482,7 @@ pub fn blend_erase(src: Color32, dst: Color32) -> Color32 {
     let out_r = (dst.r() as u32 * inv + 127) / 255;
     let out_g = (dst.g() as u32 * inv + 127) / 255;
     let out_b = (dst.b() as u32 * inv + 127) / 255;
-    Color32::from_rgba_unmultiplied(
+    Color32::from_rgba_premultiplied(
         out_r.min(255) as u8,
         out_g.min(255) as u8,
         out_b.min(255) as u8,
@@ -504,7 +504,7 @@ pub fn alpha_over(src: Color32, dst: Color32) -> Color32 {
     let out_g = src.g() as u32 + (dst.g() as u32 * inv + 127) / 255;
     let out_b = src.b() as u32 + (dst.b() as u32 * inv + 127) / 255;
 
-    Color32::from_rgba_unmultiplied(
+    Color32::from_rgba_premultiplied(
         out_r.min(255) as u8,
         out_g.min(255) as u8,
         out_b.min(255) as u8,
@@ -521,7 +521,7 @@ fn apply_opacity_scale(color: Color32, opacity_scale: u32) -> Color32 {
     let r = (color.r() as u32 * opacity_scale + 127) / 255;
     let g = (color.g() as u32 * opacity_scale + 127) / 255;
     let b = (color.b() as u32 * opacity_scale + 127) / 255;
-    Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
+    Color32::from_rgba_premultiplied(r as u8, g as u8, b as u8, a as u8)
 }
 
 fn premultiply(color: Color32) -> Color32 {
@@ -532,7 +532,7 @@ fn premultiply(color: Color32) -> Color32 {
     let r = (color.r() as u32 * a + 127) / 255;
     let g = (color.g() as u32 * a + 127) / 255;
     let b = (color.b() as u32 * a + 127) / 255;
-    Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, a as u8)
+    Color32::from_rgba_premultiplied(r as u8, g as u8, b as u8, a as u8)
 }
 
 fn unpremultiply(color: Color32) -> Color32 {
