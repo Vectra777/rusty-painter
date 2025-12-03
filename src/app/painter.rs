@@ -1,20 +1,25 @@
-use super::state::{CanvasTile, ColorModel, NewCanvasSettings, TextureAtlas};
+use super::{
+    layout::{self, ToolTab},
+    state::{CanvasTile, ColorModel, NewCanvasSettings, TextureAtlas},
+};
 use crate::{
-    brush_engine::brush::{Brush, BrushPreset, StrokeState},
+    brush_engine::brush::{Brush, BrushPreset, StrokeState, PixelBrushShape},
     canvas::{
         canvas::Canvas,
         history::{History, UndoAction},
     },
     tablet::{TabletInput, TabletPhase},
     ui,
-    utils::{color::Color, profiler::ScopeTimer, vector::Vec2},
+    ui::brush_settings::BrushPreviewState,
+    utils::{profiler::ScopeTimer, vector::Vec2},
 };
 use eframe::egui;
 use eframe::egui::{Color32, TextureOptions};
-use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
+use egui_dock::DockState;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -22,73 +27,20 @@ use std::time::Duration;
 const TILE_SIZE: usize = 64;
 const ATLAS_SIZE: usize = 2048;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum ToolTab {
-    BrushSettings,
-    BrushPresets,
-    ColorPicker,
-    Layers,
-    GeneralSettings,
-}
-
-impl ToolTab {
-    fn title(self) -> &'static str {
-        match self {
-            ToolTab::BrushSettings => "Brush Settings",
-            ToolTab::BrushPresets => "Brush Presets",
-            ToolTab::ColorPicker => "Color Picker",
-            ToolTab::Layers => "Layers",
-            ToolTab::GeneralSettings => "General",
-        }
-    }
-}
-
-struct ToolTabViewer<'a> {
-    app: &'a mut PainterApp,
-}
-
-impl<'a> TabViewer for ToolTabViewer<'a> {
-    type Tab = ToolTab;
-
-    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        tab.title().into()
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        match tab {
-            ToolTab::BrushSettings => {
-                ui::brush_settings::brush_settings_panel(ui, &mut self.app.brush)
-            }
-            ToolTab::BrushPresets => {
-                ui::brush_list::brush_list_panel(ui, &mut self.app.brush, &self.app.presets)
-            }
-            ToolTab::ColorPicker => {
-                ui::color_picker::color_picker_panel(ui, &mut self.app.brush, self.app.color_model)
-            }
-            ToolTab::Layers => {
-                let ctx = ui.ctx().clone();
-                ui::layers::layers_panel(&ctx, ui, self.app);
-            }
-            ToolTab::GeneralSettings => ui::general_settings::general_settings_panel(self.app, ui),
-        }
-    }
-
-    fn closeable(&mut self, _tab: &mut Self::Tab) -> bool {
-        false
-    }
-
-    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
-        false
-    }
-}
-
 /// Main egui application that owns the canvas, brush state, UI and rendering caches.
 pub struct PainterApp {
     pub(crate) canvas: Canvas,
     pub(crate) brush: Brush,
+    pub(crate) brush_preview: BrushPreviewState,
     pub(crate) presets: Vec<BrushPreset>,
+    pub(crate) preset_previews: HashMap<String, egui::TextureHandle>,
+    pub(crate) show_new_preset_modal: bool,
+    pub(crate) new_preset_name: String,
     pub(crate) stroke: Option<StrokeState>,
     pub(crate) is_drawing: bool,
+
+    pub(crate) brushes_path: PathBuf,
+    pub(crate) loaded_brush_tips: Vec<(String, PixelBrushShape, Option<egui::TextureHandle>)>, // Name, Shape, Optional Preview Texture
 
     pub(crate) histories: Vec<History>,
     pub(crate) current_undo_action: Option<UndoAction>,
@@ -127,15 +79,17 @@ pub struct PainterApp {
     pub(crate) export_progress_rx: Option<mpsc::Receiver<crate::ui::export_modal::ExportProgress>>,
     pub(crate) color_model: ColorModel,
     pub(crate) texture_generation: u64,
-    pub(crate) dock_state: DockState<ToolTab>,
+    pub(crate) show_general_settings: bool,
+    pub(crate) dock_left: DockState<ToolTab>,
+    pub(crate) dock_right: DockState<ToolTab>,
     pub(crate) tablet: Option<TabletInput>,
 }
 
 impl PainterApp {
     /// Initialize the UI, canvas, thread pool and GPU atlases.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let canvas_w = 8000;
-        let canvas_h = 8000;
+        let canvas_w = 4000;
+        let canvas_h = 4000;
         let canvas = Canvas::new(canvas_w, canvas_h, Color32::WHITE, TILE_SIZE);
         let layer_count = canvas.layers.len();
         let new_canvas = NewCanvasSettings::from_canvas(&canvas);
@@ -146,32 +100,66 @@ impl PainterApp {
 
         let presets = vec![
             BrushPreset {
-                name: "Soft Round".to_string(),
-                brush: Brush::new(24.0, 20.0, black, 25.0),
+                name: "Pencil (Sketch)".to_string(),
+                brush: {
+                    let mut b = Brush::new(6.0, 60.0, black, 10.0);
+                    b.flow = 30.0;
+                    b.opacity = 0.8;
+                    b.jitter = 0.5;
+                    b
+                },
+            },
+            BrushPreset {
+                name: "Ink Pen".to_string(),
+                brush: {
+                    let mut b = Brush::new(8.0, 100.0, black, 5.0);
+                    b.stabilizer = 0.2;
+                    b.flow = 100.0;
+                    b
+                },
+            },
+            BrushPreset {
+                name: "Soft Airbrush".to_string(),
+                brush: {
+                    let mut b = Brush::new(50.0, 0.0, black, 10.0);
+                    b.flow = 8.0;
+                    b.opacity = 0.6;
+                    b
+                },
             },
             BrushPreset {
                 name: "Hard Round".to_string(),
                 brush: Brush::new(20.0, 100.0, black, 10.0),
             },
             BrushPreset {
-                name: "Pixel".to_string(),
+                name: "Eraser (Soft)".to_string(),
+                brush: {
+                    let mut b = Brush::new(40.0, 20.0, black, 10.0);
+                    b.blend_mode = crate::brush_engine::brush::BlendMode::Eraser;
+                    b.opacity = 0.8;
+                    b
+                },
+            },
+            BrushPreset {
+                name: "Eraser (Hard)".to_string(),
+                brush: {
+                    let mut b = Brush::new(20.0, 100.0, black, 5.0);
+                    b.blend_mode = crate::brush_engine::brush::BlendMode::Eraser;
+                    b
+                },
+            },
+            BrushPreset {
+                name: "Chalk".to_string(),
+                brush: {
+                    let mut b = Brush::new(30.0, 80.0, black, 40.0);
+                    b.jitter = 5.0;
+                    b.flow = 50.0;
+                    b
+                },
+            },
+            BrushPreset {
+                name: "Pixel Art".to_string(),
                 brush: Brush::new_pixel(1.0, black),
-            },
-            BrushPreset {
-                name: "Airbrush".to_string(),
-                brush: {
-                    let mut b = Brush::new(50.0, 0.0, black, 20.0);
-                    b.flow = 10.0;
-                    b
-                },
-            },
-            BrushPreset {
-                name: "Stabilized".to_string(),
-                brush: {
-                    let mut b = Brush::new(20.0, 80.0, black, 10.0);
-                    b.stabilizer = 0.8;
-                    b
-                },
             },
         ];
 
@@ -232,27 +220,29 @@ impl PainterApp {
             }
         }
 
-        let mut dock_state = DockState::new(vec![
-            ToolTab::BrushSettings,
-            ToolTab::ColorPicker,
-            ToolTab::BrushPresets,
-        ]);
-        dock_state.main_surface_mut().split_below(
-            NodeIndex::root(),
-            0.6,
-            vec![ToolTab::Layers, ToolTab::GeneralSettings],
-        );
+        let dock_left = layout::default_left_dock();
+        let dock_right = layout::default_right_dock();
 
-        Self {
+        let brushes_path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("brushes");
+
+        let mut app = Self {
             canvas,
             brush,
+            brush_preview: BrushPreviewState::default(),
             presets,
+            preset_previews: HashMap::new(),
+            show_new_preset_modal: false,
+            new_preset_name: String::new(),
             stroke: None,
             is_drawing: false,
             is_panning: false,
             is_rotating: false,
             rotation: 0.0,
             is_primary_down: false,
+            brushes_path,
+            loaded_brush_tips: Vec::new(),
             histories: vec![History::new()],
             current_undo_action: None,
             modified_tiles: HashSet::new(),
@@ -284,9 +274,65 @@ impl PainterApp {
             export_progress_rx: None,
             color_model,
             texture_generation: 0,
-            dock_state,
+            show_general_settings: false,
+            dock_left,
+            dock_right,
             tablet: TabletInput::new(cc),
+        };
+
+        app.load_brush_tips(cc.egui_ctx.clone());
+        app
+    }
+
+    pub fn load_brush_tips(&mut self, ctx: egui::Context) {
+        // Create directory if it doesn't exist
+        if !self.brushes_path.exists() {
+            let _ = std::fs::create_dir_all(&self.brushes_path);
         }
+
+        self.loaded_brush_tips.clear();
+
+        if let Ok(entries) = std::fs::read_dir(&self.brushes_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                        if ["png", "jpg", "jpeg", "bmp"].contains(&ext.to_lowercase().as_str()) {
+                            if let Ok(img) = image::open(&path) {
+                                let img = img.to_luma8();
+                                let width = img.width() as usize;
+                                let height = img.height() as usize;
+                                let data = img.into_raw();
+                                
+                                let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                                let shape = PixelBrushShape::Custom { width, height, data: data.clone() };
+                                
+                                // Create UI texture for the tip
+                                // Invert for display if needed, but usually brush tips are white on black or alpha.
+                                // PixelBrushShape uses 0-255 as alpha mask.
+                                // Let's display it as white pixels with alpha.
+                                let mut pixels = Vec::with_capacity(width * height);
+                                for &alpha in &data {
+                                    pixels.push(Color32::from_white_alpha(alpha));
+                                }
+                                let texture_img = egui::ColorImage {
+                                    size: [width, height],
+                                    pixels,
+                                };
+                                let texture = ctx.load_texture(
+                                    format!("brush_tip_{}", name),
+                                    texture_img,
+                                    TextureOptions::NEAREST,
+                                );
+
+                                self.loaded_brush_tips.push((name, shape, Some(texture)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.loaded_brush_tips.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
     /// Mark all tiles that intersect a stroke segment as dirty so they re-upload to the atlas.
@@ -340,6 +386,11 @@ impl PainterApp {
 
     /// Begin a stroke at the given canvas coordinate and register undo state.
     fn start_stroke(&mut self, pos: Vec2) {
+        // Check if active layer is locked
+        if self.canvas.layers.get(self.canvas.active_layer_idx).map(|l| l.locked).unwrap_or(false) {
+            return;
+        }
+
         self.stroke = Some(StrokeState::new());
         self.is_drawing = true;
         self.current_undo_action = Some(UndoAction { tiles: Vec::new() });
@@ -690,23 +741,14 @@ impl eframe::App for PainterApp {
                     self.export_message = None;
                     self.show_export_modal = true;
                 }
+                if ui.button("Settings").clicked() {
+                    self.show_general_settings = true;
+                    ctx.request_repaint();
+                }
             });
         });
 
-        egui::SidePanel::left("tool_dock")
-            .resizable(true)
-            .default_width(340.0)
-            .min_width(260.0)
-            .show(ctx, |ui| {
-                ui.set_min_width(260.0);
-                let mut dock_state =
-                    std::mem::replace(&mut self.dock_state, DockState::new(Vec::new()));
-                {
-                    let mut viewer = ToolTabViewer { app: self };
-                    DockArea::new(&mut dock_state).show_inside(ui, &mut viewer);
-                }
-                self.dock_state = dock_state;
-            });
+        layout::show_tool_docks(self, ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.first_frame {
@@ -1008,8 +1050,7 @@ impl eframe::App for PainterApp {
         });
 
         ui::canvas_creation::canvas_creation_modal(self, ctx);
+        ui::general_settings::general_settings_modal(self, ctx);
         ui::export_modal::export_modal(self, ctx);
-
-        ctx.request_repaint_after(Duration::from_millis(10));
     }
 }

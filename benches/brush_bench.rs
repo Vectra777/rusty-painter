@@ -1,17 +1,22 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use eframe::egui::Color32;
 use rayon::ThreadPoolBuilder;
 use rusty_painter::{
     brush_engine::brush::{Brush, StrokeState},
     canvas::{canvas::Canvas, history::UndoAction},
-    utils::{ vector::Vec2},
+    utils::vector::Vec2,
 };
 use std::collections::HashSet;
 
 fn bench_soft_dab(c: &mut Criterion) {
     let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
     let canvas = Canvas::new(512, 512, Color32::WHITE, 64);
-    let mut brush = Brush::new(48.0, 50.0, Color32::from_rgba_unmultiplied(0, 0, 0, 255), 20.0);
+    let mut brush = Brush::new(
+        48.0,
+        50.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 255),
+        20.0,
+    );
     let mut undo_action = UndoAction { tiles: Vec::new() };
     let mut modified_tiles = HashSet::new();
 

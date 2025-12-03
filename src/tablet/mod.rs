@@ -63,10 +63,7 @@ impl TabletInput {
                         phase: TabletPhase::Up,
                     }),
                     ToolEvent::Pose(mut pose) => {
-                        pose.position = [
-                            pose.position[0] * scale,
-                            pose.position[1] * scale,
-                        ];
+                        pose.position = [pose.position[0] * scale, pose.position[1] * scale];
                         let pressure = pose.pressure.get().unwrap_or(1.0);
                         // Emit Move with real position; Down/Up already signaled separately.
                         out.push(TabletSample {

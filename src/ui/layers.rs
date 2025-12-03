@@ -29,6 +29,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     if ui.checkbox(&mut layer.visible, "").changed() {
                         vis_changed = true;
                     }
+                    ui.checkbox(&mut layer.locked, "🔒");
 
                     let is_active = i == active_idx;
                     let desired = egui::vec2(ui.available_width() - 40.0, 60.0);

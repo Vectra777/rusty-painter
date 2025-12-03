@@ -11,6 +11,7 @@ pub struct Layer {
     pub name: String,
     pub visible: bool,
     pub opacity: u8, // 0..255
+    pub locked: bool,
     tiles: Vec<Mutex<TileCell>>,
 }
 
@@ -26,6 +27,7 @@ impl Layer {
             name,
             visible: true,
             opacity: 255,
+            locked: false,
             tiles,
         }
     }
@@ -56,7 +58,10 @@ impl Canvas {
         let tiles_x = (width + tile_size - 1) / tile_size;
         let tiles_y = (height + tile_size - 1) / tile_size;
 
-        let bg_layer = Layer::new("Background".to_string(), width, height, tile_size);
+        let mut bg_layer = Layer::new("Background".to_string(), width, height, tile_size);
+        bg_layer.locked = true;
+        
+        let layer1 = Layer::new("Layer 1".to_string(), width, height, tile_size);
 
         // Initialize background layer with clear color
         // We can't easily pre-fill all tiles without allocating massive memory.
@@ -72,8 +77,8 @@ impl Canvas {
             tiles_x,
             tiles_y,
             clear_color: premultiply(clear_color),
-            layers: vec![bg_layer],
-            active_layer_idx: 0,
+            layers: vec![bg_layer, layer1],
+            active_layer_idx: 1,
         }
     }
 
@@ -305,11 +310,14 @@ impl Canvas {
                                 if let Some(guard) = guard_opt {
                                     if let Some(data) = &guard.data {
                                         let pixel = data[src_idx];
-                                        let src_color = apply_opacity_scale(pixel, layer.opacity as u32);
+                                        let src_color =
+                                            apply_opacity_scale(pixel, layer.opacity as u32);
                                         final_color = alpha_over(src_color, final_color);
                                     } else if layer_idx == 0 {
-                                        let src_color =
-                                            apply_opacity_scale(self.clear_color, layer.opacity as u32);
+                                        let src_color = apply_opacity_scale(
+                                            self.clear_color,
+                                            layer.opacity as u32,
+                                        );
                                         final_color = alpha_over(src_color, final_color);
                                     }
                                 } else if layer_idx == 0 {
@@ -353,23 +361,23 @@ impl Canvas {
                                         if let Some(guard) = guard_opt {
                                             if let Some(data) = &guard.data {
                                                 let pixel = data[src_idx];
-                                                let src_color =
-                                                    apply_opacity_scale(pixel, layer.opacity as u32);
+                                                let src_color = apply_opacity_scale(
+                                                    pixel,
+                                                    layer.opacity as u32,
+                                                );
                                                 pixel_color = alpha_over(src_color, pixel_color);
                                             } else if layer_idx == 0 {
-                                                let src_color =
-                                                    apply_opacity_scale(
-                                                        self.clear_color,
-                                                        layer.opacity as u32,
-                                                    );
-                                                pixel_color = alpha_over(src_color, pixel_color);
-                                            }
-                                        } else if layer_idx == 0 {
-                                            let src_color =
-                                                apply_opacity_scale(
+                                                let src_color = apply_opacity_scale(
                                                     self.clear_color,
                                                     layer.opacity as u32,
                                                 );
+                                                pixel_color = alpha_over(src_color, pixel_color);
+                                            }
+                                        } else if layer_idx == 0 {
+                                            let src_color = apply_opacity_scale(
+                                                self.clear_color,
+                                                layer.opacity as u32,
+                                            );
                                             pixel_color = alpha_over(src_color, pixel_color);
                                         }
                                     }
@@ -433,7 +441,8 @@ impl Canvas {
                             final_color = alpha_over(src_color, final_color);
                         } else if layer_idx == 0 {
                             // Background layer default color
-                            let src_color = apply_opacity_scale(self.clear_color, layer_opacity as u32);
+                            let src_color =
+                                apply_opacity_scale(self.clear_color, layer_opacity as u32);
                             final_color = alpha_over(src_color, final_color);
                         }
                     } else if layer_idx == 0 {
@@ -502,8 +511,6 @@ pub fn alpha_over(src: Color32, dst: Color32) -> Color32 {
         out_a.min(255) as u8,
     )
 }
-
-
 
 #[inline]
 fn apply_opacity_scale(color: Color32, opacity_scale: u32) -> Color32 {

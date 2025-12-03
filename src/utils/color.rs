@@ -29,7 +29,12 @@ impl ColorManipulation for Color32 {
         let g = (1.0 - m) * (1.0 - k);
         let b = (1.0 - y) * (1.0 - k);
 
-        Color32::from_rgba_unmultiplied(clamp_to_u8(r), clamp_to_u8(g), clamp_to_u8(b), clamp_to_u8(a))
+        Color32::from_rgba_unmultiplied(
+            clamp_to_u8(r),
+            clamp_to_u8(g),
+            clamp_to_u8(b),
+            clamp_to_u8(a),
+        )
     }
 
     fn to_cmyk(self) -> (f32, f32, f32, f32, f32) {
@@ -100,7 +105,11 @@ impl ColorManipulation for Color32 {
             ((r - g) / delta + 4.0) / 6.0
         };
 
-        let s = if max <= f32::EPSILON { 0.0 } else { delta / max };
+        let s = if max <= f32::EPSILON {
+            0.0
+        } else {
+            delta / max
+        };
         let v = max;
 
         (h, s, v, a as f32 / 255.0)

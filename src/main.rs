@@ -1,13 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-
 mod app;
 mod brush_engine;
 mod canvas;
 mod styling;
+mod tablet;
 mod ui;
 mod utils;
-mod tablet;
 
 pub use app::state::{
     BackgroundChoice, CanvasUnit, ColorDepth, ColorModel, NewCanvasSettings, Orientation,

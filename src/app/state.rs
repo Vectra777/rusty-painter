@@ -1,4 +1,4 @@
-use crate::{canvas::canvas::Canvas, utils::color::Color};
+use crate::canvas::canvas::Canvas;
 use eframe::egui::{Color32, TextureHandle};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
