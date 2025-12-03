@@ -2,15 +2,16 @@ use crate::PainterApp;
 use eframe::egui;
 
 /// Sidebar that manages the canvas layer stack.
-pub fn layers_window(ctx: &egui::Context, app: &mut PainterApp) {
+pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp) {
     let mut add_layer = false;
     let mut to_delete = None;
     let mut active_idx = app.canvas.active_layer_idx;
     let mut needs_refresh = false;
     let mut item_rects: Vec<(usize, egui::Rect)> = Vec::new();
-    egui::Window::new("Layers")
-        .default_width(320.0)
-        .show(ctx, |ui| {
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("New Layer").clicked() {
                     add_layer = true;
@@ -30,7 +31,7 @@ pub fn layers_window(ctx: &egui::Context, app: &mut PainterApp) {
                     }
 
                     let is_active = i == active_idx;
-                    let desired = egui::vec2(ui.available_width()-40., 60.0);
+                    let desired = egui::vec2(ui.available_width() - 40.0, 60.0);
                     let (rect, block_response) =
                         ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
                     item_rects.push((i, rect));
@@ -73,13 +74,11 @@ pub fn layers_window(ctx: &egui::Context, app: &mut PainterApp) {
                         }
                     }
 
-                    // Opacity slider
                     let response = content
                         .add(egui::Slider::new(&mut layer.opacity, 0..=255).show_value(false));
                     opacity_released =
                         response.drag_stopped() || (response.changed() && !response.dragged());
 
-                    // Inline color picker for block tint
                     if let Some(color) = app.layer_ui_colors.get_mut(i) {
                         if content.color_edit_button_srgba(color).clicked() {
                             active_idx = i;
@@ -89,7 +88,7 @@ pub fn layers_window(ctx: &egui::Context, app: &mut PainterApp) {
                     if app.canvas.layers.len() > 1 && i != 0 {
                         content.add_space(30.0);
                         let response =
-                            content.add_sized(egui::vec2(20., 24.0), egui::Button::new("🗑"));
+                            content.add_sized(egui::vec2(20.0, 24.0), egui::Button::new("🗑"));
                         if response.clicked() {
                             delete_clicked = true;
                         }
@@ -145,7 +144,6 @@ pub fn layers_window(ctx: &egui::Context, app: &mut PainterApp) {
                 }
             }
 
-            // Draw drag ghost following cursor within the list bounds.
             if let Some(drag_idx) = app.layer_dragging {
                 if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
                     if let Some((_, first_rect)) = item_rects.first() {

@@ -11,6 +11,7 @@ use crate::{
 };
 use eframe::egui;
 use eframe::egui::{Color32, TextureOptions};
+use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::collections::{HashMap, HashSet};
@@ -20,6 +21,66 @@ use std::time::Duration;
 
 const TILE_SIZE: usize = 64;
 const ATLAS_SIZE: usize = 2048;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ToolTab {
+    BrushSettings,
+    BrushPresets,
+    ColorPicker,
+    Layers,
+    GeneralSettings,
+}
+
+impl ToolTab {
+    fn title(self) -> &'static str {
+        match self {
+            ToolTab::BrushSettings => "Brush Settings",
+            ToolTab::BrushPresets => "Brush Presets",
+            ToolTab::ColorPicker => "Color Picker",
+            ToolTab::Layers => "Layers",
+            ToolTab::GeneralSettings => "General",
+        }
+    }
+}
+
+struct ToolTabViewer<'a> {
+    app: &'a mut PainterApp,
+}
+
+impl<'a> TabViewer for ToolTabViewer<'a> {
+    type Tab = ToolTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.title().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            ToolTab::BrushSettings => {
+                ui::brush_settings::brush_settings_panel(ui, &mut self.app.brush)
+            }
+            ToolTab::BrushPresets => {
+                ui::brush_list::brush_list_panel(ui, &mut self.app.brush, &self.app.presets)
+            }
+            ToolTab::ColorPicker => {
+                ui::color_picker::color_picker_panel(ui, &mut self.app.brush, self.app.color_model)
+            }
+            ToolTab::Layers => {
+                let ctx = ui.ctx().clone();
+                ui::layers::layers_panel(&ctx, ui, self.app);
+            }
+            ToolTab::GeneralSettings => ui::general_settings::general_settings_panel(self.app, ui),
+        }
+    }
+
+    fn closeable(&mut self, _tab: &mut Self::Tab) -> bool {
+        false
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
+    }
+}
 
 /// Main egui application that owns the canvas, brush state, UI and rendering caches.
 pub struct PainterApp {
@@ -66,6 +127,7 @@ pub struct PainterApp {
     pub(crate) export_progress_rx: Option<mpsc::Receiver<crate::ui::export_modal::ExportProgress>>,
     pub(crate) color_model: ColorModel,
     pub(crate) texture_generation: u64,
+    pub(crate) dock_state: DockState<ToolTab>,
     pub(crate) tablet: Option<TabletInput>,
 }
 
@@ -170,6 +232,17 @@ impl PainterApp {
             }
         }
 
+        let mut dock_state = DockState::new(vec![
+            ToolTab::BrushSettings,
+            ToolTab::ColorPicker,
+            ToolTab::BrushPresets,
+        ]);
+        dock_state.main_surface_mut().split_below(
+            NodeIndex::root(),
+            0.6,
+            vec![ToolTab::Layers, ToolTab::GeneralSettings],
+        );
+
         Self {
             canvas,
             brush,
@@ -211,6 +284,7 @@ impl PainterApp {
             export_progress_rx: None,
             color_model,
             texture_generation: 0,
+            dock_state,
             tablet: TabletInput::new(cc),
         }
     }
@@ -603,13 +677,36 @@ impl eframe::App for PainterApp {
             }
         }
 
-        ui::brush_settings::brush_settings_window(ctx, &mut self.brush);
-        ui::color_picker::color_picker_window(ctx, &mut self.brush, self.color_model);
-        ui::brush_list::brush_list_window(ctx, &mut self.brush, &self.presets);
-        ui::layers::layers_window(ctx, self);
-        ui::general_settings::general_settings_ui(self, ctx);
-        ui::canvas_creation::canvas_creation_modal(self, ctx);
-        ui::export_modal::export_modal(self, ctx);
+        egui::TopBottomPanel::top("quick_settings").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("New Canvas").clicked() {
+                    self.new_canvas.sync_from_canvas(&self.canvas);
+                    self.new_canvas.color_model = self.color_model;
+                    self.show_new_canvas_modal = true;
+                }
+                ui.add(egui::Slider::new(&mut self.brush.diameter, 1.0..=3000.0));
+                if ui.button("Export").clicked() {
+                    self.export_settings.chosen_path = None;
+                    self.export_message = None;
+                    self.show_export_modal = true;
+                }
+            });
+        });
+
+        egui::SidePanel::left("tool_dock")
+            .resizable(true)
+            .default_width(340.0)
+            .min_width(260.0)
+            .show(ctx, |ui| {
+                ui.set_min_width(260.0);
+                let mut dock_state =
+                    std::mem::replace(&mut self.dock_state, DockState::new(Vec::new()));
+                {
+                    let mut viewer = ToolTabViewer { app: self };
+                    DockArea::new(&mut dock_state).show_inside(ui, &mut viewer);
+                }
+                self.dock_state = dock_state;
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.first_frame {
@@ -629,7 +726,6 @@ impl eframe::App for PainterApp {
                 self.first_frame = false;
             }
 
-            // sync dirty tiles to GPU with simple LOD when zoomed out
             let lod_step = if self.disable_lod {
                 1
             } else if self.zoom < 1.0 {
@@ -685,7 +781,6 @@ impl eframe::App for PainterApp {
             let (rect, response) =
                 ui.allocate_at_least(ui.available_size(), egui::Sense::click_and_drag());
 
-            // Top-left of the canvas in UI coordinates
             let origin = rect.min + egui::vec2(self.offset.x, self.offset.y);
             let canvas_center = origin + canvas_size * 0.5;
             let cos = self.rotation.cos();
@@ -760,7 +855,6 @@ impl eframe::App for PainterApp {
                 }
             }
 
-            // Pump tablet input and feed into stroke pipeline.
             if let Some(tablet) = &mut self.tablet {
                 let scale = ctx.input(|i| i.pixels_per_point());
                 for sample in tablet.poll(scale) {
@@ -900,30 +994,12 @@ impl eframe::App for PainterApp {
                 }
             }
 
-            egui::TopBottomPanel::top("quick settings").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("New Canvas").clicked() {
-                        self.new_canvas.sync_from_canvas(&self.canvas);
-                        self.new_canvas.color_model = self.color_model;
-                        self.show_new_canvas_modal = true;
-                    }
-                    ui.add(egui::Slider::new(&mut self.brush.diameter, 1.0..=3000.0));
-                    if ui.button("Export").clicked() {
-                        self.export_settings.chosen_path = None;
-                        self.export_message = None;
-                        self.show_export_modal = true;
-                    }
-                });
-            });
-
-            // 4) Request repaint only while drawing
             if self.is_drawing {
                 ctx.request_repaint();
             }
 
             if ui.input(|i| i.key_pressed(egui::Key::C)) {
                 self.canvas.clear(Color32::WHITE);
-                // mark all tiles dirty
                 for tile in &mut self.tiles {
                     tile.dirty = true;
                 }
@@ -931,7 +1007,9 @@ impl eframe::App for PainterApp {
             }
         });
 
-        // Soft cap frame rate to reduce CPU/GPU load when many tiles are present.
+        ui::canvas_creation::canvas_creation_modal(self, ctx);
+        ui::export_modal::export_modal(self, ctx);
+
         ctx.request_repaint_after(Duration::from_millis(10));
     }
 }
