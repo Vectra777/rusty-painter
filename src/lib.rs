@@ -1,6 +1,7 @@
 pub mod app;
 pub mod brush_engine;
 pub mod canvas;
+pub mod selection;
 pub mod styling;
 pub mod tablet;
 pub mod ui;

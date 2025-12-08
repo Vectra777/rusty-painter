@@ -2,7 +2,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use eframe::egui::Color32;
 use rayon::ThreadPoolBuilder;
 use rusty_painter::{
-    brush_engine::brush::{Brush, StrokeState},
+    brush_engine::{brush::Brush, stroke::StrokeState},
     canvas::{canvas::Canvas, history::UndoAction},
     utils::vector::Vec2,
 };

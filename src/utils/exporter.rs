@@ -38,6 +38,7 @@ impl ExportFormat {
 }
 
 /// Export the flattened canvas (all visible layers composited) to an image file.
+#[allow(dead_code)]
 pub fn export_canvas(canvas: &Canvas, path: &Path, format: ExportFormat) -> Result<(), String> {
     let width = canvas.width();
     let height = canvas.height();

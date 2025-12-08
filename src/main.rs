@@ -4,6 +4,7 @@ mod app;
 mod brush_engine;
 mod canvas;
 mod styling;
+mod selection;
 mod tablet;
 mod ui;
 mod utils;

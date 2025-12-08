@@ -210,24 +210,24 @@ fn hsva_triangle(ui: &mut egui::Ui, hue: f32, sat: &mut f32, val: &mut f32, side
     changed
 }
 
-/// Interactive HSVA picker that updates the active brush color.
+/// Interactive HSVA picker that updates the active brush.brush_options.color.
 pub fn color_picker_panel(ui: &mut egui::Ui, brush: &mut Brush, color_model: ColorModel) {
     let min_width = slider_width(ui);
     ui.set_min_width(min_width);
 
     let id = ui.id().with("color_picker_state");
-    let (mut hue, mut sat, mut val, mut alpha) = brush.color.to_hsva();
+    let (mut hue, mut sat, mut val, mut alpha) = brush.brush_options.color.to_hsva();
     let mut state = ui.ctx().data_mut(|d| {
         d.get_temp::<PickerState>(id).unwrap_or(PickerState {
             hue,
-            last_color: brush.color,
+            last_color: brush.brush_options.color,
         })
     });
 
-    if state.last_color != brush.color {
-        let (nh, _, _, _) = brush.color.to_hsva();
+    if state.last_color != brush.brush_options.color {
+        let (nh, _, _, _) = brush.brush_options.color.to_hsva();
         state.hue = nh;
-        state.last_color = brush.color;
+        state.last_color = brush.brush_options.color;
     }
 
     hue = state.hue;
@@ -242,28 +242,28 @@ pub fn color_picker_panel(ui: &mut egui::Ui, brush: &mut Brush, color_model: Col
             }
             ColorModel::Grayscale => {
                 if grayscale_picker(ui, brush) {
-                    let (h, _, _, _) = brush.color.to_hsva();
+                    let (h, _, _, _) = brush.brush_options.color.to_hsva();
                     state.hue = h;
-                    state.last_color = brush.color;
+                    state.last_color = brush.brush_options.color;
                     ui.ctx().data_mut(|d| d.insert_temp(id, state));
                 }
             }
         });
 
     if apply_color {
-        brush.color = Color32::from_hsva(hue, sat, val, alpha);
+        brush.brush_options.color = Color32::from_hsva(hue, sat, val, alpha);
         state.hue = hue;
-        state.last_color = brush.color;
+        state.last_color = brush.brush_options.color;
         ui.ctx().data_mut(|d| d.insert_temp(id, state));
     }
 }
 
 fn grayscale_picker(ui: &mut egui::Ui, brush: &mut Brush) -> bool {
     let width = slider_width(ui);
-    let mut value = (brush.color.r() as u16 + brush.color.g() as u16 + brush.color.b() as u16)
+    let mut value = (brush.brush_options.color.r() as u16 + brush.brush_options.color.g() as u16 + brush.brush_options.color.b() as u16)
         as f32
         / (3.0 * 255.0);
-    let mut alpha = brush.color.a() as f32 / 255.0;
+    let mut alpha = brush.brush_options.color.a() as f32 / 255.0;
     let mut changed = false;
 
     ui.label("Grayscale");
@@ -291,15 +291,16 @@ fn grayscale_picker(ui: &mut egui::Ui, brush: &mut Brush) -> bool {
     });
 
     if changed {
-        brush.color = Color32::from_gray_alpha(value, alpha);
+        brush.brush_options.color = Color32::from_gray_alpha(value, alpha);
     }
 
     changed
 }
 
+#[allow(dead_code)]
 fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
     let width = slider_width(ui);
-    let (mut c, mut m, mut y, mut k, mut a) = brush.color.to_cmyk();
+    let (mut c, mut m, mut y, mut k, mut a) = brush.brush_options.color.to_cmyk();
     let mut changed = false;
     let mut color = Color32::from_cmyk(c, m, y, k, a);
 
@@ -364,7 +365,7 @@ fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
     });
 
     if changed {
-        brush.color = Color32::from_cmyk(c, m, y, k, a);
+        brush.brush_options.color = Color32::from_cmyk(c, m, y, k, a);
     }
 }
 

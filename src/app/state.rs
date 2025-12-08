@@ -1,6 +1,9 @@
 use crate::canvas::canvas::Canvas;
 use eframe::egui::{Color32, TextureHandle};
 
+pub const TILE_SIZE: usize = 64;
+pub const ATLAS_SIZE: usize = 2048;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanvasUnit {
     Pixels,

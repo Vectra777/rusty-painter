@@ -190,12 +190,12 @@ impl Canvas {
     }
 
     /// Lock a tile in the active layer, initializing it if absent.
-    pub fn lock_tile(&self, tx: usize, ty: usize) -> Option<std::sync::MutexGuard<'_, TileCell>> {
+    pub(crate) fn lock_tile(&self, tx: usize, ty: usize) -> Option<std::sync::MutexGuard<'_, TileCell>> {
         self.ensure_tile(tx, ty)
     }
 
     /// Lock a tile in a specific layer, initializing it if absent.
-    pub fn lock_layer_tile(
+    pub(crate) fn lock_layer_tile(
         &self,
         layer_idx: usize,
         tx: usize,
@@ -205,7 +205,7 @@ impl Canvas {
     }
 
     /// Lock a tile in a specific layer only if it already exists; avoids allocating new data.
-    pub fn lock_layer_tile_if_exists(
+    pub(crate) fn lock_layer_tile_if_exists(
         &self,
         layer_idx: usize,
         tx: usize,
@@ -535,6 +535,7 @@ fn premultiply(color: Color32) -> Color32 {
     Color32::from_rgba_premultiplied(r as u8, g as u8, b as u8, a as u8)
 }
 
+#[allow(dead_code)]
 fn unpremultiply(color: Color32) -> Color32 {
     let a = color.a() as u32;
     if a == 0 || a >= 255 {

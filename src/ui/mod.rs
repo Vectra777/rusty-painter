@@ -6,3 +6,4 @@ pub mod color_picker;
 pub mod export_modal;
 pub mod general_settings;
 pub mod layers;
+pub mod top_bar;

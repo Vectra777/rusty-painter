@@ -16,6 +16,7 @@ pub enum TabletPhase {
 pub struct TabletSample {
     pub pos: [f32; 2],
     pub pressure: f32,
+    #[allow(dead_code)]
     pub is_eraser: bool,
     pub phase: TabletPhase,
 }

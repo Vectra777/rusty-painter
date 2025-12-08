@@ -1,4 +1,5 @@
-use crate::brush_engine::brush::{Brush, BrushPreset, StrokeState};
+use crate::brush_engine::brush::{Brush, BrushPreset};
+use crate::brush_engine::stroke::StrokeState;
 use crate::canvas::canvas::Canvas;
 use crate::canvas::history::UndoAction;
 use crate::utils::vector::Vec2;
@@ -104,9 +105,9 @@ pub fn brush_list_panel(
 
                     let response = response.on_hover_text(&preset.name);
                     if response.clicked() {
-                        let current_color = brush.color;
+                        let current_color = brush.brush_options.color;
                         *brush = preset.brush.clone();
-                        brush.color = current_color;
+                        brush.brush_options.color = current_color;
                     }
                     
                     ui.label(egui::RichText::new(&preset.name).size(10.0).weak());
@@ -126,8 +127,8 @@ fn generate_preset_preview(brush_template: &Brush, pool: &ThreadPool, ctx: &egui
     
     let mut brush = brush_template.clone();
     // Normalize brush size for preview so huge brushes don't look weird
-    brush.diameter = 20.0; 
-    brush.color = Color32::WHITE;
+    brush.brush_options.diameter = 20.0; 
+    brush.brush_options.color = Color32::WHITE;
     
     let mut stroke = StrokeState::new();
     let mut undo = UndoAction { tiles: Vec::new() };
@@ -147,7 +148,7 @@ fn generate_preset_preview(brush_template: &Brush, pool: &ThreadPool, ctx: &egui
         let y = height * 0.5 + (phase.sin() * height * 0.3);
         
         let pressure = (t * std::f32::consts::PI).sin();
-        brush.diameter = (20.0 * pressure).max(2.0);
+        brush.brush_options.diameter = (20.0 * pressure).max(2.0);
         
         stroke.add_point(pool, &canvas, &mut brush, Vec2 { x, y }, &mut undo, &mut modified);
     }
