@@ -1,4 +1,4 @@
-use crate::brush_engine::brush::Brush;
+use crate::brush_engine::brush::{Brush, StabilizerAlgorithm};
 use crate::canvas::canvas::Canvas;
 use crate::canvas::history::UndoAction;
 use crate::selection::SelectionManager;
@@ -10,6 +10,7 @@ use rand::Rng;
 /// Tracks per-stroke state like the last position and spacing accumulator.
 pub struct StrokeState {
     pub last_pos: Option<Vec2>,
+    pub velocity: Vec2,
     dist_until_next_blit: f32,
     stroke_timer: Option<ScopeTimer>,
 }
@@ -19,6 +20,7 @@ impl StrokeState {
     pub fn new() -> Self {
         Self {
             last_pos: None,
+            velocity: Vec2 { x: 0.0, y: 0.0 },
             dist_until_next_blit: 0.0,
             stroke_timer: Some(ScopeTimer::new("stroke")),
         }
@@ -40,16 +42,45 @@ impl StrokeState {
             return;
         }
 
-        let pos = if brush.stabilizer > 0.0 {
-            if let Some(prev) = self.last_pos {
-                let factor = 1.0 - (brush.stabilizer * 0.95);
-                let diff = raw_pos - prev;
-                prev + diff * factor
-            } else {
-                raw_pos
+        let pos = match brush.stabilizer_algorithm {
+            StabilizerAlgorithm::None => raw_pos,
+            StabilizerAlgorithm::Simple => {
+                if brush.stabilizer > 0.0 {
+                    if let Some(prev) = self.last_pos {
+                        let factor = 1.0 - (brush.stabilizer * 0.95);
+                        let diff = raw_pos - prev;
+                        prev + diff * factor
+                    } else {
+                        raw_pos
+                    }
+                } else {
+                    raw_pos
+                }
             }
-        } else {
-            raw_pos
+            StabilizerAlgorithm::Dynamic => {
+                if let Some(prev) = self.last_pos {
+                    // Physics simulation:
+                    // Treat the cursor as a target pulling the brush with a spring.
+                    // Force = (Target - Current)
+                    // Acceleration = Force / Mass
+                    // Velocity += Acceleration
+                    // Velocity *= (1.0 - Drag)
+                    // NewPos = Current + Velocity
+                    
+                    let force = raw_pos - prev;
+                    // Scale mass so 0.01..1.0 maps to useful behavior
+                    let mass = brush.stabilizer_mass.max(0.01) * 50.0; 
+                    let acceleration = force / mass;
+                    
+                    self.velocity = self.velocity + acceleration;
+                    // Drag 0.0..1.0
+                    self.velocity = self.velocity * (1.0 - brush.stabilizer_drag);
+                    
+                    prev + self.velocity
+                } else {
+                    raw_pos
+                }
+            }
         };
 
         let spacing_dist = (brush.brush_options.spacing / 100.0) * brush.brush_options.diameter;

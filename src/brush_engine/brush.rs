@@ -16,7 +16,12 @@ pub enum BrushType {
     Pixel,
 }
 
-
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum StabilizerAlgorithm {
+    None,
+    Simple,
+    Dynamic,
+}
 
 /// Rectangular region inside a tile that needs to be touched by a dab.
 #[derive(Clone, Copy, Debug)]
@@ -39,7 +44,10 @@ pub struct Brush {
     pub pixel_perfect: bool,
     pub anti_aliasing: bool,
     pub jitter: f32,
-    pub stabilizer: f32, // 0..1 (0 = off, 1 = max smoothing)
+    pub stabilizer: f32, // 0..1 (0 = off, 1 = max smoothing) - Used for Simple
+    pub stabilizer_algorithm: StabilizerAlgorithm,
+    pub stabilizer_mass: f32, // 0.01..1.0
+    pub stabilizer_drag: f32, // 0.0..1.0
 }
 
 impl Brush {
@@ -52,6 +60,9 @@ impl Brush {
             anti_aliasing: true,
             jitter: 0.0,
             stabilizer: 0.0,
+            stabilizer_algorithm: StabilizerAlgorithm::None,
+            stabilizer_mass: 0.1,
+            stabilizer_drag: 0.5,
             is_changed: false,
         }
     }
@@ -66,6 +77,9 @@ impl Brush {
             anti_aliasing: false,
             jitter: 0.0,
             stabilizer: 0.0,
+            stabilizer_algorithm: StabilizerAlgorithm::None,
+            stabilizer_mass: 0.1,
+            stabilizer_drag: 0.5,
             is_changed: false,
         }
     }

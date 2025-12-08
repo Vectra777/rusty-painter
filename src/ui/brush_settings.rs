@@ -1,4 +1,4 @@
-use crate::brush_engine::brush::{Brush, BrushType};
+use crate::brush_engine::brush::{Brush, BrushType, StabilizerAlgorithm};
 use crate::brush_engine::stroke::StrokeState;
 use crate::brush_engine::brush_options::{BlendMode, PixelBrushShape};
 use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve, SoftnessSelector};
@@ -168,7 +168,22 @@ pub fn brush_settings_panel(
     if ui.add(egui::Slider::new(&mut brush.jitter, 0.0..=50.0)).changed() { preview.dirty = true; }
 
     ui.label("Stabilizer:");
-    if ui.add(egui::Slider::new(&mut brush.stabilizer, 0.0..=1.0)).changed() { preview.dirty = true; }
+    ui.horizontal(|ui| {
+        if ui.selectable_value(&mut brush.stabilizer_algorithm, StabilizerAlgorithm::None, "None").changed() { preview.dirty = true; }
+        if ui.selectable_value(&mut brush.stabilizer_algorithm, StabilizerAlgorithm::Simple, "Simple").changed() { preview.dirty = true; }
+        if ui.selectable_value(&mut brush.stabilizer_algorithm, StabilizerAlgorithm::Dynamic, "Dynamic").changed() { preview.dirty = true; }
+    });
+
+    match brush.stabilizer_algorithm {
+        StabilizerAlgorithm::None => {},
+        StabilizerAlgorithm::Simple => {
+            if ui.add(egui::Slider::new(&mut brush.stabilizer, 0.0..=1.0).text("Strength")).changed() { preview.dirty = true; }
+        },
+        StabilizerAlgorithm::Dynamic => {
+            if ui.add(egui::Slider::new(&mut brush.stabilizer_mass, 0.01..=1.0).text("Mass")).changed() { preview.dirty = true; }
+            if ui.add(egui::Slider::new(&mut brush.stabilizer_drag, 0.0..=1.0).text("Drag")).changed() { preview.dirty = true; }
+        }
+    }
 
     ui.separator();
     if ui.checkbox(&mut brush.pixel_perfect, "Pixel Perfect Mode").changed() { preview.dirty = true; }
