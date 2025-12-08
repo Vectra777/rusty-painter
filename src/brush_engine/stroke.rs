@@ -1,6 +1,7 @@
 use crate::brush_engine::brush::Brush;
 use crate::canvas::canvas::Canvas;
 use crate::canvas::history::UndoAction;
+use crate::selection::SelectionManager;
 use crate::utils::{profiler::ScopeTimer, vector::Vec2};
 use rayon::ThreadPool;
 use std::collections::HashSet;
@@ -29,12 +30,13 @@ impl StrokeState {
         pool: &ThreadPool,
         canvas: &Canvas,
         brush: &mut Brush,
+        selection: Option<&SelectionManager>,
         raw_pos: Vec2,
         undo_action: &mut UndoAction,
         modified_tiles: &mut HashSet<(usize, usize)>,
     ) {
         if brush.pixel_perfect {
-            self.add_point_pixel_perfect(pool, canvas, brush, raw_pos, undo_action, modified_tiles);
+            self.add_point_pixel_perfect(pool, canvas, brush, selection, raw_pos, undo_action, modified_tiles);
             return;
         }
 
@@ -79,7 +81,7 @@ impl StrokeState {
                     p.x += jx;
                     p.y += jy;
                 }
-                brush.dab(pool, canvas, p, undo_action, modified_tiles);
+                brush.dab(pool, canvas, selection, p, undo_action, modified_tiles);
 
                 self.dist_until_next_blit = spacing_dist;
             }
@@ -96,7 +98,7 @@ impl StrokeState {
                 p.x += jx;
                 p.y += jy;
             }
-            brush.dab(pool, canvas, p, undo_action, modified_tiles);
+            brush.dab(pool, canvas, selection, p, undo_action, modified_tiles);
             self.dist_until_next_blit = spacing_dist;
         }
 
@@ -109,6 +111,7 @@ impl StrokeState {
         pool: &ThreadPool,
         canvas: &Canvas,
         brush: &mut Brush,
+        selection: Option<&SelectionManager>,
         pos: Vec2,
         undo_action: &mut UndoAction,
         modified_tiles: &mut HashSet<(usize, usize)>,
@@ -137,6 +140,7 @@ impl StrokeState {
                 brush.dab(
                     pool,
                     canvas,
+                    selection,
                     Vec2 {
                         x: x as f32 + 0.5,
                         y: y as f32 + 0.5,
@@ -162,6 +166,7 @@ impl StrokeState {
             brush.dab(
                 pool,
                 canvas,
+                selection,
                 Vec2 {
                     x: x1 as f32 + 0.5,
                     y: y1 as f32 + 0.5,

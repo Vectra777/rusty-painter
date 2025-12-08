@@ -1,7 +1,7 @@
 use crate::{brush_engine::{brush_options::{BlendMode, PixelBrushShape}, hardness::SoftnessSelector}, canvas::{
     canvas::{Canvas, alpha_over, blend_erase},
     history::{TileSnapshot, UndoAction},
-}};
+}, selection::SelectionManager};
 use crate::utils::vector::Vec2;
 use eframe::egui::Color32;
 use rayon::ThreadPool;
@@ -75,13 +75,14 @@ impl Brush {
         &mut self,
         pool: &ThreadPool,
         canvas: &Canvas,
+        selection: Option<&SelectionManager>,
         center: Vec2,
         undo_action: &mut UndoAction,
         modified_tiles: &mut HashSet<(usize, usize)>,
     ) {
         match self.brush_type {
-            BrushType::Soft => self.soft_dab(pool, canvas, center, undo_action, modified_tiles),
-            BrushType::Pixel => self.pixel_dab(pool, canvas, center, undo_action, modified_tiles),
+            BrushType::Soft => self.soft_dab(pool, canvas, selection, center, undo_action, modified_tiles),
+            BrushType::Pixel => self.pixel_dab(pool, canvas, selection, center, undo_action, modified_tiles),
         }
     }
 
@@ -124,11 +125,12 @@ impl Brush {
         }
     }
 
-    /// Render a hard-edged dab for the pixel brush using a serial loop.
+    /// Render a hard, pixel-aligned dab.
     fn pixel_dab(
-        &self,
+        &mut self,
         _pool: &ThreadPool,
         canvas: &Canvas,
+        selection: Option<&SelectionManager>,
         center: Vec2,
         undo_action: &mut UndoAction,
         modified_tiles: &mut HashSet<(usize, usize)>,
@@ -218,6 +220,12 @@ impl Brush {
                     for gx in overlap_min_x..=overlap_max_x {
                         let dx = gx as f32 + 0.5 - center.x;
 
+                        if let Some(sel) = selection {
+                            if !sel.contains(Vec2 { x: gx as f32 + 0.5, y: gy as f32 + 0.5 }) {
+                                continue;
+                            }
+                        }
+
                         let (in_shape, alpha_mod) = match self.brush_options.pixel_shape {
                             PixelBrushShape::Circle => (dx * dx + dy * dy <= r_sq, 1.0),
                             PixelBrushShape::Square => (dx.abs() <= r && dy.abs() <= r, 1.0),
@@ -282,6 +290,7 @@ impl Brush {
         &mut self,
         _pool: &ThreadPool,
         canvas: &Canvas,
+        selection: Option<&SelectionManager>,
         center: Vec2,
         undo_action: &mut UndoAction,
         modified_tiles: &mut HashSet<(usize, usize)>,
@@ -493,6 +502,12 @@ impl Brush {
                         for gx in overlap_min_x..=overlap_max_x {
                             let pdx = gx as f32 + 0.5 - center_x;
                             let pdy = gy as f32 + 0.5 - center_y;
+
+                            if let Some(sel) = selection {
+                                if !sel.contains(Vec2 { x: gx as f32 + 0.5, y: gy as f32 + 0.5 }) {
+                                    continue;
+                                }
+                            }
                             
                             let alpha_factor = if anti_aliasing {
                                 // Anti-aliased path (smooth, uses get_base_alpha and AA fade)

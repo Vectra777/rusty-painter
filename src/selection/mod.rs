@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, Painter, Pos2, Stroke};
+use eframe::egui::{self, Color32, Painter, Pos2, Stroke, Shape};
 use crate::utils::vector::Vec2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,8 +73,49 @@ impl SelectionManager {
 
     pub fn end_selection(&mut self) {
         self.is_dragging = false;
-        // Here is where we would usually "commit" the shape to a pixel mask or path.
-        // For this step, we just keep the shape to display it.
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.current_shape = None;
+        self.is_dragging = false;
+    }
+
+    pub fn contains(&self, p: Vec2) -> bool {
+        if let Some(shape) = &self.current_shape {
+            match shape {
+                SelectionShape::Rectangle { start, end } => {
+                    let x0 = start.x.min(end.x);
+                    let x1 = start.x.max(end.x);
+                    let y0 = start.y.min(end.y);
+                    let y1 = start.y.max(end.y);
+                    p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1
+                }
+                SelectionShape::Circle { center, radius } => {
+                    let dx = p.x - center.x;
+                    let dy = p.y - center.y;
+                    dx * dx + dy * dy <= radius * radius
+                }
+                SelectionShape::Lasso { points } => {
+                    if points.len() < 3 { return false; }
+                    let mut inside = false;
+                    let mut j = points.len() - 1;
+                    for i in 0..points.len() {
+                        if (points[i].y > p.y) != (points[j].y > p.y) &&
+                            p.x < (points[j].x - points[i].x) * (p.y - points[i].y) / (points[j].y - points[i].y) + points[i].x {
+                            inside = !inside;
+                        }
+                        j = i;
+                    }
+                    inside
+                }
+            }
+        } else {
+            true
+        }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.current_shape.is_some()
     }
 
     pub fn draw_overlay(&self, painter: &Painter, zoom: f32, offset: Pos2, _canvas_height: f32) {
@@ -86,40 +127,51 @@ impl SelectionManager {
                 )
             };
 
-            let stroke = Stroke::new(1.0, Color32::WHITE);
-            let fill = Color32::from_rgba_unmultiplied(200, 200, 255, 50);
+            let stroke_white = Stroke::new(1.0, Color32::WHITE);
+            let stroke_black = Stroke::new(1.0, Color32::BLACK);
+            let dash_len = 5.0;
+            let gap_len = 5.0;
 
             match shape {
                 SelectionShape::Rectangle { start, end } => {
                     let p1 = to_screen(*start);
                     let p2 = to_screen(*end);
                     let rect = egui::Rect::from_two_pos(p1, p2);
-                    painter.rect(rect, 0.0, fill, stroke);
-                    
-                    // Marching ants effect could be added here with a dashed stroke
+
+                    let points = vec![
+                        rect.min,
+                        Pos2::new(rect.max.x, rect.min.y),
+                        rect.max,
+                        Pos2::new(rect.min.x, rect.max.y),
+                        rect.min,
+                    ];
+                    painter.add(Shape::line(points.clone(), stroke_black));
+                    painter.add(Shape::dashed_line(&points, stroke_white, dash_len, gap_len));
                 }
                 SelectionShape::Circle { center, radius } => {
                     let center_screen = to_screen(*center);
                     let radius_screen = *radius * zoom;
-                    painter.circle(center_screen, radius_screen, fill, stroke);
+
+                    let n = 64;
+                    let mut points = Vec::with_capacity(n + 1);
+                    for i in 0..=n {
+                        let angle = (i as f32 / n as f32) * 2.0 * std::f32::consts::PI;
+                        let (sin, cos) = angle.sin_cos();
+                        points.push(center_screen + eframe::egui::Vec2::new(cos, sin) * radius_screen);
+                    }
+                    painter.add(Shape::line(points.clone(), stroke_black));
+                    painter.add(Shape::dashed_line(&points, stroke_white, dash_len, gap_len));
                 }
                 SelectionShape::Lasso { points } => {
                     if points.len() < 2 { return; }
                     let screen_points: Vec<Pos2> = points.iter().map(|p| to_screen(*p)).collect();
                     
-                    // Draw fill (requires tessellation, simpler to just draw closed line for now or use convex polygon if convex)
-                    // Since lasso can be concave, fill is tricky without triangulation. 
-                    // We'll just draw the line loop and a rough fill if egui supports it easily.
-                    // egui::Shape::Path implies filled?
-                    
-                    painter.add(egui::Shape::convex_polygon(
-                        screen_points.clone(),
-                        fill,
-                        stroke,
-                    ));
-                     // Note: convex_polygon is incorrect for concave lassos, but simple for now.
-                     // Better: line strip.
-                     painter.add(egui::Shape::line(screen_points, stroke));
+                    let mut outline_points = screen_points.clone();
+                    if let Some(first) = screen_points.first() {
+                         outline_points.push(*first);
+                    }
+                    painter.add(Shape::line(outline_points.clone(), stroke_black));
+                    painter.add(Shape::dashed_line(&outline_points, stroke_white, dash_len, gap_len));
                 }
             }
         }

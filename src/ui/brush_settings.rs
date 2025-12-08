@@ -227,7 +227,7 @@ fn render_preview(state: &mut BrushPreviewState, brush: &mut Brush, pool: &Threa
         // Optional: apply to opacity
         // brush.brush_options.opacity = original_opacity * pressure;
         
-        stroke.add_point(pool, &state.canvas, brush, pos, &mut undo_action, &mut modified);
+        stroke.add_point(pool, &state.canvas, brush, None, pos, &mut undo_action, &mut modified);
     }
     
     brush.brush_options.diameter = original_diameter;

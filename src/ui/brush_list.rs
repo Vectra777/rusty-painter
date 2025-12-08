@@ -150,7 +150,7 @@ fn generate_preset_preview(brush_template: &Brush, pool: &ThreadPool, ctx: &egui
         let pressure = (t * std::f32::consts::PI).sin();
         brush.brush_options.diameter = (20.0 * pressure).max(2.0);
         
-        stroke.add_point(pool, &canvas, &mut brush, Vec2 { x, y }, &mut undo, &mut modified);
+        stroke.add_point(pool, &canvas, &mut brush, None, Vec2 { x, y }, &mut undo, &mut modified);
     }
 
     let mut image = egui::ColorImage::new([w, h], Color32::TRANSPARENT);

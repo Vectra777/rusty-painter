@@ -412,6 +412,7 @@ impl PainterApp {
                 &self.pool,
                 &self.canvas,
                 &mut self.brush,
+                if self.selection_manager.has_selection() { Some(&self.selection_manager) } else { None },
                 pos,
                 self.current_undo_action.as_mut().unwrap(),
                 &mut self.modified_tiles,
@@ -790,6 +791,11 @@ impl eframe::App for PainterApp {
                 for tile in &mut self.tiles {
                     tile.dirty = true;
                 }
+                ctx.request_repaint();
+            }
+
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.selection_manager.clear_selection();
                 ctx.request_repaint();
             }
         });
