@@ -2,6 +2,8 @@
 
 A lightweight linux desktop painting playground built with Rust and `eframe/egui`. The goal of Rusty Painter is to explore fast 2D painting techniques (tiling, atlases, multithreaded brushes) while keeping the UI simple.
 
+![](/imgs/2025-12-1118-06-17-ezgif.com-video-to-gif-converter.gif)
+
 ## Features
 - **Brush Engine**: Soft, hard, and pixel brushes with spacing, flow, jitter, and stabilizer options.
 - **Tablet Support**: Pressure sensitivity and eraser support via `octotablet`.
