@@ -131,7 +131,7 @@ fn generate_preset_preview(brush_template: &Brush, pool: &ThreadPool, ctx: &egui
     brush.brush_options.color = Color32::WHITE;
     
     let mut stroke = StrokeState::new();
-    let mut undo = UndoAction { tiles: Vec::new() };
+    let mut undo = UndoAction { tiles: Vec::new(), selection: None, transform: None };
     let mut modified = HashSet::new();
 
     // Draw S curve

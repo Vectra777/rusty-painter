@@ -203,7 +203,7 @@ fn render_preview(state: &mut BrushPreviewState, brush: &mut Brush, pool: &Threa
     
     // Create a temporary stroke state
     let mut stroke = StrokeState::new();
-    let mut undo_action = UndoAction { tiles: Vec::new() };
+    let mut undo_action = UndoAction { tiles: Vec::new(), selection: None, transform: None };
     let mut modified = HashSet::new();
     
     // Draw an S curve with pressure

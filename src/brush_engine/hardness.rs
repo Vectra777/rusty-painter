@@ -97,21 +97,14 @@ impl SoftnessCurve {
         // Standard Monotone checks:
         // If secant k-1 and secant k have different signs, tangent is 0.
         // Else, tangent is arithmetic mean (simple) or harmonic mean (Fritsch-Butland).
-        // Here we use a simple average of secants for smoothness, but clamped for monotonicity if needed.
-        // For a general smooth curve (like Krita), Catmull-Rom is often better than strictly Monotone which can look "stiff".
-        // But Monotone is safer for 0..1 range. Let's use Catmull-Rom style tangents (0.5 * (p[i+1]-p[i-1]))
-        // but adapted for non-uniform spacing.
+
 
         let _tangent = |_k: usize, sec_prev: f32, sec_next: f32| -> f32 {
              if sec_prev * sec_next <= 0.0 {
-                 // Local extrema, flat tangent for strict monotonicity
-                 // But for "smooth" feel, maybe not?
-                 // Let's try to be smooth.
+
                  0.0 
              } else {
-                 // Harmonic mean is good for monotonicity
-                 // 3.0 * sec_prev * sec_next / (sec_next + 2.0 * sec_prev) ... etc
-                 // Let's just use average for simplicity and standard spline look
+
                  (sec_prev + sec_next) * 0.5
              }
         };

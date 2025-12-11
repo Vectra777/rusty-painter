@@ -17,7 +17,7 @@ fn bench_soft_dab(c: &mut Criterion) {
         Color32::from_rgba_unmultiplied(0, 0, 0, 255),
         20.0,
     );
-    let mut undo_action = UndoAction { tiles: Vec::new() };
+    let mut undo_action = UndoAction { tiles: Vec::new(), selection: None, transform: None };
     let mut modified_tiles = HashSet::new();
 
     // Warm up the mask cache and tile allocation so the measurement focuses on per-dab work.

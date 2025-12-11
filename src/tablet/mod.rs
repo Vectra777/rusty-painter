@@ -4,6 +4,7 @@ use octotablet::{
     tool,
 };
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TabletPhase {
@@ -31,12 +32,27 @@ impl TabletInput {
     /// Create a tablet input manager using the eframe creation context for a window handle.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let builder = Builder::new().emulate_tool_from_mouse(true);
-        // Safety: matches the octotablet eframe example; drops before window.
-        let manager = unsafe { builder.build_raw(cc).ok()? };
-        Some(Self {
-            manager,
-            tool_types: HashMap::new(),
-        })
+        
+        // Wrap the unsafe and potentially panicking call (octotablet can panic on Windows/Wine if COM is missing)
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+             // Safety: matches the octotablet eframe example; drops before window.
+             unsafe { builder.build_raw(cc) }
+        }));
+
+        match result {
+            Ok(Ok(manager)) => Some(Self {
+                manager,
+                tool_types: HashMap::new(),
+            }),
+            Ok(Err(e)) => {
+                log::error!("Failed to initialize tablet: {:?}", e);
+                None
+            }
+            Err(_) => {
+                log::error!("Tablet initialization panicked (likely missing COM classes in Wine)");
+                None
+            }
+        }
     }
 
     /// Pump events and return a list of samples in logical egui points.

@@ -8,6 +8,10 @@ pub struct Vec2 {
 }
 
 impl Vec2 {
+    pub fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
     /// Euclidean length of the vector.
     pub fn length(self) -> f32 {
         (self.x * self.x + self.y * self.y).sqrt()

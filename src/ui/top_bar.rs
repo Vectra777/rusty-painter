@@ -1,5 +1,5 @@
 use crate::PainterApp;
-use crate::app::painter::Tool;
+use crate::app::tools::Tool;
 use crate::selection::SelectionType;
 use eframe::egui;
 
@@ -59,6 +59,10 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                 },
             );
 
+            if ui.selectable_label(matches!(app.active_tool, Tool::Transform(_)), "Transform").clicked() {
+                app.active_tool = Tool::Transform(crate::selection::transform::TransformInfo::default());
+            }
+
             if ui.button("New Canvas").clicked() {
                 app.new_canvas.sync_from_canvas(&app.canvas);
                 app.new_canvas.color_model = app.color_model;
@@ -74,6 +78,7 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                 app.show_general_settings = true;
                 ctx.request_repaint();
             }
+
         });
     });
 }

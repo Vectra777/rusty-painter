@@ -1,10 +1,12 @@
 use crate::canvas::canvas::Canvas;
+use crate::selection::SelectionShape;
+use crate::selection::transform::TransformInfo;
 use eframe::egui::Color32;
 
 /// Snapshot of a rectangular tile region prior to modification.
 pub struct TileSnapshot {
-    pub tx: usize,
-    pub ty: usize,
+    pub tx: i32,
+    pub ty: i32,
     pub layer_idx: usize,
     pub x0: usize,
     pub y0: usize,
@@ -16,6 +18,8 @@ pub struct TileSnapshot {
 /// Collection of tile snapshots captured during a single user operation.
 pub struct UndoAction {
     pub tiles: Vec<TileSnapshot>,
+    pub selection: Option<Option<SelectionShape>>,
+    pub transform: Option<TransformInfo>,
 }
 
 /// Stack-based undo/redo manager that swaps tile buffers in place.
@@ -40,9 +44,9 @@ impl History {
     }
 
     /// Undo the latest action, returning tile coordinates that changed.
-    pub fn undo(&mut self, canvas: &Canvas) -> Vec<(usize, usize)> {
+    pub fn undo(&mut self, canvas: &Canvas, selection_manager: &mut crate::selection::SelectionManager, active_tool: &mut crate::app::tools::Tool) -> Vec<(i32, i32)> {
         if let Some(mut action) = self.undo_stack.pop() {
-            let tiles = self.swap_tiles(canvas, &mut action);
+            let tiles = self.swap_state(canvas, selection_manager, active_tool, &mut action);
             self.redo_stack.push(action);
             tiles
         } else {
@@ -51,9 +55,9 @@ impl History {
     }
 
     /// Redo the previously undone action, returning tile coordinates that changed.
-    pub fn redo(&mut self, canvas: &Canvas) -> Vec<(usize, usize)> {
+    pub fn redo(&mut self, canvas: &Canvas, selection_manager: &mut crate::selection::SelectionManager, active_tool: &mut crate::app::tools::Tool) -> Vec<(i32, i32)> {
         if let Some(mut action) = self.redo_stack.pop() {
-            let tiles = self.swap_tiles(canvas, &mut action);
+            let tiles = self.swap_state(canvas, selection_manager, active_tool, &mut action);
             self.undo_stack.push(action);
             tiles
         } else {
@@ -62,14 +66,32 @@ impl History {
     }
 
     /// Swap stored tile data with the canvas, producing a list of updated tiles.
-    fn swap_tiles(&self, canvas: &Canvas, action: &mut UndoAction) -> Vec<(usize, usize)> {
+    fn swap_state(&self, canvas: &Canvas, selection_manager: &mut crate::selection::SelectionManager, active_tool: &mut crate::app::tools::Tool, action: &mut UndoAction) -> Vec<(i32, i32)> {
+        // Swap selection state
+        if let Some(stored_selection) = &mut action.selection {
+            std::mem::swap(stored_selection, &mut selection_manager.current_shape);
+        }
+
+        // Swap transform state
+        if let Some(stored_transform) = &mut action.transform {
+            if let crate::app::tools::Tool::Transform(current_transform) = active_tool {
+                std::mem::swap(stored_transform, current_transform);
+            } else {
+            }
+        }
+
         let mut affected = Vec::new();
         for snapshot in &mut action.tiles {
             let tile_size = canvas.tile_size();
-            canvas.ensure_layer_tile_exists(snapshot.layer_idx, snapshot.tx, snapshot.ty);
-            if let Some(mut tile) =
-                canvas.lock_layer_tile(snapshot.layer_idx, snapshot.tx, snapshot.ty)
+            canvas.ensure_layer_tile_exists_i32(snapshot.layer_idx, snapshot.tx, snapshot.ty);
+            if let Some(tile_arc) =
+                canvas.lock_layer_tile_i32(snapshot.layer_idx, snapshot.tx, snapshot.ty)
             {
+                let mut tile = tile_arc.lock().unwrap();
+                // Ensure tile data exists
+                if tile.data.is_none() {
+                    tile.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
+                }
                 let data = tile.data.as_mut().unwrap();
 
                 // Extract current region

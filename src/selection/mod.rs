@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, Painter, Pos2, Stroke, Shape};
 use crate::utils::vector::Vec2;
+pub mod transform;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SelectionType {
@@ -118,12 +119,31 @@ impl SelectionManager {
         self.current_shape.is_some()
     }
 
-    pub fn draw_overlay(&self, painter: &Painter, zoom: f32, offset: Pos2, _canvas_height: f32) {
+    pub fn draw_overlay(&self, painter: &Painter, zoom: f32, offset: Pos2, _canvas_height: f32, transform: Option<&crate::selection::transform::TransformInfo>) {
         if let Some(shape) = &self.current_shape {
             let to_screen = |v: Vec2| -> Pos2 {
+                let mut p = v;
+                if let Some(info) = transform {
+                    if let Some(bounds) = info.bounds {
+                        let center = Vec2::new(bounds.center().x, bounds.center().y);
+                        let (sin_r, cos_r) = info.rotation.sin_cos();
+                        
+                        let dx = p.x - center.x;
+                        let dy = p.y - center.y;
+                        
+                        let sx = dx * info.scale.x;
+                        let sy = dy * info.scale.y;
+                        
+                        let rx = sx * cos_r - sy * sin_r;
+                        let ry = sx * sin_r + sy * cos_r;
+                        
+                        p.x = rx + center.x + info.offset.x;
+                        p.y = ry + center.y + info.offset.y;
+                    }
+                }
                 Pos2::new(
-                    offset.x + v.x * zoom,
-                    offset.y + v.y * zoom,
+                    offset.x + p.x * zoom,
+                    offset.y + p.y * zoom,
                 )
             };
 
@@ -172,6 +192,81 @@ impl SelectionManager {
                     }
                     painter.add(Shape::line(outline_points.clone(), stroke_black));
                     painter.add(Shape::dashed_line(&outline_points, stroke_white, dash_len, gap_len));
+                }
+            }
+        }
+    }
+
+    pub fn apply_transform(&mut self, offset: Vec2, rotation: f32, scale: Vec2, center: Vec2) {
+        if let Some(shape) = &mut self.current_shape {
+            let (sin_r, cos_r) = rotation.sin_cos();
+            
+            let transform_point = |p: Vec2| -> Vec2 {
+                let dx = p.x - center.x;
+                let dy = p.y - center.y;
+                
+                let sx = dx * scale.x;
+                let sy = dy * scale.y;
+                
+                let rx = sx * cos_r - sy * sin_r;
+                let ry = sx * sin_r + sy * cos_r;
+                
+                Vec2::new(rx + center.x + offset.x, ry + center.y + offset.y)
+            };
+
+            // Convert to Lasso if rotation or non-uniform scale
+            let needs_conversion = rotation != 0.0 || (scale.x - scale.y).abs() > 0.001;
+
+            if needs_conversion {
+                match shape {
+                    SelectionShape::Rectangle { start, end } => {
+                        let p0 = *start;
+                        let p1 = Vec2::new(end.x, start.y);
+                        let p2 = *end;
+                        let p3 = Vec2::new(start.x, end.y);
+                        
+                        let points = vec![
+                            transform_point(p0),
+                            transform_point(p1),
+                            transform_point(p2),
+                            transform_point(p3),
+                        ];
+                        *shape = SelectionShape::Lasso { points };
+                    }
+                    SelectionShape::Circle { center: c, radius: r } => {
+                        // Approximate circle with polygon
+                        let n = 32;
+                        let mut points = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let angle = (i as f32 / n as f32) * 2.0 * std::f32::consts::PI;
+                            let (sin, cos) = angle.sin_cos();
+                            let p = Vec2::new(c.x + cos * *r, c.y + sin * *r);
+                            points.push(transform_point(p));
+                        }
+                        *shape = SelectionShape::Lasso { points };
+                    }
+                    SelectionShape::Lasso { points } => {
+                        for p in points {
+                            *p = transform_point(*p);
+                        }
+                    }
+                }
+            } else {
+                // Simple translation/uniform scale
+                match shape {
+                    SelectionShape::Rectangle { start, end } => {
+                        *start = transform_point(*start);
+                        *end = transform_point(*end);
+                    }
+                    SelectionShape::Circle { center: c, radius: r } => {
+                        *c = transform_point(*c);
+                        *r *= scale.x; // Uniform scale assumed
+                    }
+                    SelectionShape::Lasso { points } => {
+                        for p in points {
+                            *p = transform_point(*p);
+                        }
+                    }
                 }
             }
         }

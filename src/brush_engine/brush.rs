@@ -118,15 +118,16 @@ impl Brush {
 
             canvas.ensure_layer_tile_exists(layer_idx, region.tx, region.ty);
 
-            if let Some(mut tile) = canvas.lock_layer_tile(layer_idx, region.tx, region.ty) {
+            if let Some(tile_arc) = canvas.lock_layer_tile(layer_idx, region.tx, region.ty) {
+                let mut tile = tile_arc.lock().unwrap();
                 let data = tile.data.as_mut().unwrap();
 
                 // Snapshot the ENTIRE tile to avoid artifacts if we draw on other parts of it later
                 let patch = data.clone();
 
                 undo_action.tiles.push(TileSnapshot {
-                    tx: region.tx,
-                    ty: region.ty,
+                    tx: region.tx as i32,
+                    ty: region.ty as i32,
                     layer_idx,
                     x0: 0,
                     y0: 0,
@@ -216,7 +217,8 @@ impl Brush {
 
         // Serial execution for pixel dab
         for (tx, ty) in tiles {
-            if let Some(mut tile) = canvas.lock_tile(tx, ty) {
+            if let Some(tile_arc) = canvas.lock_tile(tx, ty) {
+                let mut tile = tile_arc.lock().unwrap();
                 let data = match tile.data.as_mut() {
                     Some(d) => d,
                     None => continue,
@@ -501,7 +503,8 @@ impl Brush {
                     return;
                 }
 
-                if let Some(mut tile) = canvas.lock_tile(*tx, *ty) {
+                if let Some(tile_arc) = canvas.lock_tile(*tx, *ty) {
+                    let mut tile = tile_arc.lock().unwrap();
                     let data = match tile.data.as_mut() {
                         Some(d) => d,
                         None => return,

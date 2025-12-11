@@ -26,13 +26,9 @@ use std::sync::mpsc;
 use std::thread;
 // use std::time::Duration;
 
-use crate::selection::{SelectionManager, SelectionType};
+use crate::selection::{SelectionManager};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Tool {
-    Brush,
-    Select(SelectionType),
-}
+
 
 /// Main egui application that owns the canvas, brush state, UI and rendering caches.
 pub struct PainterApp {
@@ -40,7 +36,7 @@ pub struct PainterApp {
     pub(crate) brush: Brush,
     pub(crate) brush_preview: BrushPreviewState,
     pub(crate) presets: Vec<BrushPreset>,
-    pub(crate) active_tool: Tool,
+    pub(crate) active_tool: super::tools::Tool,
     pub(crate) selection_manager: SelectionManager,
     pub(crate) preset_previews: HashMap<String, egui::TextureHandle>,
     pub(crate) show_new_preset_modal: bool,
@@ -63,6 +59,8 @@ pub struct PainterApp {
     pub(crate) layer_cache_dirty: Vec<HashSet<(usize, usize)>>,
     pub(crate) layer_ui_colors: Vec<Color32>,
     pub(crate) layer_dragging: Option<usize>,
+    pub(crate) floating_layer_idx: Option<usize>,
+    pub(crate) floating_buffer: Option<HashMap<(i32, i32), Vec<Color32>>>,
 
     pub(crate) zoom: f32,
     pub(crate) offset: Vec2,
@@ -241,7 +239,7 @@ impl PainterApp {
             brush,
             brush_preview: BrushPreviewState::default(),
             presets,
-            active_tool: Tool::Brush,
+            active_tool: super::tools::Tool::Brush,
             selection_manager: SelectionManager::new(),
             preset_previews: HashMap::new(),
             show_new_preset_modal: false,
@@ -265,6 +263,8 @@ impl PainterApp {
             layer_cache_dirty: vec![HashSet::new(); layer_count],
             layer_ui_colors: vec![Color32::from_gray(40); layer_count],
             layer_dragging: None,
+            floating_layer_idx: None,
+            floating_buffer: None,
             zoom: 1.0,
             offset: Vec2 { x: 300.0, y: 100.0 },
             first_frame: true,
@@ -404,7 +404,7 @@ impl PainterApp {
 
         self.stroke = Some(StrokeState::new());
         self.is_drawing = true;
-        self.current_undo_action = Some(UndoAction { tiles: Vec::new() });
+        self.current_undo_action = Some(UndoAction { tiles: Vec::new(), selection: None, transform: None });
         self.modified_tiles.clear();
 
         if let Some(stroke) = &mut self.stroke {
@@ -585,7 +585,7 @@ impl PainterApp {
         let tile_h = TILE_SIZE.min(canvas.height() - ty * TILE_SIZE);
         let mut img = egui::ColorImage::new([tile_w, tile_h], Color32::TRANSPARENT);
 
-        if let Some(data) = canvas.get_layer_tile_data(layer_idx, tx, ty) {
+        if let Some(data) = canvas.get_layer_tile_data(layer_idx, tx as i32, ty as i32) {
             let tile_size = canvas.tile_size();
             for y in 0..tile_h {
                 for x in 0..tile_w {
@@ -634,7 +634,7 @@ impl PainterApp {
                 let has_data = self
                     .canvas
                     .lock_layer_tile_if_exists(layer_idx, tx, ty)
-                    .map(|cell| cell.data.is_some())
+                    .map(|cell_arc| cell_arc.lock().unwrap().data.is_some())
                     .unwrap_or(false);
                 if has_data {
                     if let Some(tile) = self.tile_mut(tx, ty) {
@@ -683,6 +683,74 @@ impl PainterApp {
 
         self.mark_all_tiles_dirty();
     }
+
+    pub fn draw_transform_overlay(&mut self, painter: &egui::Painter, origin: egui::Pos2) {
+        if let super::tools::Tool::Transform(ref mut info) = self.active_tool {
+            // If bounds are not set, try to set them
+            if info.bounds.is_none() {
+                info.bounds = self.canvas.get_content_bounds(self.canvas.active_layer_idx, if self.selection_manager.has_selection() { Some(&self.selection_manager) } else { None });
+            }
+
+            if let Some(bounds) = info.bounds {
+                let center = Vec2::new(bounds.center().x, bounds.center().y);
+                let (sin_r, cos_r) = info.rotation.sin_cos();
+                
+                // Helper to transform a point
+                let transform_point = |p: egui::Pos2| -> egui::Pos2 {
+                    let dx = p.x - center.x;
+                    let dy = p.y - center.y;
+                    
+                    let sx = dx * info.scale.x;
+                    let sy = dy * info.scale.y;
+                    
+                    let rx = sx * cos_r - sy * sin_r;
+                    let ry = sx * sin_r + sy * cos_r;
+                    
+                    let tx = rx + center.x + info.offset.x;
+                    let ty = ry + center.y + info.offset.y;
+                    
+                    egui::pos2(
+                        origin.x + tx * self.zoom,
+                        origin.y + ty * self.zoom
+                    )
+                };
+
+                let corners = [
+                    bounds.min, // Top-Left
+                    eframe::egui::pos2(bounds.max.x, bounds.min.y), // Top-Right
+                    bounds.max, // Bottom-Right
+                    eframe::egui::pos2(bounds.min.x, bounds.max.y), // Bottom-Left
+                ];
+                
+                let t_corners: Vec<egui::Pos2> = corners.iter().map(|&c| transform_point(c)).collect();
+                
+                // Draw box
+                let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 120, 255));
+                painter.line_segment([t_corners[0], t_corners[1]], stroke);
+                painter.line_segment([t_corners[1], t_corners[2]], stroke);
+                painter.line_segment([t_corners[2], t_corners[3]], stroke);
+                painter.line_segment([t_corners[3], t_corners[0]], stroke);
+                
+                // Draw handles
+                let handle_points = [
+                    bounds.min, // Top-Left
+                    eframe::egui::pos2(bounds.center().x, bounds.min.y), // Top-Center
+                    eframe::egui::pos2(bounds.max.x, bounds.min.y), // Top-Right
+                    eframe::egui::pos2(bounds.max.x, bounds.center().y), // Right-Center
+                    bounds.max, // Bottom-Right
+                    eframe::egui::pos2(bounds.center().x, bounds.max.y), // Bottom-Center
+                    eframe::egui::pos2(bounds.min.x, bounds.max.y), // Bottom-Left
+                    eframe::egui::pos2(bounds.min.x, bounds.center().y), // Left-Center
+                ];
+                
+                for p in handle_points {
+                    let tp = transform_point(p);
+                    painter.circle_filled(tp, 4.0, egui::Color32::WHITE);
+                    painter.circle_stroke(tp, 4.0, stroke);
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for PainterApp {
@@ -694,20 +762,31 @@ impl eframe::App for PainterApp {
             let affected = if ctx.input(|i| i.modifiers.shift) {
                 self.histories
                     .get_mut(active_idx)
-                    .map(|h| h.redo(&self.canvas))
+                    .map(|h| h.redo(&self.canvas, &mut self.selection_manager, &mut self.active_tool))
                     .unwrap_or_default()
             } else {
                 self.histories
                     .get_mut(active_idx)
-                    .map(|h| h.undo(&self.canvas))
+                    .map(|h| h.undo(&self.canvas, &mut self.selection_manager, &mut self.active_tool))
                     .unwrap_or_default()
             };
 
             for (tx, ty) in affected {
-                if let Some(tile) = self.tile_mut(tx, ty) {
-                    tile.dirty = true;
+                if tx >= 0 && ty >= 0 {
+                    if let Some(tile) = self.tile_mut(tx as usize, ty as usize) {
+                        tile.dirty = true;
+                    }
                 }
             }
+
+            // Reset transform tool state if active so it recalculates bounds
+            // Only reset if the undo action didn't restore a transform state
+            if let super::tools::Tool::Transform(ref mut info) = self.active_tool {
+                if info.bounds.is_none() && info.rotation == 0.0 && info.offset.x == 0.0 && info.offset.y == 0.0 {
+                     *info = crate::selection::transform::TransformInfo::default();
+                }
+            }
+
             ctx.request_repaint();
         }
 
@@ -779,12 +858,23 @@ impl eframe::App for PainterApp {
                 ctx.request_repaint();
             }
 
-            self.selection_manager.draw_overlay(
-                ui.painter(),
-                self.zoom,
-                view.origin,
-                self.canvas.height() as f32,
-            );
+            // Always draw selection overlay, but pass transform info if active
+            let transform_info = if let super::tools::Tool::Transform(ref info) = self.active_tool {
+                Some(info)
+            } else {
+                None
+            };
+            if !matches!(self.active_tool, super::tools::Tool::Transform(_)) {
+                self.selection_manager.draw_overlay(
+                    ui.painter(),
+                    self.zoom,
+                    view.origin,
+                    self.canvas.height() as f32,
+                    None,
+                );
+            }
+
+            self.draw_transform_overlay(ui.painter(), view.origin);
 
             if ui.input(|i| i.key_pressed(egui::Key::C)) {
                 self.canvas.clear(Color32::WHITE);
