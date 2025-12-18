@@ -9,6 +9,25 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashSet;
 use super::brush_options::BrushOptions;
 
+/// Sample custom mask with nearest neighbor interpolation
+#[inline]
+fn sample_custom_mask_nn(dx: f32, dy: f32, diameter: f32, width: usize, height: usize, mask: &[u8]) -> (bool, f32) {
+    let r = diameter / 2.0;
+    let nx = (dx + r) / diameter;
+    let ny = (dy + r) / diameter;
+    
+    if nx >= 0.0 && nx < 1.0 && ny >= 0.0 && ny < 1.0 {
+        let ix = (nx * width as f32).floor() as usize;
+        let iy = (ny * height as f32).floor() as usize;
+        let idx = iy * width + ix;
+        if idx < mask.len() {
+            let val = mask[idx];
+            return (val > 0, val as f32 / 255.0);
+        }
+    }
+    (false, 0.0)
+}
+
 /// Available shapes for how a brush applies paint.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BrushType {
@@ -247,25 +266,7 @@ impl Brush {
                             PixelBrushShape::Square => (dx.abs() <= r && dy.abs() <= r, 1.0),
                             PixelBrushShape::Custom { .. } => {
                                 if let Some((w, h, mask)) = custom_data_ref {
-                                    // Nearest neighbor sampling of the custom mask
-                                    // Map (dx, dy) from [-r, r] to [0, w] and [0, h]
-                                    // Normalized coords 0..1
-                                    let nx = (dx + r) / self.brush_options.diameter;
-                                    let ny = (dy + r) / self.brush_options.diameter;
-                                    
-                                    if nx >= 0.0 && nx < 1.0 && ny >= 0.0 && ny < 1.0 {
-                                        let ix = (nx * *w as f32).floor() as usize;
-                                        let iy = (ny * *h as f32).floor() as usize;
-                                        let idx = iy * w + ix;
-                                        if idx < mask.len() {
-                                            let val = mask[idx];
-                                            (val > 0, val as f32 / 255.0)
-                                        } else {
-                                            (false, 0.0)
-                                        }
-                                    } else {
-                                        (false, 0.0)
-                                    }
+                                    sample_custom_mask_nn(dx, dy, self.brush_options.diameter, *w, *h, mask)
                                 } else {
                                     (false, 0.0)
                                 }
@@ -297,6 +298,8 @@ impl Brush {
                         }
                     }
                 }
+                // Mark tile as dirty (not empty) after modifications
+                tile.is_empty = false;
             }
         }
     }
@@ -366,24 +369,20 @@ impl Brush {
 
         self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
+        // Pre-compute values outside loops
         let base_color = self.brush_options.color;
-        let (sr, sg, sb) = if base_color.a() == 0 {
-            (0, 0, 0)
-        } else {
-            let a = base_color.a() as f32;
-            (
-                (base_color.r() as f32 * 255.0 / a).round().clamp(0.0, 255.0) as u8,
-                (base_color.g() as f32 * 255.0 / a).round().clamp(0.0, 255.0) as u8,
-                (base_color.b() as f32 * 255.0 / a).round().clamp(0.0, 255.0) as u8,
-            )
-        };
+        let sr = base_color.r();
+        let sg = base_color.g();
+        let sb = base_color.b();
+        let base_alpha = base_color.a() as f32 / 255.0;
         let flow_alpha = self.brush_options.opacity * (self.brush_options.flow / 100.0);
         let blend_mode = self.brush_options.blend_mode;
         let anti_aliasing = self.anti_aliasing;
         let hardness_val = (self.brush_options.hardness / 100.0).clamp(0.0, 0.999);
         let softness_selector = self.brush_options.softness_selector;
-        let softness_curve = self.brush_options.softness_curve.clone();
-        let pixel_shape = self.brush_options.pixel_shape.clone(); // Clone for use in closure
+        let softness_curve = &self.brush_options.softness_curve;
+        let pixel_shape = &self.brush_options.pixel_shape;
+        let diameter = self.brush_options.diameter;
 
         let center_x = center.x;
         let center_y = center.y;
@@ -392,8 +391,10 @@ impl Brush {
         let end_x = end_x;
         let end_y = end_y;
 
+        // Pre-compute fade values
         let fade_start = (r - 1.0).max(0.0);
         let fade_width = r - fade_start;
+        let inv_fade_width = if fade_width > 0.0 { 1.0 / fade_width } else { 0.0 };
 
         // Helper to get base alpha factor for a given point (dx, dy) and radius r
         let get_base_alpha = |dx: f32, dy: f32, radius: f32, shape: &PixelBrushShape| -> f32 {
@@ -443,16 +444,13 @@ impl Brush {
                     }
                 }
                 PixelBrushShape::Custom { width, height, data } => {
-                    // Map (dx, dy) from [-r, r] to [0, w] and [0, h]
-                    let nx = (dx + radius) / (radius * 2.0); // Normalized x in 0..1
-                    let ny = (dy + radius) / (radius * 2.0); // Normalized y in 0..1
+                    // Bilinear interpolation for smooth custom brushes
+                    let nx = (dx + radius) / (radius * 2.0);
+                    let ny = (dy + radius) / (radius * 2.0);
 
                     if nx >= 0.0 && nx < 1.0 && ny >= 0.0 && ny < 1.0 {
-                        let w_f32 = *width as f32;
-                        let h_f32 = *height as f32;
-
-                        let tx = nx * w_f32;
-                        let ty = ny * h_f32;
+                        let tx = nx * (*width as f32);
+                        let ty = ny * (*height as f32);
 
                         let x0 = tx.floor() as usize;
                         let y0 = ty.floor() as usize;
@@ -462,7 +460,7 @@ impl Brush {
                         let fx = tx - x0 as f32;
                         let fy = ty - y0 as f32;
                         
-                        let get_pixel = |x, y| -> f32 {
+                        let get_pixel = |x: usize, y: usize| -> f32 {
                             if x < *width && y < *height {
                                 data[y * width + x] as f32 / 255.0
                             } else {
@@ -470,7 +468,6 @@ impl Brush {
                             }
                         };
 
-                        // Bilinear interpolation
                         let c00 = get_pixel(x0, y0);
                         let c10 = get_pixel(x1, y0);
                         let c01 = get_pixel(x0, y1);
@@ -543,7 +540,7 @@ impl Brush {
                                     if dist_for_aa >= r { // Beyond brush radius, fully transparent
                                         0.0
                                     } else if dist_for_aa > fade_start { // Within AA fade zone
-                                        let fraction = (dist_for_aa - fade_start) / fade_width;
+                                        let fraction = (dist_for_aa - fade_start) * inv_fade_width;
                                         base_alpha_at_pixel * (1.0 - fraction) // Blend base alpha with fade
                                     } else { // Solid interior
                                         base_alpha_at_pixel
@@ -551,32 +548,16 @@ impl Brush {
                                 }
                             } else {
                                 // Non-anti-aliased path (hard edges)
-                                let (mut in_shape, mut alpha_mod) = (false, 0.0);
-                                match &pixel_shape {
+                                let (in_shape, alpha_mod) = match &pixel_shape {
                                     PixelBrushShape::Circle => {
-                                        in_shape = (pdx * pdx + pdy * pdy) <= r_sq;
-                                        alpha_mod = 1.0;
-                                    },
+                                        ((pdx * pdx + pdy * pdy) <= r_sq, 1.0)
+                                    }
                                     PixelBrushShape::Square => {
-                                        in_shape = pdx.abs() <= r && pdy.abs() <= r;
-                                        alpha_mod = 1.0;
-                                    },
+                                        (pdx.abs() <= r && pdy.abs() <= r, 1.0)
+                                    }
                                     PixelBrushShape::Custom { width, height, data } => {
-                                        // Nearest neighbor sampling of the custom mask (no AA)
-                                        let nx = (pdx + r) / self.brush_options.diameter;
-                                        let ny = (pdy + r) / self.brush_options.diameter;
-                                        
-                                        if nx >= 0.0 && nx < 1.0 && ny >= 0.0 && ny < 1.0 {
-                                            let ix = (nx * *width as f32).floor() as usize;
-                                            let iy = (ny * *height as f32).floor() as usize;
-                                            let idx = iy * width + ix;
-                                            if idx < data.len() {
-                                                let val = data[idx];
-                                                in_shape = val > 0;
-                                                alpha_mod = val as f32 / 255.0;
-                                            }
-                                        }
-                                    },
+                                        sample_custom_mask_nn(pdx, pdy, diameter, *width, *height, data)
+                                    }
                                 };
                                 if in_shape { alpha_mod } else { 0.0 }
                             };
@@ -585,9 +566,7 @@ impl Brush {
                                 continue;
                             }
 
-                            let src_a =
-                                ((base_color.a() as f32 / 255.0) * flow_alpha * alpha_factor)
-                                    .clamp(0.0, 1.0);
+                            let src_a = (base_alpha * flow_alpha * alpha_factor).clamp(0.0, 1.0);
                             if src_a <= 0.0 {
                                 continue;
                             }
@@ -610,6 +589,8 @@ impl Brush {
                             data[idx] = blended;
                         }
                     }
+                    // Mark tile as dirty (not empty) after modifications
+                    tile.is_empty = false;
                 }
             });
         });

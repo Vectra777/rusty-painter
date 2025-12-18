@@ -224,8 +224,6 @@ pub fn handle_input(
                 if pressed && key == egui::Key::Enter {
                      if let Some(idx) = app.floating_layer_idx {
                          // Apply final transform if needed (though preview should have done it)
-                         // Actually, we need to record the undo action here!
-                         // Since we didn't record it during drag/release.
                          
                          let mut action = crate::canvas::history::UndoAction { 
                              tiles: Vec::new(),
@@ -233,11 +231,6 @@ pub fn handle_input(
                              transform: None, // We are committing, so transform is reset
                          };
                          
-                         // We need to capture the state BEFORE merge for undo?
-                         // Actually, merging destroys the layer.
-                         // If we undo the merge, we want the floating layer back?
-                         // That's complex.
-                         // For now, let's just merge.
                          
                          app.canvas.merge_layer_down(idx);
                          app.floating_layer_idx = None;

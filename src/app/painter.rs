@@ -321,7 +321,6 @@ impl PainterApp {
                                 // Create UI texture for the tip
                                 // Invert for display if needed, but usually brush tips are white on black or alpha.
                                 // PixelBrushShape uses 0-255 as alpha mask.
-                                // Let's display it as white pixels with alpha.
                                 let mut pixels = Vec::with_capacity(width * height);
                                 for &alpha in &data {
                                     pixels.push(Color32::from_white_alpha(alpha));
