@@ -51,25 +51,25 @@ impl<'a> TabViewer for ToolTabViewer<'a> {
             ToolTab::BrushSettings => {
                 ui::brush_settings::brush_settings_panel(
                     ui,
-                    &mut self.app.brush,
-                    &mut self.app.brush_preview,
-                    &self.app.pool,
-                    &self.app.loaded_brush_tips,
+                    &mut self.app.brush_state.brush,
+                    &mut self.app.brush_state.brush_preview,
+                    &self.app.workspace.pool,
+                    &self.app.brush_state.loaded_brush_tips,
                 )
             }
             ToolTab::BrushPresets => {
                 ui::brush_list::brush_list_panel(
                     ui,
-                    &mut self.app.brush,
-                    &mut self.app.presets,
-                    &mut self.app.preset_previews,
-                    &self.app.pool,
-                    &mut self.app.show_new_preset_modal,
-                    &mut self.app.new_preset_name,
+                    &mut self.app.brush_state.brush,
+                    &mut self.app.brush_state.presets,
+                    &mut self.app.brush_state.preset_previews,
+                    &self.app.workspace.pool,
+                    &mut self.app.brush_state.show_new_preset_modal,
+                    &mut self.app.brush_state.new_preset_name,
                 )
             }
             ToolTab::ColorPicker => {
-                ui::color_picker::color_picker_panel(ui, &mut self.app.brush, self.app.color_model)
+                ui::color_picker::color_picker_panel(ui, &mut self.app.brush_state.brush, self.app.workspace.color_model)
             }
             ToolTab::Layers => {
                 let ctx = ui.ctx().clone();

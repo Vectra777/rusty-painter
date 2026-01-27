@@ -4,6 +4,9 @@ version = "0.0.1"
 authors = ["Valentin Belougne <valentin.belougne@gmail.com>"]
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 
@@ -17,10 +20,9 @@ log = "0.4"
 rand = "0.9"
 rayon = "1.9"
 image = "0.25"
-rfd = "0.14"
-octotablet = "0.1"
 egui_dock = "0.14.0"
 wide = "0.7"
+winit = { version = "0.30.12", features = ["android-native-activity"] }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -31,6 +33,14 @@ serde = "1.0"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+
+# desktop-only helpers
+[target.'cfg(not(target_os = "android"))'.dependencies]
+octotablet = "0.1"
+rfd = "0.14"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -43,6 +53,13 @@ web-sys = "0.3"              # to access the DOM (to hide the loading text)
 opt-level = 2
 [profile.dev.package."*"]
 opt-level = 2
+
+[package.metadata.android]
+package_name = "com.vectra.rustypainter"
+label = "Rusty Painter"
+min_sdk_version = 24
+target_sdk_version = 34
+fullscreen = true
 
 [[bench]]
 name = "brush_bench"

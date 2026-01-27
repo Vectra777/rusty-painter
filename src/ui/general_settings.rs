@@ -4,17 +4,17 @@ use rayon::ThreadPoolBuilder;
 
 /// Panel with app-wide toggles that affect rendering performance and controls.
 pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
-    ui.checkbox(&mut app.use_masked_brush, "Use masked brush (fast)");
-    ui.checkbox(&mut app.disable_lod, "High quality zoom out (slower)");
+    ui.checkbox(&mut app.brush_state.use_masked_brush, "Use masked brush (fast)");
+    ui.checkbox(&mut app.render_cache.disable_lod, "High quality zoom out (slower)");
     let threads_changed = ui
-        .add(egui::Slider::new(&mut app.thread_count, 1..=app.max_threads).text("Brush threads"))
+        .add(egui::Slider::new(&mut app.workspace.thread_count, 1..=app.workspace.max_threads).text("Brush threads"))
         .changed();
     if threads_changed {
         if let Ok(pool) = ThreadPoolBuilder::new()
-            .num_threads(app.thread_count)
+            .num_threads(app.workspace.thread_count)
             .build()
         {
-            app.pool = pool;
+            app.workspace.pool = pool;
         }
     }
     ui.separator();
@@ -24,7 +24,7 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
     
     ui.separator();
     if ui.button("Open Brush Folder").clicked() {
-        let _ = app.brushes_path.canonicalize().map(|path| {
+        let _ = app.brush_state.brushes_path.canonicalize().map(|path| {
             #[cfg(target_os = "linux")]
             let _ = std::process::Command::new("xdg-open").arg(path).spawn();
             #[cfg(target_os = "windows")]
@@ -41,11 +41,11 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
 
 /// Modal window that captures focus for general settings.
 pub fn general_settings_modal(app: &mut PainterApp, ctx: &egui::Context) {
-    if !app.show_general_settings {
+    if !app.modal_state.show_general_settings {
         return;
     }
 
-    let mut open = app.show_general_settings;
+    let mut open = app.modal_state.show_general_settings;
     egui::Window::new("General Settings")
         .open(&mut open)
         .collapsible(false)
@@ -54,5 +54,5 @@ pub fn general_settings_modal(app: &mut PainterApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             general_settings_panel(app, ui);
         });
-    app.show_general_settings = open;
+    app.modal_state.show_general_settings = open;
 }

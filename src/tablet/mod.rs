@@ -1,9 +1,12 @@
+#[cfg(not(target_os = "android"))]
 use octotablet::{
     builder::Builder,
     events::{Event, ToolEvent},
     tool,
 };
+#[cfg(not(target_os = "android"))]
 use std::collections::HashMap;
+#[cfg(not(target_os = "android"))]
 use std::panic::{self, AssertUnwindSafe};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -24,13 +27,23 @@ pub struct TabletSample {
 
 /// Minimal tablet bridge: pumps octotablet events and emits normalized samples.
 pub struct TabletInput {
+    #[cfg(not(target_os = "android"))]
     manager: octotablet::Manager,
+    #[cfg(not(target_os = "android"))]
     tool_types: HashMap<tool::ID, bool>, // is eraser
 }
 
 impl TabletInput {
     /// Create a tablet input manager using the eframe creation context for a window handle.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
+        #[cfg(target_os = "android")]
+        {
+            let _ = cc;
+            return None;
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
         let builder = Builder::new().emulate_tool_from_mouse(true);
         
         // Wrap the unsafe and potentially panicking call (octotablet can panic on Windows/Wine if COM is missing)
@@ -53,10 +66,19 @@ impl TabletInput {
                 None
             }
         }
+        }
     }
 
     /// Pump events and return a list of samples in logical egui points.
     pub fn poll(&mut self, scale: f32) -> Vec<TabletSample> {
+        #[cfg(target_os = "android")]
+        {
+            let _ = scale;
+            return Vec::new();
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
         let mut out = Vec::new();
         let events = match self.manager.pump() {
             Ok(evts) => evts,
@@ -95,5 +117,6 @@ impl TabletInput {
             }
         }
         out
+        }
     }
 }

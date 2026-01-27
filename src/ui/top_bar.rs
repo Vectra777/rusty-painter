@@ -64,18 +64,18 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
             }
 
             if ui.button("New Canvas").clicked() {
-                app.new_canvas.sync_from_canvas(&app.canvas);
-                app.new_canvas.color_model = app.color_model;
-                app.show_new_canvas_modal = true;
+                app.modal_state.new_canvas.sync_from_canvas(&app.canvas);
+                app.modal_state.new_canvas.color_model = app.workspace.color_model;
+                app.modal_state.show_new_canvas_modal = true;
             }
-            ui.add(egui::Slider::new(&mut app.brush.brush_options.diameter, 1.0..=3000.0));
+            ui.add(egui::Slider::new(&mut app.brush_state.brush.brush_options.diameter, 1.0..=3000.0));
             if ui.button("Export").clicked() {
-                app.export_settings.chosen_path = None;
-                app.export_message = None;
-                app.show_export_modal = true;
+                app.export_state.settings.chosen_path = None;
+                app.export_state.message = None;
+                app.export_state.show_modal = true;
             }
             if ui.button("Settings").clicked() {
-                app.show_general_settings = true;
+                app.modal_state.show_general_settings = true;
                 ctx.request_repaint();
             }
 

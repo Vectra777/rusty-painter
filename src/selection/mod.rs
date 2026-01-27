@@ -61,7 +61,7 @@ impl SelectionManager {
                 SelectionShape::Lasso { points } => {
                     // Add point if it's far enough from the last one to avoid too many points
                     if let Some(last) = points.last() {
-                        if (*last - pos).length() > 2.0 {
+                        if (*last - pos).length_squared() > 4.0 { // 2.0^2 = 4.0
                             points.push(pos);
                         }
                     } else {
@@ -82,6 +82,12 @@ impl SelectionManager {
     }
 
     pub fn contains(&self, p: Vec2) -> bool {
+        self.contains_coords(p.x, p.y)
+    }
+
+    /// Check if raw coordinates are in selection (avoids Vec2 allocation)
+    #[inline]
+    pub fn contains_coords(&self, x: f32, y: f32) -> bool {
         if let Some(shape) = &self.current_shape {
             match shape {
                 SelectionShape::Rectangle { start, end } => {
@@ -89,11 +95,11 @@ impl SelectionManager {
                     let x1 = start.x.max(end.x);
                     let y0 = start.y.min(end.y);
                     let y1 = start.y.max(end.y);
-                    p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1
+                    x >= x0 && x <= x1 && y >= y0 && y <= y1
                 }
                 SelectionShape::Circle { center, radius } => {
-                    let dx = p.x - center.x;
-                    let dy = p.y - center.y;
+                    let dx = x - center.x;
+                    let dy = y - center.y;
                     dx * dx + dy * dy <= radius * radius
                 }
                 SelectionShape::Lasso { points } => {
@@ -101,8 +107,8 @@ impl SelectionManager {
                     let mut inside = false;
                     let mut j = points.len() - 1;
                     for i in 0..points.len() {
-                        if (points[i].y > p.y) != (points[j].y > p.y) &&
-                            p.x < (points[j].x - points[i].x) * (p.y - points[i].y) / (points[j].y - points[i].y) + points[i].x {
+                        if (points[i].y > y) != (points[j].y > y) &&
+                            x < (points[j].x - points[i].x) * (y - points[i].y) / (points[j].y - points[i].y) + points[i].x {
                             inside = !inside;
                         }
                         j = i;
@@ -117,6 +123,51 @@ impl SelectionManager {
 
     pub fn has_selection(&self) -> bool {
         self.current_shape.is_some()
+    }
+
+    /// Get the bounding rectangle of the current selection in canvas coordinates.
+    pub fn get_bounds(&self) -> Option<eframe::egui::Rect> {
+        if let Some(shape) = &self.current_shape {
+            match shape {
+                SelectionShape::Rectangle { start, end } => {
+                    let min_x = start.x.min(end.x);
+                    let max_x = start.x.max(end.x);
+                    let min_y = start.y.min(end.y);
+                    let max_y = start.y.max(end.y);
+                    Some(eframe::egui::Rect::from_min_max(
+                        eframe::egui::pos2(min_x, min_y),
+                        eframe::egui::pos2(max_x, max_y),
+                    ))
+                }
+                SelectionShape::Circle { center, radius } => {
+                    Some(eframe::egui::Rect::from_center_size(
+                        eframe::egui::pos2(center.x, center.y),
+                        eframe::egui::vec2(*radius * 2.0, *radius * 2.0),
+                    ))
+                }
+                SelectionShape::Lasso { points } => {
+                    if points.is_empty() {
+                        return None;
+                    }
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    for p in points {
+                        min_x = min_x.min(p.x);
+                        min_y = min_y.min(p.y);
+                        max_x = max_x.max(p.x);
+                        max_y = max_y.max(p.y);
+                    }
+                    Some(eframe::egui::Rect::from_min_max(
+                        eframe::egui::pos2(min_x, min_y),
+                        eframe::egui::pos2(max_x, max_y),
+                    ))
+                }
+            }
+        } else {
+            None
+        }
     }
 
     pub fn draw_overlay(&self, painter: &Painter, zoom: f32, offset: Pos2, _canvas_height: f32, transform: Option<&crate::selection::transform::TransformInfo>) {

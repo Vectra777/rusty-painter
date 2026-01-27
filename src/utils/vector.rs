@@ -14,7 +14,13 @@ impl Vec2 {
 
     /// Euclidean length of the vector.
     pub fn length(self) -> f32 {
-        (self.x * self.x + self.y * self.y).sqrt()
+        self.length_squared().sqrt()
+    }
+
+    /// Squared length of the vector (avoids sqrt for distance comparisons).
+    #[inline]
+    pub fn length_squared(self) -> f32 {
+        self.x * self.x + self.y * self.y
     }
 }
 
@@ -62,4 +68,11 @@ impl Div<f32> for Vec2 {
 /// Convenience helper to measure the distance between two positions.
 pub fn distance(a: Vec2, b: Vec2) -> f32 {
     (a - b).length()
+}
+
+#[allow(dead_code)]
+/// Squared distance between two positions (avoids sqrt for comparisons).
+#[inline]
+pub fn distance_squared(a: Vec2, b: Vec2) -> f32 {
+    (a - b).length_squared()
 }

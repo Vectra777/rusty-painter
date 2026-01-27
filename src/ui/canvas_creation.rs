@@ -6,17 +6,17 @@ use eframe::egui;
 
 /// Modal dialog to configure and create a new canvas, inspired by Krita's new file window.
 pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
-    if !app.show_new_canvas_modal {
+    if !app.modal_state.show_new_canvas_modal {
         return;
     }
 
-    let mut open = app.show_new_canvas_modal;
+    let mut open = app.modal_state.show_new_canvas_modal;
     egui::Window::new("New Canvas")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
-            let settings: &mut NewCanvasSettings = &mut app.new_canvas;
+            let settings: &mut NewCanvasSettings = &mut app.modal_state.new_canvas;
 
             ui.horizontal(|ui| {
                 ui.label("Name");
@@ -152,13 +152,13 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 if ui.button("Create").clicked() {
                     app.apply_new_canvas(ctx);
-                    app.show_new_canvas_modal = false;
+                    app.modal_state.show_new_canvas_modal = false;
                 }
                 if ui.button("Cancel").clicked() {
-                    app.show_new_canvas_modal = false;
+                    app.modal_state.show_new_canvas_modal = false;
                 }
             });
         });
 
-    app.show_new_canvas_modal = open;
+    app.modal_state.show_new_canvas_modal = open;
 }

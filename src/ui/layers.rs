@@ -38,7 +38,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     item_rects.push((i, rect));
 
                     let fill = app
-                        .layer_ui_colors
+                        .layer_state.layer_ui_colors
                         .get(i)
                         .copied()
                         .unwrap_or(ui.visuals().extreme_bg_color);
@@ -80,7 +80,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     opacity_released =
                         response.drag_stopped() || (response.changed() && !response.dragged());
 
-                    if let Some(color) = app.layer_ui_colors.get_mut(i) {
+                    if let Some(color) = app.layer_state.layer_ui_colors.get_mut(i) {
                         if content.color_edit_button_srgba(color).clicked() {
                             active_idx = i;
                         }
@@ -100,11 +100,11 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     }
 
                     if block_response.drag_started() {
-                        app.layer_dragging = Some(i);
+                        app.layer_state.layer_dragging = Some(i);
                     }
 
                     if block_response.drag_stopped() {
-                        if let Some(from) = app.layer_dragging.take() {
+                        if let Some(from) = app.layer_state.layer_dragging.take() {
                             if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
                                 let mut target = from;
                                 for (idx, rect) in &item_rects {
@@ -124,7 +124,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     }
 
                     block_response.context_menu(|ui| {
-                        if let Some(color) = app.layer_ui_colors.get_mut(i) {
+                        if let Some(color) = app.layer_state.layer_ui_colors.get_mut(i) {
                             ui.menu_button("Layer color", |ui| {
                                 ui.color_edit_button_srgba(color);
                             });
@@ -145,7 +145,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 }
             }
 
-            if let Some(drag_idx) = app.layer_dragging {
+            if let Some(drag_idx) = app.layer_state.layer_dragging {
                 if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
                     if let Some((_, first_rect)) = item_rects.first() {
                         let last_rect = item_rects.last().map(|(_, r)| *r).unwrap_or(*first_rect);
@@ -158,7 +158,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                             egui::vec2(list_width, item_height),
                         );
                         let color = app
-                            .layer_ui_colors
+                            .layer_state.layer_ui_colors
                             .get(drag_idx)
                             .copied()
                             .unwrap_or(ui.visuals().extreme_bg_color);
@@ -189,10 +189,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
 
     if add_layer {
         app.canvas.add_layer();
-        app.histories.push(crate::canvas::history::History::new());
-        app.layer_caches.push(std::collections::HashMap::new());
-        app.layer_cache_dirty.push(std::collections::HashSet::new());
-        app.layer_ui_colors.push(egui::Color32::from_gray(40));
+        app.layer_state.histories.push(crate::canvas::history::History::new());
+        app.render_cache.layer_caches.push(std::collections::HashMap::new());
+        app.render_cache.layer_cache_dirty.push(std::collections::HashSet::new());
+        app.layer_state.layer_ui_colors.push(egui::Color32::from_gray(40));
         active_idx = app.canvas.layers.len().saturating_sub(1);
     }
 
@@ -200,17 +200,17 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         if idx < app.canvas.layers.len() {
             app.mark_layer_tiles_with_data_dirty(idx);
             app.canvas.layers.remove(idx);
-            if idx < app.histories.len() {
-                app.histories.remove(idx);
+            if idx < app.layer_state.histories.len() {
+                app.layer_state.histories.remove(idx);
             }
-            if idx < app.layer_caches.len() {
-                app.layer_caches.remove(idx);
+            if idx < app.render_cache.layer_caches.len() {
+                app.render_cache.layer_caches.remove(idx);
             }
-            if idx < app.layer_cache_dirty.len() {
-                app.layer_cache_dirty.remove(idx);
+            if idx < app.render_cache.layer_cache_dirty.len() {
+                app.render_cache.layer_cache_dirty.remove(idx);
             }
-            if idx < app.layer_ui_colors.len() {
-                app.layer_ui_colors.remove(idx);
+            if idx < app.layer_state.layer_ui_colors.len() {
+                app.layer_state.layer_ui_colors.remove(idx);
             }
             if active_idx >= app.canvas.layers.len() {
                 active_idx = app.canvas.layers.len().saturating_sub(1);

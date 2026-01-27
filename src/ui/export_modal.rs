@@ -10,17 +10,17 @@ use std::thread;
 
 /// Modal dialog to export the current canvas to disk with a native file picker.
 pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
-    if !app.show_export_modal {
+    if !app.export_state.show_modal {
         return;
     }
 
-    let mut open = app.show_export_modal;
+    let mut open = app.export_state.show_modal;
     egui::Window::new("Export Canvas")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
-            let settings = &mut app.export_settings;
+            let settings = &mut app.export_state.settings;
 
             ui.horizontal(|ui| {
                 ui.label("Format");
@@ -50,13 +50,13 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                 }
             });
 
-            if let Some(msg) = &app.export_message {
+            if let Some(msg) = &app.export_state.message {
                 ui.label(msg);
             }
 
-            if app.export_in_progress {
+            if app.export_state.in_progress {
                 ui.add(
-                    egui::ProgressBar::new(app.export_progress)
+                    egui::ProgressBar::new(app.export_state.progress)
                         .desired_width(200.0)
                         .text("Exporting..."),
                 );
@@ -64,7 +64,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
             ui.separator();
             ui.horizontal(|ui| {
-                let disabled = app.export_in_progress;
+                let disabled = app.export_state.in_progress;
                 if ui
                     .add_enabled(!disabled, egui::Button::new("Export"))
                     .clicked()
@@ -78,12 +78,12 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     app.canvas
                         .write_region_to_color_image(0, 0, w, h, &mut img, 1);
 
-                    app.export_in_progress = true;
-                    app.export_progress = 0.05;
-                    app.export_message = Some("Exporting...".to_string());
+                    app.export_state.in_progress = true;
+                    app.export_state.progress = 0.05;
+                    app.export_state.message = Some("Exporting...".to_string());
                     let (tx, rx) = mpsc::channel();
-                    app.export_progress_rx = Some(rx);
-                    app.export_task = Some(thread::spawn(move || {
+                    app.export_state.progress_rx = Some(rx);
+                    app.export_state.task = Some(thread::spawn(move || {
                         let _ = tx.send(ExportProgress {
                             progress: 0.2,
                             message: Some("Saving file...".to_string()),
@@ -114,18 +114,24 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     .add_enabled(!disabled, egui::Button::new("Cancel"))
                     .clicked()
                 {
-                    app.show_export_modal = false;
+                    app.export_state.show_modal = false;
                 }
             });
         });
 
-    app.show_export_modal = open;
+    app.export_state.show_modal = open;
 }
 
+#[cfg(not(target_os = "android"))]
 fn pick_file(default_name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_file_name(default_name)
         .save_file()
+}
+
+#[cfg(target_os = "android")]
+fn pick_file(_default_name: &str) -> Option<PathBuf> {
+    None
 }
 
 /// Export settings tracked by the app.

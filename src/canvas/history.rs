@@ -83,9 +83,9 @@ impl History {
         let mut affected = Vec::new();
         for snapshot in &mut action.tiles {
             let tile_size = canvas.tile_size();
-            canvas.ensure_layer_tile_exists_i32(snapshot.layer_idx, snapshot.tx, snapshot.ty);
+            canvas.ensure_layer_tile_exists(snapshot.layer_idx, snapshot.tx as usize, snapshot.ty as usize);
             if let Some(tile_arc) =
-                canvas.lock_layer_tile_i32(snapshot.layer_idx, snapshot.tx, snapshot.ty)
+                canvas.lock_layer_tile(snapshot.layer_idx, snapshot.tx as usize, snapshot.ty as usize)
             {
                 let mut tile = tile_arc.lock().unwrap();
                 // Ensure tile data exists

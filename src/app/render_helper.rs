@@ -13,18 +13,18 @@ pub struct CanvasView {
 }
 
 pub fn update_dirty_textures(app: &mut PainterApp) {
-    let lod_step = if app.disable_lod {
+    let lod_step = if app.render_cache.disable_lod {
         1
-    } else if app.zoom < 1.0 {
-        (1.0 / app.zoom).ceil() as usize
+    } else if app.viewport.zoom < 1.0 {
+        (1.0 / app.viewport.zoom).ceil() as usize
     } else {
         1
     }
     .clamp(1, TILE_SIZE);
 
     let canvas_ref = &app.canvas;
-    let dirty_images: Vec<(usize, egui::ColorImage)> = app.pool.install(|| {
-        app.tiles
+    let dirty_images: Vec<(usize, egui::ColorImage)> = app.workspace.pool.install(|| {
+        app.render_cache.tiles
             .iter()
             .enumerate()
             .filter(|(_, t)| t.dirty)
@@ -46,11 +46,11 @@ pub fn update_dirty_textures(app: &mut PainterApp) {
     });
 
     for (idx, img) in dirty_images {
-        if let Some(tile) = app.tiles.get_mut(idx) {
+        if let Some(tile) = app.render_cache.tiles.get_mut(idx) {
             let _timer = ScopeTimer::new("texture_set");
             let img_w = img.size[0];
             let img_h = img.size[1];
-            if let Some(atlas) = app.atlases.get_mut(tile.atlas_idx) {
+            if let Some(atlas) = app.render_cache.atlases.get_mut(tile.atlas_idx) {
                 atlas.texture.set_partial(
                     [tile.atlas_x, tile.atlas_y],
                     img,
@@ -66,31 +66,31 @@ pub fn update_dirty_textures(app: &mut PainterApp) {
 
 pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
     let desired_size = egui::vec2(app.canvas.width() as f32, app.canvas.height() as f32);
-    let canvas_size = desired_size * app.zoom;
+    let canvas_size = desired_size * app.viewport.zoom;
     let (rect, response) =
         ui.allocate_at_least(ui.available_size(), egui::Sense::click_and_drag());
 
-    let origin = rect.min + egui::vec2(app.offset.x, app.offset.y);
+    let origin = rect.min + egui::vec2(app.viewport.offset.x, app.viewport.offset.y);
     let canvas_center = origin + canvas_size * 0.5;
-    let cos = app.rotation.cos();
-    let sin = app.rotation.sin();
+    let cos = app.viewport.rotation.cos();
+    let sin = app.viewport.rotation.sin();
 
     let mut meshes: Vec<egui::Mesh> = app
-        .atlases
+        .render_cache.atlases
         .iter()
         .map(|atlas| egui::Mesh::with_texture(atlas.texture.id()))
         .collect();
 
     let half_texel = 0.5 / ATLAS_SIZE as f32;
 
-    for tile in &app.tiles {
-        let x = (tile.tx * TILE_SIZE) as f32 * app.zoom;
-        let y = (tile.ty * TILE_SIZE) as f32 * app.zoom;
+    for tile in &app.render_cache.tiles {
+        let x = (tile.tx * TILE_SIZE) as f32 * app.viewport.zoom;
+        let y = (tile.ty * TILE_SIZE) as f32 * app.viewport.zoom;
 
         let tile_w =
-            (TILE_SIZE.min(app.canvas.width() - tile.tx * TILE_SIZE)) as f32 * app.zoom;
+            (TILE_SIZE.min(app.canvas.width() - tile.tx * TILE_SIZE)) as f32 * app.viewport.zoom;
         let tile_h =
-            (TILE_SIZE.min(app.canvas.height() - tile.ty * TILE_SIZE)) as f32 * app.zoom;
+            (TILE_SIZE.min(app.canvas.height() - tile.ty * TILE_SIZE)) as f32 * app.viewport.zoom;
 
         let tile_rect = egui::Rect::from_min_size(
             origin + egui::vec2(x, y),

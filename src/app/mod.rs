@@ -1,5 +1,7 @@
 pub mod layout;
 pub mod painter;
+pub mod painter_helpers;
+pub mod painter_state;
 pub mod state;
 pub mod render_helper;
 pub mod input_handler;

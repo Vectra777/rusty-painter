@@ -24,6 +24,17 @@ cargo run --release
 
 That launches the native egui window with the default canvas and brush settings.
 
+## Android (APK build)
+This is an experimental setup and may need platform fixes. To build an APK:
+
+```bash
+rustup target add aarch64-linux-android
+cargo install cargo-apk
+cargo apk build --release
+```
+
+If you have multiple Android SDK/NDK installs, ensure your environment points to the intended one (e.g. `ANDROID_HOME` and `ANDROID_NDK_HOME`).
+
 ## Controls
 - **Paint**: Left click and drag
 - **Pan**: Hold `Space` + left drag

@@ -3505,6 +3505,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 name = "rusty-painter"
 version = "0.0.1"
 dependencies = [
+ "android-activity",
  "criterion",
  "eframe",
  "egui_dock",
@@ -3518,6 +3519,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "wide",
+ "winit",
 ]
 
 [[package]]

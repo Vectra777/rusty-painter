@@ -1,5 +1,7 @@
 use super::{
     layout::{self, ToolTab},
+    painter_helpers::{PixelBounds, TileRange, AtlasLayout, AtlasPosition, BrushData},
+    painter_state::{BrushState, ViewportState, RenderCache, LayerState, ModalState, ExportState, WorkspaceState},
     state::{CanvasTile, ColorModel, NewCanvasSettings, TextureAtlas, TILE_SIZE, ATLAS_SIZE},
 };
 use crate::{
@@ -10,7 +12,6 @@ use crate::{
     },
     tablet::TabletInput,
     ui,
-    ui::brush_settings::BrushPreviewState,
     utils::vector::Vec2,
 };
 use crate::app::render_helper;
@@ -19,10 +20,9 @@ use crate::brush_engine::brush_options::{BlendMode, PixelBrushShape};
 use eframe::egui;
 use eframe::egui::{Color32, TextureOptions};
 use egui_dock::DockState;
-use rayon::{ThreadPool, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::thread;
 // use std::time::Duration;
 
@@ -33,60 +33,19 @@ use crate::selection::{SelectionManager};
 /// Main egui application that owns the canvas, brush state, UI and rendering caches.
 pub struct PainterApp {
     pub(crate) canvas: Canvas,
-    pub(crate) brush: Brush,
-    pub(crate) brush_preview: BrushPreviewState,
-    pub(crate) presets: Vec<BrushPreset>,
+    
+    // Grouped state
+    pub(crate) brush_state: BrushState,
+    pub(crate) viewport: ViewportState,
+    pub(crate) render_cache: RenderCache,
+    pub(crate) layer_state: LayerState,
+    pub(crate) modal_state: ModalState,
+    pub(crate) export_state: ExportState,
+    pub(crate) workspace: WorkspaceState,
+    
+    // Standalone components
     pub(crate) active_tool: super::tools::Tool,
     pub(crate) selection_manager: SelectionManager,
-    pub(crate) preset_previews: HashMap<String, egui::TextureHandle>,
-    pub(crate) show_new_preset_modal: bool,
-    pub(crate) new_preset_name: String,
-    pub(crate) stroke: Option<StrokeState>,
-    pub(crate) is_drawing: bool,
-
-    pub(crate) brushes_path: PathBuf,
-    pub(crate) loaded_brush_tips: Vec<(String, PixelBrushShape, Option<egui::TextureHandle>)>, // Name, Shape, Optional Preview Texture
-
-    pub(crate) histories: Vec<History>,
-    pub(crate) current_undo_action: Option<UndoAction>,
-    pub(crate) modified_tiles: HashSet<(usize, usize)>,
-
-    pub(crate) tiles: Vec<CanvasTile>,
-    pub(crate) atlases: Vec<TextureAtlas>,
-    pub(crate) tiles_x: usize,
-    pub(crate) tiles_y: usize,
-    pub(crate) layer_caches: Vec<HashMap<(usize, usize), egui::ColorImage>>,
-    pub(crate) layer_cache_dirty: Vec<HashSet<(usize, usize)>>,
-    pub(crate) layer_ui_colors: Vec<Color32>,
-    pub(crate) layer_dragging: Option<usize>,
-    pub(crate) floating_layer_idx: Option<usize>,
-    pub(crate) floating_buffer: Option<HashMap<(i32, i32), Vec<Color32>>>,
-
-    pub(crate) zoom: f32,
-    pub(crate) offset: Vec2,
-    pub(crate) first_frame: bool,
-    pub(crate) use_masked_brush: bool,
-    pub(crate) thread_count: usize,
-    pub(crate) max_threads: usize,
-    pub(crate) pool: ThreadPool,
-    pub(crate) is_panning: bool,
-    pub(crate) is_rotating: bool,
-    pub(crate) rotation: f32,
-    pub(crate) is_primary_down: bool,
-    pub(crate) disable_lod: bool,
-    // pub(crate) force_full_upload: bool,
-    pub(crate) show_new_canvas_modal: bool,
-    pub(crate) show_export_modal: bool,
-    pub(crate) new_canvas: NewCanvasSettings,
-    pub(crate) export_settings: crate::ui::export_modal::ExportSettings,
-    pub(crate) export_message: Option<String>,
-    pub(crate) export_in_progress: bool,
-    pub(crate) export_task: Option<std::thread::JoinHandle<Result<String, String>>>,
-    pub(crate) export_progress: f32,
-    pub(crate) export_progress_rx: Option<mpsc::Receiver<crate::ui::export_modal::ExportProgress>>,
-    pub(crate) color_model: ColorModel,
-    pub(crate) texture_generation: u64,
-    pub(crate) show_general_settings: bool,
     pub(crate) dock_left: DockState<ToolTab>,
     pub(crate) dock_right: DockState<ToolTab>,
     pub(crate) tablet: Option<TabletInput>,
@@ -101,11 +60,43 @@ impl PainterApp {
         let layer_count = canvas.layers.len();
         let new_canvas = NewCanvasSettings::from_canvas(&canvas);
         let color_model = new_canvas.color_model;
-
         let black = Color32::from_rgba_unmultiplied(0, 0, 0, 255);
-        let brush = Brush::new(24.0, 20.0, black, 25.0);
 
-        let presets = vec![
+        let presets = Self::create_default_brush_presets(black);
+        let workspace = Self::create_workspace(color_model);
+        let render_cache = Self::initialize_render_cache(&cc.egui_ctx, canvas_w, canvas_h, layer_count);
+        let dock_left = layout::default_left_dock();
+        let dock_right = layout::default_right_dock();
+
+        let brush_state = BrushState::new(Brush::new(24.0, 20.0, black, 25.0), presets, Self::get_brushes_path(), true);
+        let viewport = ViewportState::new(1.0, Vec2 { x: 300.0, y: 100.0 });
+        let layer_state = LayerState::new(layer_count);
+        let modal_state = ModalState::new(new_canvas);
+        let export_state = ExportState::new();
+
+        let mut app = Self {
+            canvas,
+            brush_state,
+            viewport,
+            render_cache,
+            layer_state,
+            modal_state,
+            export_state,
+            workspace,
+            active_tool: super::tools::Tool::Brush,
+            selection_manager: SelectionManager::new(),
+            dock_left,
+            dock_right,
+            tablet: TabletInput::new(cc),
+        };
+
+        app.load_brush_tips(cc.egui_ctx.clone());
+        app
+    }
+
+    /// Create default brush presets.
+    fn create_default_brush_presets(black: Color32) -> Vec<BrushPreset> {
+        vec![
             BrushPreset {
                 name: "Pencil (Sketch)".to_string(),
                 brush: {
@@ -168,272 +159,290 @@ impl PainterApp {
                 name: "Pixel Art".to_string(),
                 brush: Brush::new_pixel(1.0, black),
             },
-        ];
+        ]
+    }
 
+    /// Create workspace with thread pool.
+    fn create_workspace(color_model: ColorModel) -> WorkspaceState {
         let max_threads = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(8)
             .max(1);
-        let thread_count = max_threads;
         let pool = ThreadPoolBuilder::new()
-            .num_threads(thread_count)
+            .num_threads(max_threads)
             .build()
             .expect("failed to build thread pool");
+        WorkspaceState::new(max_threads, max_threads, pool, color_model)
+    }
 
+    /// Initialize render cache with atlases and tiles.
+    fn initialize_render_cache(ctx: &egui::Context, canvas_w: usize, canvas_h: usize, layer_count: usize) -> RenderCache {
         let tiles_x = (canvas_w + TILE_SIZE - 1) / TILE_SIZE;
         let tiles_y = (canvas_h + TILE_SIZE - 1) / TILE_SIZE;
-        debug_assert!(
-            ATLAS_SIZE % TILE_SIZE == 0,
-            "ATLAS_SIZE must be divisible by TILE_SIZE for clean packing"
-        );
+        let atlas_layout = Self::calculate_atlas_layout(tiles_x, tiles_y);
+        let atlases = Self::create_initial_atlases(ctx, tiles_x, tiles_y, &atlas_layout);
+        let tiles = Self::create_initial_tiles(canvas_w, canvas_h, tiles_x, tiles_y, &atlas_layout);
+        RenderCache::new(tiles, atlases, tiles_x, tiles_y, layer_count, true)
+    }
 
-        let atlas_cols = (ATLAS_SIZE / TILE_SIZE).max(1);
-        let atlas_capacity = atlas_cols * atlas_cols;
+    /// Create initial texture atlases.
+    fn create_initial_atlases(ctx: &egui::Context, tiles_x: usize, tiles_y: usize, layout: &AtlasLayout) -> Vec<TextureAtlas> {
         let total_tiles = tiles_x * tiles_y;
-        let atlas_count = (total_tiles + atlas_capacity - 1) / atlas_capacity;
+        let atlas_count = (total_tiles + layout.capacity - 1) / layout.capacity;
+        (0..atlas_count)
+            .map(|idx| {
+                let img = egui::ColorImage::new([ATLAS_SIZE, ATLAS_SIZE], Color32::TRANSPARENT);
+                let texture = ctx.load_texture(format!("canvas_atlas_{}", idx), img, TextureOptions::LINEAR);
+                TextureAtlas { texture }
+            })
+            .collect()
+    }
 
-        let mut atlases = Vec::new();
-        for idx in 0..atlas_count {
-            let img = egui::ColorImage::new([ATLAS_SIZE, ATLAS_SIZE], Color32::TRANSPARENT);
-            let texture = cc.egui_ctx.load_texture(
-                format!("canvas_atlas_{}", idx),
-                img,
-                TextureOptions::LINEAR,
-            );
-            atlases.push(TextureAtlas { texture });
-        }
-
+    /// Create initial tile grid.
+    fn create_initial_tiles(canvas_w: usize, canvas_h: usize, tiles_x: usize, tiles_y: usize, layout: &AtlasLayout) -> Vec<CanvasTile> {
         let mut tiles = Vec::new();
-
         for ty in 0..tiles_y {
             for tx in 0..tiles_x {
-                let flat_idx = ty * tiles_x + tx;
-                let atlas_idx = flat_idx / atlas_capacity;
-                let atlas_local = flat_idx % atlas_capacity;
-                let atlas_tile_x = (atlas_local % atlas_cols) * TILE_SIZE;
-                let atlas_tile_y = (atlas_local / atlas_cols) * TILE_SIZE;
-                let tile_w = TILE_SIZE.min(canvas_w - tx * TILE_SIZE);
-                let tile_h = TILE_SIZE.min(canvas_h - ty * TILE_SIZE);
-                tiles.push(CanvasTile {
-                    dirty: true,
-                    atlas_idx,
-                    atlas_x: atlas_tile_x,
-                    atlas_y: atlas_tile_y,
-                    pixel_w: tile_w,
-                    pixel_h: tile_h,
-                    tx,
-                    ty,
-                });
+                let pos = Self::calculate_tile_atlas_position(tx, ty, tiles_x, layout);
+                let tile = Self::create_canvas_tile(tx, ty, canvas_w, canvas_h, pos);
+                tiles.push(tile);
             }
         }
+        tiles
+    }
 
-        let dock_left = layout::default_left_dock();
-        let dock_right = layout::default_right_dock();
-
-        let brushes_path = std::env::current_dir()
+    /// Get the path to the brushes directory.
+    fn get_brushes_path() -> PathBuf {
+        std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
-            .join("brushes");
-
-        let mut app = Self {
-            canvas,
-            brush,
-            brush_preview: BrushPreviewState::default(),
-            presets,
-            active_tool: super::tools::Tool::Brush,
-            selection_manager: SelectionManager::new(),
-            preset_previews: HashMap::new(),
-            show_new_preset_modal: false,
-            new_preset_name: String::new(),
-            stroke: None,
-            is_drawing: false,
-            is_panning: false,
-            is_rotating: false,
-            rotation: 0.0,
-            is_primary_down: false,
-            brushes_path,
-            loaded_brush_tips: Vec::new(),
-            histories: (0..layer_count).map(|_| History::new()).collect(),
-            current_undo_action: None,
-            modified_tiles: HashSet::new(),
-            tiles,
-            atlases,
-            tiles_x,
-            tiles_y,
-            layer_caches: vec![HashMap::new(); layer_count],
-            layer_cache_dirty: vec![HashSet::new(); layer_count],
-            layer_ui_colors: vec![Color32::from_gray(40); layer_count],
-            layer_dragging: None,
-            floating_layer_idx: None,
-            floating_buffer: None,
-            zoom: 1.0,
-            offset: Vec2 { x: 300.0, y: 100.0 },
-            first_frame: true,
-            use_masked_brush: true,
-            thread_count,
-            max_threads,
-            pool,
-            disable_lod: true,
-            // force_full_upload: false,
-            show_new_canvas_modal: false,
-            show_export_modal: false,
-            new_canvas,
-            export_settings: crate::ui::export_modal::ExportSettings::new(),
-            export_message: None,
-            export_in_progress: false,
-            export_task: None,
-            export_progress: 0.0,
-            export_progress_rx: None,
-            color_model,
-            texture_generation: 0,
-            show_general_settings: false,
-            dock_left,
-            dock_right,
-            tablet: TabletInput::new(cc),
-        };
-
-        app.load_brush_tips(cc.egui_ctx.clone());
-        app
+            .join("brushes")
     }
 
     pub fn load_brush_tips(&mut self, ctx: egui::Context) {
-        // Create directory if it doesn't exist
-        if !self.brushes_path.exists() {
-            let _ = std::fs::create_dir_all(&self.brushes_path);
+        self.ensure_brushes_directory_exists();
+        self.brush_state.loaded_brush_tips.clear();
+        self.scan_and_load_brush_images(ctx);
+        self.sort_loaded_brushes();
+    }
+
+    /// Create brushes directory if it doesn't exist.
+    fn ensure_brushes_directory_exists(&self) {
+        if !self.brush_state.brushes_path.exists() {
+            let _ = std::fs::create_dir_all(&self.brush_state.brushes_path);
         }
+    }
 
-        self.loaded_brush_tips.clear();
-
-        if let Ok(entries) = std::fs::read_dir(&self.brushes_path) {
+    /// Scan directory and load all valid brush tip images.
+    fn scan_and_load_brush_images(&mut self, ctx: egui::Context) {
+        if let Ok(entries) = std::fs::read_dir(&self.brush_state.brushes_path) {
             for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                        if ["png", "jpg", "jpeg", "bmp"].contains(&ext.to_lowercase().as_str()) {
-                            if let Ok(img) = image::open(&path) {
-                                let img = img.to_luma8();
-                                let width = img.width() as usize;
-                                let height = img.height() as usize;
-                                let data = img.into_raw();
-                                
-                                let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                                let shape = PixelBrushShape::Custom { width, height, data: data.clone() };
-                                
-                                // Create UI texture for the tip
-                                // Invert for display if needed, but usually brush tips are white on black or alpha.
-                                // PixelBrushShape uses 0-255 as alpha mask.
-                                let mut pixels = Vec::with_capacity(width * height);
-                                for &alpha in &data {
-                                    pixels.push(Color32::from_white_alpha(alpha));
-                                }
-                                let texture_img = egui::ColorImage {
-                                    size: [width, height],
-                                    pixels,
-                                };
-                                let texture = ctx.load_texture(
-                                    format!("brush_tip_{}", name),
-                                    texture_img,
-                                    TextureOptions::NEAREST,
-                                );
-
-                                self.loaded_brush_tips.push((name, shape, Some(texture)));
-                            }
-                        }
-                    }
+                if let Some(brush_tip) = self.try_load_brush_from_path(entry.path(), &ctx) {
+                    self.brush_state.loaded_brush_tips.push(brush_tip);
                 }
             }
         }
-        self.loaded_brush_tips.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    /// Try to load a brush tip from a file path.
+    fn try_load_brush_from_path(&self, path: std::path::PathBuf, ctx: &egui::Context) -> Option<(String, PixelBrushShape, Option<egui::TextureHandle>)> {
+        if !path.is_file() || !Self::is_valid_image_extension(&path) {
+            return None;
+        }
+        let img = image::open(&path).ok()?.to_luma8();
+        let brush_data = Self::extract_brush_data(&img);
+        let texture = Self::create_brush_texture(&brush_data, ctx);
+        Some(brush_data.into_brush_tip(texture))
+    }
+
+    /// Check if path has a valid image extension.
+    fn is_valid_image_extension(path: &std::path::Path) -> bool {
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| ["png", "jpg", "jpeg", "bmp"].contains(&ext.to_lowercase().as_str()))
+            .unwrap_or(false)
+    }
+
+    /// Extract brush data from a loaded image.
+    fn extract_brush_data(img: &image::GrayImage) -> BrushData {
+        BrushData {
+            width: img.width() as usize,
+            height: img.height() as usize,
+            data: img.clone().into_raw(),
+        }
+    }
+
+    /// Create UI texture for brush tip visualization.
+    fn create_brush_texture(brush_data: &BrushData, ctx: &egui::Context) -> egui::TextureHandle {
+        let pixels: Vec<Color32> = brush_data.data.iter()
+            .map(|&alpha| Color32::from_white_alpha(alpha))
+            .collect();
+        let texture_img = egui::ColorImage {
+            size: [brush_data.width, brush_data.height],
+            pixels,
+        };
+        ctx.load_texture(
+            format!("brush_tip_{}", brush_data.width),
+            texture_img,
+            TextureOptions::NEAREST,
+        )
+    }
+
+    /// Sort loaded brushes alphabetically by name.
+    fn sort_loaded_brushes(&mut self) {
+        self.brush_state.loaded_brush_tips.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
     /// Mark all tiles that intersect a stroke segment as dirty so they re-upload to the atlas.
     pub(crate) fn mark_segment_dirty(&mut self, start: Vec2, end: Vec2, radius: f32) {
-        let r_i32 = radius.ceil() as i32;
-
-        let min_x_f = start.x.min(end.x).floor() as i32 - r_i32;
-        let max_x_f = start.x.max(end.x).ceil() as i32 + r_i32;
-        let min_y_f = start.y.min(end.y).floor() as i32 - r_i32;
-        let max_y_f = start.y.max(end.y).ceil() as i32 + r_i32;
-
-        let canvas_w = self.canvas.width() as i32;
-        let canvas_h = self.canvas.height() as i32;
-
-        if max_x_f < 0 || min_x_f >= canvas_w || max_y_f < 0 || min_y_f >= canvas_h {
+        let bounds = Self::calculate_stroke_bounds(start, end, radius);
+        let canvas_bounds = self.get_canvas_bounds();
+        
+        if !Self::bounds_overlap(&bounds, &canvas_bounds) {
             return;
         }
-
-        let min_x = min_x_f.max(0) as usize;
-        let max_x = max_x_f.min(canvas_w - 1) as usize;
-        let min_y = min_y_f.max(0) as usize;
-        let max_y = max_y_f.min(canvas_h - 1) as usize;
-
-        if min_x > max_x || min_y > max_y {
-            return;
+        
+        let clamped = Self::clamp_bounds(bounds, canvas_bounds);
+        let tile_range = Self::pixel_bounds_to_tile_range(clamped);
+        
+        self.mark_tiles_in_range_dirty(tile_range);
+    }
+    
+    fn calculate_stroke_bounds(start: Vec2, end: Vec2, radius: f32) -> PixelBounds {
+        let r = radius.ceil() as i32;
+        PixelBounds {
+            min_x: start.x.min(end.x).floor() as i32 - r,
+            max_x: start.x.max(end.x).ceil() as i32 + r,
+            min_y: start.y.min(end.y).floor() as i32 - r,
+            max_y: start.y.max(end.y).ceil() as i32 + r,
         }
-
-        let min_tx = min_x / TILE_SIZE;
-        let max_tx = max_x / TILE_SIZE;
-        let min_ty = min_y / TILE_SIZE;
-        let max_ty = max_y / TILE_SIZE;
-
-        for ty in min_ty..=max_ty {
-            for tx in min_tx..=max_tx {
-                if let Some(tile) = self.tile_mut(tx, ty) {
-                    tile.dirty = true;
-                    self.canvas.ensure_tile_exists(tx, ty);
-                }
+    }
+    
+    fn get_canvas_bounds(&self) -> PixelBounds {
+        PixelBounds {
+            min_x: 0,
+            max_x: self.canvas.width() as i32,
+            min_y: 0,
+            max_y: self.canvas.height() as i32,
+        }
+    }
+    
+    fn bounds_overlap(a: &PixelBounds, b: &PixelBounds) -> bool {
+        !(a.max_x < b.min_x || a.min_x >= b.max_x || 
+          a.max_y < b.min_y || a.min_y >= b.max_y)
+    }
+    
+    fn clamp_bounds(bounds: PixelBounds, limits: PixelBounds) -> PixelBounds {
+        PixelBounds {
+            min_x: bounds.min_x.max(limits.min_x),
+            max_x: bounds.max_x.min(limits.max_x - 1),
+            min_y: bounds.min_y.max(limits.min_y),
+            max_y: bounds.max_y.min(limits.max_y - 1),
+        }
+    }
+    
+    fn pixel_bounds_to_tile_range(bounds: PixelBounds) -> TileRange {
+        TileRange {
+            min_tx: (bounds.min_x as usize) / TILE_SIZE,
+            max_tx: (bounds.max_x as usize) / TILE_SIZE,
+            min_ty: (bounds.min_y as usize) / TILE_SIZE,
+            max_ty: (bounds.max_y as usize) / TILE_SIZE,
+        }
+    }
+    
+    fn mark_tiles_in_range_dirty(&mut self, range: TileRange) {
+        for ty in range.min_ty..=range.max_ty {
+            for tx in range.min_tx..=range.max_tx {
+                self.mark_tile_dirty(tx, ty);
             }
+        }
+    }
+    
+    fn mark_tile_dirty(&mut self, tx: usize, ty: usize) {
+        if let Some(tile) = self.tile_mut(tx, ty) {
+            tile.dirty = true;
+            self.canvas.ensure_tile_exists(tx, ty);
         }
     }
 
     /// Get a mutable reference to a tile entry if coordinates are valid.
     fn tile_mut(&mut self, tx: usize, ty: usize) -> Option<&mut CanvasTile> {
-        if tx >= self.tiles_x || ty >= self.tiles_y {
+        if tx >= self.render_cache.tiles_x || ty >= self.render_cache.tiles_y {
             return None;
         }
-        let idx = ty * self.tiles_x + tx;
-        self.tiles.get_mut(idx)
+        let idx = ty * self.render_cache.tiles_x + tx;
+        self.render_cache.tiles.get_mut(idx)
     }
 
     /// Begin a stroke at the given canvas coordinate and register undo state.
     pub(crate) fn start_stroke(&mut self, pos: Vec2) {
-        // Check if active layer is locked
-        if self.canvas.layers.get(self.canvas.active_layer_idx).map(|l| l.locked).unwrap_or(false) {
+        if self.is_active_layer_locked() {
             return;
         }
+        self.initialize_stroke_state();
+        self.add_initial_stroke_point(pos);
+    }
 
-        self.stroke = Some(StrokeState::new());
-        self.is_drawing = true;
-        self.current_undo_action = Some(UndoAction { tiles: Vec::new(), selection: None, transform: None });
-        self.modified_tiles.clear();
+    /// Check if the active layer is locked.
+    fn is_active_layer_locked(&self) -> bool {
+        self.canvas.layers.get(self.canvas.active_layer_idx).map(|l| l.locked).unwrap_or(false)
+    }
 
-        if let Some(stroke) = &mut self.stroke {
+    /// Initialize stroke state for a new stroke.
+    fn initialize_stroke_state(&mut self) {
+        self.brush_state.stroke = Some(StrokeState::new());
+        self.brush_state.is_drawing = true;
+        self.layer_state.current_undo_action = Some(UndoAction { tiles: Vec::new(), selection: None, transform: None });
+        self.render_cache.modified_tiles.clear();
+    }
+
+    /// Add the first point to the newly started stroke.
+    fn add_initial_stroke_point(&mut self, pos: Vec2) {
+        if let Some(stroke) = &mut self.brush_state.stroke {
+            let has_selection = self.selection_manager.has_selection();
+            let selection = if has_selection { Some(&self.selection_manager) } else { None };
             stroke.add_point(
-                &self.pool,
+                &self.workspace.pool,
                 &self.canvas,
-                &mut self.brush,
-                if self.selection_manager.has_selection() { Some(&self.selection_manager) } else { None },
+                &mut self.brush_state.brush,
+                selection,
                 pos,
-                self.current_undo_action.as_mut().unwrap(),
-                &mut self.modified_tiles,
+                self.layer_state.current_undo_action.as_mut().unwrap(),
+                &mut self.render_cache.modified_tiles,
             );
-            self.mark_segment_dirty(pos, pos, self.brush.brush_options.diameter / 2.0);
+            self.mark_segment_dirty(pos, pos, self.brush_state.brush.brush_options.diameter / 2.0);
         }
     }
 
+    /// Get selection reference if active, otherwise None.
     /// Finalize the current stroke and push it to the undo stack.
     pub(crate) fn finish_stroke(&mut self) {
-        if let Some(stroke) = &mut self.stroke {
+        self.end_current_stroke();
+        self.save_undo_action_if_valid();
+        self.clear_stroke_state();
+    }
+
+    /// End the stroke recording.
+    fn end_current_stroke(&mut self) {
+        if let Some(stroke) = &mut self.brush_state.stroke {
             stroke.end();
         }
-        if let Some(action) = self.current_undo_action.take() {
+    }
+
+    /// Save the undo action if it contains tile changes.
+    fn save_undo_action_if_valid(&mut self) {
+        if let Some(action) = self.layer_state.current_undo_action.take() {
             if !action.tiles.is_empty() {
                 if let Some(hist) = self.active_history_mut() {
                     hist.push_action(action);
                 }
             }
         }
-        self.stroke = None;
-        self.is_drawing = false;
+    }
+
+    /// Clear stroke drawing state.
+    fn clear_stroke_state(&mut self) {
+        self.brush_state.stroke = None;
+        self.brush_state.is_drawing = false;
     }
 
     /// Rotate a point around a center by the given cos/sin pair.
@@ -446,110 +455,168 @@ impl PainterApp {
     }
 
     /// Convert a screen-space position into canvas space considering zoom and rotation.
-    pub(crate) fn screen_to_canvas(
-        &self,
-        pos: egui::Pos2,
-        origin: egui::Pos2,
-        canvas_center: egui::Pos2,
-    ) -> (Vec2, bool) {
-        let cos = self.rotation.cos();
-        let sin = self.rotation.sin();
-        let delta = pos - canvas_center;
-        let unrotated = egui::Vec2::new(
-            delta.x * cos + delta.y * sin,
-            -delta.x * sin + delta.y * cos,
-        );
-        let point_world = canvas_center + unrotated;
-        let canvas_point = (point_world - origin) / self.zoom;
-        let clamped = Vec2 {
-            x: canvas_point.x.clamp(0.0, self.canvas.width() as f32),
-            y: canvas_point.y.clamp(0.0, self.canvas.height() as f32),
-        };
-        let is_inside = canvas_point.x >= 0.0
-            && canvas_point.y >= 0.0
-            && canvas_point.x <= self.canvas.width() as f32
-            && canvas_point.y <= self.canvas.height() as f32;
+    pub(crate) fn screen_to_canvas(&self, pos: egui::Pos2, origin: egui::Pos2, canvas_center: egui::Pos2) -> (Vec2, bool) {
+        let unrotated = self.unrotate_point_around_center(pos, canvas_center);
+        let world_point = canvas_center + unrotated;
+        let canvas_point = self.world_to_canvas_coords(world_point, origin);
+        let clamped = self.clamp_to_canvas_bounds(canvas_point);
+        let is_inside = self.is_point_in_canvas(canvas_point);
         (clamped, is_inside)
     }
 
+    /// Unrotate a point around the canvas center.
+    fn unrotate_point_around_center(&self, pos: egui::Pos2, center: egui::Pos2) -> egui::Vec2 {
+        let cos = self.viewport.rotation.cos();
+        let sin = self.viewport.rotation.sin();
+        let delta = pos - center;
+        egui::Vec2::new(
+            delta.x * cos + delta.y * sin,
+            -delta.x * sin + delta.y * cos,
+        )
+    }
+
+    /// Convert world coordinates to canvas coordinates.
+    fn world_to_canvas_coords(&self, world: egui::Pos2, origin: egui::Pos2) -> egui::Pos2 {
+        let delta = (world - origin) / self.viewport.zoom;
+        egui::Pos2::new(delta.x, delta.y)
+    }
+
+    /// Clamp point to canvas dimensions.
+    fn clamp_to_canvas_bounds(&self, point: egui::Pos2) -> Vec2 {
+        Vec2 {
+            x: point.x.clamp(0.0, self.canvas.width() as f32),
+            y: point.y.clamp(0.0, self.canvas.height() as f32),
+        }
+    }
+
+    /// Check if point is within canvas bounds.
+    fn is_point_in_canvas(&self, point: egui::Pos2) -> bool {
+        point.x >= 0.0
+            && point.y >= 0.0
+            && point.x <= self.canvas.width() as f32
+            && point.y <= self.canvas.height() as f32
+    }
+
     /// Recreate the canvas, tile metadata, atlases and undo history with new dimensions.
-    fn rebuild_canvas(
-        &mut self,
-        ctx: &egui::Context,
-        width: usize,
-        height: usize,
-        background: Color32,
-    ) {
+    fn rebuild_canvas(&mut self, ctx: &egui::Context, width: usize, height: usize, background: Color32) {
+        self.reset_canvas_state(width, height, background);
+        self.recreate_render_cache(width, height);
+        self.create_atlas_textures(ctx, width, height);
+        self.generate_tile_grid(width, height);
+        self.reset_viewport_state();
+    }
+
+    /// Reset canvas and layer state for new canvas.
+    fn reset_canvas_state(&mut self, width: usize, height: usize, background: Color32) {
         self.canvas = Canvas::new(width, height, background, TILE_SIZE);
         let layer_count = self.canvas.layers.len();
-        self.histories = (0..layer_count).map(|_| History::new()).collect();
-        self.layer_caches = vec![HashMap::new(); layer_count];
-        self.layer_cache_dirty = vec![HashSet::new(); layer_count];
-        self.layer_ui_colors = vec![Color32::from_gray(40); layer_count];
-        self.layer_dragging = None;
-        self.current_undo_action = None;
-        self.modified_tiles.clear();
-        self.stroke = None;
-        self.is_drawing = false;
-        self.is_panning = false;
-        self.is_rotating = false;
-        self.is_primary_down = false;
+        self.layer_state.histories = (0..layer_count).map(|_| History::new()).collect();
+        self.layer_state.layer_ui_colors = vec![Color32::from_gray(40); layer_count];
+        self.layer_state.layer_dragging = None;
+        self.layer_state.current_undo_action = None;
+    }
 
-        self.tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE;
-        self.tiles_y = (height + TILE_SIZE - 1) / TILE_SIZE;
+    /// Reset render cache data structures.
+    fn recreate_render_cache(&mut self, width: usize, height: usize) {
+        let layer_count = self.canvas.layers.len();
+        self.render_cache.layer_caches = vec![HashMap::new(); layer_count];
+        self.render_cache.layer_cache_dirty = vec![HashSet::new(); layer_count];
+        self.render_cache.modified_tiles.clear();
+        self.render_cache.tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE;
+        self.render_cache.tiles_y = (height + TILE_SIZE - 1) / TILE_SIZE;
+        self.brush_state.stroke = None;
+        self.brush_state.is_drawing = false;
+        self.viewport.is_panning = false;
+        self.viewport.is_rotating = false;
+        self.viewport.is_primary_down = false;
+    }
 
-        let atlas_cols = (ATLAS_SIZE / TILE_SIZE).max(1);
-        let atlas_capacity = atlas_cols * atlas_cols;
-        let total_tiles = self.tiles_x * self.tiles_y;
-        let atlas_count = (total_tiles + atlas_capacity - 1) / atlas_capacity;
-
-        self.texture_generation = self.texture_generation.wrapping_add(1);
-        self.atlases.clear();
+    /// Create texture atlases for tile storage.
+    fn create_atlas_textures(&mut self, ctx: &egui::Context, _width: usize, _height: usize) {
+        let atlas_layout = Self::calculate_atlas_layout(self.render_cache.tiles_x, self.render_cache.tiles_y);
+        self.render_cache.texture_generation = self.render_cache.texture_generation.wrapping_add(1);
+        self.render_cache.atlases.clear();
+        
+        let atlas_count = (self.render_cache.tiles_x * self.render_cache.tiles_y + atlas_layout.capacity - 1) / atlas_layout.capacity;
         for idx in 0..atlas_count {
-            let img = egui::ColorImage::new([ATLAS_SIZE, ATLAS_SIZE], Color32::TRANSPARENT);
-            let texture = ctx.load_texture(
-                format!("canvas_atlas_{}_{}", self.texture_generation, idx),
-                img,
-                TextureOptions::NEAREST,
-            );
-            self.atlases.push(TextureAtlas { texture });
+            let texture = Self::create_atlas_texture(ctx, self.render_cache.texture_generation, idx);
+            self.render_cache.atlases.push(TextureAtlas { texture });
         }
+    }
 
-        self.tiles.clear();
-        for ty in 0..self.tiles_y {
-            for tx in 0..self.tiles_x {
-                let flat_idx = ty * self.tiles_x + tx;
-                let atlas_idx = flat_idx / atlas_capacity;
-                let atlas_local = flat_idx % atlas_capacity;
-                let atlas_tile_x = (atlas_local % atlas_cols) * TILE_SIZE;
-                let atlas_tile_y = (atlas_local / atlas_cols) * TILE_SIZE;
-                let tile_w = TILE_SIZE.min(width - tx * TILE_SIZE);
-                let tile_h = TILE_SIZE.min(height - ty * TILE_SIZE);
-                self.tiles.push(CanvasTile {
-                    dirty: true,
-                    atlas_idx,
-                    atlas_x: atlas_tile_x,
-                    atlas_y: atlas_tile_y,
-                    pixel_w: tile_w,
-                    pixel_h: tile_h,
-                    tx,
-                    ty,
-                });
+    /// Calculate atlas layout dimensions.
+    fn calculate_atlas_layout(_tiles_x: usize, _tiles_y: usize) -> AtlasLayout {
+        let cols = (ATLAS_SIZE / TILE_SIZE).max(1);
+        AtlasLayout {
+            cols,
+            capacity: cols * cols,
+        }
+    }
+
+    /// Create a single atlas texture.
+    fn create_atlas_texture(ctx: &egui::Context, generation: u64, idx: usize) -> egui::TextureHandle {
+        let img = egui::ColorImage::new([ATLAS_SIZE, ATLAS_SIZE], Color32::TRANSPARENT);
+        ctx.load_texture(
+            format!("canvas_atlas_{}_{}", generation, idx),
+            img,
+            TextureOptions::NEAREST,
+        )
+    }
+
+    /// Generate tile grid with atlas positions.
+    fn generate_tile_grid(&mut self, width: usize, height: usize) {
+        let atlas_layout = Self::calculate_atlas_layout(self.render_cache.tiles_x, self.render_cache.tiles_y);
+        self.render_cache.tiles.clear();
+        
+        for ty in 0..self.render_cache.tiles_y {
+            for tx in 0..self.render_cache.tiles_x {
+                let pos = Self::calculate_tile_atlas_position(tx, ty, self.render_cache.tiles_x, &atlas_layout);
+                let tile = Self::create_canvas_tile(tx, ty, width, height, pos);
+                self.render_cache.tiles.push(tile);
             }
         }
+    }
 
-        self.offset = Vec2 { x: 0.0, y: 0.0 };
-        self.zoom = 1.0;
-        self.rotation = 0.0;
-        self.first_frame = true;
+    /// Calculate where a tile should be placed in the atlas.
+    fn calculate_tile_atlas_position(tx: usize, ty: usize, tiles_x: usize, layout: &AtlasLayout) -> AtlasPosition {
+        let flat_idx = ty * tiles_x + tx;
+        let atlas_idx = flat_idx / layout.capacity;
+        let atlas_local = flat_idx % layout.capacity;
+        AtlasPosition {
+            atlas_idx,
+            x: (atlas_local % layout.cols) * TILE_SIZE,
+            y: (atlas_local / layout.cols) * TILE_SIZE,
+        }
+    }
+
+    /// Create a single canvas tile.
+    fn create_canvas_tile(tx: usize, ty: usize, width: usize, height: usize, pos: AtlasPosition) -> CanvasTile {
+        CanvasTile {
+            dirty: true,
+            atlas_idx: pos.atlas_idx,
+            atlas_x: pos.x,
+            atlas_y: pos.y,
+            pixel_w: TILE_SIZE.min(width - tx * TILE_SIZE),
+            pixel_h: TILE_SIZE.min(height - ty * TILE_SIZE),
+            tx,
+            ty,
+        }
+    }
+
+    /// Reset viewport to default position and zoom.
+    fn reset_viewport_state(&mut self) {
+        self.viewport.offset = Vec2 { x: 0.0, y: 0.0 };
+        self.viewport.zoom = 1.0;
+        self.viewport.rotation = 0.0;
+        self.workspace.first_frame = true;
     }
 
     pub(crate) fn apply_new_canvas(&mut self, ctx: &egui::Context) {
-        let (width, height) = self.new_canvas.dimensions_in_pixels();
-        self.color_model = self.new_canvas.color_model;
-        let background = self.new_canvas.background_color32(self.color_model);
+        let (width, height) = self.modal_state.new_canvas.dimensions_in_pixels();
+        self.workspace.color_model = self.modal_state.new_canvas.color_model;
+        let background = self.modal_state.new_canvas.background_color32(self.workspace.color_model);
         self.rebuild_canvas(ctx, width, height, background);
-        self.brush.brush_options.color = Self::convert_color_for_model(self.brush.brush_options.color, self.color_model);
+        self.brush_state.brush.brush_options.color = Self::convert_color_for_model(self.brush_state.brush.brush_options.color, self.workspace.color_model);
     }
 
     fn convert_color_for_model(color: Color32, model: ColorModel) -> Color32 {
@@ -605,29 +672,61 @@ impl PainterApp {
     }
 
     fn active_history_mut(&mut self) -> Option<&mut History> {
-        self.histories.get_mut(self.canvas.active_layer_idx)
+        self.layer_state.histories.get_mut(self.canvas.active_layer_idx)
     }
 
     #[allow(dead_code)]
     pub(crate) fn ensure_layer_history_len(&mut self) {
         let target = self.canvas.layers.len();
-        if self.histories.len() < target {
-            self.histories
-                .extend((self.histories.len()..target).map(|_| History::new()));
-        } else if self.histories.len() > target {
-            self.histories.truncate(target);
+        if self.layer_state.histories.len() < target {
+            self.layer_state.histories
+                .extend((self.layer_state.histories.len()..target).map(|_| History::new()));
+        } else if self.layer_state.histories.len() > target {
+            self.layer_state.histories.truncate(target);
         }
     }
 
     pub(crate) fn mark_all_tiles_dirty(&mut self) {
-        for tile in &mut self.tiles {
+        for tile in &mut self.render_cache.tiles {
             tile.dirty = true;
         }
     }
 
+    /// Mark only tiles that intersect the given pixel bounds as dirty.
+    /// Much faster than mark_all_tiles_dirty for localized updates.
+    pub(crate) fn mark_tiles_in_bounds_dirty(&mut self, bounds: eframe::egui::Rect) {
+        if bounds.is_negative() {
+            return;
+        }
+        
+        let min_x = bounds.min.x.floor().max(0.0) as usize;
+        let min_y = bounds.min.y.floor().max(0.0) as usize;
+        let max_x = bounds.max.x.ceil().min(self.canvas.width() as f32) as usize;
+        let max_y = bounds.max.y.ceil().min(self.canvas.height() as f32) as usize;
+        
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+        
+        let min_tx = min_x / TILE_SIZE;
+        let max_tx = max_x.saturating_sub(1) / TILE_SIZE;
+        let min_ty = min_y / TILE_SIZE;
+        let max_ty = max_y.saturating_sub(1) / TILE_SIZE;
+        
+        let tiles_x = self.render_cache.tiles_x;
+        for ty in min_ty..=max_ty.min(self.render_cache.tiles_y - 1) {
+            for tx in min_tx..=max_tx.min(tiles_x - 1) {
+                let idx = ty * tiles_x + tx;
+                if let Some(tile) = self.render_cache.tiles.get_mut(idx) {
+                    tile.dirty = true;
+                }
+            }
+        }
+    }
+
     pub(crate) fn mark_layer_tiles_with_data_dirty(&mut self, layer_idx: usize) {
-        let tiles_x = self.tiles_x;
-        let tiles_y = self.tiles_y;
+        let tiles_x = self.render_cache.tiles_x;
+        let tiles_y = self.render_cache.tiles_y;
         for ty in 0..tiles_y {
             for tx in 0..tiles_x {
                 let has_data = self
@@ -636,7 +735,8 @@ impl PainterApp {
                     .map(|cell_arc| cell_arc.lock().unwrap().data.is_some())
                     .unwrap_or(false);
                 if has_data {
-                    if let Some(tile) = self.tile_mut(tx, ty) {
+                    let idx = ty * tiles_x + tx;
+                    if let Some(tile) = self.render_cache.tiles.get_mut(idx) {
                         tile.dirty = true;
                     }
                 }
@@ -657,17 +757,17 @@ impl PainterApp {
         let layer = self.canvas.layers.remove(from);
         self.canvas.layers.insert(to, layer);
 
-        let hist = self.histories.remove(from);
-        self.histories.insert(to, hist);
+        let hist = self.layer_state.histories.remove(from);
+        self.layer_state.histories.insert(to, hist);
 
-        let cache = self.layer_caches.remove(from);
-        self.layer_caches.insert(to, cache);
+        let cache = self.render_cache.layer_caches.remove(from);
+        self.render_cache.layer_caches.insert(to, cache);
 
-        let cache_dirty = self.layer_cache_dirty.remove(from);
-        self.layer_cache_dirty.insert(to, cache_dirty);
+        let cache_dirty = self.render_cache.layer_cache_dirty.remove(from);
+        self.render_cache.layer_cache_dirty.insert(to, cache_dirty);
 
-        let ui_color = self.layer_ui_colors.remove(from);
-        self.layer_ui_colors.insert(to, ui_color);
+        let ui_color = self.layer_state.layer_ui_colors.remove(from);
+        self.layer_state.layer_ui_colors.insert(to, ui_color);
 
         let active = self.canvas.active_layer_idx;
         self.canvas.active_layer_idx = if active == from {
@@ -709,8 +809,8 @@ impl PainterApp {
                     let ty = ry + center.y + info.offset.y;
                     
                     egui::pos2(
-                        origin.x + tx * self.zoom,
-                        origin.y + ty * self.zoom
+                        origin.x + tx * self.viewport.zoom,
+                        origin.y + ty * self.viewport.zoom
                     )
                 };
 
@@ -721,7 +821,12 @@ impl PainterApp {
                     eframe::egui::pos2(bounds.min.x, bounds.max.y), // Bottom-Left
                 ];
                 
-                let t_corners: Vec<egui::Pos2> = corners.iter().map(|&c| transform_point(c)).collect();
+                let t_corners = [
+                    transform_point(corners[0]),
+                    transform_point(corners[1]),
+                    transform_point(corners[2]),
+                    transform_point(corners[3]),
+                ];
                 
                 // Draw box
                 let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 120, 255));
@@ -755,26 +860,31 @@ impl PainterApp {
 impl eframe::App for PainterApp {
     /// Handle UI, input, painting updates, and tile uploads each frame.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut needs_repaint = false;
+        
+        // Cache input state for this frame
+        let (ctrl_z_pressed, shift_held) = ctx.input(|i| {
+            (i.modifiers.ctrl && i.key_pressed(egui::Key::Z), i.modifiers.shift)
+        });
+        
         // Handle Undo/Redo
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+        if ctrl_z_pressed {
             let active_idx = self.canvas.active_layer_idx;
-            let affected = if ctx.input(|i| i.modifiers.shift) {
-                self.histories
+            let affected = if shift_held {
+                self.layer_state.histories
                     .get_mut(active_idx)
                     .map(|h| h.redo(&self.canvas, &mut self.selection_manager, &mut self.active_tool))
                     .unwrap_or_default()
             } else {
-                self.histories
+                self.layer_state.histories
                     .get_mut(active_idx)
                     .map(|h| h.undo(&self.canvas, &mut self.selection_manager, &mut self.active_tool))
                     .unwrap_or_default()
             };
 
             for (tx, ty) in affected {
-                if tx >= 0 && ty >= 0 {
-                    if let Some(tile) = self.tile_mut(tx as usize, ty as usize) {
-                        tile.dirty = true;
-                    }
+                if let Some(tile) = self.tile_mut(tx.max(0) as usize, ty.max(0) as usize) {
+                    tile.dirty = true;
                 }
             }
 
@@ -786,36 +896,36 @@ impl eframe::App for PainterApp {
                 }
             }
 
-            ctx.request_repaint();
+            needs_repaint = true;
         }
 
         // Poll export tasks
-        if let Some(handle) = self.export_task.as_ref() {
+        if let Some(handle) = self.export_state.task.as_ref() {
             if handle.is_finished() {
                 let result = self
-                    .export_task
+                    .export_state.task
                     .take()
                     .and_then(|h| h.join().ok())
                     .unwrap_or_else(|| Err("Export thread panicked".to_string()));
-                self.export_in_progress = false;
+                self.export_state.in_progress = false;
                 match result {
                     Ok(msg) => {
-                        self.export_message = Some(msg);
-                        self.show_export_modal = false;
+                        self.export_state.message = Some(msg);
+                        self.export_state.show_modal = false;
                     }
                     Err(err) => {
-                        self.export_message = Some(err);
+                        self.export_state.message = Some(err);
                     }
                 }
             }
         }
 
         // Drain progress updates
-        if let Some(rx) = &self.export_progress_rx {
+        if let Some(rx) = &self.export_state.progress_rx {
             for update in rx.try_iter() {
-                self.export_progress = update.progress;
+                self.export_state.progress = update.progress;
                 if let Some(msg) = update.message {
-                    self.export_message = Some(msg);
+                    self.export_state.message = Some(msg);
                 }
             }
         }
@@ -825,21 +935,21 @@ impl eframe::App for PainterApp {
         layout::show_tool_docks(self, ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.first_frame {
+            if self.workspace.first_frame {
                 let available = ui.available_size();
                 let canvas_w = self.canvas.width() as f32;
                 let canvas_h = self.canvas.height() as f32;
 
                 let zoom_x = available.x / canvas_w;
                 let zoom_y = available.y / canvas_h;
-                self.zoom = zoom_x.min(zoom_y) * 0.9; // 90% fit
-                let canvas_size = egui::vec2(canvas_w, canvas_h) * self.zoom;
+                self.viewport.zoom = zoom_x.min(zoom_y) * 0.9; // 90% fit
+                let canvas_size = egui::vec2(canvas_w, canvas_h) * self.viewport.zoom;
                 let offset = (available - canvas_size) * 0.5;
-                self.offset = Vec2 {
+                self.viewport.offset = Vec2 {
                     x: offset.x,
                     y: offset.y,
                 };
-                self.first_frame = false;
+                self.workspace.first_frame = false;
             }
 
             render_helper::update_dirty_textures(self);
@@ -853,8 +963,8 @@ impl eframe::App for PainterApp {
                 view.canvas_center,
             );
 
-            if self.is_drawing {
-                ctx.request_repaint();
+            if self.brush_state.is_drawing {
+                needs_repaint = true;
             }
 
             // Always draw selection overlay, but pass transform info if active
@@ -866,7 +976,7 @@ impl eframe::App for PainterApp {
             if !matches!(self.active_tool, super::tools::Tool::Transform(_)) {
                 self.selection_manager.draw_overlay(
                     ui.painter(),
-                    self.zoom,
+                    self.viewport.zoom,
                     view.origin,
                     self.canvas.height() as f32,
                     None,
@@ -875,22 +985,32 @@ impl eframe::App for PainterApp {
 
             self.draw_transform_overlay(ui.painter(), view.origin);
 
-            if ui.input(|i| i.key_pressed(egui::Key::C)) {
+            // Cache keyboard input for this frame
+            let (c_pressed, escape_pressed) = ui.input(|i| {
+                (i.key_pressed(egui::Key::C), i.key_pressed(egui::Key::Escape))
+            });
+
+            if c_pressed {
                 self.canvas.clear(Color32::WHITE);
-                for tile in &mut self.tiles {
+                for tile in &mut self.render_cache.tiles {
                     tile.dirty = true;
                 }
-                ctx.request_repaint();
+                needs_repaint = true;
             }
 
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if escape_pressed {
                 self.selection_manager.clear_selection();
-                ctx.request_repaint();
+                needs_repaint = true;
             }
         });
 
         ui::canvas_creation::canvas_creation_modal(self, ctx);
         ui::general_settings::general_settings_modal(self, ctx);
         ui::export_modal::export_modal(self, ctx);
+        
+        // Single consolidated repaint request
+        if needs_repaint {
+            ctx.request_repaint();
+        }
     }
 }
