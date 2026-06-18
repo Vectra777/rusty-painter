@@ -1,12 +1,9 @@
 use crate::brush_engine::brush::{Brush, BrushPreset};
-use crate::brush_engine::stroke::StrokeState;
-use crate::canvas::canvas::Canvas;
-use crate::canvas::history::UndoAction;
-use crate::utils::vector::Vec2;
+use crate::brush_engine::preview::stroke_preview_image;
 use eframe::egui;
 use eframe::egui::{Color32, TextureOptions};
 use rayon::ThreadPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Displays available presets and lets the user apply one to the active brush.
 pub fn brush_list_panel(
@@ -52,7 +49,7 @@ pub fn brush_list_panel(
                         } else {
                             new_preset_name.trim().to_string()
                         };
-                        
+
                         presets.push(BrushPreset {
                             name,
                             brush: brush.clone(),
@@ -63,98 +60,80 @@ pub fn brush_list_panel(
             });
     }
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.columns(3, |col| {
-            let mut idx = 0;
-            for preset in presets {
-                let column = &mut col[idx];
-                column.vertical(|ui| {
-                    let preview_size = 64.0; // Increased size for better visibility
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(preview_size, preview_size),
-                        egui::Sense::click(),
-                    );
+    egui::ScrollArea::vertical()
+        .id_salt("brush_presets_scroll")
+        .show(ui, |ui| {
+            ui.columns(3, |col| {
+                let mut idx = 0;
+                for preset in presets {
+                    let column = &mut col[idx];
+                    column.vertical(|ui| {
+                        let preview_size = 64.0; // Increased size for better visibility
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(preview_size, preview_size),
+                            egui::Sense::click(),
+                        );
 
-                    // Ensure preview exists
-                    let texture_id = if let Some(tex) = previews.get(&preset.name) {
-                        tex.id()
-                    } else {
-                        // Generate preview
-                        let tex = generate_preset_preview(&preset.brush, pool, &ctx);
-                        let id = tex.id();
-                        previews.insert(preset.name.clone(), tex);
-                        id
-                    };
+                        // Ensure preview exists
+                        let texture_id = if let Some(tex) = previews.get(&preset.name) {
+                            tex.id()
+                        } else {
+                            // Generate preview
+                            let tex = generate_preset_preview(&preset.brush, pool, &ctx);
+                            let id = tex.id();
+                            previews.insert(preset.name.clone(), tex);
+                            id
+                        };
 
-                    // Draw background
-                    ui.painter().rect_filled(rect, 2.0, Color32::from_gray(30));
-                    
-                    // Draw texture
-                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                    ui.painter().image(texture_id, rect, uv, Color32::WHITE);
+                        // Draw background
+                        ui.painter().rect_filled(rect, 2.0, Color32::from_gray(30));
 
-                    // Selection highlight
-                    // We don't strictly track which preset is "selected" in PainterApp yet,
-                    // but we could highlight if active brush matches preset?
-                    // For now just hover effect
-                    if response.hovered() {
-                         ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, Color32::WHITE));
-                    } else {
-                         ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0, Color32::GRAY));
-                    }
+                        // Draw texture
+                        let uv =
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        ui.painter().image(texture_id, rect, uv, Color32::WHITE);
 
-                    let response = response.on_hover_text(&preset.name);
-                    if response.clicked() {
-                        let current_color = brush.brush_options.color;
-                        *brush = preset.brush.clone();
-                        brush.brush_options.color = current_color;
-                    }
-                    
-                    ui.label(egui::RichText::new(&preset.name).size(10.0).weak());
-                });
-                column.add_space(8.0);
-                idx += 1;
-                idx = idx % 3;
-            }
+                        // Selection highlight
+                        // We don't strictly track which preset is "selected" in PainterApp yet,
+                        // but we could highlight if active brush matches preset?
+                        // For now just hover effect
+                        if response.hovered() {
+                            ui.painter().rect_stroke(
+                                rect,
+                                2.0,
+                                egui::Stroke::new(1.0, Color32::WHITE),
+                            );
+                        } else {
+                            ui.painter().rect_stroke(
+                                rect,
+                                2.0,
+                                egui::Stroke::new(1.0, Color32::GRAY),
+                            );
+                        }
+
+                        let response = response.on_hover_text(&preset.name);
+                        if response.clicked() {
+                            let current_color = brush.brush_options.color;
+                            *brush = preset.brush.clone();
+                            brush.brush_options.color = current_color;
+                        }
+
+                        ui.label(egui::RichText::new(&preset.name).size(10.0).weak());
+                    });
+                    column.add_space(8.0);
+                    idx += 1;
+                    idx %= 3;
+                }
+            });
         });
-    });
 }
 
-fn generate_preset_preview(brush_template: &Brush, pool: &ThreadPool, ctx: &egui::Context) -> egui::TextureHandle {
-    let w = 128;
-    let h = 128;
-    let canvas = Canvas::new(w, h, Color32::TRANSPARENT, 32);
-    
+fn generate_preset_preview(
+    brush_template: &Brush,
+    pool: &ThreadPool,
+    ctx: &egui::Context,
+) -> egui::TextureHandle {
     let mut brush = brush_template.clone();
-    // Normalize brush size for preview so huge brushes don't look weird
-    brush.brush_options.diameter = 20.0; 
-    brush.brush_options.color = Color32::WHITE;
-    
-    let mut stroke = StrokeState::new();
-    let mut undo = UndoAction { tiles: Vec::new(), selection: None, transform: None };
-    let mut modified = HashSet::new();
-
-    // Draw S curve
-    let steps = 80;
-    let margin = 20.0;
-    let width = w as f32;
-    let height = h as f32;
-    let effective_w = width - 2.0 * margin;
-
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let x = margin + t * effective_w;
-        let phase = t * std::f32::consts::PI * 2.0;
-        let y = height * 0.5 + (phase.sin() * height * 0.3);
-        
-        let pressure = (t * std::f32::consts::PI).sin();
-        brush.brush_options.diameter = (20.0 * pressure).max(2.0);
-        
-        stroke.add_point(pool, &canvas, &mut brush, None, Vec2 { x, y }, &mut undo, &mut modified);
-    }
-
-    let mut image = egui::ColorImage::new([w, h], Color32::TRANSPARENT);
-    canvas.write_region_to_color_image(0, 0, w, h, &mut image, 1);
-    
+    let image = stroke_preview_image(&mut brush, pool, [128, 128], 32, Color32::WHITE, 20.0);
     ctx.load_texture("preset_preview", image, TextureOptions::LINEAR)
 }

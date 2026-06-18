@@ -37,6 +37,7 @@ pub(crate) fn default_right_dock() -> DockState<ToolTab> {
 
 struct ToolTabViewer<'a> {
     app: &'a mut PainterApp,
+    dock_id: &'static str,
 }
 
 impl<'a> TabViewer for ToolTabViewer<'a> {
@@ -46,36 +47,38 @@ impl<'a> TabViewer for ToolTabViewer<'a> {
         tab.title().into()
     }
 
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new((self.dock_id, *tab))
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        match tab {
-            ToolTab::BrushSettings => {
-                ui::brush_settings::brush_settings_panel(
-                    ui,
-                    &mut self.app.brush_state.brush,
-                    &mut self.app.brush_state.brush_preview,
-                    &self.app.workspace.pool,
-                    &self.app.brush_state.loaded_brush_tips,
-                )
-            }
-            ToolTab::BrushPresets => {
-                ui::brush_list::brush_list_panel(
-                    ui,
-                    &mut self.app.brush_state.brush,
-                    &mut self.app.brush_state.presets,
-                    &mut self.app.brush_state.preset_previews,
-                    &self.app.workspace.pool,
-                    &mut self.app.brush_state.show_new_preset_modal,
-                    &mut self.app.brush_state.new_preset_name,
-                )
-            }
-            ToolTab::ColorPicker => {
-                ui::color_picker::color_picker_panel(ui, &mut self.app.brush_state.brush, self.app.workspace.color_model)
-            }
+        ui.push_id((self.dock_id, *tab, "content"), |ui| match tab {
+            ToolTab::BrushSettings => ui::brush_settings::brush_settings_panel(
+                ui,
+                &mut self.app.brush_state.brush,
+                &mut self.app.brush_state.brush_preview,
+                &self.app.workspace.pool,
+                &self.app.brush_state.loaded_brush_tips,
+            ),
+            ToolTab::BrushPresets => ui::brush_list::brush_list_panel(
+                ui,
+                &mut self.app.brush_state.brush,
+                &mut self.app.brush_state.presets,
+                &mut self.app.brush_state.preset_previews,
+                &self.app.workspace.pool,
+                &mut self.app.brush_state.show_new_preset_modal,
+                &mut self.app.brush_state.new_preset_name,
+            ),
+            ToolTab::ColorPicker => ui::color_picker::color_picker_panel(
+                ui,
+                &mut self.app.brush_state.brush,
+                self.app.workspace.color_model,
+            ),
             ToolTab::Layers => {
                 let ctx = ui.ctx().clone();
                 ui::layers::layers_panel(&ctx, ui, self.app);
             }
-        }
+        });
     }
 
     fn closeable(&mut self, _tab: &mut Self::Tab) -> bool {
@@ -96,8 +99,13 @@ pub(crate) fn show_tool_docks(app: &mut PainterApp, ctx: &egui::Context) {
             ui.set_min_width(260.0);
             let mut dock_state = std::mem::replace(&mut app.dock_left, DockState::new(Vec::new()));
             {
-                let mut viewer = ToolTabViewer { app };
-                DockArea::new(&mut dock_state).show_inside(ui, &mut viewer);
+                let mut viewer = ToolTabViewer {
+                    app,
+                    dock_id: "tool_dock_left",
+                };
+                DockArea::new(&mut dock_state)
+                    .id(egui::Id::new("tool_dock_left_area"))
+                    .show_inside(ui, &mut viewer);
             }
             app.dock_left = dock_state;
         });
@@ -110,8 +118,13 @@ pub(crate) fn show_tool_docks(app: &mut PainterApp, ctx: &egui::Context) {
             ui.set_min_width(240.0);
             let mut dock_state = std::mem::replace(&mut app.dock_right, DockState::new(Vec::new()));
             {
-                let mut viewer = ToolTabViewer { app };
-                DockArea::new(&mut dock_state).show_inside(ui, &mut viewer);
+                let mut viewer = ToolTabViewer {
+                    app,
+                    dock_id: "tool_dock_right",
+                };
+                DockArea::new(&mut dock_state)
+                    .id(egui::Id::new("tool_dock_right_area"))
+                    .show_inside(ui, &mut viewer);
             }
             app.dock_right = dock_state;
         });

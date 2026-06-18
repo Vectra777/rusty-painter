@@ -101,13 +101,14 @@ fn gradient_slider(
     );
 
     let pointer_down = ui.input(|i| i.pointer.primary_down());
-    if (response.hovered() || response.dragged()) && pointer_down {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            if (t - *value).abs() > f32::EPSILON {
-                *value = t;
-                return true;
-            }
+    if (response.hovered() || response.dragged())
+        && pointer_down
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        if (t - *value).abs() > f32::EPSILON {
+            *value = t;
+            return true;
         }
     }
     false
@@ -178,30 +179,31 @@ fn hsva_triangle(ui: &mut egui::Ui, hue: f32, sat: &mut f32, val: &mut f32, side
 
     let pointer_down = ui.input(|i| i.pointer.primary_down());
     let mut changed = false;
-    if (response.hovered() || response.dragged()) && pointer_down {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let v0 = tri_right - tri_top;
-            let v1 = tri_left - tri_top;
-            let v2 = pointer - tri_top;
-            let denom = v0.x * v1.y - v1.x * v0.y;
-            if denom.abs() > f32::EPSILON {
-                let inv_denom = 1.0 / denom;
-                let w_right = (v2.x * v1.y - v1.x * v2.y) * inv_denom;
-                let w_left = (v0.x * v2.y - v2.x * v0.y) * inv_denom;
-                let w_top = 1.0 - w_left - w_right;
-                if w_top >= -0.01 && w_left >= -0.01 && w_right >= -0.01 {
-                    let mut w_top = w_top.clamp(0.0, 1.0);
-                    let w_left = w_left.clamp(0.0, 1.0);
-                    let mut w_right = w_right.clamp(0.0, 1.0);
-                    let total = w_top + w_left + w_right;
-                    if total > 0.0 {
-                        w_top /= total;
-                        w_right /= total;
-                    }
-                    *sat = w_right;
-                    *val = (w_top + w_right).clamp(0.0, 1.0);
-                    changed = true;
+    if (response.hovered() || response.dragged())
+        && pointer_down
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let v0 = tri_right - tri_top;
+        let v1 = tri_left - tri_top;
+        let v2 = pointer - tri_top;
+        let denom = v0.x * v1.y - v1.x * v0.y;
+        if denom.abs() > f32::EPSILON {
+            let inv_denom = 1.0 / denom;
+            let w_right = (v2.x * v1.y - v1.x * v2.y) * inv_denom;
+            let w_left = (v0.x * v2.y - v2.x * v0.y) * inv_denom;
+            let w_top = 1.0 - w_left - w_right;
+            if w_top >= -0.01 && w_left >= -0.01 && w_right >= -0.01 {
+                let mut w_top = w_top.clamp(0.0, 1.0);
+                let w_left = w_left.clamp(0.0, 1.0);
+                let mut w_right = w_right.clamp(0.0, 1.0);
+                let total = w_top + w_left + w_right;
+                if total > 0.0 {
+                    w_top /= total;
+                    w_right /= total;
                 }
+                *sat = w_right;
+                *val = (w_top + w_right).clamp(0.0, 1.0);
+                changed = true;
             }
         }
     }
@@ -235,6 +237,7 @@ pub fn color_picker_panel(ui: &mut egui::Ui, brush: &mut Brush, color_model: Col
     let mut apply_color = false;
 
     egui::ScrollArea::vertical()
+        .id_salt("color_picker_scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| match color_model {
             ColorModel::Rgba => {
@@ -260,8 +263,9 @@ pub fn color_picker_panel(ui: &mut egui::Ui, brush: &mut Brush, color_model: Col
 
 fn grayscale_picker(ui: &mut egui::Ui, brush: &mut Brush) -> bool {
     let width = slider_width(ui);
-    let mut value = (brush.brush_options.color.r() as u16 + brush.brush_options.color.g() as u16 + brush.brush_options.color.b() as u16)
-        as f32
+    let mut value = (brush.brush_options.color.r() as u16
+        + brush.brush_options.color.g() as u16
+        + brush.brush_options.color.b() as u16) as f32
         / (3.0 * 255.0);
     let mut alpha = brush.brush_options.color.a() as f32 / 255.0;
     let mut changed = false;
@@ -295,78 +299,6 @@ fn grayscale_picker(ui: &mut egui::Ui, brush: &mut Brush) -> bool {
     }
 
     changed
-}
-
-#[allow(dead_code)]
-fn cmyk_picker(ui: &mut egui::Ui, brush: &mut Brush) {
-    let width = slider_width(ui);
-    let (mut c, mut m, mut y, mut k, mut a) = brush.brush_options.color.to_cmyk();
-    let mut changed = false;
-    let mut color = Color32::from_cmyk(c, m, y, k, a);
-
-    ui.label("CMYK");
-    let (hue, mut sat, mut val, _) = color.to_hsva();
-    let tri_side = ui.available_width().clamp(140.0, TRI_SIDE);
-    changed |= hsva_triangle(ui, hue, &mut sat, &mut val, tri_side);
-    if changed {
-        color = Color32::from_hsva(hue, sat, val, a);
-        let (nc, nm, ny, nk, _) = color.to_cmyk();
-        c = nc;
-        m = nm;
-        y = ny;
-        k = nk;
-    }
-
-    changed |= gradient_slider(
-        ui,
-        width,
-        &mut c,
-        "Cyan",
-        &|t| Color32::from_cmyk(t, m, y, k, 1.0),
-        false,
-    );
-    changed |= gradient_slider(
-        ui,
-        width,
-        &mut m,
-        "Magenta",
-        &|t| Color32::from_cmyk(c, t, y, k, 1.0),
-        false,
-    );
-    changed |= gradient_slider(
-        ui,
-        width,
-        &mut y,
-        "Yellow",
-        &|t| Color32::from_cmyk(c, m, t, k, 1.0),
-        false,
-    );
-    changed |= gradient_slider(
-        ui,
-        width,
-        &mut k,
-        "Key (Black)",
-        &|t| Color32::from_cmyk(c, m, y, t, 1.0),
-        false,
-    );
-    changed |= gradient_slider(
-        ui,
-        width,
-        &mut a,
-        "Opacity",
-        &|t| Color32::from_cmyk(c, m, y, k, t),
-        true,
-    );
-
-    let mut preview = Color32::from_cmyk(c, m, y, k, a);
-    ui.horizontal(|ui| {
-        ui.label("Preview");
-        ui.color_edit_button_srgba(&mut preview);
-    });
-
-    if changed {
-        brush.brush_options.color = Color32::from_cmyk(c, m, y, k, a);
-    }
 }
 
 fn rgba_picker(

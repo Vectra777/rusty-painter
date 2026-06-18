@@ -1,51 +1,38 @@
-use crate::canvas::canvas::Canvas;
-use eframe::egui::Color32;
 use eframe::egui::ColorImage;
 use image::ImageFormat;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {
-    PNG,
-    JPEG,
-    TIFF,
+    Png,
+    Jpeg,
+    Tiff,
 }
 
 impl ExportFormat {
     pub fn label(&self) -> &'static str {
         match self {
-            ExportFormat::PNG => "PNG",
-            ExportFormat::JPEG => "JPEG",
-            ExportFormat::TIFF => "TIFF",
+            ExportFormat::Png => "PNG",
+            ExportFormat::Jpeg => "JPEG",
+            ExportFormat::Tiff => "TIFF",
         }
     }
 
     pub fn extension(&self) -> &'static str {
         match self {
-            ExportFormat::PNG => "png",
-            ExportFormat::JPEG => "jpg",
-            ExportFormat::TIFF => "tiff",
+            ExportFormat::Png => "png",
+            ExportFormat::Jpeg => "jpg",
+            ExportFormat::Tiff => "tiff",
         }
     }
 
     fn image_format(&self) -> ImageFormat {
         match self {
-            ExportFormat::PNG => ImageFormat::Png,
-            ExportFormat::JPEG => ImageFormat::Jpeg,
-            ExportFormat::TIFF => ImageFormat::Tiff,
+            ExportFormat::Png => ImageFormat::Png,
+            ExportFormat::Jpeg => ImageFormat::Jpeg,
+            ExportFormat::Tiff => ImageFormat::Tiff,
         }
     }
-}
-
-/// Export the flattened canvas (all visible layers composited) to an image file.
-#[allow(dead_code)]
-pub fn export_canvas(canvas: &Canvas, path: &Path, format: ExportFormat) -> Result<(), String> {
-    let width = canvas.width();
-    let height = canvas.height();
-    let mut img = eframe::egui::ColorImage::new([width, height], Color32::TRANSPARENT);
-    canvas.write_region_to_color_image(0, 0, width, height, &mut img, 1);
-
-    save_color_image(img, path, format)
 }
 
 /// Save a precomputed color image to disk.

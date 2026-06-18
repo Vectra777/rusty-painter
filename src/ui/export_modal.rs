@@ -27,9 +27,9 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                 egui::ComboBox::from_label("Format")
                     .selected_text(settings.format.label())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut settings.format, ExportFormat::PNG, "PNG");
-                        ui.selectable_value(&mut settings.format, ExportFormat::JPEG, "JPEG");
-                        ui.selectable_value(&mut settings.format, ExportFormat::TIFF, "TIFF");
+                        ui.selectable_value(&mut settings.format, ExportFormat::Png, "PNG");
+                        ui.selectable_value(&mut settings.format, ExportFormat::Jpeg, "JPEG");
+                        ui.selectable_value(&mut settings.format, ExportFormat::Tiff, "TIFF");
                     });
             });
 
@@ -43,10 +43,10 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| settings.default_file_name());
                 ui.monospace(display);
-                if ui.button("Choose...").clicked() {
-                    if let Some(path) = pick_file(&settings.default_file_name()) {
-                        settings.chosen_path = Some(path);
-                    }
+                if ui.button("Choose...").clicked()
+                    && let Some(path) = pick_file(&settings.default_file_name())
+                {
+                    settings.chosen_path = Some(path);
                 }
             });
 
@@ -142,10 +142,16 @@ pub struct ExportSettings {
     pub base_name: String,
 }
 
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExportSettings {
     pub fn new() -> Self {
         Self {
-            format: ExportFormat::PNG,
+            format: ExportFormat::Png,
             chosen_path: None,
             base_name: "export".to_string(),
         }

@@ -1,5 +1,4 @@
-/// Helper structs for painter operations to reduce parameter count and improve clarity
-
+//! Helper structs for painter operations.
 use crate::brush_engine::brush_options::PixelBrushShape;
 use eframe::egui::TextureHandle;
 
@@ -45,7 +44,10 @@ pub struct BrushData {
 
 impl BrushData {
     /// Convert brush data into a loadable brush tip tuple
-    pub fn into_brush_tip(self, texture: TextureHandle) -> (String, PixelBrushShape, Option<TextureHandle>) {
+    pub fn into_brush_tip(
+        self,
+        texture: TextureHandle,
+    ) -> (String, PixelBrushShape, Option<TextureHandle>) {
         let name = format!("{}x{}", self.width, self.height);
         let shape = PixelBrushShape::Custom {
             width: self.width,

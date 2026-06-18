@@ -1,16 +1,17 @@
-pub mod app;
+mod app;
 pub mod brush_engine;
 pub mod canvas;
 pub mod selection;
-pub mod styling;
-pub mod tablet;
-pub mod ui;
-pub mod utils;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod styling;
+mod tablet;
+mod ui;
+mod utils;
 
+pub use app::PainterApp;
 pub use app::state::{
     BackgroundChoice, CanvasUnit, ColorDepth, ColorModel, NewCanvasSettings, Orientation,
 };
-pub use app::{PaintBackend, PainterApp, parse_backend_arg};
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]

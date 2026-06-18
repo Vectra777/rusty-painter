@@ -1,10 +1,12 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use eframe::egui::Color32;
+use eframe::egui::{Color32, Vec2};
 use rayon::ThreadPoolBuilder;
 use rusty_painter::{
-    brush_engine::{brush::Brush, stroke::StrokeState},
-    canvas::{canvas::Canvas, history::UndoAction},
-    utils::vector::Vec2,
+    brush_engine::{
+        brush::Brush,
+        stroke::{StrokeContext, StrokeState},
+    },
+    canvas::{Canvas, history::UndoAction},
 };
 use std::collections::HashSet;
 
@@ -17,19 +19,18 @@ fn bench_soft_dab(c: &mut Criterion) {
         Color32::from_rgba_unmultiplied(0, 0, 0, 255),
         20.0,
     );
-    let mut undo_action = UndoAction { tiles: Vec::new(), selection: None, transform: None };
+    let mut undo_action = UndoAction {
+        tiles: Vec::new(),
+        selection: None,
+        transform: None,
+    };
     let mut modified_tiles = HashSet::new();
 
     // Warm up the mask cache and tile allocation so the measurement focuses on per-dab work.
     let mut stroke = StrokeState::new();
-    stroke.add_point(
-        &pool,
-        &canvas,
-        &mut brush,
-        Vec2 { x: 256.0, y: 256.0 },
-        &mut undo_action,
-        &mut modified_tiles,
-    );
+    let mut context =
+        StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut modified_tiles);
+    stroke.add_point(&mut brush, Vec2 { x: 256.0, y: 256.0 }, &mut context);
     undo_action.tiles.clear();
     modified_tiles.clear();
 
@@ -39,22 +40,10 @@ fn bench_soft_dab(c: &mut Criterion) {
             undo_action.tiles.clear();
             modified_tiles.clear();
 
-            stroke.add_point(
-                &pool,
-                &canvas,
-                &mut brush,
-                Vec2 { x: 256.0, y: 256.0 },
-                &mut undo_action,
-                &mut modified_tiles,
-            );
-            stroke.add_point(
-                &pool,
-                &canvas,
-                &mut brush,
-                Vec2 { x: 280.0, y: 256.0 },
-                &mut undo_action,
-                &mut modified_tiles,
-            );
+            let mut context =
+                StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut modified_tiles);
+            stroke.add_point(&mut brush, Vec2 { x: 256.0, y: 256.0 }, &mut context);
+            stroke.add_point(&mut brush, Vec2 { x: 280.0, y: 256.0 }, &mut context);
         });
     });
 }

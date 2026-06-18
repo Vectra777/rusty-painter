@@ -1,7 +1,7 @@
 use eframe::egui::Color32;
 
-use crate::brush_engine::hardness::SoftnessSelector;
 use crate::brush_engine::hardness::SoftnessCurve;
+use crate::brush_engine::hardness::SoftnessSelector;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PixelBrushShape {

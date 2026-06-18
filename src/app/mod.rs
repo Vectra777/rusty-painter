@@ -1,11 +1,12 @@
-pub mod layout;
-pub mod painter;
-pub mod painter_helpers;
-pub mod painter_state;
-pub mod state;
-pub mod render_helper;
-pub mod input_handler;
-pub mod tools;
+pub(crate) mod canvas_ops;
+pub(crate) mod input_handler;
+pub(crate) mod layout;
+pub(crate) mod painter;
+pub(crate) mod painter_helpers;
+pub(crate) mod painter_state;
+pub(crate) mod render_helper;
+pub(crate) mod state;
+pub(crate) mod tools;
+pub(crate) mod transform;
 
 pub use painter::PainterApp;
-pub use state::{PaintBackend, parse_backend_arg};

@@ -1,18 +1,19 @@
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use eframe::egui::{Color32, ColorImage, Rgba};
 use wide::f32x4;
 
-use crate::utils::color::{Color, ColorManipulation};
-use crate::utils::profiler::ScopeTimer;
-use crate::utils::vector::Vec2;
 use crate::canvas::history::UndoAction;
 use crate::selection::SelectionManager;
+use crate::utils::color::{Color, ColorManipulation};
+use eframe::egui::Vec2;
 
 // Gamma correction lookup table size for high precision conversion
 const GAMMA_LUT_SIZE: usize = 4096;
+type TileMap = HashMap<(i32, i32), Arc<Mutex<TileCell>>>;
+type RowTileCache = Vec<Option<(i32, Arc<Mutex<TileCell>>, Option<Vec<Rgba>>, bool)>>;
 
 /// Transform operation parameters
 #[derive(Clone, Copy, Debug)]
@@ -25,7 +26,12 @@ pub struct TransformParams {
 
 impl TransformParams {
     pub fn new(offset: Vec2, rotation: f32, scale: Vec2, center: Vec2) -> Self {
-        Self { offset, rotation, scale, center }
+        Self {
+            offset,
+            rotation,
+            scale,
+            center,
+        }
     }
 }
 
@@ -35,14 +41,14 @@ static GAMMA_LUT: OnceLock<[u8; GAMMA_LUT_SIZE]> = OnceLock::new();
 fn gamma_lut() -> &'static [u8; GAMMA_LUT_SIZE] {
     GAMMA_LUT.get_or_init(|| {
         let mut lut = [0u8; GAMMA_LUT_SIZE];
-        for i in 0..GAMMA_LUT_SIZE {
+        for (i, item) in lut.iter_mut().enumerate() {
             let linear = i as f32 / (GAMMA_LUT_SIZE - 1) as f32;
             let srgb = if linear <= 0.0031308 {
                 linear * 12.92
             } else {
                 1.055 * linear.powf(1.0 / 2.4) - 0.055
             };
-            lut[i] = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
+            *item = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
         }
         lut
     })
@@ -67,6 +73,183 @@ fn rgba_to_color32_fast(rgba: Rgba) -> Color32 {
     )
 }
 
+struct PixelCollector<'a> {
+    pixels: &'a mut HashMap<(i32, i32), Color32>,
+    bounds: &'a mut eframe::egui::Rect,
+    first: &'a mut bool,
+    tile_size: usize,
+    selection: Option<&'a SelectionManager>,
+}
+
+impl PixelCollector<'_> {
+    fn add_tile(&mut self, tx: i32, ty: i32, data: &[Color32]) {
+        let base_x = tx * self.tile_size as i32;
+        let base_y = ty * self.tile_size as i32;
+
+        for py in 0..self.tile_size {
+            for px in 0..self.tile_size {
+                let idx = py * self.tile_size + px;
+                if data[idx].a() == 0 {
+                    continue;
+                }
+
+                let gx = base_x + px as i32;
+                let gy = base_y + py as i32;
+                if let Some(sel) = self.selection
+                    && !sel.contains_coords(gx as f32, gy as f32)
+                {
+                    continue;
+                }
+
+                self.pixels.insert((gx, gy), data[idx]);
+                let pos = eframe::egui::pos2(gx as f32, gy as f32);
+                if *self.first {
+                    *self.bounds = eframe::egui::Rect::from_min_max(pos, pos);
+                    *self.first = false;
+                } else {
+                    self.bounds.extend_with(pos);
+                }
+            }
+        }
+    }
+}
+
+fn transform_pixels(
+    src_pixels: &HashMap<(i32, i32), Color32>,
+    mut src_bounds: eframe::egui::Rect,
+    params: TransformParams,
+    tile_size: usize,
+) -> HashMap<(i32, i32), Vec<Color32>> {
+    src_bounds.max.x += 1.0;
+    src_bounds.max.y += 1.0;
+
+    let grid_min_x = src_bounds.min.x.floor() as i32;
+    let grid_min_y = src_bounds.min.y.floor() as i32;
+    let grid_width = (src_bounds.max.x.ceil() as i32 - grid_min_x) as usize;
+    let grid_height = (src_bounds.max.y.ceil() as i32 - grid_min_y) as usize;
+
+    let mut src_grid = vec![Color32::TRANSPARENT; grid_width * grid_height];
+    for ((gx, gy), pixel) in src_pixels {
+        let idx_x = (*gx - grid_min_x) as usize;
+        let idx_y = (*gy - grid_min_y) as usize;
+        if idx_x < grid_width && idx_y < grid_height {
+            src_grid[idx_y * grid_width + idx_x] = *pixel;
+        }
+    }
+
+    let corners = [
+        src_bounds.min,
+        eframe::egui::pos2(src_bounds.max.x, src_bounds.min.y),
+        src_bounds.max,
+        eframe::egui::pos2(src_bounds.min.x, src_bounds.max.y),
+    ];
+
+    let (sin_r, cos_r) = params.rotation.sin_cos();
+    let transform = |p: eframe::egui::Pos2| -> eframe::egui::Pos2 {
+        let dx = p.x - params.center.x;
+        let dy = p.y - params.center.y;
+        let sx = dx * params.scale.x;
+        let sy = dy * params.scale.y;
+        let rx = sx * cos_r - sy * sin_r;
+        let ry = sx * sin_r + sy * cos_r;
+        eframe::egui::pos2(
+            rx + params.center.x + params.offset.x,
+            ry + params.center.y + params.offset.y,
+        )
+    };
+
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for corner in corners.map(transform) {
+        min_x = min_x.min(corner.x);
+        min_y = min_y.min(corner.y);
+        max_x = max_x.max(corner.x);
+        max_y = max_y.max(corner.y);
+    }
+
+    let dst_min_x = min_x.floor() as i32;
+    let dst_min_y = min_y.floor() as i32;
+    let dst_max_x = max_x.ceil() as i32;
+    let dst_max_y = max_y.ceil() as i32;
+    let tile_size_i32 = tile_size as i32;
+    let center_offset_x = params.center.x + params.offset.x;
+    let center_offset_y = params.center.y + params.offset.y;
+    let inv_scale_x = 1.0 / params.scale.x;
+    let inv_scale_y = 1.0 / params.scale.y;
+    let estimated_dst_tiles =
+        ((dst_max_x - dst_min_x) * (dst_max_y - dst_min_y)) / (tile_size_i32 * tile_size_i32) + 4;
+    let mut dst_tiles = HashMap::with_capacity(estimated_dst_tiles.max(0) as usize);
+
+    for y in dst_min_y..dst_max_y {
+        for x in dst_min_x..dst_max_x {
+            let dx = x as f32 - center_offset_x;
+            let dy = y as f32 - center_offset_y;
+            let rx = dx * cos_r + dy * sin_r;
+            let ry = -dx * sin_r + dy * cos_r;
+            let src_x = (rx * inv_scale_x + params.center.x).round() as i32;
+            let src_y = (ry * inv_scale_y + params.center.y).round() as i32;
+            let grid_x = src_x - grid_min_x;
+            let grid_y = src_y - grid_min_y;
+
+            if grid_x < 0
+                || grid_x >= grid_width as i32
+                || grid_y < 0
+                || grid_y >= grid_height as i32
+            {
+                continue;
+            }
+
+            let pixel = src_grid[grid_y as usize * grid_width + grid_x as usize];
+            if pixel == Color32::TRANSPARENT {
+                continue;
+            }
+
+            let ntx = x.div_euclid(tile_size_i32);
+            let nty = y.div_euclid(tile_size_i32);
+            let npx = (x - ntx * tile_size_i32) as usize;
+            let npy = (y - nty * tile_size_i32) as usize;
+            let dst_data = dst_tiles
+                .entry((ntx, nty))
+                .or_insert_with(|| vec![Color32::TRANSPARENT; tile_size * tile_size]);
+            dst_data[npy * tile_size + npx] = pixel;
+        }
+    }
+
+    dst_tiles
+}
+
+fn write_transformed_tiles(
+    tiles: &mut TileMap,
+    dst_tiles: HashMap<(i32, i32), Vec<Color32>>,
+    tile_size: usize,
+) {
+    for ((tx, ty), data) in dst_tiles {
+        let tile_arc = tiles.entry((tx, ty)).or_insert_with(|| {
+            Arc::new(Mutex::new(TileCell {
+                data: Some(vec![Color32::TRANSPARENT; tile_size * tile_size]),
+                is_empty: true,
+            }))
+        });
+        let mut guard = tile_arc.lock().unwrap();
+        if guard.data.is_none() {
+            guard.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
+        }
+
+        let mut has_content = false;
+        if let Some(target_data) = &mut guard.data {
+            for i in 0..data.len() {
+                if data[i].a() > 0 {
+                    target_data[i] = data[i];
+                    has_content = true;
+                }
+            }
+        }
+        guard.is_empty = !has_content;
+    }
+}
+
 #[derive(Debug)]
 /// Single painting layer with its own opacity, visibility and tile storage.
 pub struct Layer {
@@ -74,7 +257,7 @@ pub struct Layer {
     pub visible: bool,
     pub opacity: f32, // 0..1
     pub locked: bool,
-    tiles: Mutex<HashMap<(i32, i32), Arc<Mutex<TileCell>>>>,
+    tiles: Mutex<TileMap>,
 }
 
 impl Layer {
@@ -114,7 +297,7 @@ impl Canvas {
     pub fn new(width: usize, height: usize, clear_color: Color32, tile_size: usize) -> Self {
         let mut bg_layer = Layer::new("Background".to_string(), width, height, tile_size);
         bg_layer.locked = true;
-        
+
         let layer1 = Layer::new("Layer 1".to_string(), width, height, tile_size);
 
         // Initialize background layer with clear color
@@ -181,11 +364,17 @@ impl Canvas {
             return None;
         }
         let layer = &self.layers[layer_idx];
-        
+
         let tile_arc = {
             let mut tiles = layer.tiles.lock().unwrap();
-            tiles.entry((tx, ty))
-                .or_insert_with(|| Arc::new(Mutex::new(TileCell { data: None, is_empty: true })))
+            tiles
+                .entry((tx, ty))
+                .or_insert_with(|| {
+                    Arc::new(Mutex::new(TileCell {
+                        data: None,
+                        is_empty: true,
+                    }))
+                })
                 .clone()
         };
 
@@ -248,12 +437,7 @@ impl Canvas {
     }
 
     /// Clone the raw pixel buffer for a tile in a given layer.
-    pub fn get_layer_tile_data(
-        &self,
-        layer_idx: usize,
-        tx: i32,
-        ty: i32,
-    ) -> Option<Vec<Color32>> {
+    pub fn get_layer_tile_data(&self, layer_idx: usize, tx: i32, ty: i32) -> Option<Vec<Color32>> {
         let cell = self.layer_tile_cell(layer_idx, tx, ty)?;
         let guard = cell.lock().unwrap();
         guard.data.clone()
@@ -280,11 +464,9 @@ impl Canvas {
         out: &mut ColorImage,
         step: usize,
     ) {
-        let _timer = ScopeTimer::new("region_to_color_image");
-
         let step = step.max(1);
-        let dst_w = (w + step - 1) / step;
-        let dst_h = (h + step - 1) / step;
+        let dst_w = w.div_ceil(step);
+        let dst_h = h.div_ceil(step);
 
         if out.size != [dst_w, dst_h] {
             out.size = [dst_w, dst_h];
@@ -321,7 +503,7 @@ impl Canvas {
             // 3. Pre-convert all tiles to linear space to avoid repeated conversions
             let tile_pixel_count = self.tile_size * self.tile_size;
             let mut linear_tiles: Vec<Option<Vec<Rgba>>> = Vec::with_capacity(self.layers.len());
-            
+
             for opt_guard in layer_guards.iter() {
                 if let Some(guard) = opt_guard {
                     if let Some(data) = &guard.data {
@@ -341,16 +523,20 @@ impl Canvas {
 
             // 4. Pre-calculate layer visibility and opacity to avoid lookups in the pixel loop
             // Stores: (is_visible, opacity, has_data_guard_index, is_background, is_empty)
-            let layer_props: Vec<(bool, f32, usize, bool, bool)> = layer_guards.iter().enumerate().map(|(i, opt_guard)| {
-                let is_visible = self.layers[i].visible && self.layers[i].opacity > 0.0;
-                let is_empty = opt_guard.as_ref().map_or(i != 0, |g| g.is_empty);
-                (is_visible, self.layers[i].opacity, i, i == 0, is_empty)
-            }).collect();
-            
+            let layer_props: Vec<(bool, f32, usize, bool, bool)> = layer_guards
+                .iter()
+                .enumerate()
+                .map(|(i, opt_guard)| {
+                    let is_visible = self.layers[i].visible && self.layers[i].opacity > 0.0;
+                    let is_empty = opt_guard.as_ref().map_or(i != 0, |g| g.is_empty);
+                    (is_visible, self.layers[i].opacity, i, i == 0, is_empty)
+                })
+                .collect();
+
             // Pre-convert clear_color to linear space
             let clear_color_linear = Rgba::from(self.clear_color);
 
-            if true { 
+            if true {
                 for dst_y in 0..dst_h {
                     let global_y_start = y + dst_y * step;
                     let row_start = dst_y * dst_w;
@@ -367,8 +553,12 @@ impl Canvas {
                             // Linear Accumulator (starts transparent)
                             let mut composite = Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
 
-                            for (i, (visible, opacity, _, is_bg, is_empty)) in layer_props.iter().enumerate() {
-                                if !visible || *is_empty { continue; }
+                            for (i, (visible, opacity, _, is_bg, is_empty)) in
+                                layer_props.iter().enumerate()
+                            {
+                                if !visible || *is_empty {
+                                    continue;
+                                }
 
                                 // Get pixel in linear space (already converted)
                                 let src = if let Some(linear_data) = &linear_tiles[i] {
@@ -379,18 +569,19 @@ impl Canvas {
                                     Rgba::TRANSPARENT
                                 };
 
-                                if src.a() == 0.0 { continue; }
+                                if src.a() == 0.0 {
+                                    continue;
+                                }
 
                                 // Apply Opacity and Blend (already in linear space)
                                 let src = if *opacity < 1.0 { src * *opacity } else { src };
-                                
+
                                 // Linear Blend: Src Over Composite
                                 composite = src + composite * (1.0 - src.a());
                             }
-                            
+
                             // 4. Convert Linear Float -> sRGB (Once at the end) - Fast LUT-based
                             out.pixels[row_start + dst_x] = rgba_to_color32_fast(composite);
-
                         } else {
                             // --- DOWNSAMPLING PATH (High Quality) ---
                             let mut r_acc = 0.0;
@@ -401,21 +592,30 @@ impl Canvas {
 
                             for sy in 0..step {
                                 let global_y = global_y_start + sy;
-                                if global_y >= y + h { continue; }
+                                if global_y >= y + h {
+                                    continue;
+                                }
                                 let local_y = global_y % self.tile_size;
 
                                 for sx in 0..step {
                                     let global_x = global_x_start + sx;
-                                    if global_x >= x + w { continue; }
+                                    if global_x >= x + w {
+                                        continue;
+                                    }
                                     let local_x = global_x % self.tile_size;
 
                                     let src_idx = local_y * self.tile_size + local_x;
-                                    
-                                    // Calculate the color for this sub-pixel using Linear Math
-                                    let mut sub_composite = Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
 
-                                    for (i, (visible, opacity, _, is_bg, is_empty)) in layer_props.iter().enumerate() {
-                                        if !visible || *is_empty { continue; }
+                                    // Calculate the color for this sub-pixel using Linear Math
+                                    let mut sub_composite =
+                                        Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
+
+                                    for (i, (visible, opacity, _, is_bg, is_empty)) in
+                                        layer_props.iter().enumerate()
+                                    {
+                                        if !visible || *is_empty {
+                                            continue;
+                                        }
 
                                         // Get pixel in linear space (already converted)
                                         let src = if let Some(linear_data) = &linear_tiles[i] {
@@ -426,7 +626,9 @@ impl Canvas {
                                             Rgba::TRANSPARENT
                                         };
 
-                                        if src.a() == 0.0 { continue; }
+                                        if src.a() == 0.0 {
+                                            continue;
+                                        }
 
                                         // Apply Opacity and Blend (already in linear space)
                                         let src = if *opacity < 1.0 { src * *opacity } else { src };
@@ -444,12 +646,13 @@ impl Canvas {
                             if count > 0.0 {
                                 let inv = 1.0 / count;
                                 // Convert the averaged Linear result back to sRGB - Fast LUT-based
-                                out.pixels[row_start + dst_x] = rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
-                                    r_acc * inv,
-                                    g_acc * inv,
-                                    b_acc * inv,
-                                    a_acc * inv
-                                ));
+                                out.pixels[row_start + dst_x] =
+                                    rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
+                                        r_acc * inv,
+                                        g_acc * inv,
+                                        b_acc * inv,
+                                        a_acc * inv,
+                                    ));
                             }
                         }
                     }
@@ -464,16 +667,16 @@ impl Canvas {
             let global_y = y + dst_y * step;
             let ty = (global_y / self.tile_size) as i32;
             let local_y = global_y % self.tile_size;
-            
+
             // Cache tile Arc and converted linear data for this row
             // Tuple: (cached_tx, tile_arc, linear_tile_data, is_empty)
-            let mut row_tile_cache: Vec<Option<(i32, Arc<Mutex<TileCell>>, Option<Vec<Rgba>>, bool)>> = Vec::with_capacity(self.layers.len());
-            
+            let mut row_tile_cache: RowTileCache = Vec::with_capacity(self.layers.len());
+
             // Initialize cache with None for each layer
             for _ in 0..self.layers.len() {
                 row_tile_cache.push(None);
             }
-            
+
             let mut dst_x = 0;
             while dst_x < dst_w {
                 let global_x = x + dst_x * step;
@@ -485,23 +688,25 @@ impl Canvas {
                 let mut composite = Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
 
                 for (layer_idx, layer) in self.layers.iter().enumerate() {
-                    if !layer.visible || layer.opacity <= 0.0 { continue; }
+                    if !layer.visible || layer.opacity <= 0.0 {
+                        continue;
+                    }
 
                     // Check if we need to fetch a different tile
                     let needs_lookup = row_tile_cache[layer_idx]
                         .as_ref()
-                        .map_or(true, |(cached_tx, _, _, _)| *cached_tx != tx);
-                    
+                        .is_none_or(|(cached_tx, _, _, _)| *cached_tx != tx);
+
                     if needs_lookup {
                         // Drop old cache entry
                         row_tile_cache[layer_idx] = None;
-                        
+
                         // Fetch new tile and pre-convert to linear
                         if let Some(tile_arc) = self.layer_tile_cell(layer_idx, tx, ty) {
                             // Lock temporarily to read data
                             let guard = tile_arc.lock().unwrap();
                             let is_empty = guard.is_empty;
-                            
+
                             // Pre-convert entire tile to linear space for efficiency
                             let linear_data = if let Some(data) = &guard.data {
                                 let mut linear_tile = Vec::with_capacity(data.len());
@@ -512,7 +717,7 @@ impl Canvas {
                             } else {
                                 None
                             };
-                            
+
                             // Release lock and cache the Arc with converted data
                             drop(guard);
                             row_tile_cache[layer_idx] = Some((tx, tile_arc, linear_data, is_empty));
@@ -520,15 +725,18 @@ impl Canvas {
                     }
 
                     // Skip if tile is empty or missing
-                    let (is_empty, linear_data) = if let Some((_, _, linear_data, is_empty)) = &row_tile_cache[layer_idx] {
-                        (*is_empty, linear_data.as_ref())
-                    } else if layer_idx == 0 {
-                        (false, None) // Background uses clear_color
-                    } else {
-                        continue; // Non-background layer with no tile
-                    };
-                    
-                    if is_empty { continue; }
+                    let (is_empty, linear_data) =
+                        if let Some((_, _, linear_data, is_empty)) = &row_tile_cache[layer_idx] {
+                            (*is_empty, linear_data.as_ref())
+                        } else if layer_idx == 0 {
+                            (false, None) // Background uses clear_color
+                        } else {
+                            continue; // Non-background layer with no tile
+                        };
+
+                    if is_empty {
+                        continue;
+                    }
 
                     // Resolve Pixel in linear space
                     let src = if let Some(linear_tile) = linear_data {
@@ -540,10 +748,16 @@ impl Canvas {
                         Rgba::TRANSPARENT
                     };
 
-                    if src.a() == 0.0 { continue; }
+                    if src.a() == 0.0 {
+                        continue;
+                    }
 
                     // Apply opacity and blend (already in linear space)
-                    let src = if layer.opacity < 1.0 { src * layer.opacity } else { src };
+                    let src = if layer.opacity < 1.0 {
+                        src * layer.opacity
+                    } else {
+                        src
+                    };
                     composite = src + composite * (1.0 - src.a());
                 }
 
@@ -580,181 +794,56 @@ impl Canvas {
         pixels
     }
 
-    pub fn preview_transform(&mut self, layer_idx: usize, src_tiles: &HashMap<(i32, i32), Vec<Color32>>, params: TransformParams) {
+    pub fn preview_transform(
+        &mut self,
+        layer_idx: usize,
+        src_tiles: &HashMap<(i32, i32), Vec<Color32>>,
+        params: TransformParams,
+    ) {
         let tile_size = self.tile_size;
-        
-        // 1. Collect all source pixels from buffer
-        // Optimization: Pre-allocate with estimated capacity
-        let estimated_pixels = src_tiles.len() * tile_size * tile_size / 4; // Assume 25% fill
+        let estimated_pixels = src_tiles.len() * tile_size * tile_size / 4;
         let mut src_pixels: HashMap<(i32, i32), Color32> = HashMap::with_capacity(estimated_pixels);
         let mut src_bounds = eframe::egui::Rect::NOTHING;
         let mut first = true;
 
-        for ((tx, ty), data) in src_tiles {
-            let base_x = *tx * tile_size as i32;
-            let base_y = *ty * tile_size as i32;
-            
-            for py in 0..tile_size {
-                for px in 0..tile_size {
-                    let idx = py * tile_size + px;
-                    if data[idx].a() > 0 {
-                        let gx = base_x + px as i32;
-                        let gy = base_y + py as i32;
-                        
-                        src_pixels.insert((gx, gy), data[idx]);
-                        
-                        let pos = eframe::egui::pos2(gx as f32, gy as f32);
-                        if first {
-                            src_bounds = eframe::egui::Rect::from_min_max(pos, pos);
-                            first = false;
-                        } else {
-                            src_bounds.extend_with(pos);
-                        }
-                    }
-                }
+        {
+            let mut collector = PixelCollector {
+                pixels: &mut src_pixels,
+                bounds: &mut src_bounds,
+                first: &mut first,
+                tile_size,
+                selection: None,
+            };
+            for ((tx, ty), data) in src_tiles {
+                collector.add_tile(*tx, *ty, data);
             }
         }
-        
-        if src_pixels.is_empty() { return; }
-        // Expand bounds slightly to cover the pixels fully
-        src_bounds.max.x += 1.0;
-        src_bounds.max.y += 1.0;
-
-        // Build spatial grid for O(1) pixel lookups instead of O(log n) HashMap
-        let grid_min_x = src_bounds.min.x.floor() as i32;
-        let grid_min_y = src_bounds.min.y.floor() as i32;
-        let grid_width = (src_bounds.max.x.ceil() as i32 - grid_min_x) as usize;
-        let grid_height = (src_bounds.max.y.ceil() as i32 - grid_min_y) as usize;
-        
-        let mut src_grid: Vec<Color32> = vec![Color32::TRANSPARENT; grid_width * grid_height];
-        for ((gx, gy), pixel) in &src_pixels {
-            let idx_x = (*gx - grid_min_x) as usize;
-            let idx_y = (*gy - grid_min_y) as usize;
-            if idx_x < grid_width && idx_y < grid_height {
-                src_grid[idx_y * grid_width + idx_x] = *pixel;
-            }
+        if src_pixels.is_empty() {
+            return;
         }
 
-        // 2. Calculate destination bounds
-        let corners = [
-            src_bounds.min,
-            eframe::egui::pos2(src_bounds.max.x, src_bounds.min.y),
-            src_bounds.max,
-            eframe::egui::pos2(src_bounds.min.x, src_bounds.max.y),
-        ];
-        
-        let (sin_r, cos_r) = params.rotation.sin_cos();
-        
-        let transform = |p: eframe::egui::Pos2| -> eframe::egui::Pos2 {
-            let dx = p.x - params.center.x;
-            let dy = p.y - params.center.y;
-            let sx = dx * params.scale.x;
-            let sy = dy * params.scale.y;
-            let rx = sx * cos_r - sy * sin_r;
-            let ry = sx * sin_r + sy * cos_r;
-            eframe::egui::pos2(rx + params.center.x + params.offset.x, ry + params.center.y + params.offset.y)
-        };
-        
-        let t_corners: Vec<eframe::egui::Pos2> = corners.iter().map(|&c| transform(c)).collect();
-        
-        let mut min_x = t_corners[0].x;
-        let mut min_y = t_corners[0].y;
-        let mut max_x = t_corners[0].x;
-        let mut max_y = t_corners[0].y;
-        
-        for c in &t_corners {
-            min_x = min_x.min(c.x);
-            min_y = min_y.min(c.y);
-            max_x = max_x.max(c.x);
-            max_y = max_y.max(c.y);
-        }
-        
-        let dst_min_x = min_x.floor() as i32;
-        let dst_min_y = min_y.floor() as i32;
-        let dst_max_x = max_x.ceil() as i32;
-        let dst_max_y = max_y.ceil() as i32;
+        let dst_tiles = transform_pixels(&src_pixels, src_bounds, params, tile_size);
 
-        // 3. Reverse mapping
-        let mut dst_tiles: HashMap<(i32, i32), Vec<Color32>> = HashMap::new();
-        
-        for y in dst_min_y..dst_max_y {
-            for x in dst_min_x..dst_max_x {
-                // Inverse transform
-                let dx = x as f32 - (params.center.x + params.offset.x);
-                let dy = y as f32 - (params.center.y + params.offset.y);
-                
-                // Inverse Rotate
-                let rx = dx * cos_r + dy * sin_r;
-                let ry = -dx * sin_r + dy * cos_r;
-                
-                // Inverse Scale
-                let sx = rx / params.scale.x;
-                let sy = ry / params.scale.y;
-                
-                let src_x = (sx + params.center.x).round() as i32;
-                let src_y = (sy + params.center.y).round() as i32;
-                
-                // Use spatial grid for O(1) lookup
-                let grid_x = src_x - grid_min_x;
-                let grid_y = src_y - grid_min_y;
-                
-                if grid_x >= 0 && grid_x < grid_width as i32 && grid_y >= 0 && grid_y < grid_height as i32 {
-                    let pixel = src_grid[(grid_y as usize) * grid_width + (grid_x as usize)];
-                    if pixel != Color32::TRANSPARENT {
-                        let ntx = x.div_euclid(tile_size as i32);
-                        let nty = y.div_euclid(tile_size as i32);
-                        
-                        let npx = (x - ntx * tile_size as i32) as usize;
-                        let npy = (y - nty * tile_size as i32) as usize;
-
-                        let dst_data = dst_tiles.entry((ntx, nty)).or_insert_with(|| vec![Color32::TRANSPARENT; tile_size * tile_size]);
-                        let dst_idx = npy * tile_size + npx;
-                        dst_data[dst_idx] = pixel;
-                    }
-                }
-            }
-        }
-
-        // 4. Apply back to layer (Clear first)
         if let Some(layer) = self.layers.get(layer_idx) {
             let mut tiles = layer.tiles.lock().unwrap();
-            
-            // Clear existing tiles
             for tile_arc in tiles.values() {
                 let mut cell = tile_arc.lock().unwrap();
                 cell.data = None;
                 cell.is_empty = true;
             }
-
-            // Write destination pixels
-            for ((tx, ty), data) in dst_tiles {
-                let tile_arc = tiles.entry((tx, ty)).or_insert_with(|| Arc::new(Mutex::new(TileCell { data: Some(vec![Color32::TRANSPARENT; tile_size * tile_size]), is_empty: true })));
-                let mut guard = tile_arc.lock().unwrap();
-                if guard.data.is_none() {
-                    guard.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
-                }
-                
-                let mut has_content = false;
-                if let Some(target_data) = &mut guard.data {
-                    for i in 0..data.len() {
-                        if data[i].a() > 0 {
-                            target_data[i] = data[i];
-                            has_content = true;
-                        }
-                    }
-                }
-                guard.is_empty = !has_content;
-            }
+            write_transformed_tiles(&mut tiles, dst_tiles, tile_size);
         }
     }
 
-    pub fn apply_transform(&mut self, params: TransformParams, selection: Option<&crate::selection::SelectionManager>, history: Option<&mut UndoAction>) {
+    pub fn apply_transform(
+        &mut self,
+        params: TransformParams,
+        selection: Option<&crate::selection::SelectionManager>,
+        history: Option<&mut UndoAction>,
+    ) {
         let layer_idx = self.active_layer_idx;
         let tile_size = self.tile_size;
-        
-        // 1. Collect all source pixels
-        let estimated_pixels = 1024; // Initial capacity
-        let mut src_pixels: HashMap<(i32, i32), Color32> = HashMap::with_capacity(estimated_pixels);
+        let mut src_pixels: HashMap<(i32, i32), Color32> = HashMap::with_capacity(1024);
         let mut src_bounds = eframe::egui::Rect::NOTHING;
         let mut first = true;
 
@@ -763,194 +852,73 @@ impl Canvas {
             for ((tx, ty), tile_arc) in tiles.iter() {
                 let guard = tile_arc.lock().unwrap();
                 if let Some(data) = &guard.data {
-                    let base_x = *tx * tile_size as i32;
-                    let base_y = *ty * tile_size as i32;
-                    
-                    for py in 0..tile_size {
-                        for px in 0..tile_size {
-                            let idx = py * tile_size + px;
-                            if data[idx].a() > 0 {
-                                let gx = base_x + px as i32;
-                                let gy = base_y + py as i32;
-                                
-                                if let Some(sel) = selection {
-                                    if !sel.contains(Vec2::new(gx as f32, gy as f32)) {
-                                        continue;
-                                    }
-                                }
-                                src_pixels.insert((gx, gy), data[idx]);
-                                
-                                let pos = eframe::egui::pos2(gx as f32, gy as f32);
-                                if first {
-                                    src_bounds = eframe::egui::Rect::from_min_max(pos, pos);
-                                    first = false;
-                                } else {
-                                    src_bounds.extend_with(pos);
-                                }
-                            }
-                        }
-                    }
+                    let mut collector = PixelCollector {
+                        pixels: &mut src_pixels,
+                        bounds: &mut src_bounds,
+                        first: &mut first,
+                        tile_size,
+                        selection,
+                    };
+                    collector.add_tile(*tx, *ty, data);
                 }
             }
         }
-        
-        if src_pixels.is_empty() { return; }
-        // Expand bounds slightly to cover the pixels fully
-        src_bounds.max.x += 1.0;
-        src_bounds.max.y += 1.0;
 
-        // Build spatial grid for O(1) pixel lookups instead of O(log n) HashMap
-        let grid_min_x = src_bounds.min.x.floor() as i32;
-        let grid_min_y = src_bounds.min.y.floor() as i32;
-        let grid_width = (src_bounds.max.x.ceil() as i32 - grid_min_x) as usize;
-        let grid_height = (src_bounds.max.y.ceil() as i32 - grid_min_y) as usize;
-        
-        let mut src_grid: Vec<Color32> = vec![Color32::TRANSPARENT; grid_width * grid_height];
-        for ((gx, gy), pixel) in &src_pixels {
-            let idx_x = (*gx - grid_min_x) as usize;
-            let idx_y = (*gy - grid_min_y) as usize;
-            if idx_x < grid_width && idx_y < grid_height {
-                src_grid[idx_y * grid_width + idx_x] = *pixel;
-            }
+        if src_pixels.is_empty() {
+            return;
         }
 
-        // 2. Calculate destination bounds
-        let corners = [
-            src_bounds.min,
-            eframe::egui::pos2(src_bounds.max.x, src_bounds.min.y),
-            src_bounds.max,
-            eframe::egui::pos2(src_bounds.min.x, src_bounds.max.y),
-        ];
-        
-        let (sin_r, cos_r) = params.rotation.sin_cos();
-        
-        let transform = |p: eframe::egui::Pos2| -> eframe::egui::Pos2 {
-            let dx = p.x - params.center.x;
-            let dy = p.y - params.center.y;
-            let sx = dx * params.scale.x;
-            let sy = dy * params.scale.y;
-            let rx = sx * cos_r - sy * sin_r;
-            let ry = sx * sin_r + sy * cos_r;
-            eframe::egui::pos2(rx + params.center.x + params.offset.x, ry + params.center.y + params.offset.y)
-        };
-        
-        let t_corners: Vec<eframe::egui::Pos2> = corners.iter().map(|&c| transform(c)).collect();
-        
-        let mut min_x = t_corners[0].x;
-        let mut min_y = t_corners[0].y;
-        let mut max_x = t_corners[0].x;
-        let mut max_y = t_corners[0].y;
-        
-        for c in &t_corners {
-            min_x = min_x.min(c.x);
-            min_y = min_y.min(c.y);
-            max_x = max_x.max(c.x);
-            max_y = max_y.max(c.y);
-        }
-        
-        let dst_min_x = min_x.floor() as i32;
-        let dst_min_y = min_y.floor() as i32;
-        let dst_max_x = max_x.ceil() as i32;
-        let dst_max_y = max_y.ceil() as i32;
-
-        // 3. Reverse mapping
-        let estimated_dst_tiles = ((dst_max_x - dst_min_x) * (dst_max_y - dst_min_y)) / (tile_size as i32 * tile_size as i32) + 4;
-        let mut dst_tiles: HashMap<(i32, i32), Vec<Color32>> = HashMap::with_capacity(estimated_dst_tiles as usize);
+        let dst_tiles = transform_pixels(&src_pixels, src_bounds, params, tile_size);
         let tile_size_i32 = tile_size as i32;
-        let center_offset_x = params.center.x + params.offset.x;
-        let center_offset_y = params.center.y + params.offset.y;
-        let inv_scale_x = 1.0 / params.scale.x;
-        let inv_scale_y = 1.0 / params.scale.y;
-        
-        for y in dst_min_y..dst_max_y {
-            for x in dst_min_x..dst_max_x {
-                // Inverse transform
-                let dx = x as f32 - center_offset_x;
-                let dy = y as f32 - center_offset_y;
-                
-                // Inverse Rotate
-                let rx = dx * cos_r + dy * sin_r;
-                let ry = -dx * sin_r + dy * cos_r;
-                
-                // Inverse Scale
-                let sx = rx * inv_scale_x;
-                let sy = ry * inv_scale_y;
-                
-                let src_x = (sx + params.center.x).round() as i32;
-                let src_y = (sy + params.center.y).round() as i32;
-                
-                // Use spatial grid for O(1) lookup
-                let grid_x = src_x - grid_min_x;
-                let grid_y = src_y - grid_min_y;
-                
-                if grid_x >= 0 && grid_x < grid_width as i32 && grid_y >= 0 && grid_y < grid_height as i32 {
-                    let pixel = src_grid[(grid_y as usize) * grid_width + (grid_x as usize)];
-                    if pixel != Color32::TRANSPARENT {
-                        let ntx = x.div_euclid(tile_size_i32);
-                        let nty = y.div_euclid(tile_size_i32);
-                        
-                        let npx = (x - ntx * tile_size_i32) as usize;
-                        let npy = (y - nty * tile_size_i32) as usize;
 
-                        let dst_data = dst_tiles.entry((ntx, nty)).or_insert_with(|| vec![Color32::TRANSPARENT; tile_size * tile_size]);
-                        let dst_idx = npy * tile_size + npx;
-                        dst_data[dst_idx] = pixel;
-                    }
-                }
-            }
-        }
-
-        // 4. Apply back to layer
         if let Some(layer) = self.layers.get(layer_idx) {
             let mut tiles = layer.tiles.lock().unwrap();
-            
-            // Record history
             if let Some(action) = history {
                 let mut affected_tiles = std::collections::HashSet::new();
-                
-                // Source tiles - cache div_euclid results
-                for ((gx, gy), _) in &src_pixels {
-                     let tx = gx.div_euclid(tile_size_i32);
-                     let ty = gy.div_euclid(tile_size_i32);
-                     affected_tiles.insert((tx, ty));
+
+                for (gx, gy) in src_pixels.keys() {
+                    let tx = gx.div_euclid(tile_size_i32);
+                    let ty = gy.div_euclid(tile_size_i32);
+                    affected_tiles.insert((tx, ty));
                 }
-                
-                // Destination tiles
-                for ((tx, ty), _) in &dst_tiles {
+
+                for (tx, ty) in dst_tiles.keys() {
                     affected_tiles.insert((*tx, *ty));
                 }
-                
+
                 for (tx, ty) in affected_tiles {
                     let data = if let Some(tile_arc) = tiles.get(&(tx, ty)) {
                         let guard = tile_arc.lock().unwrap();
-                        guard.data.clone().unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_size * tile_size])
+                        guard
+                            .data
+                            .clone()
+                            .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_size * tile_size])
                     } else {
                         vec![Color32::TRANSPARENT; tile_size * tile_size]
                     };
 
                     action.tiles.push(crate::canvas::history::TileSnapshot {
-                         tx,
-                         ty,
-                         layer_idx,
-                         x0: 0,
-                         y0: 0,
-                         width: tile_size,
-                         height: tile_size,
-                         data,
-                     });
+                        tx,
+                        ty,
+                        layer_idx,
+                        x0: 0,
+                        y0: 0,
+                        width: tile_size,
+                        height: tile_size,
+                        data,
+                    });
                 }
             }
-            
-            // Clear source pixels - cache tile coordinates and batch by tile
+
             let mut clear_ops: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
-            for ((gx, gy), _) in &src_pixels {
-                 let tx = gx.div_euclid(tile_size_i32);
-                 let ty = gy.div_euclid(tile_size_i32);
-                 let px = (gx - tx * tile_size_i32) as usize;
-                 let py = (gy - ty * tile_size_i32) as usize;
-                 clear_ops.entry((tx, ty)).or_insert_with(Vec::new).push((px, py));
+            for (gx, gy) in src_pixels.keys() {
+                let tx = gx.div_euclid(tile_size_i32);
+                let ty = gy.div_euclid(tile_size_i32);
+                let px = (gx - tx * tile_size_i32) as usize;
+                let py = (gy - ty * tile_size_i32) as usize;
+                clear_ops.entry((tx, ty)).or_default().push((px, py));
             }
-            
+
             for ((tx, ty), pixel_coords) in clear_ops {
                 if let Some(tile_arc) = tiles.get(&(tx, ty)) {
                     let mut guard = tile_arc.lock().unwrap();
@@ -963,29 +931,15 @@ impl Canvas {
                 }
             }
 
-            // Write destination pixels
-            for ((tx, ty), data) in dst_tiles {
-                let tile_arc = tiles.entry((tx, ty)).or_insert_with(|| Arc::new(Mutex::new(TileCell { data: Some(vec![Color32::TRANSPARENT; tile_size * tile_size]), is_empty: true })));
-                let mut guard = tile_arc.lock().unwrap();
-                if guard.data.is_none() {
-                    guard.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
-                }
-                
-                let mut has_content = false;
-                if let Some(target_data) = &mut guard.data {
-                    for i in 0..data.len() {
-                        if data[i].a() > 0 {
-                            target_data[i] = data[i];
-                            has_content = true;
-                        }
-                    }
-                }
-                guard.is_empty = !has_content;
-            }
+            write_transformed_tiles(&mut tiles, dst_tiles, tile_size);
         }
     }
 
-    pub fn get_content_bounds(&self, layer_idx: usize, selection: Option<&crate::selection::SelectionManager>) -> Option<eframe::egui::Rect> {
+    pub fn get_content_bounds(
+        &self,
+        layer_idx: usize,
+        selection: Option<&crate::selection::SelectionManager>,
+    ) -> Option<eframe::egui::Rect> {
         let mut min_x = i32::MAX;
         let mut min_y = i32::MAX;
         let mut max_x = i32::MIN;
@@ -1004,11 +958,12 @@ impl Canvas {
                                 let gx = *tx * self.tile_size as i32 + px as i32;
                                 let gy = *ty * self.tile_size as i32 + py as i32;
 
-                                    if let Some(sel) = selection {
-                                        if !sel.contains_coords(gx as f32, gy as f32) {
-                                            continue;
-                                        }
-                                    }                                min_x = min_x.min(gx);
+                                if let Some(sel) = selection
+                                    && !sel.contains_coords(gx as f32, gy as f32)
+                                {
+                                    continue;
+                                }
+                                min_x = min_x.min(gx);
                                 min_y = min_y.min(gy);
                                 max_x = max_x.max(gx);
                                 max_y = max_y.max(gy);
@@ -1044,19 +999,24 @@ impl Canvas {
         }
 
         // Create new layer
-        let new_layer = Layer::new("Floating Selection".to_string(), self.width, self.height, self.tile_size);
-        
+        let new_layer = Layer::new(
+            "Floating Selection".to_string(),
+            self.width,
+            self.height,
+            self.tile_size,
+        );
+
         let active_layer = &self.layers[active_idx];
         let active_tiles_map = active_layer.tiles.lock().unwrap();
-        
+
         let mut tiles_to_process = Vec::new();
         for (&(tx, ty), tile_arc) in active_tiles_map.iter() {
             tiles_to_process.push(((tx, ty), tile_arc.clone()));
         }
         drop(active_tiles_map);
-        
+
         let mut new_layer_tiles = new_layer.tiles.lock().unwrap();
-        
+
         for ((tx, ty), tile_arc) in tiles_to_process {
             let mut tile = tile_arc.lock().unwrap();
             if let Some(data) = &mut tile.data {
@@ -1067,7 +1027,7 @@ impl Canvas {
                     for x in 0..self.tile_size {
                         let px = tx * (self.tile_size as i32) + (x as i32);
                         let py = ty * (self.tile_size as i32) + (y as i32);
-                        
+
                         if selection.contains(Vec2::new(px as f32, py as f32)) {
                             let idx = y * self.tile_size + x;
                             let color = data[idx];
@@ -1079,19 +1039,22 @@ impl Canvas {
                         }
                     }
                 }
-                
+
                 if has_content {
-                    let new_tile = Arc::new(Mutex::new(TileCell { data: Some(new_tile_data), is_empty: false }));
+                    let new_tile = Arc::new(Mutex::new(TileCell {
+                        data: Some(new_tile_data),
+                        is_empty: false,
+                    }));
                     new_layer_tiles.insert((tx, ty), new_tile);
                 }
             }
         }
-        
+
         drop(new_layer_tiles);
-        
+
         self.layers.push(new_layer);
         self.active_layer_idx = self.layers.len() - 1;
-        
+
         Some(self.active_layer_idx)
     }
 
@@ -1102,7 +1065,7 @@ impl Canvas {
 
         // Remove the top layer (source)
         let top_layer = self.layers.remove(layer_idx);
-        
+
         {
             // Get the bottom layer (destination)
             // Note: indices shifted after remove, so the layer that was at layer_idx - 1 is still at layer_idx - 1
@@ -1118,40 +1081,46 @@ impl Canvas {
                     if top_guard.is_empty {
                         continue;
                     }
-                    
+
                     // Ensure bottom tile exists
-                    let bottom_tile_arc = bottom_tiles
-                        .entry((*tx, *ty))
-                        .or_insert_with(|| Arc::new(Mutex::new(TileCell { data: None, is_empty: true })));
-                    
+                    let bottom_tile_arc = bottom_tiles.entry((*tx, *ty)).or_insert_with(|| {
+                        Arc::new(Mutex::new(TileCell {
+                            data: None,
+                            is_empty: true,
+                        }))
+                    });
+
                     let mut bottom_guard = bottom_tile_arc.lock().unwrap();
-                    
+
                     // Initialize bottom data if missing
                     if bottom_guard.data.is_none() {
-                         bottom_guard.data = Some(vec![Color32::TRANSPARENT; self.tile_size * self.tile_size]);
+                        bottom_guard.data =
+                            Some(vec![Color32::TRANSPARENT; self.tile_size * self.tile_size]);
                     }
 
                     if let Some(bottom_data) = &mut bottom_guard.data {
                         // Use SIMD batch processing for better performance
                         let tile_len = bottom_data.len();
-                        
+
                         // Apply opacity to source pixels and prepare for batch blend
                         let mut src_with_opacity = vec![Color32::TRANSPARENT; tile_len];
                         for i in 0..tile_len {
-                            src_with_opacity[i] = apply_opacity_scale(top_data[i], top_layer.opacity);
+                            src_with_opacity[i] =
+                                apply_opacity_scale(top_data[i], top_layer.opacity);
                         }
-                        
+
                         // Create temporary output buffer
                         let mut blended = vec![Color32::TRANSPARENT; tile_len];
-                        
+
                         // Batch blend using SIMD
                         alpha_over_batch(&src_with_opacity, bottom_data, &mut blended);
-                        
+
                         // Copy result back
                         *bottom_data = blended;
-                        
+
                         // Update is_empty flag
-                        bottom_guard.is_empty = bottom_data.iter().all(|&p| p == Color32::TRANSPARENT);
+                        bottom_guard.is_empty =
+                            bottom_data.iter().all(|&p| p == Color32::TRANSPARENT);
                     }
                 }
             }
@@ -1180,7 +1149,6 @@ pub fn blend_erase(src: Color32, dst: Color32) -> Color32 {
     )
 }
 
-
 /// SIMD-optimized alpha blending for 4 pixels at once
 #[inline]
 pub fn alpha_over_simd_x4(src: [Color32; 4], dst: [Color32; 4]) -> [Color32; 4] {
@@ -1189,39 +1157,39 @@ pub fn alpha_over_simd_x4(src: [Color32; 4], dst: [Color32; 4]) -> [Color32; 4] 
     let s1 = Rgba::from(src[1]);
     let s2 = Rgba::from(src[2]);
     let s3 = Rgba::from(src[3]);
-    
+
     // Pack into SIMD vectors (Structure of Arrays layout for better vectorization)
     let sr = f32x4::new([s0.r(), s1.r(), s2.r(), s3.r()]);
     let sg = f32x4::new([s0.g(), s1.g(), s2.g(), s3.g()]);
     let sb = f32x4::new([s0.b(), s1.b(), s2.b(), s3.b()]);
     let sa = f32x4::new([s0.a(), s1.a(), s2.a(), s3.a()]);
-    
+
     // Convert 4 destination pixels to linear space
     let d0 = Rgba::from(dst[0]);
     let d1 = Rgba::from(dst[1]);
     let d2 = Rgba::from(dst[2]);
     let d3 = Rgba::from(dst[3]);
-    
+
     let dr = f32x4::new([d0.r(), d1.r(), d2.r(), d3.r()]);
     let dg = f32x4::new([d0.g(), d1.g(), d2.g(), d3.g()]);
     let db = f32x4::new([d0.b(), d1.b(), d2.b(), d3.b()]);
     let da = f32x4::new([d0.a(), d1.a(), d2.a(), d3.a()]);
-    
+
     // Alpha over blend in SIMD: out = src + dst * (1 - src.a)
     let one = f32x4::splat(1.0);
     let inv_alpha = one - sa;
-    
+
     let out_r = sr + dr * inv_alpha;
     let out_g = sg + dg * inv_alpha;
     let out_b = sb + db * inv_alpha;
     let out_a = sa + da * inv_alpha;
-    
+
     // Convert back to Color32 (sRGB)
     let r = out_r.to_array();
     let g = out_g.to_array();
     let b = out_b.to_array();
     let a = out_a.to_array();
-    
+
     [
         rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r[0], g[0], b[0], a[0])),
         rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r[1], g[1], b[1], a[1])),
@@ -1235,36 +1203,26 @@ pub fn alpha_over_simd_x4(src: [Color32; 4], dst: [Color32; 4]) -> [Color32; 4] 
 pub fn alpha_over_batch(src: &[Color32], dst: &[Color32], out: &mut [Color32]) {
     assert_eq!(src.len(), dst.len());
     assert_eq!(src.len(), out.len());
-    
+
     let len = src.len();
     let simd_len = len / 4 * 4;
-    
+
     // Process 4 pixels at a time with SIMD
     let mut i = 0;
     while i < simd_len {
-        let src_chunk = [
-            src[i],
-            src[i + 1],
-            src[i + 2],
-            src[i + 3],
-        ];
-        let dst_chunk = [
-            dst[i],
-            dst[i + 1],
-            dst[i + 2],
-            dst[i + 3],
-        ];
-        
+        let src_chunk = [src[i], src[i + 1], src[i + 2], src[i + 3]];
+        let dst_chunk = [dst[i], dst[i + 1], dst[i + 2], dst[i + 3]];
+
         let result = alpha_over_simd_x4(src_chunk, dst_chunk);
-        
+
         out[i] = result[0];
         out[i + 1] = result[1];
         out[i + 2] = result[2];
         out[i + 3] = result[3];
-        
+
         i += 4;
     }
-    
+
     // Handle remaining pixels with scalar code
     for i in simd_len..len {
         out[i] = alpha_over(src[i], dst[i]);
@@ -1280,7 +1238,7 @@ pub fn alpha_over(src: Color32, dst: Color32) -> Color32 {
 
     // 2. Perform the blend in Linear space
     let inv_alpha = 1.0 - src_l.a();
-    
+
     let out_r = src_l.r() + dst_l.r() * inv_alpha;
     let out_g = src_l.g() + dst_l.g() * inv_alpha;
     let out_b = src_l.b() + dst_l.b() * inv_alpha;
@@ -1307,11 +1265,10 @@ fn apply_opacity_scale(color: Color32, opacity_scale: f32) -> Color32 {
 fn premultiply(color: Color32) -> Color32 {
     let [r, g, b, a] = color.to_array();
     let linear = Rgba::from_rgba_unmultiplied(
-        r as f32 / 255.0, 
-        g as f32 / 255.0, 
-        b as f32 / 255.0, 
-        a as f32 / 255.0
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+        a as f32 / 255.0,
     );
     Color32::from(linear)
 }
-

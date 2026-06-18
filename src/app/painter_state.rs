@@ -1,3 +1,4 @@
+use crate::app::state::{CanvasTile, ColorModel, NewCanvasSettings, TextureAtlas};
 use crate::{
     brush_engine::{
         brush::{Brush, BrushPreset},
@@ -6,10 +7,8 @@ use crate::{
     },
     canvas::history::{History, UndoAction},
     ui::{brush_settings::BrushPreviewState, export_modal::ExportProgress},
-    utils::vector::Vec2,
 };
-use crate::app::state::{CanvasTile, ColorModel, NewCanvasSettings, TextureAtlas};
-use eframe::egui::{self, Color32};
+use eframe::egui::{self, Color32, Vec2};
 use rayon::ThreadPool;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

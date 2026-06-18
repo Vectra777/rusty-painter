@@ -4,24 +4,35 @@ use rayon::ThreadPoolBuilder;
 
 /// Panel with app-wide toggles that affect rendering performance and controls.
 pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
-    ui.checkbox(&mut app.brush_state.use_masked_brush, "Use masked brush (fast)");
-    ui.checkbox(&mut app.render_cache.disable_lod, "High quality zoom out (slower)");
+    ui.checkbox(
+        &mut app.brush_state.use_masked_brush,
+        "Use masked brush (fast)",
+    );
+    ui.checkbox(
+        &mut app.render_cache.disable_lod,
+        "High quality zoom out (slower)",
+    );
     let threads_changed = ui
-        .add(egui::Slider::new(&mut app.workspace.thread_count, 1..=app.workspace.max_threads).text("Brush threads"))
+        .add(
+            egui::Slider::new(
+                &mut app.workspace.thread_count,
+                1..=app.workspace.max_threads,
+            )
+            .text("Brush threads"),
+        )
         .changed();
-    if threads_changed {
-        if let Ok(pool) = ThreadPoolBuilder::new()
+    if threads_changed
+        && let Ok(pool) = ThreadPoolBuilder::new()
             .num_threads(app.workspace.thread_count)
             .build()
-        {
-            app.workspace.pool = pool;
-        }
+    {
+        app.workspace.pool = pool;
     }
     ui.separator();
     ui.label("Controls:");
     ui.label("Left click: Paint");
     ui.label("C: Clear Canvas");
-    
+
     ui.separator();
     if ui.button("Open Brush Folder").clicked() {
         let _ = app.brush_state.brushes_path.canonicalize().map(|path| {

@@ -1,5 +1,5 @@
-use crate::utils::vector::Vec2;
 use eframe::egui::Rect;
+use eframe::egui::Vec2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TransformState {
@@ -39,13 +39,13 @@ impl TransformInfo {
 
             // Transform the bounds corners
             let corners = [
-                bounds.min, // Top-Left
+                bounds.min,                                          // Top-Left
                 eframe::egui::pos2(bounds.center().x, bounds.min.y), // Top-Center
-                eframe::egui::pos2(bounds.max.x, bounds.min.y), // Top-Right
+                eframe::egui::pos2(bounds.max.x, bounds.min.y),      // Top-Right
                 eframe::egui::pos2(bounds.max.x, bounds.center().y), // Right-Center
-                bounds.max, // Bottom-Right
+                bounds.max,                                          // Bottom-Right
                 eframe::egui::pos2(bounds.center().x, bounds.max.y), // Bottom-Center
-                eframe::egui::pos2(bounds.min.x, bounds.max.y), // Bottom-Left
+                eframe::egui::pos2(bounds.min.x, bounds.max.y),      // Bottom-Left
                 eframe::egui::pos2(bounds.min.x, bounds.center().y), // Left-Center
             ];
 

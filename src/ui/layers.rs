@@ -10,6 +10,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     let mut item_rects: Vec<(usize, egui::Rect)> = Vec::new();
 
     egui::ScrollArea::vertical()
+        .id_salt("layers_scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -38,7 +39,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     item_rects.push((i, rect));
 
                     let fill = app
-                        .layer_state.layer_ui_colors
+                        .layer_state
+                        .layer_ui_colors
                         .get(i)
                         .copied()
                         .unwrap_or(ui.visuals().extreme_bg_color);
@@ -80,10 +82,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     opacity_released =
                         response.drag_stopped() || (response.changed() && !response.dragged());
 
-                    if let Some(color) = app.layer_state.layer_ui_colors.get_mut(i) {
-                        if content.color_edit_button_srgba(color).clicked() {
-                            active_idx = i;
-                        }
+                    if let Some(color) = app.layer_state.layer_ui_colors.get_mut(i)
+                        && content.color_edit_button_srgba(color).clicked()
+                    {
+                        active_idx = i;
                     }
 
                     if app.canvas.layers.len() > 1 && i != 0 {
@@ -103,24 +105,23 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         app.layer_state.layer_dragging = Some(i);
                     }
 
-                    if block_response.drag_stopped() {
-                        if let Some(from) = app.layer_state.layer_dragging.take() {
-                            if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
-                                let mut target = from;
-                                for (idx, rect) in &item_rects {
-                                    if rect.contains(pointer) {
-                                        target = *idx;
-                                        break;
-                                    }
-                                    if pointer.y < rect.top() {
-                                        target = *idx;
-                                    }
-                                }
-                                app.reorder_layers(from, target);
-                                needs_refresh = true;
-                                active_idx = app.canvas.active_layer_idx;
+                    if block_response.drag_stopped()
+                        && let Some(from) = app.layer_state.layer_dragging.take()
+                        && let Some(pointer) = ctx.input(|i| i.pointer.hover_pos())
+                    {
+                        let mut target = from;
+                        for (idx, rect) in &item_rects {
+                            if rect.contains(pointer) {
+                                target = *idx;
+                                break;
+                            }
+                            if pointer.y < rect.top() {
+                                target = *idx;
                             }
                         }
+                        app.reorder_layers(from, target);
+                        needs_refresh = true;
+                        active_idx = app.canvas.active_layer_idx;
                     }
 
                     block_response.context_menu(|ui| {
@@ -145,78 +146,86 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 }
             }
 
-            if let Some(drag_idx) = app.layer_state.layer_dragging {
-                if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
-                    if let Some((_, first_rect)) = item_rects.first() {
-                        let last_rect = item_rects.last().map(|(_, r)| *r).unwrap_or(*first_rect);
-                        let list_left = first_rect.left();
-                        let list_width = first_rect.width();
-                        let item_height = first_rect.height();
-                        let clamped_y = pointer.y.clamp(first_rect.top(), last_rect.bottom());
-                        let ghost_rect = egui::Rect::from_min_size(
-                            egui::pos2(list_left, clamped_y - item_height * 0.5),
-                            egui::vec2(list_width, item_height),
-                        );
-                        let color = app
-                            .layer_state.layer_ui_colors
-                            .get(drag_idx)
-                            .copied()
-                            .unwrap_or(ui.visuals().extreme_bg_color);
-                        ui.painter()
-                            .rect_filled(ghost_rect, 6.0, color.linear_multiply(0.7));
-                        ui.painter().rect_stroke(
-                            ghost_rect.shrink(2.0),
-                            6.0,
-                            egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
-                        );
-                        let name = app
-                            .canvas
-                            .layers
-                            .get(drag_idx)
-                            .map(|l| l.name.as_str())
-                            .unwrap_or("Layer");
-                        ui.painter().text(
-                            ghost_rect.left_top() + egui::vec2(12.0, 18.0),
-                            egui::Align2::LEFT_TOP,
-                            name,
-                            egui::FontId::proportional(14.0),
-                            ui.visuals().text_color(),
-                        );
-                    }
-                }
+            if let Some(drag_idx) = app.layer_state.layer_dragging
+                && let Some(pointer) = ctx.input(|i| i.pointer.hover_pos())
+                && let Some((_, first_rect)) = item_rects.first()
+            {
+                let last_rect = item_rects.last().map(|(_, r)| *r).unwrap_or(*first_rect);
+                let list_left = first_rect.left();
+                let list_width = first_rect.width();
+                let item_height = first_rect.height();
+                let clamped_y = pointer.y.clamp(first_rect.top(), last_rect.bottom());
+                let ghost_rect = egui::Rect::from_min_size(
+                    egui::pos2(list_left, clamped_y - item_height * 0.5),
+                    egui::vec2(list_width, item_height),
+                );
+                let color = app
+                    .layer_state
+                    .layer_ui_colors
+                    .get(drag_idx)
+                    .copied()
+                    .unwrap_or(ui.visuals().extreme_bg_color);
+                ui.painter()
+                    .rect_filled(ghost_rect, 6.0, color.linear_multiply(0.7));
+                ui.painter().rect_stroke(
+                    ghost_rect.shrink(2.0),
+                    6.0,
+                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                );
+                let name = app
+                    .canvas
+                    .layers
+                    .get(drag_idx)
+                    .map(|l| l.name.as_str())
+                    .unwrap_or("Layer");
+                ui.painter().text(
+                    ghost_rect.left_top() + egui::vec2(12.0, 18.0),
+                    egui::Align2::LEFT_TOP,
+                    name,
+                    egui::FontId::proportional(14.0),
+                    ui.visuals().text_color(),
+                );
             }
         });
 
     if add_layer {
         app.canvas.add_layer();
-        app.layer_state.histories.push(crate::canvas::history::History::new());
-        app.render_cache.layer_caches.push(std::collections::HashMap::new());
-        app.render_cache.layer_cache_dirty.push(std::collections::HashSet::new());
-        app.layer_state.layer_ui_colors.push(egui::Color32::from_gray(40));
+        app.layer_state
+            .histories
+            .push(crate::canvas::history::History::new());
+        app.render_cache
+            .layer_caches
+            .push(std::collections::HashMap::new());
+        app.render_cache
+            .layer_cache_dirty
+            .push(std::collections::HashSet::new());
+        app.layer_state
+            .layer_ui_colors
+            .push(egui::Color32::from_gray(40));
         active_idx = app.canvas.layers.len().saturating_sub(1);
     }
 
-    if let Some(idx) = to_delete {
-        if idx < app.canvas.layers.len() {
-            app.mark_layer_tiles_with_data_dirty(idx);
-            app.canvas.layers.remove(idx);
-            if idx < app.layer_state.histories.len() {
-                app.layer_state.histories.remove(idx);
-            }
-            if idx < app.render_cache.layer_caches.len() {
-                app.render_cache.layer_caches.remove(idx);
-            }
-            if idx < app.render_cache.layer_cache_dirty.len() {
-                app.render_cache.layer_cache_dirty.remove(idx);
-            }
-            if idx < app.layer_state.layer_ui_colors.len() {
-                app.layer_state.layer_ui_colors.remove(idx);
-            }
-            if active_idx >= app.canvas.layers.len() {
-                active_idx = app.canvas.layers.len().saturating_sub(1);
-            }
-            needs_refresh = true;
+    if let Some(idx) = to_delete
+        && idx < app.canvas.layers.len()
+    {
+        app.mark_layer_tiles_with_data_dirty(idx);
+        app.canvas.layers.remove(idx);
+        if idx < app.layer_state.histories.len() {
+            app.layer_state.histories.remove(idx);
         }
+        if idx < app.render_cache.layer_caches.len() {
+            app.render_cache.layer_caches.remove(idx);
+        }
+        if idx < app.render_cache.layer_cache_dirty.len() {
+            app.render_cache.layer_cache_dirty.remove(idx);
+        }
+        if idx < app.layer_state.layer_ui_colors.len() {
+            app.layer_state.layer_ui_colors.remove(idx);
+        }
+        if active_idx >= app.canvas.layers.len() {
+            active_idx = app.canvas.layers.len().saturating_sub(1);
+        }
+        needs_refresh = true;
     }
 
     app.canvas.active_layer_idx = active_idx;

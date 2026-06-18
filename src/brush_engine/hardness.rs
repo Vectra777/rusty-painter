@@ -25,10 +25,7 @@ pub struct SoftnessCurve {
 impl Default for SoftnessCurve {
     fn default() -> Self {
         Self {
-            points: vec![
-                CurvePoint::new(0.0, 1.0),
-                CurvePoint::new(1.0, 0.0),
-            ],
+            points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)],
         }
     }
 }
@@ -98,28 +95,25 @@ impl SoftnessCurve {
         // If secant k-1 and secant k have different signs, tangent is 0.
         // Else, tangent is arithmetic mean (simple) or harmonic mean (Fritsch-Butland).
 
-
         let _tangent = |_k: usize, sec_prev: f32, sec_next: f32| -> f32 {
-             if sec_prev * sec_next <= 0.0 {
-
-                 0.0 
-             } else {
-
-                 (sec_prev + sec_next) * 0.5
-             }
+            if sec_prev * sec_next <= 0.0 {
+                0.0
+            } else {
+                (sec_prev + sec_next) * 0.5
+            }
         };
-        
+
         // Re-calculating secants properly for the endpoints logic
         let m0 = if i == 0 {
-             secant1 // Start point
+            secant1 // Start point
         } else {
-             (secant0 + secant1) * 0.5
+            (secant0 + secant1) * 0.5
         };
-        
+
         let m1 = if i == len - 2 {
-             secant1 // End point
+            secant1 // End point
         } else {
-             (secant1 + secant2) * 0.5
+            (secant1 + secant2) * 0.5
         };
 
         // Evaluate cubic hermite

@@ -1,18 +1,55 @@
 use crate::brush_engine::brush::{Brush, StabilizerAlgorithm};
-use crate::canvas::canvas::Canvas;
+use crate::canvas::Canvas;
 use crate::canvas::history::UndoAction;
 use crate::selection::SelectionManager;
-use crate::utils::{profiler::ScopeTimer, vector::Vec2};
+use eframe::egui::Vec2;
+use rand::Rng;
 use rayon::ThreadPool;
 use std::collections::HashSet;
-use rand::Rng;
+
+/// Shared drawing dependencies for adding points to a stroke.
+pub struct StrokeContext<'a> {
+    pool: &'a ThreadPool,
+    canvas: &'a Canvas,
+    selection: Option<&'a SelectionManager>,
+    undo_action: &'a mut UndoAction,
+    modified_tiles: &'a mut HashSet<(usize, usize)>,
+}
+
+impl<'a> StrokeContext<'a> {
+    pub fn new(
+        pool: &'a ThreadPool,
+        canvas: &'a Canvas,
+        selection: Option<&'a SelectionManager>,
+        undo_action: &'a mut UndoAction,
+        modified_tiles: &'a mut HashSet<(usize, usize)>,
+    ) -> Self {
+        Self {
+            pool,
+            canvas,
+            selection,
+            undo_action,
+            modified_tiles,
+        }
+    }
+
+    fn dab(&mut self, brush: &mut Brush, pos: Vec2) {
+        brush.dab(
+            self.pool,
+            self.canvas,
+            self.selection,
+            pos,
+            self.undo_action,
+            self.modified_tiles,
+        );
+    }
+}
 
 /// Tracks per-stroke state like the last position and spacing accumulator.
 pub struct StrokeState {
     pub last_pos: Option<Vec2>,
     pub velocity: Vec2,
     dist_until_next_blit: f32,
-    stroke_timer: Option<ScopeTimer>,
 }
 
 impl StrokeState {
@@ -22,23 +59,13 @@ impl StrokeState {
             last_pos: None,
             velocity: Vec2 { x: 0.0, y: 0.0 },
             dist_until_next_blit: 0.0,
-            stroke_timer: Some(ScopeTimer::new("stroke")),
         }
     }
 
     /// Add a new sample to the stroke, interpolating dabs based on spacing and jitter.
-    pub fn add_point(
-        &mut self,
-        pool: &ThreadPool,
-        canvas: &Canvas,
-        brush: &mut Brush,
-        selection: Option<&SelectionManager>,
-        raw_pos: Vec2,
-        undo_action: &mut UndoAction,
-        modified_tiles: &mut HashSet<(usize, usize)>,
-    ) {
+    pub fn add_point(&mut self, brush: &mut Brush, raw_pos: Vec2, context: &mut StrokeContext<'_>) {
         if brush.pixel_perfect {
-            self.add_point_pixel_perfect(pool, canvas, brush, selection, raw_pos, undo_action, modified_tiles);
+            self.add_point_pixel_perfect(brush, raw_pos, context);
             return;
         }
 
@@ -66,16 +93,16 @@ impl StrokeState {
                     // Velocity += Acceleration
                     // Velocity *= (1.0 - Drag)
                     // NewPos = Current + Velocity
-                    
+
                     let force = raw_pos - prev;
                     // Scale mass so 0.01..1.0 maps to useful behavior
-                    let mass = brush.stabilizer_mass.max(0.01) * 50.0; 
+                    let mass = brush.stabilizer_mass.max(0.01) * 50.0;
                     let acceleration = force / mass;
-                    
-                    self.velocity = self.velocity + acceleration;
+
+                    self.velocity += acceleration;
                     // Drag 0.0..1.0
-                    self.velocity = self.velocity * (1.0 - brush.stabilizer_drag);
-                    
+                    self.velocity *= 1.0 - brush.stabilizer_drag;
+
                     prev + self.velocity
                 } else {
                     raw_pos
@@ -99,7 +126,7 @@ impl StrokeState {
 
             while dist_left >= self.dist_until_next_blit {
                 // Take a step to the next blit point.
-                cur_pos = cur_pos + unit_step * self.dist_until_next_blit;
+                cur_pos += unit_step * self.dist_until_next_blit;
                 dist_left -= self.dist_until_next_blit;
 
                 // Blit.
@@ -112,7 +139,7 @@ impl StrokeState {
                     p.x += jx;
                     p.y += jy;
                 }
-                brush.dab(pool, canvas, selection, p, undo_action, modified_tiles);
+                context.dab(brush, p);
 
                 self.dist_until_next_blit = spacing_dist;
             }
@@ -129,7 +156,7 @@ impl StrokeState {
                 p.x += jx;
                 p.y += jy;
             }
-            brush.dab(pool, canvas, selection, p, undo_action, modified_tiles);
+            context.dab(brush, p);
             self.dist_until_next_blit = spacing_dist;
         }
 
@@ -139,13 +166,9 @@ impl StrokeState {
     /// Pixel-perfect Bresenham line stepping to avoid gaps when snapping to pixels.
     fn add_point_pixel_perfect(
         &mut self,
-        pool: &ThreadPool,
-        canvas: &Canvas,
         brush: &mut Brush,
-        selection: Option<&SelectionManager>,
         pos: Vec2,
-        undo_action: &mut UndoAction,
-        modified_tiles: &mut HashSet<(usize, usize)>,
+        context: &mut StrokeContext<'_>,
     ) {
         let x1 = pos.x.floor() as i32;
         let y1 = pos.y.floor() as i32;
@@ -168,16 +191,12 @@ impl StrokeState {
             let mut y = y0;
 
             loop {
-                brush.dab(
-                    pool,
-                    canvas,
-                    selection,
+                context.dab(
+                    brush,
                     Vec2 {
                         x: x as f32 + 0.5,
                         y: y as f32 + 0.5,
                     },
-                    undo_action,
-                    modified_tiles,
                 );
 
                 if x == x1 && y == y1 {
@@ -194,16 +213,12 @@ impl StrokeState {
                 }
             }
         } else {
-            brush.dab(
-                pool,
-                canvas,
-                selection,
+            context.dab(
+                brush,
                 Vec2 {
                     x: x1 as f32 + 0.5,
                     y: y1 as f32 + 0.5,
                 },
-                undo_action,
-                modified_tiles,
             );
         }
         self.last_pos = Some(pos);
@@ -213,7 +228,11 @@ impl StrokeState {
     pub fn end(&mut self) {
         self.last_pos = None;
         self.dist_until_next_blit = 0.0;
-        // Drop the timer so stroke-level duration is reported when the stroke ends.
-        self.stroke_timer.take();
+    }
+}
+
+impl Default for StrokeState {
+    fn default() -> Self {
+        Self::new()
     }
 }

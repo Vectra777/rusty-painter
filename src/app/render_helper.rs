@@ -1,6 +1,5 @@
 use crate::PainterApp;
 use crate::app::state::{ATLAS_SIZE, TILE_SIZE};
-use crate::utils::profiler::ScopeTimer;
 use eframe::egui::{self, Color32, TextureOptions};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
@@ -24,7 +23,8 @@ pub fn update_dirty_textures(app: &mut PainterApp) {
 
     let canvas_ref = &app.canvas;
     let dirty_images: Vec<(usize, egui::ColorImage)> = app.workspace.pool.install(|| {
-        app.render_cache.tiles
+        app.render_cache
+            .tiles
             .iter()
             .enumerate()
             .filter(|(_, t)| t.dirty)
@@ -36,8 +36,8 @@ pub fn update_dirty_textures(app: &mut PainterApp) {
                 let w = TILE_SIZE.min(canvas_ref.width() - x);
                 let h = TILE_SIZE.min(canvas_ref.height() - y);
 
-                let out_w = (w + lod_step - 1) / lod_step;
-                let out_h = (h + lod_step - 1) / lod_step;
+                let out_w = w.div_ceil(lod_step);
+                let out_h = h.div_ceil(lod_step);
                 let mut img = egui::ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
                 canvas_ref.write_region_to_color_image(x, y, w, h, &mut img, lod_step);
                 (*idx, img)
@@ -47,7 +47,6 @@ pub fn update_dirty_textures(app: &mut PainterApp) {
 
     for (idx, img) in dirty_images {
         if let Some(tile) = app.render_cache.tiles.get_mut(idx) {
-            let _timer = ScopeTimer::new("texture_set");
             let img_w = img.size[0];
             let img_h = img.size[1];
             if let Some(atlas) = app.render_cache.atlases.get_mut(tile.atlas_idx) {
@@ -67,8 +66,7 @@ pub fn update_dirty_textures(app: &mut PainterApp) {
 pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
     let desired_size = egui::vec2(app.canvas.width() as f32, app.canvas.height() as f32);
     let canvas_size = desired_size * app.viewport.zoom;
-    let (rect, response) =
-        ui.allocate_at_least(ui.available_size(), egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_at_least(ui.available_size(), egui::Sense::click_and_drag());
 
     let origin = rect.min + egui::vec2(app.viewport.offset.x, app.viewport.offset.y);
     let canvas_center = origin + canvas_size * 0.5;
@@ -76,7 +74,8 @@ pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
     let sin = app.viewport.rotation.sin();
 
     let mut meshes: Vec<egui::Mesh> = app
-        .render_cache.atlases
+        .render_cache
+        .atlases
         .iter()
         .map(|atlas| egui::Mesh::with_texture(atlas.texture.id()))
         .collect();
@@ -92,10 +91,8 @@ pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
         let tile_h =
             (TILE_SIZE.min(app.canvas.height() - tile.ty * TILE_SIZE)) as f32 * app.viewport.zoom;
 
-        let tile_rect = egui::Rect::from_min_size(
-            origin + egui::vec2(x, y),
-            egui::vec2(tile_w, tile_h),
-        );
+        let tile_rect =
+            egui::Rect::from_min_size(origin + egui::vec2(x, y), egui::vec2(tile_w, tile_h));
 
         let corners = [
             PainterApp::rotate_point(tile_rect.left_top(), canvas_center, cos, sin),
@@ -106,10 +103,8 @@ pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
 
         let u0 = (tile.atlas_x as f32 + half_texel) / ATLAS_SIZE as f32;
         let v0 = (tile.atlas_y as f32 + half_texel) / ATLAS_SIZE as f32;
-        let u1 =
-            (tile.atlas_x as f32 + tile.pixel_w as f32 - half_texel) / ATLAS_SIZE as f32;
-        let v1 =
-            (tile.atlas_y as f32 + tile.pixel_h as f32 - half_texel) / ATLAS_SIZE as f32;
+        let u1 = (tile.atlas_x as f32 + tile.pixel_w as f32 - half_texel) / ATLAS_SIZE as f32;
+        let v1 = (tile.atlas_y as f32 + tile.pixel_h as f32 - half_texel) / ATLAS_SIZE as f32;
 
         let uv_coords = [
             egui::Pos2::new(u0, v0),
@@ -127,14 +122,8 @@ pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
                     color: Color32::WHITE,
                 });
             }
-            mesh.indices.extend_from_slice(&[
-                base,
-                base + 1,
-                base + 2,
-                base,
-                base + 2,
-                base + 3,
-            ]);
+            mesh.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
 

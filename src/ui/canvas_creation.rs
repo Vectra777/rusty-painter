@@ -138,9 +138,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                         );
                     });
             });
-            ui.weak(
-                "Grayscale paints in a single channel; CMYK converts selections into an on-screen approximation.",
-            );
+            ui.weak("Grayscale paints in a single channel.");
 
             let (px_w, px_h) = settings.dimensions_in_pixels();
             ui.label(format!(

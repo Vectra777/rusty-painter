@@ -1,4 +1,4 @@
-use crate::canvas::canvas::Canvas;
+use crate::canvas::Canvas;
 use eframe::egui::{Color32, TextureHandle};
 
 pub const TILE_SIZE: usize = 64;
@@ -51,11 +51,6 @@ pub struct NewCanvasSettings {
     pub custom_bg: Color32,
     pub color_model: ColorModel,
     pub color_depth: ColorDepth,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum PaintBackend {
-    Cpu,
 }
 
 pub struct CanvasTile {
@@ -154,23 +149,4 @@ impl NewCanvasSettings {
             ColorModel::Grayscale => color,
         }
     }
-}
-
-pub fn parse_backend_arg() -> PaintBackend {
-    let mut backend = PaintBackend::Cpu;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--cpu" | "--backend=cpu" => backend = PaintBackend::Cpu,
-            "--backend" => {
-                if let Some(next) = args.next() {
-                    if next.eq_ignore_ascii_case("cpu") {
-                        backend = PaintBackend::Cpu;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    backend
 }

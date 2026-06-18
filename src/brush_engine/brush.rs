@@ -1,22 +1,37 @@
-use crate::{brush_engine::{brush_options::{BlendMode, PixelBrushShape}, hardness::SoftnessSelector}, canvas::{
-    canvas::{Canvas, alpha_over_batch, blend_erase},
-    history::{TileSnapshot, UndoAction},
-}, selection::SelectionManager};
-use crate::utils::vector::Vec2;
+use super::brush_options::BrushOptions;
+use crate::{
+    brush_engine::{
+        brush_options::{BlendMode, PixelBrushShape},
+        hardness::SoftnessSelector,
+    },
+    canvas::{
+        Canvas,
+        history::{TileSnapshot, UndoAction},
+        storage::{alpha_over_batch, blend_erase},
+    },
+    selection::SelectionManager,
+};
 use eframe::egui::Color32;
+use eframe::egui::Vec2;
 use rayon::ThreadPool;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashSet;
-use super::brush_options::BrushOptions;
 
 /// Sample custom mask with nearest neighbor interpolation
 #[inline]
-fn sample_custom_mask_nn(dx: f32, dy: f32, diameter: f32, width: usize, height: usize, mask: &[u8]) -> (bool, f32) {
+fn sample_custom_mask_nn(
+    dx: f32,
+    dy: f32,
+    diameter: f32,
+    width: usize,
+    height: usize,
+    mask: &[u8],
+) -> (bool, f32) {
     let r = diameter / 2.0;
     let nx = (dx + r) / diameter;
     let ny = (dy + r) / diameter;
-    
-    if nx >= 0.0 && nx < 1.0 && ny >= 0.0 && ny < 1.0 {
+
+    if (0.0..1.0).contains(&nx) && (0.0..1.0).contains(&ny) {
         let ix = (nx * width as f32).floor() as usize;
         let iy = (ny * height as f32).floor() as usize;
         let idx = iy * width + ix;
@@ -30,11 +45,18 @@ fn sample_custom_mask_nn(dx: f32, dy: f32, diameter: f32, width: usize, height: 
 
 /// Sample custom mask with bilinear interpolation for smooth soft brushes
 #[inline]
-fn sample_custom_mask_bilinear(dx: f32, dy: f32, radius: f32, width: usize, height: usize, data: &[u8]) -> f32 {
+fn sample_custom_mask_bilinear(
+    dx: f32,
+    dy: f32,
+    radius: f32,
+    width: usize,
+    height: usize,
+    data: &[u8],
+) -> f32 {
     let nx = (dx + radius) / (radius * 2.0);
     let ny = (dy + radius) / (radius * 2.0);
 
-    if nx >= 0.0 && nx < 1.0 && ny >= 0.0 && ny < 1.0 {
+    if (0.0..1.0).contains(&nx) && (0.0..1.0).contains(&ny) {
         let tx = nx * (width as f32);
         let ty = ny * (height as f32);
 
@@ -45,7 +67,7 @@ fn sample_custom_mask_bilinear(dx: f32, dy: f32, radius: f32, width: usize, heig
 
         let fx = tx - x0 as f32;
         let fy = ty - y0 as f32;
-        
+
         let get_pixel = |x: usize, y: usize| -> f32 {
             if x < width && y < height {
                 data[y * width + x] as f32 / 255.0
@@ -59,10 +81,10 @@ fn sample_custom_mask_bilinear(dx: f32, dy: f32, radius: f32, width: usize, heig
         let c01 = get_pixel(x0, y1);
         let c11 = get_pixel(x1, y1);
 
-        c00 * (1.0 - fx) * (1.0 - fy) +
-         c10 * fx * (1.0 - fy) +
-         c01 * (1.0 - fx) * fy +
-         c11 * fx * fy
+        c00 * (1.0 - fx) * (1.0 - fy)
+            + c10 * fx * (1.0 - fy)
+            + c01 * (1.0 - fx) * fy
+            + c11 * fx * fy
     } else {
         0.0
     }
@@ -135,7 +157,11 @@ fn calc_soft_brush_alpha(
                 (alpha, dist_sq)
             }
         }
-        PixelBrushShape::Custom { width, height, data } => {
+        PixelBrushShape::Custom {
+            width,
+            height,
+            data,
+        } => {
             let alpha = sample_custom_mask_bilinear(dx, dy, radius, *width, *height, data);
             let dist_sq = dx * dx + dy * dy;
             (alpha, dist_sq)
@@ -159,14 +185,9 @@ pub enum StabilizerAlgorithm {
 
 /// Rectangular region inside a tile that needs to be touched by a dab.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
 struct TileRegion {
     tx: usize,
     ty: usize,
-    x0: usize,
-    y0: usize,
-    width: usize,
-    height: usize,
 }
 
 /// Pixel bounds for a dab operation
@@ -198,56 +219,101 @@ pub struct Brush {
 }
 
 /// Calculate pixel and tile bounds for a dab centered at the given position.
-fn calc_dab_bounds(center: Vec2, radius: f32, canvas_w: i32, canvas_h: i32, tile_size: usize) -> Option<DabBounds> {
+fn calc_dab_bounds(
+    center: Vec2,
+    radius: f32,
+    canvas_w: i32,
+    canvas_h: i32,
+    tile_size: usize,
+) -> Option<DabBounds> {
     let r_ceil = radius.ceil() as i32;
     let min_x = (center.x.floor() as i32) - r_ceil;
     let max_x = (center.x.floor() as i32) + r_ceil;
     let min_y = (center.y.floor() as i32) - r_ceil;
     let max_y = (center.y.floor() as i32) + r_ceil;
-    
+
     if max_x < 0 || max_y < 0 || min_x >= canvas_w || min_y >= canvas_h {
         return None;
     }
-    
+
     let start_x = min_x.max(0) as usize;
     let start_y = min_y.max(0) as usize;
     let end_x = max_x.min(canvas_w - 1) as usize;
     let end_y = max_y.min(canvas_h - 1) as usize;
-    
+
     if start_x > end_x || start_y > end_y {
         return None;
     }
-    
+
     let min_tx = start_x / tile_size;
     let max_tx = end_x / tile_size;
     let min_ty = start_y / tile_size;
     let max_ty = end_y / tile_size;
-    
-    Some(DabBounds { start_x, start_y, end_x, end_y, min_tx, max_tx, min_ty, max_ty })
+
+    Some(DabBounds {
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        min_tx,
+        max_tx,
+        min_ty,
+        max_ty,
+    })
 }
 
 /// Build tile regions from dab bounds.
-fn build_tile_regions(bounds: &DabBounds, tile_size: usize) -> Vec<TileRegion> {
+fn build_tile_regions(bounds: &DabBounds) -> Vec<TileRegion> {
     (bounds.min_ty..=bounds.max_ty)
-        .flat_map(|ty| {
-            (bounds.min_tx..=bounds.max_tx).map(move |tx| {
-                let tile_x0 = tx * tile_size;
-                let tile_y0 = ty * tile_size;
-                let overlap_min_x = bounds.start_x.max(tile_x0);
-                let overlap_max_x = bounds.end_x.min(tile_x0 + tile_size - 1);
-                let overlap_min_y = bounds.start_y.max(tile_y0);
-                let overlap_max_y = bounds.end_y.min(tile_y0 + tile_size - 1);
-                TileRegion {
-                    tx,
-                    ty,
-                    x0: overlap_min_x - tile_x0,
-                    y0: overlap_min_y - tile_y0,
-                    width: overlap_max_x - overlap_min_x + 1,
-                    height: overlap_max_y - overlap_min_y + 1,
-                }
-            })
-        })
+        .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| TileRegion { tx, ty }))
         .collect()
+}
+
+fn tile_coords(bounds: &DabBounds) -> Vec<(usize, usize)> {
+    (bounds.min_ty..=bounds.max_ty)
+        .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| (tx, ty)))
+        .collect()
+}
+
+fn tile_overlaps_selection(
+    selection: Option<&SelectionManager>,
+    tile_x0: usize,
+    tile_y0: usize,
+    tile_size: usize,
+) -> bool {
+    let Some(sel) = selection else {
+        return true;
+    };
+    let Some(sel_bounds) = sel.get_bounds() else {
+        return true;
+    };
+
+    let tile_max_x = (tile_x0 + tile_size) as f32;
+    let tile_max_y = (tile_y0 + tile_size) as f32;
+    !(tile_x0 as f32 >= sel_bounds.max.x
+        || tile_max_x <= sel_bounds.min.x
+        || tile_y0 as f32 >= sel_bounds.max.y
+        || tile_max_y <= sel_bounds.min.y)
+}
+
+fn flush_blend_batch(
+    data: &mut [Color32],
+    src_batch: &mut Vec<Color32>,
+    dst_batch: &mut Vec<Color32>,
+    idx_batch: &mut Vec<usize>,
+) {
+    if src_batch.is_empty() {
+        return;
+    }
+
+    let mut blended = vec![Color32::TRANSPARENT; src_batch.len()];
+    alpha_over_batch(src_batch, dst_batch, &mut blended);
+    for (i, &idx) in idx_batch.iter().enumerate() {
+        data[idx] = blended[i];
+    }
+    src_batch.clear();
+    dst_batch.clear();
+    idx_batch.clear();
 }
 
 impl Brush {
@@ -267,7 +333,6 @@ impl Brush {
         }
     }
 
-    #[allow(dead_code)]
     /// Convenience constructor for a pixel-perfect pen.
     pub fn new_pixel(diameter: f32, color: Color32) -> Self {
         Self {
@@ -295,8 +360,12 @@ impl Brush {
         modified_tiles: &mut HashSet<(usize, usize)>,
     ) {
         match self.brush_type {
-            BrushType::Soft => self.soft_dab(pool, canvas, selection, center, undo_action, modified_tiles),
-            BrushType::Pixel => self.pixel_dab(pool, canvas, selection, center, undo_action, modified_tiles),
+            BrushType::Soft => {
+                self.soft_dab(pool, canvas, selection, center, undo_action, modified_tiles)
+            }
+            BrushType::Pixel => {
+                self.pixel_dab(pool, canvas, selection, center, undo_action, modified_tiles)
+            }
         }
     }
 
@@ -354,22 +423,30 @@ impl Brush {
         let tile_size = canvas.tile_size();
         let canvas_w = canvas.width() as i32;
         let canvas_h = canvas.height() as i32;
-        
-        let Some(bounds) = calc_dab_bounds(center, r, canvas_w, canvas_h, tile_size) else { return };
-        let regions = build_tile_regions(&bounds, tile_size);
+
+        let Some(bounds) = calc_dab_bounds(center, r, canvas_w, canvas_h, tile_size) else {
+            return;
+        };
+        let regions = build_tile_regions(&bounds);
 
         self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
         let src_base = self.brush_options.color;
-        let base_alpha = self.brush_options.color.a() as f32 * self.brush_options.opacity * (self.brush_options.flow / 100.0);
+        let base_alpha = self.brush_options.color.a() as f32
+            * self.brush_options.opacity
+            * (self.brush_options.flow / 100.0);
         let src_r = src_base.r();
         let src_g = src_base.g();
         let src_b = src_base.b();
-        
+
         // Pre-compute common shape data
         let r_sq = r * r;
         let custom_data_ref = match &self.brush_options.pixel_shape {
-            PixelBrushShape::Custom { width, height, data } => Some((width, height, data)),
+            PixelBrushShape::Custom {
+                width,
+                height,
+                data,
+            } => Some((width, height, data)),
             _ => None,
         };
         let blend_mode = self.brush_options.blend_mode;
@@ -379,10 +456,8 @@ impl Brush {
         let diameter = self.brush_options.diameter;
 
         // Parallel execution for pixel dab
-        let tiles: Vec<(usize, usize)> = (bounds.min_ty..=bounds.max_ty)
-            .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| (tx, ty)))
-            .collect();
-        
+        let tiles = tile_coords(&bounds);
+
         pool.install(|| {
             tiles.par_iter().for_each(|(tx, ty)| {
                 if let Some(tile_arc) = canvas.lock_tile(*tx, *ty) {
@@ -399,23 +474,7 @@ impl Brush {
                     let overlap_min_y = bounds.start_y.max(tile_y0);
                     let overlap_max_y = bounds.end_y.min(tile_y0 + tile_size - 1);
 
-                    // Pre-check if tile intersects selection bounds for early culling
-                    let tile_overlaps_selection = if let Some(sel) = selection {
-                        if let Some(sel_bounds) = sel.get_bounds() {
-                            let tile_max_x = (tile_x0 + tile_size) as f32;
-                            let tile_max_y = (tile_y0 + tile_size) as f32;
-                            
-                            // Check if tile AABB intersects selection AABB
-                            !(tile_x0 as f32 >= sel_bounds.max.x || tile_max_x <= sel_bounds.min.x ||
-                              tile_y0 as f32 >= sel_bounds.max.y || tile_max_y <= sel_bounds.min.y)
-                        } else {
-                            true
-                        }
-                    } else {
-                        true
-                    };
-                    
-                    if !tile_overlaps_selection {
+                    if !tile_overlaps_selection(selection, tile_x0, tile_y0, tile_size) {
                         return; // Tile completely outside selection, skip
                     }
 
@@ -431,10 +490,10 @@ impl Brush {
                             let dx = gx as f32 + 0.5 - center_x;
                             let px = gx as f32 + 0.5;
 
-                            if let Some(sel) = selection {
-                                if !sel.contains_coords(px, py) {
-                                    continue;
-                                }
+                            if let Some(sel) = selection
+                                && !sel.contains_coords(px, py)
+                            {
+                                continue;
                             }
 
                             let (in_shape, alpha_mod) = match &pixel_shape {
@@ -453,12 +512,13 @@ impl Brush {
                                 let local_y = gy - tile_y0;
                                 let local_x = gx - tile_x0;
                                 let idx = local_y * tile_size + local_x;
-                                
+
                                 // Combine base alpha with shape alpha (if any)
                                 let final_alpha = (base_alpha * alpha_mod).clamp(0.0, 1.0);
                                 let alpha_u8 = (final_alpha * 255.0) as u8;
-                                
-                                let src_color = Color32::from_rgba_unmultiplied(src_r, src_g, src_b, alpha_u8);
+
+                                let src_color =
+                                    Color32::from_rgba_unmultiplied(src_r, src_g, src_b, alpha_u8);
 
                                 match blend_mode {
                                     BlendMode::Normal => {
@@ -466,17 +526,15 @@ impl Brush {
                                         src_batch.push(src_color);
                                         dst_batch.push(data[idx]);
                                         idx_batch.push(idx);
-                                        
+
                                         // Process batch when we have 4+ pixels
                                         if src_batch.len() >= 4 {
-                                            let mut blended = vec![Color32::TRANSPARENT; src_batch.len()];
-                                            alpha_over_batch(&src_batch, &dst_batch, &mut blended);
-                                            for (i, &idx) in idx_batch.iter().enumerate() {
-                                                data[idx] = blended[i];
-                                            }
-                                            src_batch.clear();
-                                            dst_batch.clear();
-                                            idx_batch.clear();
+                                            flush_blend_batch(
+                                                data,
+                                                &mut src_batch,
+                                                &mut dst_batch,
+                                                &mut idx_batch,
+                                            );
                                         }
                                     }
                                     BlendMode::Eraser => {
@@ -488,12 +546,8 @@ impl Brush {
                     }
 
                     // Process remaining pixels in batch (scalar fallback)
-                    if !src_batch.is_empty() && blend_mode == BlendMode::Normal {
-                        let mut blended = vec![Color32::TRANSPARENT; src_batch.len()];
-                        alpha_over_batch(&src_batch, &dst_batch, &mut blended);
-                        for (i, &idx) in idx_batch.iter().enumerate() {
-                            data[idx] = blended[i];
-                        }
+                    if blend_mode == BlendMode::Normal {
+                        flush_blend_batch(data, &mut src_batch, &mut dst_batch, &mut idx_batch);
                     }
                     // Mark tile as dirty (not empty) after modifications
                     tile.is_empty = false;
@@ -517,9 +571,11 @@ impl Brush {
         let tile_size = canvas.tile_size();
         let canvas_w = canvas.width() as i32;
         let canvas_h = canvas.height() as i32;
-        
-        let Some(bounds) = calc_dab_bounds(center, r, canvas_w, canvas_h, tile_size) else { return };
-        let regions = build_tile_regions(&bounds, tile_size);
+
+        let Some(bounds) = calc_dab_bounds(center, r, canvas_w, canvas_h, tile_size) else {
+            return;
+        };
+        let regions = build_tile_regions(&bounds);
 
         self.snapshot_tiles(canvas, &regions, undo_action, modified_tiles);
 
@@ -544,11 +600,13 @@ impl Brush {
         // Pre-compute fade values for anti-aliasing (1.5 pixel outer fade)
         let fade_start = (r - 1.5).max(0.0);
         let fade_width = 1.5_f32.min(r);
-        let inv_fade_width = if fade_width > 0.0 { 1.0 / fade_width } else { 0.0 };
-        
-        let tiles: Vec<(usize, usize)> = (bounds.min_ty..=bounds.max_ty)
-            .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| (tx, ty)))
-            .collect();
+        let inv_fade_width = if fade_width > 0.0 {
+            1.0 / fade_width
+        } else {
+            0.0
+        };
+
+        let tiles = tile_coords(&bounds);
 
         _pool.install(|| {
             tiles.par_iter().for_each(|(tx, ty)| {
@@ -558,8 +616,11 @@ impl Brush {
                 let tile_y1 = tile_y0 + tile_size;
 
                 // Check if tile is reasonably close to center (bounding box check)
-                if center_x < (tile_x0 as f32 - r) || center_x > (tile_x1 as f32 + r) ||
-                   center_y < (tile_y0 as f32 - r) || center_y > (tile_y1 as f32 + r) {
+                if center_x < (tile_x0 as f32 - r)
+                    || center_x > (tile_x1 as f32 + r)
+                    || center_y < (tile_y0 as f32 - r)
+                    || center_y > (tile_y1 as f32 + r)
+                {
                     return;
                 }
 
@@ -575,23 +636,7 @@ impl Brush {
                     let overlap_min_y = bounds.start_y.max(tile_y0);
                     let overlap_max_y = bounds.end_y.min(tile_y0 + tile_size - 1);
 
-                    // Pre-check if tile intersects selection bounds for early culling
-                    let tile_overlaps_selection = if let Some(sel) = selection {
-                        if let Some(sel_bounds) = sel.get_bounds() {
-                            let tile_max_x = (tile_x0 + tile_size) as f32;
-                            let tile_max_y = (tile_y0 + tile_size) as f32;
-                            
-                            // Check if tile AABB intersects selection AABB
-                            !(tile_x0 as f32 >= sel_bounds.max.x || tile_max_x <= sel_bounds.min.x ||
-                              tile_y0 as f32 >= sel_bounds.max.y || tile_max_y <= sel_bounds.min.y)
-                        } else {
-                            true
-                        }
-                    } else {
-                        true
-                    };
-                    
-                    if !tile_overlaps_selection {
+                    if !tile_overlaps_selection(selection, tile_x0, tile_y0, tile_size) {
                         return; // Tile completely outside selection
                     }
 
@@ -607,19 +652,26 @@ impl Brush {
                             let pdy = py - center_y;
                             let px = gx as f32 + 0.5;
 
-                            if let Some(sel) = selection {
-                                if !sel.contains_coords(px, py) {
-                                    continue;
-                                }
+                            if let Some(sel) = selection
+                                && !sel.contains_coords(px, py)
+                            {
+                                continue;
                             }
-                            
+
                             let alpha_factor = if anti_aliasing {
                                 // Anti-aliased path (smooth, uses calc_soft_brush_alpha and AA fade)
                                 let (base_alpha_at_pixel, dist_sq) = calc_soft_brush_alpha(
-                                    pdx, pdy, r, &pixel_shape, hardness_val, softness_selector, softness_curve
+                                    pdx,
+                                    pdy,
+                                    r,
+                                    pixel_shape,
+                                    hardness_val,
+                                    softness_selector,
+                                    softness_curve,
                                 );
-                                
-                                if base_alpha_at_pixel <= 0.0 { // Early exit if inner shape is transparent
+
+                                if base_alpha_at_pixel <= 0.0 {
+                                    // Early exit if inner shape is transparent
                                     0.0
                                 } else {
                                     // Apply the 1.5 pixel outer fade using pre-computed distance
@@ -628,13 +680,16 @@ impl Brush {
                                         PixelBrushShape::Square => pdx.abs().max(pdy.abs()),
                                         PixelBrushShape::Custom { .. } => pdx.abs().max(pdy.abs()),
                                     };
-                                    
-                                    if dist_for_aa >= r { // Beyond brush radius, fully transparent
+
+                                    if dist_for_aa >= r {
+                                        // Beyond brush radius, fully transparent
                                         0.0
-                                    } else if dist_for_aa > fade_start { // Within AA fade zone
+                                    } else if dist_for_aa > fade_start {
+                                        // Within AA fade zone
                                         let fraction = (dist_for_aa - fade_start) * inv_fade_width;
                                         base_alpha_at_pixel * (1.0 - fraction) // Blend base alpha with fade
-                                    } else { // Solid interior
+                                    } else {
+                                        // Solid interior
                                         base_alpha_at_pixel
                                     }
                                 }
@@ -647,9 +702,13 @@ impl Brush {
                                     PixelBrushShape::Square => {
                                         (pdx.abs() <= r && pdy.abs() <= r, 1.0)
                                     }
-                                    PixelBrushShape::Custom { width, height, data } => {
-                                        sample_custom_mask_nn(pdx, pdy, diameter, *width, *height, data)
-                                    }
+                                    PixelBrushShape::Custom {
+                                        width,
+                                        height,
+                                        data,
+                                    } => sample_custom_mask_nn(
+                                        pdx, pdy, diameter, *width, *height, data,
+                                    ),
                                 };
                                 if in_shape { alpha_mod } else { 0.0 }
                             };
@@ -675,17 +734,15 @@ impl Brush {
                                     src_batch.push(src);
                                     dst_batch.push(data[idx]);
                                     idx_batch.push(idx);
-                                    
+
                                     // Process batch when we have 4+ pixels
                                     if src_batch.len() >= 4 {
-                                        let mut blended = vec![Color32::TRANSPARENT; src_batch.len()];
-                                        alpha_over_batch(&src_batch, &dst_batch, &mut blended);
-                                        for (i, &idx) in idx_batch.iter().enumerate() {
-                                            data[idx] = blended[i];
-                                        }
-                                        src_batch.clear();
-                                        dst_batch.clear();
-                                        idx_batch.clear();
+                                        flush_blend_batch(
+                                            data,
+                                            &mut src_batch,
+                                            &mut dst_batch,
+                                            &mut idx_batch,
+                                        );
                                     }
                                 }
                                 BlendMode::Eraser => {
@@ -696,12 +753,8 @@ impl Brush {
                     }
 
                     // Process remaining pixels in batch (scalar fallback)
-                    if !src_batch.is_empty() && blend_mode == BlendMode::Normal {
-                        let mut blended = vec![Color32::TRANSPARENT; src_batch.len()];
-                        alpha_over_batch(&src_batch, &dst_batch, &mut blended);
-                        for (i, &idx) in idx_batch.iter().enumerate() {
-                            data[idx] = blended[i];
-                        }
+                    if blend_mode == BlendMode::Normal {
+                        flush_blend_batch(data, &mut src_batch, &mut dst_batch, &mut idx_batch);
                     }
                     // Mark tile as dirty (not empty) after modifications
                     tile.is_empty = false;

@@ -59,8 +59,12 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                 },
             );
 
-            if ui.selectable_label(matches!(app.active_tool, Tool::Transform(_)), "Transform").clicked() {
-                app.active_tool = Tool::Transform(crate::selection::transform::TransformInfo::default());
+            if ui
+                .selectable_label(matches!(app.active_tool, Tool::Transform(_)), "Transform")
+                .clicked()
+            {
+                app.active_tool =
+                    Tool::Transform(crate::selection::transform::TransformInfo::default());
             }
 
             if ui.button("New Canvas").clicked() {
@@ -68,7 +72,10 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                 app.modal_state.new_canvas.color_model = app.workspace.color_model;
                 app.modal_state.show_new_canvas_modal = true;
             }
-            ui.add(egui::Slider::new(&mut app.brush_state.brush.brush_options.diameter, 1.0..=3000.0));
+            ui.add(egui::Slider::new(
+                &mut app.brush_state.brush.brush_options.diameter,
+                1.0..=3000.0,
+            ));
             if ui.button("Export").clicked() {
                 app.export_state.settings.chosen_path = None;
                 app.export_state.message = None;
@@ -78,7 +85,6 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                 app.modal_state.show_general_settings = true;
                 ctx.request_repaint();
             }
-
         });
     });
 }
