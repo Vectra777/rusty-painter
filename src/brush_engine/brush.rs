@@ -2,7 +2,11 @@ use super::brush_options::BrushOptions;
 use crate::{
     brush_engine::{
         brush_options::{BlendMode, PixelBrushShape},
+        dab::{
+            TileRegion, build_tile_regions, calc_dab_bounds, tile_coords, tile_overlaps_selection,
+        },
         hardness::SoftnessSelector,
+        masks::{calc_soft_brush_alpha, sample_custom_mask_nn},
     },
     canvas::{
         Canvas,
@@ -17,164 +21,6 @@ use rayon::ThreadPool;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashSet;
 
-/// Sample custom mask with nearest neighbor interpolation
-#[inline]
-fn sample_custom_mask_nn(
-    dx: f32,
-    dy: f32,
-    diameter: f32,
-    width: usize,
-    height: usize,
-    mask: &[u8],
-) -> (bool, f32) {
-    if width == 0 || height == 0 || mask.is_empty() || diameter <= 0.0 {
-        return (false, 0.0);
-    }
-    let r = diameter / 2.0;
-    let nx = (dx + r) / diameter;
-    let ny = (dy + r) / diameter;
-
-    if (0.0..1.0).contains(&nx) && (0.0..1.0).contains(&ny) {
-        let ix = (nx * width as f32).floor() as usize;
-        let iy = (ny * height as f32).floor() as usize;
-        let idx = iy * width + ix;
-        if idx < mask.len() {
-            let val = mask[idx];
-            return (val > 0, val as f32 / 255.0);
-        }
-    }
-    (false, 0.0)
-}
-
-/// Sample custom mask with bilinear interpolation for smooth soft brushes
-#[inline]
-fn sample_custom_mask_bilinear(
-    dx: f32,
-    dy: f32,
-    radius: f32,
-    width: usize,
-    height: usize,
-    data: &[u8],
-) -> f32 {
-    if width == 0 || height == 0 || data.is_empty() || radius <= 0.0 {
-        return 0.0;
-    }
-    let nx = (dx + radius) / (radius * 2.0);
-    let ny = (dy + radius) / (radius * 2.0);
-
-    if (0.0..1.0).contains(&nx) && (0.0..1.0).contains(&ny) {
-        let tx = nx * (width as f32);
-        let ty = ny * (height as f32);
-
-        let x0 = tx.floor() as usize;
-        let y0 = ty.floor() as usize;
-        let x1 = (x0 + 1).min(width - 1);
-        let y1 = (y0 + 1).min(height - 1);
-
-        let fx = tx - x0 as f32;
-        let fy = ty - y0 as f32;
-
-        let get_pixel = |x: usize, y: usize| -> f32 {
-            if x < width && y < height {
-                data[y * width + x] as f32 / 255.0
-            } else {
-                0.0
-            }
-        };
-
-        let c00 = get_pixel(x0, y0);
-        let c10 = get_pixel(x1, y0);
-        let c01 = get_pixel(x0, y1);
-        let c11 = get_pixel(x1, y1);
-
-        c00 * (1.0 - fx) * (1.0 - fy)
-            + c10 * fx * (1.0 - fy)
-            + c01 * (1.0 - fx) * fy
-            + c11 * fx * fy
-    } else {
-        0.0
-    }
-}
-
-/// Calculate base alpha value for soft brush at given offset from center.
-/// Returns (alpha, distance_squared) to avoid redundant sqrt calculations.
-fn calc_soft_brush_alpha(
-    dx: f32,
-    dy: f32,
-    radius: f32,
-    shape: &PixelBrushShape,
-    hardness_val: f32,
-    softness_selector: SoftnessSelector,
-    softness_curve: &crate::brush_engine::hardness::SoftnessCurve,
-) -> (f32, f32) {
-    match shape {
-        PixelBrushShape::Circle => {
-            let dist_sq = dx * dx + dy * dy;
-            let r_sq = radius * radius;
-            if dist_sq >= r_sq {
-                (0.0, dist_sq)
-            } else {
-                let dist = dist_sq.sqrt();
-                let t = dist / radius;
-                let alpha = match softness_selector {
-                    SoftnessSelector::Gaussian => {
-                        if t < hardness_val {
-                            1.0
-                        } else if hardness_val >= 1.0 {
-                            // 100% hardness: hard edge (outer AA fade handles smoothing)
-                            1.0
-                        } else {
-                            let v = (t - hardness_val) / (1.0 - hardness_val);
-                            let falloff = 1.0 - v.clamp(0.0, 1.0);
-                            let f2 = falloff * falloff;
-                            f2 * (3.0 - 2.0 * falloff)
-                        }
-                    }
-                    SoftnessSelector::Curve => softness_curve.eval(t),
-                };
-                (alpha, dist_sq)
-            }
-        }
-        PixelBrushShape::Square => {
-            let dist_x = dx.abs();
-            let dist_y = dy.abs();
-            let dist = dist_x.max(dist_y);
-            let dist_sq = dist * dist;
-            let t = dist / radius;
-            if dist >= radius {
-                (0.0, dist_sq)
-            } else {
-                let alpha = match softness_selector {
-                    SoftnessSelector::Gaussian => {
-                        if t < hardness_val {
-                            1.0
-                        } else if hardness_val >= 0.999 {
-                            // Very high hardness (>99.9%): hard edge (outer AA fade handles smoothing)
-                            1.0
-                        } else {
-                            let v = (t - hardness_val) / (1.0 - hardness_val);
-                            let falloff = 1.0 - v.clamp(0.0, 1.0);
-                            let f2 = falloff * falloff;
-                            f2 * (3.0 - 2.0 * falloff)
-                        }
-                    }
-                    SoftnessSelector::Curve => softness_curve.eval(t),
-                };
-                (alpha, dist_sq)
-            }
-        }
-        PixelBrushShape::Custom {
-            width,
-            height,
-            data,
-        } => {
-            let alpha = sample_custom_mask_bilinear(dx, dy, radius, *width, *height, data);
-            let dist_sq = dx * dx + dy * dy;
-            (alpha, dist_sq)
-        }
-    }
-}
-
 /// Available shapes for how a brush applies paint.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BrushType {
@@ -187,26 +33,6 @@ pub enum StabilizerAlgorithm {
     None,
     Simple,
     Dynamic,
-}
-
-/// Rectangular region inside a tile that needs to be touched by a dab.
-#[derive(Clone, Copy, Debug)]
-struct TileRegion {
-    tx: usize,
-    ty: usize,
-}
-
-/// Pixel bounds for a dab operation
-#[derive(Clone, Copy, Debug)]
-struct DabBounds {
-    start_x: usize,
-    start_y: usize,
-    end_x: usize,
-    end_y: usize,
-    min_tx: usize,
-    max_tx: usize,
-    min_ty: usize,
-    max_ty: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -242,84 +68,6 @@ pub struct Brush {
     pub stabilizer_mass: f32, // 0.01..1.0
     pub stabilizer_drag: f32, // 0.0..1.0
     soft_mask_cache: Vec<SoftMaskCache>,
-}
-
-/// Calculate pixel and tile bounds for a dab centered at the given position.
-fn calc_dab_bounds(
-    center: Vec2,
-    radius: f32,
-    canvas_w: i32,
-    canvas_h: i32,
-    tile_size: usize,
-) -> Option<DabBounds> {
-    let r_ceil = radius.ceil() as i32;
-    let min_x = (center.x.floor() as i32) - r_ceil;
-    let max_x = (center.x.floor() as i32) + r_ceil;
-    let min_y = (center.y.floor() as i32) - r_ceil;
-    let max_y = (center.y.floor() as i32) + r_ceil;
-
-    if max_x < 0 || max_y < 0 || min_x >= canvas_w || min_y >= canvas_h {
-        return None;
-    }
-
-    let start_x = min_x.max(0) as usize;
-    let start_y = min_y.max(0) as usize;
-    let end_x = max_x.min(canvas_w - 1) as usize;
-    let end_y = max_y.min(canvas_h - 1) as usize;
-
-    if start_x > end_x || start_y > end_y {
-        return None;
-    }
-
-    let min_tx = start_x / tile_size;
-    let max_tx = end_x / tile_size;
-    let min_ty = start_y / tile_size;
-    let max_ty = end_y / tile_size;
-
-    Some(DabBounds {
-        start_x,
-        start_y,
-        end_x,
-        end_y,
-        min_tx,
-        max_tx,
-        min_ty,
-        max_ty,
-    })
-}
-
-/// Build tile regions from dab bounds.
-fn build_tile_regions(bounds: &DabBounds) -> Vec<TileRegion> {
-    (bounds.min_ty..=bounds.max_ty)
-        .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| TileRegion { tx, ty }))
-        .collect()
-}
-
-fn tile_coords(bounds: &DabBounds) -> Vec<(usize, usize)> {
-    (bounds.min_ty..=bounds.max_ty)
-        .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| (tx, ty)))
-        .collect()
-}
-
-fn tile_overlaps_selection(
-    selection: Option<&SelectionManager>,
-    tile_x0: usize,
-    tile_y0: usize,
-    tile_size: usize,
-) -> bool {
-    let Some(sel) = selection else {
-        return true;
-    };
-    let Some(sel_bounds) = sel.get_bounds() else {
-        return true;
-    };
-
-    let tile_max_x = (tile_x0 + tile_size) as f32;
-    let tile_max_y = (tile_y0 + tile_size) as f32;
-    !(tile_x0 as f32 >= sel_bounds.max.x
-        || tile_max_x <= sel_bounds.min.x
-        || tile_y0 as f32 >= sel_bounds.max.y
-        || tile_max_y <= sel_bounds.min.y)
 }
 
 impl Brush {

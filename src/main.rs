@@ -3,6 +3,7 @@
 mod app;
 mod brush_engine;
 mod canvas;
+mod project;
 mod selection;
 mod styling;
 mod tablet;

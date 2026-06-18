@@ -72,6 +72,20 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                 app.modal_state.new_canvas.color_model = app.workspace.color_model;
                 app.modal_state.show_new_canvas_modal = true;
             }
+            if ui.button("Open").clicked()
+                && let Some(path) = open_project_dialog()
+                && let Err(err) = app.load_project_from_path(ctx, path)
+            {
+                log::error!("{err}");
+                app.export_state.message = Some(err);
+            }
+            if ui.button("Save").clicked()
+                && let Some(path) = save_project_dialog()
+                && let Err(err) = app.save_project_to_path(path)
+            {
+                log::error!("{err}");
+                app.export_state.message = Some(err);
+            }
             ui.add(egui::Slider::new(
                 &mut app.brush_state.brush.brush_options.diameter,
                 1.0..=3000.0,
@@ -87,4 +101,29 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
             }
         });
     });
+}
+
+#[cfg(not(target_os = "android"))]
+fn open_project_dialog() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Rusty Painter", &["rpainter"])
+        .pick_file()
+}
+
+#[cfg(target_os = "android")]
+fn open_project_dialog() -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(not(target_os = "android"))]
+fn save_project_dialog() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Rusty Painter", &["rpainter"])
+        .set_file_name("project.rpainter")
+        .save_file()
+}
+
+#[cfg(target_os = "android")]
+fn save_project_dialog() -> Option<std::path::PathBuf> {
+    None
 }

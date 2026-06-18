@@ -4,6 +4,7 @@ use crate::selection::transform::TransformInfo;
 use eframe::egui::Color32;
 
 /// Snapshot of a rectangular tile region prior to modification.
+#[derive(Clone)]
 pub struct TileSnapshot {
     pub tx: i32,
     pub ty: i32,
@@ -16,6 +17,7 @@ pub struct TileSnapshot {
 }
 
 /// Collection of tile snapshots captured during a single user operation.
+#[derive(Clone)]
 pub struct UndoAction {
     pub tiles: Vec<TileSnapshot>,
     pub selection: Option<Option<SelectionShape>>,
@@ -23,6 +25,7 @@ pub struct UndoAction {
 }
 
 /// Stack-based undo/redo manager that swaps tile buffers in place.
+#[derive(Clone)]
 pub struct History {
     undo_stack: Vec<UndoAction>,
     redo_stack: Vec<UndoAction>,
@@ -41,6 +44,17 @@ impl History {
     pub fn push_action(&mut self, action: UndoAction) {
         self.undo_stack.push(action);
         self.redo_stack.clear();
+    }
+
+    pub(crate) fn stacks(&self) -> (&[UndoAction], &[UndoAction]) {
+        (&self.undo_stack, &self.redo_stack)
+    }
+
+    pub(crate) fn from_stacks(undo_stack: Vec<UndoAction>, redo_stack: Vec<UndoAction>) -> Self {
+        Self {
+            undo_stack,
+            redo_stack,
+        }
     }
 
     /// Undo the latest action, returning tile coordinates that changed.

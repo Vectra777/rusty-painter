@@ -1,6 +1,7 @@
 mod app;
 pub mod brush_engine;
 pub mod canvas;
+pub(crate) mod project;
 pub mod selection;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod styling;
