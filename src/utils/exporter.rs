@@ -44,9 +44,13 @@ pub fn save_color_image(
     let path = path.into();
     let width = img.size[0];
     let height = img.size[1];
+    let byte_len = width
+        .checked_mul(height)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "Image is too large to export".to_string())?;
 
     // Convert egui ColorImage to raw RGBA bytes
-    let mut bytes = Vec::with_capacity(width * height * 4);
+    let mut bytes = Vec::with_capacity(byte_len);
     for px in &img.pixels {
         let [r, g, b, a] = px.to_srgba_unmultiplied();
         bytes.extend_from_slice(&[r, g, b, a]);

@@ -65,16 +65,11 @@ fn handle_tablet_down(app: &mut PainterApp, pos: Vec2) {
 fn handle_tablet_move(app: &mut PainterApp, pos: Vec2, pressure: f32) {
     match app.active_tool {
         Tool::Brush => {
-            if let Some(stroke) = &mut app.brush_state.stroke {
+            if app.brush_state.stroke.is_some() {
                 let base = app.brush_state.brush.brush_options.diameter;
                 app.brush_state.brush.brush_options.diameter = (base * pressure).max(1.0);
-                let prev = stroke.last_pos.unwrap_or(pos);
                 add_stroke_point(app, pos);
-                app.mark_segment_dirty(
-                    prev,
-                    pos,
-                    app.brush_state.brush.brush_options.diameter / 2.0,
-                );
+                app.mark_modified_tiles_dirty();
                 app.brush_state.brush.brush_options.diameter = base;
             } else {
                 app.start_stroke(pos);
@@ -357,14 +352,9 @@ fn handle_tool_move(
 
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2, is_inside: bool) {
     if app.brush_state.is_drawing {
-        if let Some(stroke) = &mut app.brush_state.stroke {
-            let prev = stroke.last_pos.unwrap_or(pos);
+        if app.brush_state.stroke.is_some() {
             add_stroke_point(app, pos);
-            app.mark_segment_dirty(
-                prev,
-                pos,
-                app.brush_state.brush.brush_options.diameter / 2.0,
-            );
+            app.mark_modified_tiles_dirty();
         }
     } else if app.viewport.is_primary_down
         && !app.viewport.is_panning

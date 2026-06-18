@@ -1,7 +1,5 @@
-use crate::{
-    BackgroundChoice, CanvasUnit, ColorDepth, ColorModel, NewCanvasSettings, Orientation,
-    PainterApp,
-};
+use crate::app::state::{MAX_CANVAS_DIMENSION, MAX_CANVAS_DPI};
+use crate::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation, PainterApp};
 use eframe::egui;
 
 /// Modal dialog to configure and create a new canvas, inspired by Krita's new file window.
@@ -30,14 +28,14 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                 ui.add(
                     egui::DragValue::new(&mut settings.width)
                         .speed(1.0)
-                        .range(1.0..=50000.0)
+                        .range(1.0..=MAX_CANVAS_DIMENSION as f32)
                         .suffix(settings.unit.label()),
                 );
                 ui.label("Height");
                 ui.add(
                     egui::DragValue::new(&mut settings.height)
                         .speed(1.0)
-                        .range(1.0..=50000.0)
+                        .range(1.0..=MAX_CANVAS_DIMENSION as f32)
                         .suffix(settings.unit.label()),
                 );
                 egui::ComboBox::from_label("Units")
@@ -63,7 +61,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                 ui.add(
                     egui::DragValue::new(&mut settings.resolution)
                         .speed(1.0)
-                        .range(1.0..=1200.0),
+                        .range(1.0..=MAX_CANVAS_DPI),
                 );
                 let mut orientation_changed = false;
                 orientation_changed |= ui
@@ -113,42 +111,28 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                             "Grayscale",
                         );
                     });
-                ui.label("Depth");
-                egui::ComboBox::from_id_salt("color_depth")
-                    .selected_text(match settings.color_depth {
-                        ColorDepth::Bit8 => "8-bit integer",
-                        ColorDepth::Bit16 => "16-bit integer",
-                        ColorDepth::Float32 => "32-bit float",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut settings.color_depth,
-                            ColorDepth::Bit8,
-                            "8-bit integer",
-                        );
-                        ui.selectable_value(
-                            &mut settings.color_depth,
-                            ColorDepth::Bit16,
-                            "16-bit integer",
-                        );
-                        ui.selectable_value(
-                            &mut settings.color_depth,
-                            ColorDepth::Float32,
-                            "32-bit float",
-                        );
-                    });
             });
             ui.weak("Grayscale paints in a single channel.");
 
-            let (px_w, px_h) = settings.dimensions_in_pixels();
-            ui.label(format!(
-                "Result: {} × {} px @ {:.0} dpi",
-                px_w, px_h, settings.resolution
-            ));
+            let validation = settings.validated_dimensions();
+            match validation {
+                Ok((px_w, px_h)) => {
+                    ui.label(format!(
+                        "Result: {} × {} px @ {:.0} dpi",
+                        px_w, px_h, settings.resolution
+                    ));
+                }
+                Err(ref msg) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, msg);
+                }
+            }
 
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Create").clicked() {
+                if ui
+                    .add_enabled(validation.is_ok(), egui::Button::new("Create"))
+                    .clicked()
+                {
                     app.apply_new_canvas(ctx);
                     app.modal_state.show_new_canvas_modal = false;
                 }

@@ -2,24 +2,6 @@
 use crate::brush_engine::brush_options::PixelBrushShape;
 use eframe::egui::TextureHandle;
 
-/// Represents pixel coordinate bounds
-#[derive(Debug, Clone, Copy)]
-pub struct PixelBounds {
-    pub min_x: i32,
-    pub max_x: i32,
-    pub min_y: i32,
-    pub max_y: i32,
-}
-
-/// Represents a range of tiles
-#[derive(Debug, Clone, Copy)]
-pub struct TileRange {
-    pub min_tx: usize,
-    pub max_tx: usize,
-    pub min_ty: usize,
-    pub max_ty: usize,
-}
-
 /// Atlas layout information
 #[derive(Debug, Clone, Copy)]
 pub struct AtlasLayout {

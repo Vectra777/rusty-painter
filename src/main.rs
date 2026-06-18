@@ -10,9 +10,7 @@ mod ui;
 mod utils;
 
 pub use app::PainterApp;
-pub use app::state::{
-    BackgroundChoice, CanvasUnit, ColorDepth, ColorModel, NewCanvasSettings, Orientation,
-};
+pub use app::state::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation};
 
 /// Launch the native egui application.
 fn main() -> eframe::Result<()> {

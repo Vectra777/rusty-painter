@@ -1,7 +1,7 @@
 use crate::PainterApp;
 use crate::app::state::{ATLAS_SIZE, TILE_SIZE};
 use eframe::egui::{self, Color32, TextureOptions};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
 pub struct CanvasView {
     pub origin: egui::Pos2,
@@ -25,11 +25,9 @@ pub fn update_dirty_textures(app: &mut PainterApp) {
     let dirty_images: Vec<(usize, egui::ColorImage)> = app.workspace.pool.install(|| {
         app.render_cache
             .tiles
-            .iter()
+            .par_iter()
             .enumerate()
             .filter(|(_, t)| t.dirty)
-            .collect::<Vec<_>>()
-            .par_iter()
             .map(|(idx, tile)| {
                 let x = tile.tx * TILE_SIZE;
                 let y = tile.ty * TILE_SIZE;
@@ -40,7 +38,7 @@ pub fn update_dirty_textures(app: &mut PainterApp) {
                 let out_h = h.div_ceil(lod_step);
                 let mut img = egui::ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
                 canvas_ref.write_region_to_color_image(x, y, w, h, &mut img, lod_step);
-                (*idx, img)
+                (idx, img)
             })
             .collect()
     });
@@ -81,6 +79,7 @@ pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
         .collect();
 
     let half_texel = 0.5 / ATLAS_SIZE as f32;
+    let clip_rect = ui.clip_rect();
 
     for tile in &app.render_cache.tiles {
         let x = (tile.tx * TILE_SIZE) as f32 * app.viewport.zoom;
@@ -100,6 +99,21 @@ pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
             PainterApp::rotate_point(tile_rect.right_bottom(), canvas_center, cos, sin),
             PainterApp::rotate_point(tile_rect.left_bottom(), canvas_center, cos, sin),
         ];
+        let min_x = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let min_y = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let max_x = corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let max_y = corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let screen_bounds =
+            egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
+        if !screen_bounds.intersects(clip_rect) {
+            continue;
+        }
 
         let u0 = (tile.atlas_x as f32 + half_texel) / ATLAS_SIZE as f32;
         let v0 = (tile.atlas_y as f32 + half_texel) / ATLAS_SIZE as f32;

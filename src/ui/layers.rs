@@ -189,42 +189,13 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         });
 
     if add_layer {
-        app.canvas.add_layer();
-        app.layer_state
-            .histories
-            .push(crate::canvas::history::History::new());
-        app.render_cache
-            .layer_caches
-            .push(std::collections::HashMap::new());
-        app.render_cache
-            .layer_cache_dirty
-            .push(std::collections::HashSet::new());
-        app.layer_state
-            .layer_ui_colors
-            .push(egui::Color32::from_gray(40));
+        app.add_paint_layer();
         active_idx = app.canvas.layers.len().saturating_sub(1);
     }
 
-    if let Some(idx) = to_delete
-        && idx < app.canvas.layers.len()
-    {
-        app.mark_layer_tiles_with_data_dirty(idx);
-        app.canvas.layers.remove(idx);
-        if idx < app.layer_state.histories.len() {
-            app.layer_state.histories.remove(idx);
-        }
-        if idx < app.render_cache.layer_caches.len() {
-            app.render_cache.layer_caches.remove(idx);
-        }
-        if idx < app.render_cache.layer_cache_dirty.len() {
-            app.render_cache.layer_cache_dirty.remove(idx);
-        }
-        if idx < app.layer_state.layer_ui_colors.len() {
-            app.layer_state.layer_ui_colors.remove(idx);
-        }
-        if active_idx >= app.canvas.layers.len() {
-            active_idx = app.canvas.layers.len().saturating_sub(1);
-        }
+    if let Some(idx) = to_delete {
+        app.remove_paint_layer(idx);
+        active_idx = app.canvas.active_layer_idx;
         needs_refresh = true;
     }
 

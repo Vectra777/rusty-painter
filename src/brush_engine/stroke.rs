@@ -53,7 +53,7 @@ pub struct StrokeState {
 }
 
 impl StrokeState {
-    /// Create an empty stroke state and start the profiling timer.
+    /// Create an empty stroke state.
     pub fn new() -> Self {
         Self {
             last_pos: None,
@@ -224,7 +224,7 @@ impl StrokeState {
         self.last_pos = Some(pos);
     }
 
-    /// Reset the stroke state and emit the profiling metric.
+    /// Reset the stroke state.
     pub fn end(&mut self) {
         self.last_pos = None;
         self.dist_until_next_blit = 0.0;

@@ -3,6 +3,9 @@ use eframe::egui::{Color32, TextureHandle};
 
 pub const TILE_SIZE: usize = 64;
 pub const ATLAS_SIZE: usize = 2048;
+pub const MAX_CANVAS_DIMENSION: usize = 65_536;
+pub const MAX_CANVAS_PIXELS: usize = 268_435_456;
+pub const MAX_CANVAS_DPI: f32 = 4_800.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanvasUnit {
@@ -32,13 +35,6 @@ pub enum ColorModel {
     Grayscale,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColorDepth {
-    Bit8,
-    Bit16,
-    Float32,
-}
-
 #[derive(Clone)]
 pub struct NewCanvasSettings {
     pub name: String,
@@ -50,7 +46,6 @@ pub struct NewCanvasSettings {
     pub background: BackgroundChoice,
     pub custom_bg: Color32,
     pub color_model: ColorModel,
-    pub color_depth: ColorDepth,
 }
 
 pub struct CanvasTile {
@@ -98,7 +93,6 @@ impl NewCanvasSettings {
             background: BackgroundChoice::White,
             custom_bg: Color32::WHITE,
             color_model: ColorModel::Rgba,
-            color_depth: ColorDepth::Bit8,
         }
     }
 
@@ -113,7 +107,12 @@ impl NewCanvasSettings {
     }
 
     pub fn dimensions_in_pixels(&self) -> (usize, usize) {
+        self.validated_dimensions().unwrap_or((16_384, 16_384))
+    }
+
+    pub fn validated_dimensions(&self) -> Result<(usize, usize), String> {
         let dpi = self.resolution.max(1.0);
+        validate_dpi(dpi)?;
         let to_px = |value: f32| -> f32 {
             match self.unit {
                 CanvasUnit::Pixels => value,
@@ -132,7 +131,10 @@ impl NewCanvasSettings {
             _ => {}
         }
 
-        (w.round().max(1.0) as usize, h.round().max(1.0) as usize)
+        let width = w.round().max(1.0) as usize;
+        let height = h.round().max(1.0) as usize;
+        validate_canvas_size(width, height)?;
+        Ok((width, height))
     }
 
     pub fn background_color32(&self, model: ColorModel) -> Color32 {
@@ -146,7 +148,90 @@ impl NewCanvasSettings {
         let color = base;
         match model {
             ColorModel::Rgba => color,
-            ColorModel::Grayscale => color,
+            ColorModel::Grayscale => to_grayscale(color),
         }
+    }
+}
+
+pub fn to_grayscale(color: Color32) -> Color32 {
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    let y = (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32).round() as u8;
+    Color32::from_rgba_unmultiplied(y, y, y, a)
+}
+
+pub fn validate_canvas_size(width: usize, height: usize) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("Canvas dimensions must be at least 1 px".to_string());
+    }
+    if width > MAX_CANVAS_DIMENSION || height > MAX_CANVAS_DIMENSION {
+        return Err(format!(
+            "Canvas edge is too large. Maximum is {MAX_CANVAS_DIMENSION} px."
+        ));
+    }
+    let pixels = width
+        .checked_mul(height)
+        .ok_or_else(|| "Canvas dimensions overflow usize".to_string())?;
+    if pixels > MAX_CANVAS_PIXELS {
+        return Err(format!(
+            "Canvas is too large. Maximum is {} megapixels.",
+            MAX_CANVAS_PIXELS / 1_000_000
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_dpi(dpi: f32) -> Result<(), String> {
+    if !(1.0..=MAX_CANVAS_DPI).contains(&dpi) {
+        return Err(format!("DPI must be between 1 and {MAX_CANVAS_DPI:.0}."));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_generous_canvas_limit() {
+        assert!(validate_canvas_size(16_384, 16_384).is_ok());
+        assert!(validate_canvas_size(16_384, 16_385).is_err());
+        assert!(validate_canvas_size(0, 10).is_err());
+    }
+
+    #[test]
+    fn unit_conversion_is_capped() {
+        let settings = NewCanvasSettings {
+            width: 2.0,
+            height: 3.0,
+            unit: CanvasUnit::Inches,
+            resolution: MAX_CANVAS_DPI,
+            orientation: Orientation::Portrait,
+            name: "Huge".to_string(),
+            background: BackgroundChoice::White,
+            custom_bg: Color32::WHITE,
+            color_model: ColorModel::Rgba,
+        };
+        assert_eq!(settings.validated_dimensions().unwrap(), (9_600, 14_400));
+    }
+
+    #[test]
+    fn grayscale_background_is_converted() {
+        let settings = NewCanvasSettings {
+            width: 1.0,
+            height: 1.0,
+            unit: CanvasUnit::Pixels,
+            resolution: 72.0,
+            orientation: Orientation::Portrait,
+            name: "Gray".to_string(),
+            background: BackgroundChoice::Custom,
+            custom_bg: Color32::from_rgb(255, 0, 0),
+            color_model: ColorModel::Grayscale,
+        };
+
+        let [r, g, b, _] = settings
+            .background_color32(ColorModel::Grayscale)
+            .to_srgba_unmultiplied();
+        assert_eq!(r, g);
+        assert_eq!(g, b);
     }
 }

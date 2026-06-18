@@ -1,6 +1,6 @@
 use super::{
     PainterApp,
-    painter_helpers::{AtlasLayout, AtlasPosition, PixelBounds, TileRange},
+    painter_helpers::{AtlasLayout, AtlasPosition},
     state::{ATLAS_SIZE, CanvasTile, ColorModel, TILE_SIZE, TextureAtlas},
 };
 use crate::canvas::Canvas;
@@ -58,71 +58,16 @@ impl PainterApp {
         tiles
     }
 
-    pub(crate) fn mark_segment_dirty(&mut self, start: Vec2, end: Vec2, radius: f32) {
-        let bounds = Self::calculate_stroke_bounds(start, end, radius);
-        let canvas_bounds = self.get_canvas_bounds();
-
-        if !Self::bounds_overlap(&bounds, &canvas_bounds) {
-            return;
-        }
-
-        let clamped = Self::clamp_bounds(bounds, canvas_bounds);
-        self.mark_tiles_in_range_dirty(Self::pixel_bounds_to_tile_range(clamped));
-    }
-
-    fn calculate_stroke_bounds(start: Vec2, end: Vec2, radius: f32) -> PixelBounds {
-        let r = radius.ceil() as i32;
-        PixelBounds {
-            min_x: start.x.min(end.x).floor() as i32 - r,
-            max_x: start.x.max(end.x).ceil() as i32 + r,
-            min_y: start.y.min(end.y).floor() as i32 - r,
-            max_y: start.y.max(end.y).ceil() as i32 + r,
-        }
-    }
-
-    fn get_canvas_bounds(&self) -> PixelBounds {
-        PixelBounds {
-            min_x: 0,
-            max_x: self.canvas.width() as i32,
-            min_y: 0,
-            max_y: self.canvas.height() as i32,
-        }
-    }
-
-    fn bounds_overlap(a: &PixelBounds, b: &PixelBounds) -> bool {
-        !(a.max_x < b.min_x || a.min_x >= b.max_x || a.max_y < b.min_y || a.min_y >= b.max_y)
-    }
-
-    fn clamp_bounds(bounds: PixelBounds, limits: PixelBounds) -> PixelBounds {
-        PixelBounds {
-            min_x: bounds.min_x.max(limits.min_x),
-            max_x: bounds.max_x.min(limits.max_x - 1),
-            min_y: bounds.min_y.max(limits.min_y),
-            max_y: bounds.max_y.min(limits.max_y - 1),
-        }
-    }
-
-    fn pixel_bounds_to_tile_range(bounds: PixelBounds) -> TileRange {
-        TileRange {
-            min_tx: (bounds.min_x as usize) / TILE_SIZE,
-            max_tx: (bounds.max_x as usize) / TILE_SIZE,
-            min_ty: (bounds.min_y as usize) / TILE_SIZE,
-            max_ty: (bounds.max_y as usize) / TILE_SIZE,
-        }
-    }
-
-    fn mark_tiles_in_range_dirty(&mut self, range: TileRange) {
-        for ty in range.min_ty..=range.max_ty {
-            for tx in range.min_tx..=range.max_tx {
-                self.mark_tile_dirty(tx, ty);
-            }
-        }
-    }
-
-    fn mark_tile_dirty(&mut self, tx: usize, ty: usize) {
+    pub(crate) fn mark_tile_dirty(&mut self, tx: usize, ty: usize) {
         if let Some(tile) = self.tile_mut(tx, ty) {
             tile.dirty = true;
-            self.canvas.ensure_tile_exists(tx, ty);
+        }
+    }
+
+    pub(crate) fn mark_modified_tiles_dirty(&mut self) {
+        let tiles: Vec<_> = self.render_cache.modified_tiles.iter().copied().collect();
+        for (tx, ty) in tiles {
+            self.mark_tile_dirty(tx, ty);
         }
     }
 
@@ -268,7 +213,9 @@ impl PainterApp {
     }
 
     pub(crate) fn apply_new_canvas(&mut self, ctx: &egui::Context) {
-        let (width, height) = self.modal_state.new_canvas.dimensions_in_pixels();
+        let Ok((width, height)) = self.modal_state.new_canvas.validated_dimensions() else {
+            return;
+        };
         self.workspace.color_model = self.modal_state.new_canvas.color_model;
         let background = self
             .modal_state
@@ -284,7 +231,7 @@ impl PainterApp {
     fn convert_color_for_model(color: Color32, model: ColorModel) -> Color32 {
         match model {
             ColorModel::Rgba => color,
-            ColorModel::Grayscale => color,
+            ColorModel::Grayscale => super::state::to_grayscale(color),
         }
     }
 
@@ -332,7 +279,13 @@ impl PainterApp {
                 let has_data = self
                     .canvas
                     .lock_layer_tile_if_exists(layer_idx, tx, ty)
-                    .map(|cell_arc| cell_arc.lock().unwrap().data.is_some())
+                    .map(|cell_arc| {
+                        cell_arc
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .data
+                            .is_some()
+                    })
                     .unwrap_or(false);
                 if has_data {
                     let idx = ty * tiles_x + tx;
@@ -377,5 +330,56 @@ impl PainterApp {
         };
 
         self.mark_all_tiles_dirty();
+    }
+
+    pub(crate) fn add_paint_layer(&mut self) {
+        self.canvas.add_layer();
+        self.insert_layer_state(self.canvas.layers.len().saturating_sub(1));
+    }
+
+    pub(crate) fn remove_paint_layer(&mut self, idx: usize) {
+        if idx >= self.canvas.layers.len() || self.canvas.layers.len() <= 1 || idx == 0 {
+            return;
+        }
+
+        let active = self.canvas.active_layer_idx;
+        self.mark_layer_tiles_with_data_dirty(idx);
+        self.canvas.layers.remove(idx);
+        self.remove_layer_state(idx);
+        self.canvas.active_layer_idx = if active == idx {
+            idx.min(self.canvas.layers.len().saturating_sub(1))
+        } else if idx < active {
+            active.saturating_sub(1)
+        } else {
+            active.min(self.canvas.layers.len().saturating_sub(1))
+        };
+        self.mark_all_tiles_dirty();
+    }
+
+    pub(crate) fn insert_layer_state(&mut self, idx: usize) {
+        let idx = idx.min(self.canvas.layers.len());
+        self.layer_state.histories.insert(idx, History::new());
+        self.render_cache.layer_caches.insert(idx, HashMap::new());
+        self.render_cache
+            .layer_cache_dirty
+            .insert(idx, HashSet::new());
+        self.layer_state
+            .layer_ui_colors
+            .insert(idx, Color32::from_gray(40));
+    }
+
+    pub(crate) fn remove_layer_state(&mut self, idx: usize) {
+        if idx < self.layer_state.histories.len() {
+            self.layer_state.histories.remove(idx);
+        }
+        if idx < self.render_cache.layer_caches.len() {
+            self.render_cache.layer_caches.remove(idx);
+        }
+        if idx < self.render_cache.layer_cache_dirty.len() {
+            self.render_cache.layer_cache_dirty.remove(idx);
+        }
+        if idx < self.layer_state.layer_ui_colors.len() {
+            self.layer_state.layer_ui_colors.remove(idx);
+        }
     }
 }

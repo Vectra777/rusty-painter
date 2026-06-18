@@ -31,6 +31,8 @@ use std::thread;
 
 use crate::selection::SelectionManager;
 
+const MAX_BRUSH_TIP_PIXELS: u32 = 4_194_304;
+
 /// Main egui application that owns the canvas, brush state, UI and rendering caches.
 pub struct PainterApp {
     pub(crate) canvas: Canvas,
@@ -223,6 +225,15 @@ impl PainterApp {
         if !path.is_file() || !Self::is_valid_image_extension(&path) {
             return None;
         }
+        let reader = image::ImageReader::open(&path)
+            .ok()?
+            .with_guessed_format()
+            .ok()?;
+        let (width, height) = reader.into_dimensions().ok()?;
+        if width == 0 || height == 0 || width.checked_mul(height)? > MAX_BRUSH_TIP_PIXELS {
+            log::warn!("Skipping oversized brush tip: {}", path.display());
+            return None;
+        }
         let img = image::open(&path).ok()?.to_luma8();
         let brush_data = Self::extract_brush_data(&img);
         let texture = Self::create_brush_texture(&brush_data, ctx);
@@ -318,11 +329,7 @@ impl PainterApp {
                 &mut self.render_cache.modified_tiles,
             );
             stroke.add_point(&mut self.brush_state.brush, pos, &mut context);
-            self.mark_segment_dirty(
-                pos,
-                pos,
-                self.brush_state.brush.brush_options.diameter / 2.0,
-            );
+            self.mark_modified_tiles_dirty();
         }
     }
 

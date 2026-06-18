@@ -3,6 +3,9 @@ name = "rusty-painter"
 version = "0.0.1"
 authors = ["Valentin Belougne <valentin.belougne@gmail.com>"]
 edition = "2024"
+description = "Native tiled painting playground built with egui."
+readme = "README.md"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -13,7 +16,7 @@ env_logger = "0.11"
 log = "0.4"
 rand = "0.9"
 rayon = "1.9"
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
 egui_dock = "0.14.0"
 wide = "0.7"
 
@@ -26,7 +29,7 @@ criterion = "0.5"
 # desktop-only helpers
 [target.'cfg(not(target_os = "android"))'.dependencies]
 octotablet = "0.1"
-rfd = "0.14"
+rfd = "0.17.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
@@ -50,5 +53,5 @@ name = "brush_bench"
 harness = false
 
 [[bench]]
-name = "simd_bench"
+name = "blend_bench"
 harness = false

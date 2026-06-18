@@ -11,7 +11,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **Selection Tools**: Rectangle, Circle, and Lasso selection modes.
 - **Transform Tools**: Move, rotate, and scale selections with non-destructive preview.
 - **History**: Robust Undo/redo system for pixels, selections, and transformations.
-- **Canvas**: Massive canvas support (default 8000x8000) backed by tiled storage and GPU texture atlases.
+- **Canvas**: Large canvas support (default 4000x4000) backed by tiled storage and GPU texture atlases.
 - **Export**: Save your work as PNG, JPEG, or TIFF.
 - **Performance**: Optional masked brush mode and zoom-out LOD for performance experiments.
 
@@ -56,14 +56,14 @@ If you have multiple Android SDK/NDK installs, ensure your environment points to
 - **Export**: Export your canvas via the Export button in the top bar.
 
 ## Project Structure
-- `src/main.rs` – egui app wiring, input handling, texture atlas uploads.
+- `src/main.rs` – native app entry point.
 - `src/app/` - Application state, input handling, and tool logic.
 - `src/canvas/` – tiled canvas storage, compositing, and undo history.
 - `src/brush_engine/` – brush logic, stroke spacing, and mask generation.
 - `src/selection/` - Selection shapes and transformation logic.
 - `src/tablet/` - Tablet input handling.
 - `src/ui/` – egui panels for brushes, colors, layers, and settings.
-- `src/utils/` – small helpers (colors, vectors, profiling, exporting).
+- `src/utils/` – small helpers for colors and exporting.
 
 ## Contributing
-The project is early-stage and focused on performance experiments. If you have ideas for improving brush quality, tiling performance, or UI/UX, feel free to open an issue or directly contact me. Tests/benchmarks and profiling notes are especially welcome.
+The project is early-stage and focused on performance experiments. If you have ideas for improving brush quality, tiling performance, or UI/UX, feel free to open an issue or directly contact me. Tests and benchmarks are especially welcome.

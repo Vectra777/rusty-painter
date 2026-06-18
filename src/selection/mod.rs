@@ -360,3 +360,19 @@ impl SelectionManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rectangle_selection_contains_edges() {
+        let mut selection = SelectionManager::new();
+        selection.start_selection(Vec2::new(10.0, 20.0), SelectionType::Rectangle);
+        selection.update_selection(Vec2::new(30.0, 40.0));
+
+        assert!(selection.contains_coords(10.0, 20.0));
+        assert!(selection.contains_coords(30.0, 40.0));
+        assert!(!selection.contains_coords(30.1, 40.0));
+    }
+}

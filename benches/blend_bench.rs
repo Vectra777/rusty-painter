@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use eframe::egui::Color32;
-use rusty_painter::canvas::storage::{alpha_over, alpha_over_batch, alpha_over_simd_x4};
+use rusty_painter::canvas::storage::{alpha_over, alpha_over_batch};
 
 fn bench_alpha_over_scalar(c: &mut Criterion) {
     let src = Color32::from_rgba_unmultiplied(255, 128, 64, 200);
@@ -8,25 +8,6 @@ fn bench_alpha_over_scalar(c: &mut Criterion) {
 
     c.bench_function("alpha_over_scalar", |b| {
         b.iter(|| black_box(alpha_over(black_box(src), black_box(dst))))
-    });
-}
-
-fn bench_alpha_over_simd_x4(c: &mut Criterion) {
-    let src = [
-        Color32::from_rgba_unmultiplied(255, 128, 64, 200),
-        Color32::from_rgba_unmultiplied(200, 100, 50, 180),
-        Color32::from_rgba_unmultiplied(180, 90, 45, 160),
-        Color32::from_rgba_unmultiplied(160, 80, 40, 140),
-    ];
-    let dst = [
-        Color32::from_rgba_unmultiplied(64, 128, 255, 150),
-        Color32::from_rgba_unmultiplied(50, 100, 200, 130),
-        Color32::from_rgba_unmultiplied(45, 90, 180, 120),
-        Color32::from_rgba_unmultiplied(40, 80, 160, 110),
-    ];
-
-    c.bench_function("alpha_over_simd_x4", |b| {
-        b.iter(|| black_box(alpha_over_simd_x4(black_box(src), black_box(dst))))
     });
 }
 
@@ -57,7 +38,7 @@ fn bench_alpha_over_batch(c: &mut Criterion) {
         let mut out = vec![Color32::TRANSPARENT; *size];
 
         group.throughput(Throughput::Elements(*size as u64));
-        group.bench_with_input(BenchmarkId::new("simd", size), size, |b, _| {
+        group.bench_with_input(BenchmarkId::new("batch", size), size, |b, _| {
             b.iter(|| alpha_over_batch(black_box(&src), black_box(&dst), black_box(&mut out)))
         });
 
@@ -86,7 +67,7 @@ fn bench_tile_merge(c: &mut Criterion) {
     let mut group = c.benchmark_group("tile_merge");
     group.throughput(Throughput::Elements(tile_size as u64));
 
-    group.bench_function("simd", |b| {
+    group.bench_function("batch", |b| {
         b.iter(|| alpha_over_batch(black_box(&src), black_box(&dst), black_box(&mut out)))
     });
 
@@ -104,7 +85,6 @@ fn bench_tile_merge(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_alpha_over_scalar,
-    bench_alpha_over_simd_x4,
     bench_alpha_over_batch,
     bench_tile_merge
 );

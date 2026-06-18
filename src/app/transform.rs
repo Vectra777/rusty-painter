@@ -51,18 +51,7 @@ pub(crate) fn create_floating_layer(app: &mut PainterApp) {
             app.layer_state.floating_layer_idx = Some(idx);
             app.layer_state.floating_buffer = Some(app.canvas.capture_layer_pixels(idx));
 
-            app.layer_state
-                .histories
-                .push(crate::canvas::history::History::new());
-            app.render_cache
-                .layer_caches
-                .push(std::collections::HashMap::new());
-            app.render_cache
-                .layer_cache_dirty
-                .push(std::collections::HashSet::new());
-            app.layer_state
-                .layer_ui_colors
-                .push(egui::Color32::from_gray(40));
+            app.insert_layer_state(idx);
 
             if let Some(bounds) = sel_bounds {
                 app.mark_tiles_in_bounds_dirty(bounds);
@@ -91,12 +80,7 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
             *info = crate::selection::transform::TransformInfo::default();
         }
 
-        if idx < app.layer_state.histories.len() {
-            app.layer_state.histories.remove(idx);
-            app.render_cache.layer_caches.remove(idx);
-            app.render_cache.layer_cache_dirty.remove(idx);
-            app.layer_state.layer_ui_colors.remove(idx);
-        }
+        app.remove_layer_state(idx);
 
         if let Some(b1) = float_bounds {
             if let Some(b2) = base_bounds {

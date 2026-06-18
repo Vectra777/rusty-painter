@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +12,7 @@ use eframe::egui::Vec2;
 
 // Gamma correction lookup table size for high precision conversion
 const GAMMA_LUT_SIZE: usize = 4096;
+const MAX_TRANSFORM_SOURCE_PIXELS: usize = 67_108_864;
 type TileMap = HashMap<(i32, i32), Arc<Mutex<TileCell>>>;
 type RowTileCache = Vec<Option<(i32, Arc<Mutex<TileCell>>, Option<Vec<Rgba>>, bool)>>;
 
@@ -37,6 +38,7 @@ impl TransformParams {
 
 // Gamma correction lookup table (4096 entries for high precision)
 static GAMMA_LUT: OnceLock<[u8; GAMMA_LUT_SIZE]> = OnceLock::new();
+static SRGB_TO_LINEAR_LUT: OnceLock<[f32; 256]> = OnceLock::new();
 
 fn gamma_lut() -> &'static [u8; GAMMA_LUT_SIZE] {
     GAMMA_LUT.get_or_init(|| {
@@ -54,12 +56,37 @@ fn gamma_lut() -> &'static [u8; GAMMA_LUT_SIZE] {
     })
 }
 
+fn srgb_to_linear_lut() -> &'static [f32; 256] {
+    SRGB_TO_LINEAR_LUT.get_or_init(|| {
+        let mut lut = [0.0; 256];
+        for (i, item) in lut.iter_mut().enumerate() {
+            let srgb = i as f32 / 255.0;
+            *item = if srgb <= 0.04045 {
+                srgb / 12.92
+            } else {
+                ((srgb + 0.055) / 1.055).powf(2.4)
+            };
+        }
+        lut
+    })
+}
+
+#[inline]
+fn srgb_u8_to_linear(v: u8) -> f32 {
+    srgb_to_linear_lut()[v as usize]
+}
+
 /// Fast linear to sRGB conversion using lookup table (eliminates powf)
 #[inline]
 fn linear_to_srgb_u8(linear: f32) -> u8 {
     let clamped = linear.clamp(0.0, 1.0);
-    let index = (clamped * (GAMMA_LUT_SIZE - 1) as f32).round() as usize;
+    let index = (clamped * (GAMMA_LUT_SIZE - 1) as f32 + 0.5) as usize;
     gamma_lut()[index.min(GAMMA_LUT_SIZE - 1)]
+}
+
+#[inline]
+fn alpha_to_u8(alpha: f32) -> u8 {
+    (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
 /// Fast Rgba (linear) to Color32 (sRGB) conversion without powf
@@ -69,73 +96,102 @@ fn rgba_to_color32_fast(rgba: Rgba) -> Color32 {
         linear_to_srgb_u8(rgba.r()),
         linear_to_srgb_u8(rgba.g()),
         linear_to_srgb_u8(rgba.b()),
-        (rgba.a() * 255.0).round().clamp(0.0, 255.0) as u8,
+        alpha_to_u8(rgba.a()),
     )
 }
 
-struct PixelCollector<'a> {
-    pixels: &'a mut HashMap<(i32, i32), Color32>,
-    bounds: &'a mut eframe::egui::Rect,
-    first: &'a mut bool,
+fn source_bounds_and_tiles(
+    src_tiles: &HashMap<(i32, i32), Vec<Color32>>,
     tile_size: usize,
-    selection: Option<&'a SelectionManager>,
-}
+    selection: Option<&SelectionManager>,
+) -> Option<(eframe::egui::Rect, HashSet<(i32, i32)>)> {
+    let mut bounds = eframe::egui::Rect::NOTHING;
+    let mut affected = HashSet::new();
+    let mut found = false;
 
-impl PixelCollector<'_> {
-    fn add_tile(&mut self, tx: i32, ty: i32, data: &[Color32]) {
-        let base_x = tx * self.tile_size as i32;
-        let base_y = ty * self.tile_size as i32;
+    for ((tx, ty), data) in src_tiles {
+        let base_x = tx * tile_size as i32;
+        let base_y = ty * tile_size as i32;
+        let mut tile_has_content = false;
 
-        for py in 0..self.tile_size {
-            for px in 0..self.tile_size {
-                let idx = py * self.tile_size + px;
+        for py in 0..tile_size {
+            for px in 0..tile_size {
+                let idx = py * tile_size + px;
                 if data[idx].a() == 0 {
                     continue;
                 }
 
                 let gx = base_x + px as i32;
                 let gy = base_y + py as i32;
-                if let Some(sel) = self.selection
+                if let Some(sel) = selection
                     && !sel.contains_coords(gx as f32, gy as f32)
                 {
                     continue;
                 }
 
-                self.pixels.insert((gx, gy), data[idx]);
+                tile_has_content = true;
                 let pos = eframe::egui::pos2(gx as f32, gy as f32);
-                if *self.first {
-                    *self.bounds = eframe::egui::Rect::from_min_max(pos, pos);
-                    *self.first = false;
+                if found {
+                    bounds.extend_with(pos);
                 } else {
-                    self.bounds.extend_with(pos);
+                    bounds = eframe::egui::Rect::from_min_max(pos, pos);
+                    found = true;
                 }
             }
         }
+
+        if tile_has_content {
+            affected.insert((*tx, *ty));
+        }
     }
+
+    found.then_some((bounds, affected))
 }
 
-fn transform_pixels(
-    src_pixels: &HashMap<(i32, i32), Color32>,
+fn sample_source_tile(
+    src_tiles: &HashMap<(i32, i32), Vec<Color32>>,
+    x: i32,
+    y: i32,
+    tile_size: usize,
+    selection: Option<&SelectionManager>,
+) -> Color32 {
+    if let Some(sel) = selection
+        && !sel.contains_coords(x as f32, y as f32)
+    {
+        return Color32::TRANSPARENT;
+    }
+
+    let tile_size_i32 = tile_size as i32;
+    let tx = x.div_euclid(tile_size_i32);
+    let ty = y.div_euclid(tile_size_i32);
+    let px = (x - tx * tile_size_i32) as usize;
+    let py = (y - ty * tile_size_i32) as usize;
+    src_tiles
+        .get(&(tx, ty))
+        .map_or(Color32::TRANSPARENT, |data| data[py * tile_size + px])
+}
+
+fn transform_tiles(
+    src_tiles: &HashMap<(i32, i32), Vec<Color32>>,
     mut src_bounds: eframe::egui::Rect,
     params: TransformParams,
     tile_size: usize,
+    canvas_width: usize,
+    canvas_height: usize,
+    selection: Option<&SelectionManager>,
 ) -> HashMap<(i32, i32), Vec<Color32>> {
+    if params.scale.x.abs() < f32::EPSILON
+        || params.scale.y.abs() < f32::EPSILON
+        || !params.offset.is_finite()
+        || !params.scale.is_finite()
+        || !params.center.is_finite()
+        || !params.rotation.is_finite()
+    {
+        return HashMap::new();
+    }
+
     src_bounds.max.x += 1.0;
     src_bounds.max.y += 1.0;
-
-    let grid_min_x = src_bounds.min.x.floor() as i32;
-    let grid_min_y = src_bounds.min.y.floor() as i32;
-    let grid_width = (src_bounds.max.x.ceil() as i32 - grid_min_x) as usize;
-    let grid_height = (src_bounds.max.y.ceil() as i32 - grid_min_y) as usize;
-
-    let mut src_grid = vec![Color32::TRANSPARENT; grid_width * grid_height];
-    for ((gx, gy), pixel) in src_pixels {
-        let idx_x = (*gx - grid_min_x) as usize;
-        let idx_y = (*gy - grid_min_y) as usize;
-        if idx_x < grid_width && idx_y < grid_height {
-            src_grid[idx_y * grid_width + idx_x] = *pixel;
-        }
-    }
 
     let corners = [
         src_bounds.min,
@@ -183,25 +239,29 @@ fn transform_pixels(
     let mut dst_tiles = HashMap::with_capacity(estimated_dst_tiles.max(0) as usize);
 
     for y in dst_min_y..dst_max_y {
+        if y < 0 || y >= canvas_height as i32 {
+            continue;
+        }
         for x in dst_min_x..dst_max_x {
+            if x < 0 || x >= canvas_width as i32 {
+                continue;
+            }
             let dx = x as f32 - center_offset_x;
             let dy = y as f32 - center_offset_y;
             let rx = dx * cos_r + dy * sin_r;
             let ry = -dx * sin_r + dy * cos_r;
             let src_x = (rx * inv_scale_x + params.center.x).round() as i32;
             let src_y = (ry * inv_scale_y + params.center.y).round() as i32;
-            let grid_x = src_x - grid_min_x;
-            let grid_y = src_y - grid_min_y;
 
-            if grid_x < 0
-                || grid_x >= grid_width as i32
-                || grid_y < 0
-                || grid_y >= grid_height as i32
+            if src_x < src_bounds.min.x.floor() as i32
+                || src_x >= src_bounds.max.x.ceil() as i32
+                || src_y < src_bounds.min.y.floor() as i32
+                || src_y >= src_bounds.max.y.ceil() as i32
             {
                 continue;
             }
 
-            let pixel = src_grid[grid_y as usize * grid_width + grid_x as usize];
+            let pixel = sample_source_tile(src_tiles, src_x, src_y, tile_size, selection);
             if pixel == Color32::TRANSPARENT {
                 continue;
             }
@@ -232,7 +292,7 @@ fn write_transformed_tiles(
                 is_empty: true,
             }))
         });
-        let mut guard = tile_arc.lock().unwrap();
+        let mut guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
         if guard.data.is_none() {
             guard.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
         }
@@ -349,7 +409,7 @@ impl Canvas {
             return None;
         }
         let layer = &self.layers[layer_idx];
-        let tiles = layer.tiles.lock().unwrap();
+        let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
         tiles.get(&(tx, ty)).cloned()
     }
 
@@ -366,7 +426,7 @@ impl Canvas {
         let layer = &self.layers[layer_idx];
 
         let tile_arc = {
-            let mut tiles = layer.tiles.lock().unwrap();
+            let mut tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             tiles
                 .entry((tx, ty))
                 .or_insert_with(|| {
@@ -379,7 +439,7 @@ impl Canvas {
         };
 
         {
-            let mut guard = tile_arc.lock().unwrap();
+            let mut guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
             if guard.data.is_none() {
                 let fill_color = if layer_idx == 0 {
                     self.clear_color
@@ -439,7 +499,7 @@ impl Canvas {
     /// Clone the raw pixel buffer for a tile in a given layer.
     pub fn get_layer_tile_data(&self, layer_idx: usize, tx: i32, ty: i32) -> Option<Vec<Color32>> {
         let cell = self.layer_tile_cell(layer_idx, tx, ty)?;
-        let guard = cell.lock().unwrap();
+        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
         guard.data.clone()
     }
 
@@ -447,7 +507,7 @@ impl Canvas {
     pub fn set_layer_tile_data(&self, layer_idx: usize, tx: i32, ty: i32, data: Vec<Color32>) {
         // Ensure tile exists
         if let Some(cell) = self.ensure_layer_tile(layer_idx, tx, ty) {
-            let mut guard = cell.lock().unwrap();
+            let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
             let is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
             guard.is_empty = is_empty;
             guard.data = Some(data);
@@ -464,6 +524,12 @@ impl Canvas {
         out: &mut ColorImage,
         step: usize,
     ) {
+        if w == 0 || h == 0 {
+            out.size = [0, 0];
+            out.pixels.clear();
+            return;
+        }
+
         let step = step.max(1);
         let dst_w = w.div_ceil(step);
         let dst_h = h.div_ceil(step);
@@ -476,8 +542,22 @@ impl Canvas {
         // Optimization: Check if the region is within a single tile
         let start_tx = x / self.tile_size;
         let start_ty = y / self.tile_size;
-        let end_tx = (x + w - 1) / self.tile_size;
-        let end_ty = (y + h - 1) / self.tile_size;
+        let end_tx = (x.saturating_add(w).saturating_sub(1)) / self.tile_size;
+        let end_ty = (y.saturating_add(h).saturating_sub(1)) / self.tile_size;
+
+        if start_tx == end_tx
+            && start_ty == end_ty
+            && step == 1
+            && self.try_write_single_tile_fast(
+                start_tx as i32,
+                start_ty as i32,
+                x..x + w,
+                y..y + h,
+                out,
+            )
+        {
+            return;
+        }
 
         if start_tx == end_tx && start_ty == end_ty {
             // Fast path: Single tile access
@@ -489,7 +569,7 @@ impl Canvas {
                 .layers
                 .iter()
                 .map(|layer| {
-                    let tiles = layer.tiles.lock().unwrap();
+                    let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
                     tiles.get(&(tx, ty)).cloned()
                 })
                 .collect();
@@ -497,7 +577,10 @@ impl Canvas {
             // 2. Lock the Tiles (Holding locks for the render duration)
             let layer_guards: Vec<Option<std::sync::MutexGuard<'_, TileCell>>> = layer_arcs
                 .iter()
-                .map(|opt| opt.as_ref().map(|arc| arc.lock().unwrap()))
+                .map(|opt| {
+                    opt.as_ref()
+                        .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()))
+                })
                 .collect();
 
             // 3. Pre-convert all tiles to linear space to avoid repeated conversions
@@ -704,7 +787,7 @@ impl Canvas {
                         // Fetch new tile and pre-convert to linear
                         if let Some(tile_arc) = self.layer_tile_cell(layer_idx, tx, ty) {
                             // Lock temporarily to read data
-                            let guard = tile_arc.lock().unwrap();
+                            let guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                             let is_empty = guard.is_empty;
 
                             // Pre-convert entire tile to linear space for efficiency
@@ -767,13 +850,75 @@ impl Canvas {
         }
     }
 
+    fn try_write_single_tile_fast(
+        &self,
+        tx: i32,
+        ty: i32,
+        x_range: std::ops::Range<usize>,
+        y_range: std::ops::Range<usize>,
+        out: &mut ColorImage,
+    ) -> bool {
+        let mut bg_visible = false;
+        let mut paint_layer = None;
+        for (idx, layer) in self.layers.iter().enumerate() {
+            if !layer.visible || layer.opacity <= 0.0 {
+                continue;
+            }
+            if idx == 0 {
+                bg_visible = true;
+            } else if paint_layer.is_none() && layer.opacity >= 1.0 {
+                paint_layer = Some(idx);
+            } else {
+                return false;
+            }
+        }
+
+        let bg_arc = bg_visible
+            .then(|| self.layer_tile_cell(0, tx, ty))
+            .flatten();
+        let bg_guard = bg_arc
+            .as_ref()
+            .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()));
+        let bg_data = bg_guard.as_ref().and_then(|guard| guard.data.as_ref());
+
+        let paint_arc = paint_layer.and_then(|idx| self.layer_tile_cell(idx, tx, ty));
+        let paint_guard = paint_arc
+            .as_ref()
+            .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()));
+        let paint_data = paint_guard
+            .as_ref()
+            .filter(|guard| !guard.is_empty)
+            .and_then(|guard| guard.data.as_ref());
+
+        let w = x_range.len();
+        let local_x = x_range.start % self.tile_size;
+        let local_y = y_range.start % self.tile_size;
+        for row in 0..y_range.len() {
+            for col in 0..w {
+                let src_idx = (local_y + row) * self.tile_size + local_x + col;
+                let bg = if bg_visible {
+                    bg_data.map_or(self.clear_color, |data| data[src_idx])
+                } else {
+                    Color32::TRANSPARENT
+                };
+                let pixel = match paint_data.map(|data| data[src_idx]) {
+                    Some(src) if src.a() == 255 => src,
+                    Some(src) if src.a() > 0 => alpha_over(src, bg),
+                    _ => bg,
+                };
+                out.pixels[row * w + col] = pixel;
+            }
+        }
+        true
+    }
+
     /// Clear the active layer to the provided color (or transparent for non-background).
     pub fn clear(&mut self, color: Color) {
         self.clear_color = premultiply(color.to_color32());
         if let Some(layer) = self.layers.get(self.active_layer_idx) {
-            let tiles = layer.tiles.lock().unwrap();
+            let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             for tile_arc in tiles.values() {
-                let mut cell = tile_arc.lock().unwrap();
+                let mut cell = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 cell.data = None;
                 cell.is_empty = true;
             }
@@ -783,9 +928,9 @@ impl Canvas {
     pub fn capture_layer_pixels(&self, layer_idx: usize) -> HashMap<(i32, i32), Vec<Color32>> {
         let mut pixels = HashMap::new();
         if let Some(layer) = self.layers.get(layer_idx) {
-            let tiles = layer.tiles.lock().unwrap();
+            let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             for ((tx, ty), tile_arc) in tiles.iter() {
-                let guard = tile_arc.lock().unwrap();
+                let guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(data) = &guard.data {
                     pixels.insert((*tx, *ty), data.clone());
                 }
@@ -801,33 +946,28 @@ impl Canvas {
         params: TransformParams,
     ) {
         let tile_size = self.tile_size;
-        let estimated_pixels = src_tiles.len() * tile_size * tile_size / 4;
-        let mut src_pixels: HashMap<(i32, i32), Color32> = HashMap::with_capacity(estimated_pixels);
-        let mut src_bounds = eframe::egui::Rect::NOTHING;
-        let mut first = true;
-
-        {
-            let mut collector = PixelCollector {
-                pixels: &mut src_pixels,
-                bounds: &mut src_bounds,
-                first: &mut first,
-                tile_size,
-                selection: None,
-            };
-            for ((tx, ty), data) in src_tiles {
-                collector.add_tile(*tx, *ty, data);
-            }
-        }
-        if src_pixels.is_empty() {
+        if src_tiles.len().saturating_mul(tile_size * tile_size) > MAX_TRANSFORM_SOURCE_PIXELS {
+            log::warn!("Skipping transform preview: source is too large");
             return;
         }
+        let Some((src_bounds, _)) = source_bounds_and_tiles(src_tiles, tile_size, None) else {
+            return;
+        };
 
-        let dst_tiles = transform_pixels(&src_pixels, src_bounds, params, tile_size);
+        let dst_tiles = transform_tiles(
+            src_tiles,
+            src_bounds,
+            params,
+            tile_size,
+            self.width,
+            self.height,
+            None,
+        );
 
         if let Some(layer) = self.layers.get(layer_idx) {
-            let mut tiles = layer.tiles.lock().unwrap();
+            let mut tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             for tile_arc in tiles.values() {
-                let mut cell = tile_arc.lock().unwrap();
+                let mut cell = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 cell.data = None;
                 cell.is_empty = true;
             }
@@ -843,52 +983,39 @@ impl Canvas {
     ) {
         let layer_idx = self.active_layer_idx;
         let tile_size = self.tile_size;
-        let mut src_pixels: HashMap<(i32, i32), Color32> = HashMap::with_capacity(1024);
-        let mut src_bounds = eframe::egui::Rect::NOTHING;
-        let mut first = true;
+        let src_tiles = self.capture_layer_pixels(layer_idx);
 
-        if let Some(layer) = self.layers.get(layer_idx) {
-            let tiles = layer.tiles.lock().unwrap();
-            for ((tx, ty), tile_arc) in tiles.iter() {
-                let guard = tile_arc.lock().unwrap();
-                if let Some(data) = &guard.data {
-                    let mut collector = PixelCollector {
-                        pixels: &mut src_pixels,
-                        bounds: &mut src_bounds,
-                        first: &mut first,
-                        tile_size,
-                        selection,
-                    };
-                    collector.add_tile(*tx, *ty, data);
-                }
-            }
-        }
-
-        if src_pixels.is_empty() {
+        if src_tiles.len().saturating_mul(tile_size * tile_size) > MAX_TRANSFORM_SOURCE_PIXELS {
+            log::warn!("Skipping transform: source layer is too large");
             return;
         }
 
-        let dst_tiles = transform_pixels(&src_pixels, src_bounds, params, tile_size);
+        let Some((src_bounds, affected_src_tiles)) =
+            source_bounds_and_tiles(&src_tiles, tile_size, selection)
+        else {
+            return;
+        };
+
+        let dst_tiles = transform_tiles(
+            &src_tiles,
+            src_bounds,
+            params,
+            tile_size,
+            self.width,
+            self.height,
+            selection,
+        );
         let tile_size_i32 = tile_size as i32;
 
         if let Some(layer) = self.layers.get(layer_idx) {
-            let mut tiles = layer.tiles.lock().unwrap();
+            let mut tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(action) = history {
-                let mut affected_tiles = std::collections::HashSet::new();
-
-                for (gx, gy) in src_pixels.keys() {
-                    let tx = gx.div_euclid(tile_size_i32);
-                    let ty = gy.div_euclid(tile_size_i32);
-                    affected_tiles.insert((tx, ty));
-                }
-
-                for (tx, ty) in dst_tiles.keys() {
-                    affected_tiles.insert((*tx, *ty));
-                }
+                let mut affected_tiles = affected_src_tiles.clone();
+                affected_tiles.extend(dst_tiles.keys().copied());
 
                 for (tx, ty) in affected_tiles {
                     let data = if let Some(tile_arc) = tiles.get(&(tx, ty)) {
-                        let guard = tile_arc.lock().unwrap();
+                        let guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                         guard
                             .data
                             .clone()
@@ -910,23 +1037,32 @@ impl Canvas {
                 }
             }
 
-            let mut clear_ops: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
-            for (gx, gy) in src_pixels.keys() {
-                let tx = gx.div_euclid(tile_size_i32);
-                let ty = gy.div_euclid(tile_size_i32);
-                let px = (gx - tx * tile_size_i32) as usize;
-                let py = (gy - ty * tile_size_i32) as usize;
-                clear_ops.entry((tx, ty)).or_default().push((px, py));
-            }
-
-            for ((tx, ty), pixel_coords) in clear_ops {
-                if let Some(tile_arc) = tiles.get(&(tx, ty)) {
-                    let mut guard = tile_arc.lock().unwrap();
+            for ((tx, ty), source_data) in &src_tiles {
+                if !affected_src_tiles.contains(&(*tx, *ty)) {
+                    continue;
+                }
+                if let Some(tile_arc) = tiles.get(&(*tx, *ty)) {
+                    let mut guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(data) = &mut guard.data {
-                        for (px, py) in pixel_coords {
-                            let idx = py * tile_size + px;
-                            data[idx] = Color32::TRANSPARENT;
+                        let base_x = *tx * tile_size_i32;
+                        let base_y = *ty * tile_size_i32;
+                        for py in 0..tile_size {
+                            for px in 0..tile_size {
+                                let idx = py * tile_size + px;
+                                if source_data[idx].a() == 0 {
+                                    continue;
+                                }
+
+                                let gx = base_x + px as i32;
+                                let gy = base_y + py as i32;
+                                if selection
+                                    .is_none_or(|sel| sel.contains_coords(gx as f32, gy as f32))
+                                {
+                                    data[idx] = Color32::TRANSPARENT;
+                                }
+                            }
                         }
+                        guard.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
                     }
                 }
             }
@@ -947,9 +1083,9 @@ impl Canvas {
         let mut found = false;
 
         if let Some(layer) = self.layers.get(layer_idx) {
-            let tiles = layer.tiles.lock().unwrap();
+            let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             for ((tx, ty), tile_arc) in tiles.iter() {
-                let guard = tile_arc.lock().unwrap();
+                let guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(data) = &guard.data {
                     for py in 0..self.tile_size {
                         for px in 0..self.tile_size {
@@ -1007,7 +1143,7 @@ impl Canvas {
         );
 
         let active_layer = &self.layers[active_idx];
-        let active_tiles_map = active_layer.tiles.lock().unwrap();
+        let active_tiles_map = active_layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut tiles_to_process = Vec::new();
         for (&(tx, ty), tile_arc) in active_tiles_map.iter() {
@@ -1015,10 +1151,10 @@ impl Canvas {
         }
         drop(active_tiles_map);
 
-        let mut new_layer_tiles = new_layer.tiles.lock().unwrap();
+        let mut new_layer_tiles = new_layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
 
         for ((tx, ty), tile_arc) in tiles_to_process {
-            let mut tile = tile_arc.lock().unwrap();
+            let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(data) = &mut tile.data {
                 let mut new_tile_data = vec![Color32::TRANSPARENT; self.tile_size * self.tile_size];
                 let mut has_content = false;
@@ -1071,11 +1207,13 @@ impl Canvas {
             // Note: indices shifted after remove, so the layer that was at layer_idx - 1 is still at layer_idx - 1
             let bottom_layer = &mut self.layers[layer_idx - 1];
 
-            let top_tiles = top_layer.tiles.lock().unwrap();
-            let mut bottom_tiles = bottom_layer.tiles.lock().unwrap();
+            let top_tiles = top_layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
+            let mut bottom_tiles = bottom_layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
+            let mut src_with_opacity = Vec::new();
+            let mut blended = Vec::new();
 
             for ((tx, ty), top_tile_arc) in top_tiles.iter() {
-                let top_guard = top_tile_arc.lock().unwrap();
+                let top_guard = top_tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(top_data) = &top_guard.data {
                     // Skip empty top tiles
                     if top_guard.is_empty {
@@ -1090,7 +1228,8 @@ impl Canvas {
                         }))
                     });
 
-                    let mut bottom_guard = bottom_tile_arc.lock().unwrap();
+                    let mut bottom_guard =
+                        bottom_tile_arc.lock().unwrap_or_else(|e| e.into_inner());
 
                     // Initialize bottom data if missing
                     if bottom_guard.data.is_none() {
@@ -1103,20 +1242,20 @@ impl Canvas {
                         let tile_len = bottom_data.len();
 
                         // Apply opacity to source pixels and prepare for batch blend
-                        let mut src_with_opacity = vec![Color32::TRANSPARENT; tile_len];
+                        src_with_opacity.resize(tile_len, Color32::TRANSPARENT);
                         for i in 0..tile_len {
                             src_with_opacity[i] =
                                 apply_opacity_scale(top_data[i], top_layer.opacity);
                         }
 
                         // Create temporary output buffer
-                        let mut blended = vec![Color32::TRANSPARENT; tile_len];
+                        blended.resize(tile_len, Color32::TRANSPARENT);
 
                         // Batch blend using SIMD
                         alpha_over_batch(&src_with_opacity, bottom_data, &mut blended);
 
                         // Copy result back
-                        *bottom_data = blended;
+                        bottom_data.copy_from_slice(&blended);
 
                         // Update is_empty flag
                         bottom_guard.is_empty =
@@ -1149,103 +1288,218 @@ pub fn blend_erase(src: Color32, dst: Color32) -> Color32 {
     )
 }
 
-/// SIMD-optimized alpha blending for 4 pixels at once
+#[derive(Clone)]
+pub struct LinearBrushColor {
+    r: [f32; 256],
+    g: [f32; 256],
+    b: [f32; 256],
+    a: [f32; 256],
+    premul: [Color32; 256],
+    is_black: bool,
+}
+
+impl LinearBrushColor {
+    pub fn new(r: u8, g: u8, b: u8) -> Self {
+        let mut color = Self {
+            r: [0.0; 256],
+            g: [0.0; 256],
+            b: [0.0; 256],
+            a: [0.0; 256],
+            premul: [Color32::TRANSPARENT; 256],
+            is_black: r == 0 && g == 0 && b == 0,
+        };
+
+        for alpha in 0..=255 {
+            let premul = Color32::from_rgba_unmultiplied(r, g, b, alpha as u8);
+            color.r[alpha] = srgb_u8_to_linear(premul.r());
+            color.g[alpha] = srgb_u8_to_linear(premul.g());
+            color.b[alpha] = srgb_u8_to_linear(premul.b());
+            color.a[alpha] = alpha as f32 / 255.0;
+            color.premul[alpha] = premul;
+        }
+
+        color
+    }
+}
+
 #[inline]
-pub fn alpha_over_simd_x4(src: [Color32; 4], dst: [Color32; 4]) -> [Color32; 4] {
-    // Convert 4 source pixels to linear space
-    let s0 = Rgba::from(src[0]);
-    let s1 = Rgba::from(src[1]);
-    let s2 = Rgba::from(src[2]);
-    let s3 = Rgba::from(src[3]);
+pub fn alpha_over_brush(src: &LinearBrushColor, alpha: u8, dst: Color32) -> Color32 {
+    match alpha {
+        0 => return dst,
+        255 => return src.premul[255],
+        _ => {}
+    }
+    if dst.a() == 0 {
+        return src.premul[alpha as usize];
+    }
 
-    // Pack into SIMD vectors (Structure of Arrays layout for better vectorization)
-    let sr = f32x4::new([s0.r(), s1.r(), s2.r(), s3.r()]);
-    let sg = f32x4::new([s0.g(), s1.g(), s2.g(), s3.g()]);
-    let sb = f32x4::new([s0.b(), s1.b(), s2.b(), s3.b()]);
-    let sa = f32x4::new([s0.a(), s1.a(), s2.a(), s3.a()]);
+    let idx = alpha as usize;
+    let src_a = src.a[idx];
+    let inv_alpha = 1.0 - src_a;
 
-    // Convert 4 destination pixels to linear space
-    let d0 = Rgba::from(dst[0]);
-    let d1 = Rgba::from(dst[1]);
-    let d2 = Rgba::from(dst[2]);
-    let d3 = Rgba::from(dst[3]);
+    let dst_r = srgb_u8_to_linear(dst.r()) * inv_alpha;
+    let dst_g = srgb_u8_to_linear(dst.g()) * inv_alpha;
+    let dst_b = srgb_u8_to_linear(dst.b()) * inv_alpha;
 
-    let dr = f32x4::new([d0.r(), d1.r(), d2.r(), d3.r()]);
-    let dg = f32x4::new([d0.g(), d1.g(), d2.g(), d3.g()]);
-    let db = f32x4::new([d0.b(), d1.b(), d2.b(), d3.b()]);
-    let da = f32x4::new([d0.a(), d1.a(), d2.a(), d3.a()]);
+    let (out_r, out_g, out_b) = if src.is_black {
+        (dst_r, dst_g, dst_b)
+    } else {
+        (src.r[idx] + dst_r, src.g[idx] + dst_g, src.b[idx] + dst_b)
+    };
 
-    // Alpha over blend in SIMD: out = src + dst * (1 - src.a)
-    let one = f32x4::splat(1.0);
-    let inv_alpha = one - sa;
+    let out_a = if dst.a() == 255 {
+        255
+    } else {
+        alpha_to_u8(src_a + (dst.a() as f32 / 255.0) * inv_alpha)
+    };
 
-    let out_r = sr + dr * inv_alpha;
-    let out_g = sg + dg * inv_alpha;
-    let out_b = sb + db * inv_alpha;
-    let out_a = sa + da * inv_alpha;
+    Color32::from_rgba_premultiplied(
+        linear_to_srgb_u8(out_r),
+        linear_to_srgb_u8(out_g),
+        linear_to_srgb_u8(out_b),
+        out_a,
+    )
+}
 
-    // Convert back to Color32 (sRGB)
-    let r = out_r.to_array();
-    let g = out_g.to_array();
-    let b = out_b.to_array();
-    let a = out_a.to_array();
+#[inline]
+fn alpha_over_x4(src: [Color32; 4], dst: [Color32; 4]) -> [Color32; 4] {
+    let sr = f32x4::new([
+        srgb_u8_to_linear(src[0].r()),
+        srgb_u8_to_linear(src[1].r()),
+        srgb_u8_to_linear(src[2].r()),
+        srgb_u8_to_linear(src[3].r()),
+    ]);
+    let sg = f32x4::new([
+        srgb_u8_to_linear(src[0].g()),
+        srgb_u8_to_linear(src[1].g()),
+        srgb_u8_to_linear(src[2].g()),
+        srgb_u8_to_linear(src[3].g()),
+    ]);
+    let sb = f32x4::new([
+        srgb_u8_to_linear(src[0].b()),
+        srgb_u8_to_linear(src[1].b()),
+        srgb_u8_to_linear(src[2].b()),
+        srgb_u8_to_linear(src[3].b()),
+    ]);
+    let sa = f32x4::new([
+        src[0].a() as f32 / 255.0,
+        src[1].a() as f32 / 255.0,
+        src[2].a() as f32 / 255.0,
+        src[3].a() as f32 / 255.0,
+    ]);
+    let dr = f32x4::new([
+        srgb_u8_to_linear(dst[0].r()),
+        srgb_u8_to_linear(dst[1].r()),
+        srgb_u8_to_linear(dst[2].r()),
+        srgb_u8_to_linear(dst[3].r()),
+    ]);
+    let dg = f32x4::new([
+        srgb_u8_to_linear(dst[0].g()),
+        srgb_u8_to_linear(dst[1].g()),
+        srgb_u8_to_linear(dst[2].g()),
+        srgb_u8_to_linear(dst[3].g()),
+    ]);
+    let db = f32x4::new([
+        srgb_u8_to_linear(dst[0].b()),
+        srgb_u8_to_linear(dst[1].b()),
+        srgb_u8_to_linear(dst[2].b()),
+        srgb_u8_to_linear(dst[3].b()),
+    ]);
+    let inv_alpha = f32x4::splat(1.0) - sa;
+    let r = (sr + dr * inv_alpha).to_array();
+    let g = (sg + dg * inv_alpha).to_array();
+    let b = (sb + db * inv_alpha).to_array();
+    let da = f32x4::new([
+        dst[0].a() as f32 / 255.0,
+        dst[1].a() as f32 / 255.0,
+        dst[2].a() as f32 / 255.0,
+        dst[3].a() as f32 / 255.0,
+    ]);
+    let a = (sa + da * inv_alpha).to_array();
 
     [
-        rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r[0], g[0], b[0], a[0])),
-        rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r[1], g[1], b[1], a[1])),
-        rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r[2], g[2], b[2], a[2])),
-        rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r[3], g[3], b[3], a[3])),
+        Color32::from_rgba_premultiplied(
+            linear_to_srgb_u8(r[0]),
+            linear_to_srgb_u8(g[0]),
+            linear_to_srgb_u8(b[0]),
+            alpha_to_u8(a[0]),
+        ),
+        Color32::from_rgba_premultiplied(
+            linear_to_srgb_u8(r[1]),
+            linear_to_srgb_u8(g[1]),
+            linear_to_srgb_u8(b[1]),
+            alpha_to_u8(a[1]),
+        ),
+        Color32::from_rgba_premultiplied(
+            linear_to_srgb_u8(r[2]),
+            linear_to_srgb_u8(g[2]),
+            linear_to_srgb_u8(b[2]),
+            alpha_to_u8(a[2]),
+        ),
+        Color32::from_rgba_premultiplied(
+            linear_to_srgb_u8(r[3]),
+            linear_to_srgb_u8(g[3]),
+            linear_to_srgb_u8(b[3]),
+            alpha_to_u8(a[3]),
+        ),
     ]
 }
 
-/// Batch SIMD blend: process entire slices with SIMD acceleration
+/// Batch blend with SIMD arithmetic for the layer-merge path.
 #[inline]
 pub fn alpha_over_batch(src: &[Color32], dst: &[Color32], out: &mut [Color32]) {
     assert_eq!(src.len(), dst.len());
     assert_eq!(src.len(), out.len());
 
-    let len = src.len();
-    let simd_len = len / 4 * 4;
-
-    // Process 4 pixels at a time with SIMD
+    let simd_len = src.len() / 4 * 4;
     let mut i = 0;
     while i < simd_len {
-        let src_chunk = [src[i], src[i + 1], src[i + 2], src[i + 3]];
-        let dst_chunk = [dst[i], dst[i + 1], dst[i + 2], dst[i + 3]];
-
-        let result = alpha_over_simd_x4(src_chunk, dst_chunk);
-
-        out[i] = result[0];
-        out[i + 1] = result[1];
-        out[i + 2] = result[2];
-        out[i + 3] = result[3];
-
+        let blended = alpha_over_x4(
+            [src[i], src[i + 1], src[i + 2], src[i + 3]],
+            [dst[i], dst[i + 1], dst[i + 2], dst[i + 3]],
+        );
+        out[i] = blended[0];
+        out[i + 1] = blended[1];
+        out[i + 2] = blended[2];
+        out[i + 3] = blended[3];
         i += 4;
     }
 
-    // Handle remaining pixels with scalar code
-    for i in simd_len..len {
+    for i in simd_len..src.len() {
         out[i] = alpha_over(src[i], dst[i]);
     }
 }
 
-/// Scalar alpha blending (fallback and for single pixels)
+/// Alpha blend premultiplied sRGBA pixels in linear space using LUTs.
 #[inline]
 pub fn alpha_over(src: Color32, dst: Color32) -> Color32 {
-    // 1. Convert sRGB u8 to Linear f32
-    let src_l = Rgba::from(src);
-    let dst_l = Rgba::from(dst);
+    match src.a() {
+        0 => return dst,
+        255 => return src,
+        _ => {}
+    }
+    if dst.a() == 0 {
+        return src;
+    }
 
-    // 2. Perform the blend in Linear space
-    let inv_alpha = 1.0 - src_l.a();
+    let src_a = src.a() as f32 / 255.0;
+    let inv_alpha = 1.0 - src_a;
 
-    let out_r = src_l.r() + dst_l.r() * inv_alpha;
-    let out_g = src_l.g() + dst_l.g() * inv_alpha;
-    let out_b = src_l.b() + dst_l.b() * inv_alpha;
-    let out_a = src_l.a() + dst_l.a() * inv_alpha;
+    let out_r = srgb_u8_to_linear(src.r()) + srgb_u8_to_linear(dst.r()) * inv_alpha;
+    let out_g = srgb_u8_to_linear(src.g()) + srgb_u8_to_linear(dst.g()) * inv_alpha;
+    let out_b = srgb_u8_to_linear(src.b()) + srgb_u8_to_linear(dst.b()) * inv_alpha;
+    let out_a = if dst.a() == 255 {
+        255
+    } else {
+        alpha_to_u8(src_a + (dst.a() as f32 / 255.0) * inv_alpha)
+    };
 
-    // 3. Construct the result and convert back to sRGB u8 - Fast LUT-based
-    rgba_to_color32_fast(Rgba::from_rgba_premultiplied(out_r, out_g, out_b, out_a))
+    Color32::from_rgba_premultiplied(
+        linear_to_srgb_u8(out_r),
+        linear_to_srgb_u8(out_g),
+        linear_to_srgb_u8(out_b),
+        out_a,
+    )
 }
 
 #[inline]
@@ -1271,4 +1525,104 @@ fn premultiply(color: Color32) -> Color32 {
         a as f32 / 255.0,
     );
     Color32::from(linear)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reference_alpha_over(src: Color32, dst: Color32) -> Color32 {
+        let src_l = Rgba::from(src);
+        let dst_l = Rgba::from(dst);
+        let inv_alpha = 1.0 - src_l.a();
+
+        rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
+            src_l.r() + dst_l.r() * inv_alpha,
+            src_l.g() + dst_l.g() * inv_alpha,
+            src_l.b() + dst_l.b() * inv_alpha,
+            src_l.a() + dst_l.a() * inv_alpha,
+        ))
+    }
+
+    fn assert_color_close(actual: Color32, expected: Color32) {
+        for (actual, expected) in actual.to_array().into_iter().zip(expected.to_array()) {
+            assert!((actual as i16 - expected as i16).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn lut_alpha_over_matches_rgba_reference() {
+        let cases = [
+            (
+                Color32::from_rgba_unmultiplied(255, 128, 64, 80),
+                Color32::from_rgba_unmultiplied(64, 100, 255, 180),
+            ),
+            (
+                Color32::from_rgba_unmultiplied(20, 220, 90, 170),
+                Color32::from_rgba_unmultiplied(240, 30, 160, 90),
+            ),
+            (
+                Color32::from_rgba_unmultiplied(0, 0, 0, 0),
+                Color32::from_rgba_unmultiplied(90, 80, 70, 120),
+            ),
+        ];
+
+        for (src, dst) in cases {
+            assert_color_close(alpha_over(src, dst), reference_alpha_over(src, dst));
+        }
+    }
+
+    #[test]
+    fn brush_alpha_over_matches_regular_alpha_over() {
+        let cases = [
+            (
+                LinearBrushColor::new(240, 120, 30),
+                (240, 120, 30),
+                Color32::from_rgba_unmultiplied(40, 80, 220, 180),
+            ),
+            (
+                LinearBrushColor::new(0, 0, 0),
+                (0, 0, 0),
+                Color32::from_rgba_unmultiplied(240, 240, 240, 255),
+            ),
+        ];
+
+        for (brush, (r, g, b), dst) in cases {
+            for alpha in [0, 1, 80, 170, 254, 255] {
+                let src = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+                assert_color_close(alpha_over_brush(&brush, alpha, dst), alpha_over(src, dst));
+            }
+        }
+    }
+
+    #[test]
+    fn zero_sized_region_clears_output() {
+        let canvas = Canvas::new(8, 8, Color32::WHITE, 4);
+        let mut image = ColorImage::new([2, 2], Color32::BLACK);
+
+        canvas.write_region_to_color_image(0, 0, 0, 8, &mut image, 1);
+
+        assert_eq!(image.size, [0, 0]);
+        assert!(image.pixels.is_empty());
+    }
+
+    #[test]
+    fn transform_output_is_clipped_to_canvas() {
+        let mut canvas = Canvas::new(8, 8, Color32::WHITE, 4);
+        let mut data = vec![Color32::TRANSPARENT; 16];
+        data[0] = Color32::BLACK;
+        canvas.set_layer_tile_data(1, 0, 0, data);
+
+        canvas.apply_transform(
+            TransformParams::new(Vec2::new(-20.0, -20.0), 0.0, Vec2::splat(1.0), Vec2::ZERO),
+            None,
+            None,
+        );
+
+        let tiles = canvas.layers[1]
+            .tiles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(tiles.keys().all(|(tx, ty)| *tx >= 0 && *ty >= 0));
+    }
 }

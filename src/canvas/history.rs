@@ -98,6 +98,19 @@ impl History {
         let mut affected = Vec::new();
         for snapshot in &mut action.tiles {
             let tile_size = canvas.tile_size();
+            if snapshot.tx < 0
+                || snapshot.ty < 0
+                || snapshot.x0 + snapshot.width > tile_size
+                || snapshot.y0 + snapshot.height > tile_size
+                || snapshot.data.len() != snapshot.width * snapshot.height
+            {
+                log::error!(
+                    "Skipping invalid undo snapshot at tile ({}, {})",
+                    snapshot.tx,
+                    snapshot.ty
+                );
+                continue;
+            }
             canvas.ensure_layer_tile_exists(
                 snapshot.layer_idx,
                 snapshot.tx as usize,
@@ -108,7 +121,7 @@ impl History {
                 snapshot.tx as usize,
                 snapshot.ty as usize,
             ) {
-                let mut tile = tile_arc.lock().unwrap();
+                let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 // Ensure tile data exists
                 if tile.data.is_none() {
                     tile.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
@@ -147,5 +160,36 @@ impl History {
 impl Default for History {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tools::Tool;
+    use crate::selection::SelectionManager;
+
+    #[test]
+    fn invalid_snapshot_is_ignored() {
+        let canvas = Canvas::new(8, 8, Color32::WHITE, 4);
+        let mut history = History::new();
+        history.push_action(UndoAction {
+            tiles: vec![TileSnapshot {
+                tx: 0,
+                ty: 0,
+                layer_idx: 1,
+                x0: 3,
+                y0: 3,
+                width: 4,
+                height: 4,
+                data: vec![Color32::BLACK; 16],
+            }],
+            selection: None,
+            transform: None,
+        });
+
+        let mut selection = SelectionManager::new();
+        let mut tool = Tool::Brush;
+        assert!(history.undo(&canvas, &mut selection, &mut tool).is_empty());
     }
 }

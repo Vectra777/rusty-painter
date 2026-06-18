@@ -1,5 +1,6 @@
 use crate::{
     PainterApp,
+    app::state::validate_canvas_size,
     utils::exporter::{ExportFormat, save_color_image},
 };
 use eframe::egui;
@@ -72,8 +73,14 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     let target = settings.output_path();
                     let format = settings.format;
 
-                    // Flatten on the UI thread, then save on a worker thread to avoid blocking.
                     let (w, h) = (app.canvas.width(), app.canvas.height());
+                    if let Err(msg) = validate_canvas_size(w, h) {
+                        app.export_state.message = Some(format!("Export blocked: {msg}"));
+                        return;
+                    }
+
+                    // Flatten on the UI thread, then save on a worker thread.
+                    // The shared canvas is not cloned across threads; size limits keep this bounded.
                     let mut img = ColorImage::new([w, h], egui::Color32::TRANSPARENT);
                     app.canvas
                         .write_region_to_color_image(0, 0, w, h, &mut img, 1);

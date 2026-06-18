@@ -9,9 +9,7 @@ mod ui;
 mod utils;
 
 pub use app::PainterApp;
-pub use app::state::{
-    BackgroundChoice, CanvasUnit, ColorDepth, ColorModel, NewCanvasSettings, Orientation,
-};
+pub use app::state::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation};
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
