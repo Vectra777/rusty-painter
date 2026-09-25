@@ -17,8 +17,14 @@ pub use app::state::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
+    let renderer = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        eframe::Renderer::Wgpu
+    } else {
+        eframe::Renderer::Glow
+    };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
+        renderer,
         ..Default::default()
     };
     eframe::run_native(
