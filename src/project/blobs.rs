@@ -8,17 +8,39 @@ pub(super) struct StoredBlob {
     pub offset: u64,
     pub len: u64,
     pub raw_len: u64,
+    #[serde(default = "default_compressed")]
+    pub compressed: bool,
+}
+
+fn default_compressed() -> bool {
+    true
 }
 
 pub(super) fn push_blob(blobs: &mut Vec<u8>, raw: &[u8]) -> Result<StoredBlob, String> {
-    let compressed = zstd::stream::encode_all(Cursor::new(raw), ZSTD_LEVEL)
-        .map_err(|err| format!("Compression failed: {err}"))?;
+    push_blob_impl(blobs, raw, true)
+}
+
+/// Like [`push_blob`], but stores `raw` uncompressed. Use for payloads that are
+/// already compressed (e.g. PNG-encoded previews), where a second zstd pass
+/// only burns CPU for no size benefit.
+pub(super) fn push_blob_raw(blobs: &mut Vec<u8>, raw: &[u8]) -> Result<StoredBlob, String> {
+    push_blob_impl(blobs, raw, false)
+}
+
+fn push_blob_impl(blobs: &mut Vec<u8>, raw: &[u8], compress: bool) -> Result<StoredBlob, String> {
+    let payload = if compress {
+        zstd::stream::encode_all(Cursor::new(raw), ZSTD_LEVEL)
+            .map_err(|err| format!("Compression failed: {err}"))?
+    } else {
+        raw.to_vec()
+    };
     let offset = blobs.len() as u64;
-    blobs.extend_from_slice(&compressed);
+    blobs.extend_from_slice(&payload);
     Ok(StoredBlob {
         offset,
-        len: compressed.len() as u64,
+        len: payload.len() as u64,
         raw_len: raw.len() as u64,
+        compressed: compress,
     })
 }
 
@@ -31,8 +53,15 @@ pub(super) fn read_blob(blobs: &[u8], blob: &StoredBlob) -> Result<Vec<u8>, Stri
     if end > blobs.len() {
         return Err("Project blob is out of range".to_string());
     }
-    let raw = zstd::stream::decode_all(Cursor::new(&blobs[start..end]))
-        .map_err(|err| format!("Decompression failed: {err}"))?;
+    let raw_len = usize::try_from(blob.raw_len).map_err(|_| "Blob raw length is too large")?;
+    let raw = if blob.compressed {
+        // Bounded by the stored raw_len so a corrupt/malicious blob claiming a huge
+        // decompressed size errors out instead of exhausting memory.
+        zstd::bulk::decompress(&blobs[start..end], raw_len)
+            .map_err(|err| format!("Decompression failed: {err}"))?
+    } else {
+        blobs[start..end].to_vec()
+    };
     if raw.len() as u64 != blob.raw_len {
         return Err("Decompressed blob size mismatch".to_string());
     }

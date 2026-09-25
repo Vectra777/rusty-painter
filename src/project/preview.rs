@@ -3,7 +3,7 @@ use eframe::egui::{Color32, ColorImage};
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use serde::{Deserialize, Serialize};
 
-use super::blobs::{StoredBlob, push_blob};
+use super::blobs::{StoredBlob, push_blob_raw};
 
 const PREVIEW_MAX_EDGE: usize = 256;
 
@@ -42,6 +42,6 @@ pub(super) fn preview_png_blob(
     Ok(Some(StoredPreview {
         width: image.size[0],
         height: image.size[1],
-        blob: push_blob(blobs, &png)?,
+        blob: push_blob_raw(blobs, &png)?,
     }))
 }

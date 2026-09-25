@@ -39,7 +39,7 @@ impl From<&SelectionShape> for StoredSelectionShape {
                 center: StoredVec2::from(*center),
                 radius: *radius,
             },
-            SelectionShape::Lasso { points } => Self::Lasso {
+            SelectionShape::Lasso { points, .. } => Self::Lasso {
                 points: points.iter().copied().map(StoredVec2::from).collect(),
             },
         }
@@ -57,9 +57,9 @@ impl StoredSelectionShape {
                 center: center.into(),
                 radius,
             },
-            Self::Lasso { points } => SelectionShape::Lasso {
-                points: points.into_iter().map(Into::into).collect(),
-            },
+            Self::Lasso { points } => {
+                crate::selection::new_lasso_shape(points.into_iter().map(Into::into).collect())
+            }
         }
     }
 }

@@ -13,7 +13,36 @@ pub enum SelectionType {
 pub enum SelectionShape {
     Rectangle { start: Vec2, end: Vec2 },
     Circle { center: Vec2, radius: f32 },
-    Lasso { points: Vec<Vec2> },
+    Lasso {
+        points: Vec<Vec2>,
+        /// Axis-aligned bounding box of `points`, kept up to date on every mutation
+        /// so `contains_coords` can cheaply reject points outside the lasso before
+        /// paying for the full ray-cast polygon test (a hot path during brush
+        /// stamping, which runs across rayon worker threads).
+        bbox_min: Vec2,
+        bbox_max: Vec2,
+    },
+}
+
+pub(crate) fn new_lasso_shape(points: Vec<Vec2>) -> SelectionShape {
+    let (bbox_min, bbox_max) = compute_lasso_bbox(&points);
+    SelectionShape::Lasso {
+        points,
+        bbox_min,
+        bbox_max,
+    }
+}
+
+fn compute_lasso_bbox(points: &[Vec2]) -> (Vec2, Vec2) {
+    let mut min = Vec2::new(f32::MAX, f32::MAX);
+    let mut max = Vec2::new(f32::MIN, f32::MIN);
+    for p in points {
+        min.x = min.x.min(p.x);
+        min.y = min.y.min(p.y);
+        max.x = max.x.max(p.x);
+        max.y = max.y.max(p.y);
+    }
+    (min, max)
 }
 
 pub struct SelectionManager {
@@ -53,7 +82,7 @@ impl SelectionManager {
                 });
             }
             SelectionType::Lasso => {
-                self.current_shape = Some(SelectionShape::Lasso { points: vec![pos] });
+                self.current_shape = Some(new_lasso_shape(vec![pos]));
             }
         }
     }
@@ -70,15 +99,26 @@ impl SelectionManager {
                 SelectionShape::Circle { center, radius } => {
                     *radius = (*center - pos).length();
                 }
-                SelectionShape::Lasso { points } => {
+                SelectionShape::Lasso {
+                    points,
+                    bbox_min,
+                    bbox_max,
+                } => {
                     // Add point if it's far enough from the last one to avoid too many points
-                    if let Some(last) = points.last() {
-                        if (*last - pos).length_sq() > 4.0 {
-                            // 2.0^2 = 4.0
-                            points.push(pos);
-                        }
-                    } else {
+                    let should_push = points
+                        .last()
+                        .is_none_or(|last| (*last - pos).length_sq() > 4.0); // 2.0^2 = 4.0
+                    if should_push {
                         points.push(pos);
+                        if points.len() == 1 {
+                            *bbox_min = pos;
+                            *bbox_max = pos;
+                        } else {
+                            bbox_min.x = bbox_min.x.min(pos.x);
+                            bbox_min.y = bbox_min.y.min(pos.y);
+                            bbox_max.x = bbox_max.x.max(pos.x);
+                            bbox_max.y = bbox_max.y.max(pos.y);
+                        }
                     }
                 }
             }
@@ -115,8 +155,15 @@ impl SelectionManager {
                     let dy = y - center.y;
                     dx * dx + dy * dy <= radius * radius
                 }
-                SelectionShape::Lasso { points } => {
+                SelectionShape::Lasso {
+                    points,
+                    bbox_min,
+                    bbox_max,
+                } => {
                     if points.len() < 3 {
+                        return false;
+                    }
+                    if x < bbox_min.x || x > bbox_max.x || y < bbox_min.y || y > bbox_max.y {
                         return false;
                     }
                     let mut inside = false;
@@ -163,23 +210,17 @@ impl SelectionManager {
                         eframe::egui::vec2(*radius * 2.0, *radius * 2.0),
                     ))
                 }
-                SelectionShape::Lasso { points } => {
+                SelectionShape::Lasso {
+                    points,
+                    bbox_min,
+                    bbox_max,
+                } => {
                     if points.is_empty() {
                         return None;
                     }
-                    let mut min_x = f32::MAX;
-                    let mut min_y = f32::MAX;
-                    let mut max_x = f32::MIN;
-                    let mut max_y = f32::MIN;
-                    for p in points {
-                        min_x = min_x.min(p.x);
-                        min_y = min_y.min(p.y);
-                        max_x = max_x.max(p.x);
-                        max_y = max_y.max(p.y);
-                    }
                     Some(eframe::egui::Rect::from_min_max(
-                        eframe::egui::pos2(min_x, min_y),
-                        eframe::egui::pos2(max_x, max_y),
+                        eframe::egui::pos2(bbox_min.x, bbox_min.y),
+                        eframe::egui::pos2(bbox_max.x, bbox_max.y),
                     ))
                 }
             }
@@ -238,8 +279,8 @@ impl SelectionManager {
                         Pos2::new(rect.min.x, rect.max.y),
                         rect.min,
                     ];
-                    painter.add(Shape::line(points.clone(), stroke_black));
                     painter.add(Shape::dashed_line(&points, stroke_white, dash_len, gap_len));
+                    painter.add(Shape::line(points, stroke_black));
                 }
                 SelectionShape::Circle { center, radius } => {
                     let center_screen = to_screen(*center);
@@ -254,26 +295,25 @@ impl SelectionManager {
                             center_screen + eframe::egui::Vec2::new(cos, sin) * radius_screen,
                         );
                     }
-                    painter.add(Shape::line(points.clone(), stroke_black));
                     painter.add(Shape::dashed_line(&points, stroke_white, dash_len, gap_len));
+                    painter.add(Shape::line(points, stroke_black));
                 }
-                SelectionShape::Lasso { points } => {
+                SelectionShape::Lasso { points, .. } => {
                     if points.len() < 2 {
                         return;
                     }
-                    let screen_points: Vec<Pos2> = points.iter().map(|p| to_screen(*p)).collect();
-
-                    let mut outline_points = screen_points.clone();
-                    if let Some(first) = screen_points.first() {
-                        outline_points.push(*first);
+                    let mut outline_points: Vec<Pos2> =
+                        points.iter().map(|p| to_screen(*p)).collect();
+                    if let Some(&first) = outline_points.first() {
+                        outline_points.push(first);
                     }
-                    painter.add(Shape::line(outline_points.clone(), stroke_black));
                     painter.add(Shape::dashed_line(
                         &outline_points,
                         stroke_white,
                         dash_len,
                         gap_len,
                     ));
+                    painter.add(Shape::line(outline_points, stroke_black));
                 }
             }
         }
@@ -313,7 +353,7 @@ impl SelectionManager {
                             transform_point(p2),
                             transform_point(p3),
                         ];
-                        *shape = SelectionShape::Lasso { points };
+                        *shape = new_lasso_shape(points);
                     }
                     SelectionShape::Circle {
                         center: c,
@@ -328,12 +368,17 @@ impl SelectionManager {
                             let p = Vec2::new(c.x + cos * *r, c.y + sin * *r);
                             points.push(transform_point(p));
                         }
-                        *shape = SelectionShape::Lasso { points };
+                        *shape = new_lasso_shape(points);
                     }
-                    SelectionShape::Lasso { points } => {
-                        for p in points {
+                    SelectionShape::Lasso {
+                        points,
+                        bbox_min,
+                        bbox_max,
+                    } => {
+                        for p in points.iter_mut() {
                             *p = transform_point(*p);
                         }
+                        (*bbox_min, *bbox_max) = compute_lasso_bbox(points);
                     }
                 }
             } else {
@@ -350,10 +395,15 @@ impl SelectionManager {
                         *c = transform_point(*c);
                         *r *= scale.x; // Uniform scale assumed
                     }
-                    SelectionShape::Lasso { points } => {
-                        for p in points {
+                    SelectionShape::Lasso {
+                        points,
+                        bbox_min,
+                        bbox_max,
+                    } => {
+                        for p in points.iter_mut() {
                             *p = transform_point(*p);
                         }
+                        (*bbox_min, *bbox_max) = compute_lasso_bbox(points);
                     }
                 }
             }
