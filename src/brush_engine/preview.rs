@@ -21,6 +21,7 @@ pub fn stroke_preview_image(
         tiles: Vec::new(),
         selection: None,
         transform: None,
+        layer_action: None,
     };
     let mut modified = HashSet::new();
 

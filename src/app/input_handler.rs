@@ -238,6 +238,7 @@ fn handle_primary_release(app: &mut PainterApp) {
                         tiles: Vec::new(),
                         selection: Some(app.selection_manager.current_shape.clone()),
                         transform: Some(captured),
+                        layer_action: None,
                     };
 
                     let has_selection = app.selection_manager.has_selection();

@@ -694,6 +694,7 @@ mod tests {
                 tiles: Vec::new(),
                 selection: None,
                 transform: None,
+                layer_action: None,
             };
             let mut modified_tiles = HashSet::new();
             for &center in centers {

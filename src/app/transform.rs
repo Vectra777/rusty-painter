@@ -9,6 +9,7 @@ pub(crate) fn apply_simple_transform(app: &mut PainterApp, offset: Vec2) {
         tiles: Vec::new(),
         selection: Some(app.selection_manager.current_shape.clone()),
         transform: None,
+        layer_action: None,
     };
 
     let has_selection = app.selection_manager.has_selection();
@@ -60,7 +61,13 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
             None
         };
 
-        app.canvas.merge_layer_down(idx);
+        let mut action = UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: None,
+        };
+        app.canvas.merge_layer_down(idx, Some(&mut action));
         app.layer_state.floating_layer_idx = None;
         app.layer_state.floating_buffer = None;
         app.selection_manager.clear_selection();
@@ -70,6 +77,13 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
         }
 
         app.remove_layer_state(idx);
+
+        if action.layer_action.is_some() {
+            let active = app.canvas.active_layer_idx;
+            if let Some(hist) = app.layer_state.histories.get_mut(active) {
+                hist.push_action(action);
+            }
+        }
 
         if let Some(b1) = float_bounds {
             if let Some(b2) = base_bounds {

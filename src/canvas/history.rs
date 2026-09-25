@@ -20,12 +20,54 @@ pub struct TileSnapshot {
     pub data: Vec<Color32>,
 }
 
+/// Plain-data layer metadata (no tile content), enough to reconstruct an
+/// empty layer shell for undo/redo of a layer add/remove. Pixel content is
+/// restored separately through this action's `tiles` snapshots, which are
+/// resolved by the same stable `LayerId`.
+#[derive(Clone)]
+pub struct LayerMeta {
+    pub name: String,
+    pub visible: bool,
+    pub opacity: f32,
+    pub locked: bool,
+}
+
+/// A structural change to the layer list (as opposed to a pixel edit),
+/// bundled into an `UndoAction` alongside whatever tile snapshots are needed
+/// to restore its content.
+#[derive(Clone)]
+pub enum LayerHistoryOp {
+    Added {
+        index: usize,
+        id: LayerId,
+        active_before: usize,
+        active_after: usize,
+    },
+    Removed {
+        index: usize,
+        id: LayerId,
+        meta: LayerMeta,
+        active_before: usize,
+        active_after: usize,
+    },
+    Moved {
+        id: LayerId,
+        from: usize,
+        to: usize,
+        active_before: usize,
+        active_after: usize,
+    },
+}
+
 /// Collection of tile snapshots captured during a single user operation.
 #[derive(Clone)]
 pub struct UndoAction {
     pub tiles: Vec<TileSnapshot>,
     pub selection: Option<Option<SelectionShape>>,
     pub transform: Option<TransformInfo>,
+    /// Set when this action also adds, removes or moves a layer itself
+    /// (not just its pixel content).
+    pub layer_action: Option<LayerHistoryOp>,
 }
 
 /// Stack-based undo/redo manager that swaps tile buffers in place.
@@ -61,35 +103,200 @@ impl History {
         }
     }
 
-    /// Undo the latest action, returning tile coordinates that changed.
+    /// Undo the latest action, returning tile coordinates that changed and
+    /// (if this action also touched the layer list itself) the structural
+    /// change that was applied — the caller must mirror it onto its own
+    /// per-layer side-car state (undo-history vec, render caches, UI
+    /// colors), which `History` has no access to from here.
     pub fn undo(
         &mut self,
-        canvas: &Canvas,
+        canvas: &mut Canvas,
         selection_manager: &mut crate::selection::SelectionManager,
         active_tool: &mut crate::app::tools::Tool,
-    ) -> Vec<(i32, i32)> {
+    ) -> (Vec<(i32, i32)>, Option<LayerHistoryOp>) {
         if let Some(mut action) = self.undo_stack.pop() {
+            Self::prepare_for_undo(canvas, action.layer_action.as_ref());
             let tiles = self.swap_state(canvas, selection_manager, active_tool, &mut action);
+            let layer_action = Self::finalize_after_undo(canvas, action.layer_action.as_ref());
             self.redo_stack.push(action);
-            tiles
+            (tiles, layer_action)
         } else {
-            Vec::new()
+            (Vec::new(), None)
         }
     }
 
-    /// Redo the previously undone action, returning tile coordinates that changed.
+    /// Redo the previously undone action. See `undo` for the return shape.
     pub fn redo(
         &mut self,
-        canvas: &Canvas,
+        canvas: &mut Canvas,
         selection_manager: &mut crate::selection::SelectionManager,
         active_tool: &mut crate::app::tools::Tool,
-    ) -> Vec<(i32, i32)> {
+    ) -> (Vec<(i32, i32)>, Option<LayerHistoryOp>) {
         if let Some(mut action) = self.redo_stack.pop() {
+            Self::prepare_for_redo(canvas, action.layer_action.as_ref());
             let tiles = self.swap_state(canvas, selection_manager, active_tool, &mut action);
+            let layer_action = Self::finalize_after_redo(canvas, action.layer_action.as_ref());
             self.undo_stack.push(action);
-            tiles
+            (tiles, layer_action)
         } else {
-            Vec::new()
+            (Vec::new(), None)
+        }
+    }
+
+    /// Structural change applied BEFORE the tile-snapshot swap, so the swap
+    /// has a layer to write pixel data into (undoing a removal needs the
+    /// layer shell to exist again before its tiles can be restored).
+    fn prepare_for_undo(canvas: &mut Canvas, layer_action: Option<&LayerHistoryOp>) {
+        if let Some(LayerHistoryOp::Removed {
+            index, id, meta, ..
+        }) = layer_action
+        {
+            canvas.insert_layer_with_meta(*index, *id, meta);
+        }
+    }
+
+    /// Structural change applied AFTER the tile-snapshot swap. Returns the
+    /// action to expose to the caller, with `index` corrected to the
+    /// position actually touched in `canvas.layers` — the recorded `index`
+    /// can be stale by the time this specific action reaches the top of the
+    /// stack (other layers may have been added/removed/reordered elsewhere
+    /// in the meantime), and the caller uses this `index` to mirror the
+    /// same structural change onto its own per-layer side-car vecs, so it
+    /// must match the position actually mutated here, not the one recorded
+    /// at the time this action was originally pushed.
+    fn finalize_after_undo(
+        canvas: &mut Canvas,
+        layer_action: Option<&LayerHistoryOp>,
+    ) -> Option<LayerHistoryOp> {
+        match layer_action {
+            Some(LayerHistoryOp::Added {
+                id,
+                index,
+                active_before,
+                active_after,
+            }) => {
+                // The layer being un-added is one we ourselves added and
+                // never removed since, so it's guaranteed to still exist —
+                // resolve its actual current position rather than trusting
+                // the possibly-stale recorded one.
+                let removed_index = canvas.layer_index_of(*id);
+                if let Some(current) = removed_index {
+                    canvas.layers.remove(current);
+                }
+                canvas.active_layer_idx = (*active_before).min(canvas.layers.len().saturating_sub(1));
+                Some(LayerHistoryOp::Added {
+                    id: *id,
+                    index: removed_index.unwrap_or(*index),
+                    active_before: *active_before,
+                    active_after: *active_after,
+                })
+            }
+            Some(op @ LayerHistoryOp::Removed { active_before, .. }) => {
+                canvas.active_layer_idx = (*active_before).min(canvas.layers.len().saturating_sub(1));
+                Some(op.clone())
+            }
+            Some(LayerHistoryOp::Moved {
+                id,
+                from,
+                to,
+                active_before,
+                active_after,
+            }) => {
+                if let Some(current) = canvas.layer_index_of(*id) {
+                    let layer = canvas.layers.remove(current);
+                    canvas.layers.insert((*from).min(canvas.layers.len()), layer);
+                }
+                canvas.active_layer_idx = (*active_before).min(canvas.layers.len().saturating_sub(1));
+                Some(LayerHistoryOp::Moved {
+                    id: *id,
+                    from: *from,
+                    to: *to,
+                    active_before: *active_before,
+                    active_after: *active_after,
+                })
+            }
+            None => None,
+        }
+    }
+
+    fn prepare_for_redo(canvas: &mut Canvas, layer_action: Option<&LayerHistoryOp>) {
+        if let Some(LayerHistoryOp::Added { index, id, .. }) = layer_action {
+            // Redoing an add: recreate the layer shell with the same
+            // defaults `Canvas::add_layer` itself uses. Any content the
+            // layer had is restored separately, in order, by whatever
+            // pixel-edit redo entries sit above this one in the SAME
+            // per-layer stack — reaching this entry at all requires the
+            // whole stack to have been undone down to here first, so the
+            // layer is guaranteed to have been empty at this point in its
+            // history (opacity/visibility toggles aren't undo-tracked
+            // either, matching the rest of this app's undo scope).
+            let meta = LayerMeta {
+                name: format!("Layer {}", index + 1),
+                visible: true,
+                opacity: 1.0,
+                locked: false,
+            };
+            canvas.insert_layer_with_meta(*index, *id, &meta);
+        }
+    }
+
+    /// See `finalize_after_undo` for why this returns a (possibly
+    /// index-corrected) action rather than mutating in place.
+    fn finalize_after_redo(
+        canvas: &mut Canvas,
+        layer_action: Option<&LayerHistoryOp>,
+    ) -> Option<LayerHistoryOp> {
+        match layer_action {
+            Some(LayerHistoryOp::Removed {
+                id,
+                index,
+                meta,
+                active_before,
+                active_after,
+            }) => {
+                // Re-applying a removal: the layer was re-inserted by this
+                // same redo (via prepare_for_redo would be for Added, not
+                // here — Removed's re-insertion happened on the matching
+                // undo, so this layer has existed continuously since; still
+                // resolve fresh rather than trust the original index).
+                let removed_index = canvas.layer_index_of(*id);
+                if let Some(current) = removed_index {
+                    canvas.layers.remove(current);
+                }
+                canvas.active_layer_idx = (*active_after).min(canvas.layers.len().saturating_sub(1));
+                Some(LayerHistoryOp::Removed {
+                    id: *id,
+                    index: removed_index.unwrap_or(*index),
+                    meta: meta.clone(),
+                    active_before: *active_before,
+                    active_after: *active_after,
+                })
+            }
+            Some(op @ LayerHistoryOp::Added { active_after, .. }) => {
+                canvas.active_layer_idx = (*active_after).min(canvas.layers.len().saturating_sub(1));
+                Some(op.clone())
+            }
+            Some(LayerHistoryOp::Moved {
+                id,
+                from,
+                to,
+                active_before,
+                active_after,
+            }) => {
+                if let Some(current) = canvas.layer_index_of(*id) {
+                    let layer = canvas.layers.remove(current);
+                    canvas.layers.insert((*to).min(canvas.layers.len()), layer);
+                }
+                canvas.active_layer_idx = (*active_after).min(canvas.layers.len().saturating_sub(1));
+                Some(LayerHistoryOp::Moved {
+                    id: *id,
+                    from: *from,
+                    to: *to,
+                    active_before: *active_before,
+                    active_after: *active_after,
+                })
+            }
+            None => None,
         }
     }
 
@@ -192,7 +399,7 @@ mod tests {
 
     #[test]
     fn invalid_snapshot_is_ignored() {
-        let canvas = Canvas::new(8, 8, Color32::WHITE, 4);
+        let mut canvas = Canvas::new(8, 8, Color32::WHITE, 4);
         let mut history = History::new();
         history.push_action(UndoAction {
             tiles: vec![TileSnapshot {
@@ -207,11 +414,68 @@ mod tests {
             }],
             selection: None,
             transform: None,
+            layer_action: None,
         });
 
         let mut selection = SelectionManager::new();
         let mut tool = Tool::Brush;
-        assert!(history.undo(&canvas, &mut selection, &mut tool).is_empty());
+        let (affected, layer_action) = history.undo(&mut canvas, &mut selection, &mut tool);
+        assert!(affected.is_empty());
+        assert!(layer_action.is_none());
+    }
+
+    /// Regression test: a layer's recorded `Added { index, .. }` can go
+    /// stale if a DIFFERENT, earlier layer is removed afterward (shifting
+    /// this layer's actual position down without touching this layer's own
+    /// history stack at all). Undoing the Added action must still remove
+    /// the correct layer (resolved by LayerId), not whatever now happens to
+    /// sit at the originally-recorded index.
+    #[test]
+    fn undo_added_resolves_current_position_after_intervening_removal() {
+        let tile_size = 4;
+        let mut canvas = Canvas::new(tile_size, tile_size, Color32::WHITE, tile_size);
+        // canvas: [Background(id0), Layer1(id1)]
+
+        let layer2_id = canvas.add_layer();
+        // canvas: [Background, Layer1, Layer2] — Layer2 added at index 2.
+        let mut layer2_history = History::new();
+        layer2_history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Added {
+                index: 2,
+                id: layer2_id,
+                active_before: 1,
+                active_after: 2,
+            }),
+        });
+
+        // Some other layer (Layer1, index 1) gets removed afterward,
+        // shifting Layer2 down to index 1 — without touching Layer2's own
+        // history stack at all.
+        canvas.layers.remove(1);
+        canvas.active_layer_idx = 1;
+        assert_eq!(canvas.layer_index_of(layer2_id), Some(1));
+        assert_eq!(canvas.layers.len(), 2);
+
+        let mut selection = SelectionManager::new();
+        let mut tool = Tool::Brush;
+        let (_, layer_action) = layer2_history.undo(&mut canvas, &mut selection, &mut tool);
+
+        // Layer2 must be gone — removed by resolving its current position
+        // (1), not the stale recorded index (2), which would be out of
+        // bounds for the now-2-layer canvas and silently no-op instead.
+        assert_eq!(canvas.layer_index_of(layer2_id), None);
+        assert_eq!(canvas.layers.len(), 1);
+
+        match layer_action {
+            Some(LayerHistoryOp::Added { index, id, .. }) => {
+                assert_eq!(id, layer2_id);
+                assert_eq!(index, 1, "exposed index must be the corrected/current position");
+            }
+            _ => panic!("expected a corrected Added layer_action"),
+        }
     }
 
     /// Regression test for the layer-idx-staleness bug: an undo snapshot
@@ -221,7 +485,7 @@ mod tests {
     #[test]
     fn undo_targets_correct_layer_after_reorder() {
         let tile_size = 4;
-        let canvas = Canvas::new(tile_size, tile_size, Color32::WHITE, tile_size);
+        let mut canvas = Canvas::new(tile_size, tile_size, Color32::WHITE, tile_size);
         // Canvas::new gives LayerId(0) = "Background" at position 0,
         // LayerId(1) = "Layer 1" at position 1.
         let original = vec![Color32::TRANSPARENT; tile_size * tile_size];
@@ -243,23 +507,218 @@ mod tests {
             }],
             selection: None,
             transform: None,
+            layer_action: None,
         });
         canvas.set_layer_tile_data(1, 0, 0, painted.clone());
 
         // Reorder: Layer 1 (LayerId(1)) moves from position 1 to position 0.
-        let mut canvas = canvas;
         canvas.layers.swap(0, 1);
         assert_eq!(canvas.layer_index_of(LayerId(1)), Some(0));
         assert_eq!(canvas.layer_index_of(LayerId(0)), Some(1));
 
         let mut selection = SelectionManager::new();
         let mut tool = Tool::Brush;
-        let affected = history.undo(&canvas, &mut selection, &mut tool);
+        let (affected, layer_action) = history.undo(&mut canvas, &mut selection, &mut tool);
         assert_eq!(affected, vec![(0, 0)]);
+        assert!(layer_action.is_none());
 
         // The undo must restore LayerId(1)'s data at its NEW position (0),
         // not blindly write into position 1 (now the Background layer).
         assert_eq!(canvas.get_layer_tile_data(0, 0, 0), Some(original));
         assert_ne!(canvas.get_layer_tile_data(1, 0, 0), Some(painted));
+    }
+
+    /// Undoing a layer-add removes the layer and restores the previously
+    /// active layer.
+    #[test]
+    fn undo_removes_added_layer() {
+        let mut canvas = Canvas::new(4, 4, Color32::WHITE, 4);
+        let active_before = canvas.active_layer_idx; // Canvas::new -> 1
+        let new_id = canvas.add_layer();
+        let new_idx = canvas.layers.len() - 1; // 2
+
+        let mut history = History::new();
+        history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Added {
+                index: new_idx,
+                id: new_id,
+                active_before,
+                active_after: new_idx,
+            }),
+        });
+
+        let mut selection = SelectionManager::new();
+        let mut tool = Tool::Brush;
+        let (affected, layer_action) = history.undo(&mut canvas, &mut selection, &mut tool);
+        assert!(affected.is_empty());
+        assert!(matches!(layer_action, Some(LayerHistoryOp::Added { .. })));
+        assert_eq!(canvas.layers.len(), 2);
+        assert_eq!(canvas.active_layer_idx, active_before);
+        assert!(canvas.layer_index_of(new_id).is_none());
+    }
+
+    /// Redoing a layer-add re-inserts a layer with the same id at the same
+    /// position.
+    #[test]
+    fn redo_readds_layer_with_same_id() {
+        let mut canvas = Canvas::new(4, 4, Color32::WHITE, 4);
+        let active_before = canvas.active_layer_idx;
+        let new_id = canvas.add_layer();
+        let new_idx = canvas.layers.len() - 1;
+
+        let mut history = History::new();
+        history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Added {
+                index: new_idx,
+                id: new_id,
+                active_before,
+                active_after: new_idx,
+            }),
+        });
+
+        let mut selection = SelectionManager::new();
+        let mut tool = Tool::Brush;
+        history.undo(&mut canvas, &mut selection, &mut tool);
+        assert_eq!(canvas.layers.len(), 2);
+
+        let (_, layer_action) = history.redo(&mut canvas, &mut selection, &mut tool);
+        assert!(matches!(layer_action, Some(LayerHistoryOp::Added { .. })));
+        assert_eq!(canvas.layers.len(), 3);
+        assert_eq!(canvas.layer_index_of(new_id), Some(new_idx));
+        assert_eq!(canvas.active_layer_idx, new_idx);
+    }
+
+    /// Undoing a layer removal restores the layer at its original position,
+    /// with its original id AND its original pixel content.
+    #[test]
+    fn undo_restores_removed_layer_with_content() {
+        let tile_size = 4;
+        let mut canvas = Canvas::new(tile_size, tile_size, Color32::WHITE, tile_size);
+        let removed_id = canvas.add_layer();
+        let removed_idx = canvas.layers.len() - 1; // 2
+        let painted = vec![Color32::BLACK; tile_size * tile_size];
+        canvas.set_layer_tile_data(removed_idx, 0, 0, painted.clone());
+
+        let meta = canvas.layer_meta_at(removed_idx).unwrap();
+        let tiles = canvas.snapshot_layer_tiles(removed_idx);
+        assert_eq!(tiles.len(), 1);
+
+        let active_before = canvas.active_layer_idx; // 2 (just added)
+        canvas.layers.remove(removed_idx);
+        canvas.active_layer_idx = active_before.min(canvas.layers.len() - 1); // clamps to 1
+
+        let mut history = History::new();
+        history.push_action(UndoAction {
+            tiles,
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Removed {
+                index: removed_idx,
+                id: removed_id,
+                meta,
+                active_before,
+                active_after: canvas.active_layer_idx,
+            }),
+        });
+
+        let mut selection = SelectionManager::new();
+        let mut tool = Tool::Brush;
+        let (affected, layer_action) = history.undo(&mut canvas, &mut selection, &mut tool);
+        assert_eq!(affected, vec![(0, 0)]);
+        assert!(matches!(layer_action, Some(LayerHistoryOp::Removed { .. })));
+        assert_eq!(canvas.layers.len(), 3);
+        let restored_idx = canvas.layer_index_of(removed_id).unwrap();
+        assert_eq!(restored_idx, removed_idx);
+        assert_eq!(canvas.get_layer_tile_data(restored_idx, 0, 0), Some(painted));
+        assert_eq!(canvas.active_layer_idx, active_before);
+    }
+
+    /// Undoing a layer reorder restores both layers' original positions.
+    #[test]
+    fn undo_moves_layer_back() {
+        let mut canvas = Canvas::new(4, 4, Color32::WHITE, 4);
+        let id2 = canvas.add_layer(); // now at idx 2
+        let from = 2;
+        let to = 1;
+        let moved_id = canvas.layer_id_at(from).unwrap();
+        assert_eq!(moved_id, id2);
+        let other_id = canvas.layer_id_at(to).unwrap();
+
+        let active_before = canvas.active_layer_idx; // 2, just added
+        let layer = canvas.layers.remove(from);
+        canvas.layers.insert(to, layer);
+        let active_after = to;
+        canvas.active_layer_idx = active_after;
+
+        let mut history = History::new();
+        history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Moved {
+                id: moved_id,
+                from,
+                to,
+                active_before,
+                active_after,
+            }),
+        });
+
+        let mut selection = SelectionManager::new();
+        let mut tool = Tool::Brush;
+        let (_, layer_action) = history.undo(&mut canvas, &mut selection, &mut tool);
+        assert!(matches!(layer_action, Some(LayerHistoryOp::Moved { .. })));
+        assert_eq!(canvas.layer_index_of(moved_id), Some(from));
+        assert_eq!(canvas.layer_index_of(other_id), Some(to));
+        assert_eq!(canvas.active_layer_idx, active_before);
+    }
+
+    /// Undoing a merge-down restores both the bottom layer's pre-merge
+    /// content and the fully-merged-away top layer (same id, same pixels).
+    #[test]
+    fn undo_restores_both_layers_after_merge_down() {
+        let tile_size = 4;
+        let mut canvas = Canvas::new(tile_size, tile_size, Color32::WHITE, tile_size);
+        let bottom_id = canvas.layer_id_at(1).unwrap();
+        let bottom_before = vec![Color32::from_rgba_unmultiplied(10, 10, 10, 255); tile_size * tile_size];
+        canvas.set_layer_tile_data(1, 0, 0, bottom_before.clone());
+
+        let top_id = canvas.add_layer();
+        let top_idx = canvas.layers.len() - 1;
+        let top_data = vec![Color32::from_rgba_unmultiplied(200, 0, 0, 255); tile_size * tile_size];
+        canvas.set_layer_tile_data(top_idx, 0, 0, top_data.clone());
+
+        let mut action = UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: None,
+        };
+        canvas.merge_layer_down(top_idx, Some(&mut action));
+        assert_eq!(canvas.layers.len(), 2);
+        assert!(action.layer_action.is_some());
+        // Bottom layer now holds the blended result, not its original data.
+        assert_ne!(canvas.get_layer_tile_data(1, 0, 0), Some(bottom_before.clone()));
+
+        let mut history = History::new();
+        history.push_action(action);
+
+        let mut selection = SelectionManager::new();
+        let mut tool = Tool::Brush;
+        let (affected, layer_action) = history.undo(&mut canvas, &mut selection, &mut tool);
+        assert!(!affected.is_empty());
+        assert!(matches!(layer_action, Some(LayerHistoryOp::Removed { .. })));
+        assert_eq!(canvas.layers.len(), 3);
+
+        let restored_top_idx = canvas.layer_index_of(top_id).unwrap();
+        assert_eq!(canvas.get_layer_tile_data(restored_top_idx, 0, 0), Some(top_data));
+        let bottom_idx = canvas.layer_index_of(bottom_id).unwrap();
+        assert_eq!(canvas.get_layer_tile_data(bottom_idx, 0, 0), Some(bottom_before));
     }
 }

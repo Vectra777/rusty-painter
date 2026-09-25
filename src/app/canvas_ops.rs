@@ -4,7 +4,7 @@ use super::{
     state::{ATLAS_SIZE, CanvasTile, ColorModel, TILE_SIZE, TextureAtlas},
 };
 use crate::canvas::Canvas;
-use crate::canvas::history::History;
+use crate::canvas::history::{History, LayerHistoryOp, UndoAction};
 use eframe::egui::{self, Color32, TextureOptions, Vec2};
 use std::collections::{HashMap, HashSet};
 
@@ -337,9 +337,53 @@ impl PainterApp {
         if from == to {
             return;
         }
+        let Some(moved_id) = self.canvas.layer_id_at(from) else {
+            return;
+        };
 
         let layer = self.canvas.layers.remove(from);
         self.canvas.layers.insert(to, layer);
+        self.reorder_layer_state(from, to);
+
+        let active_before = self.canvas.active_layer_idx;
+        let active_after = if active_before == from {
+            to
+        } else if from < active_before && active_before <= to {
+            active_before - 1
+        } else if to <= active_before && active_before < from {
+            active_before + 1
+        } else {
+            active_before
+        };
+        self.canvas.active_layer_idx = active_after;
+
+        let action = UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Moved {
+                id: moved_id,
+                from,
+                to,
+                active_before,
+                active_after,
+            }),
+        };
+        if let Some(hist) = self.layer_state.histories.get_mut(active_after) {
+            hist.push_action(action);
+        }
+
+        self.mark_all_tiles_dirty();
+        self.debug_assert_layer_state_in_sync();
+    }
+
+    /// Move the side-car per-layer state (undo history, render cache,
+    /// cache-dirty set, UI color) from `from` to `to`, mirroring a move
+    /// already applied to `canvas.layers` itself. Shared by the UI reorder
+    /// entry point (`reorder_layers`) and undo/redo of a layer move, which
+    /// moves `canvas.layers` itself inside `History::undo`/`redo` and can't
+    /// also reach into `LayerState`/`RenderCache` from there.
+    pub(crate) fn reorder_layer_state(&mut self, from: usize, to: usize) {
         let hist = self.layer_state.histories.remove(from);
         self.layer_state.histories.insert(to, hist);
         let cache = self.render_cache.layer_caches.remove(from);
@@ -348,25 +392,29 @@ impl PainterApp {
         self.render_cache.layer_cache_dirty.insert(to, cache_dirty);
         let ui_color = self.layer_state.layer_ui_colors.remove(from);
         self.layer_state.layer_ui_colors.insert(to, ui_color);
-
-        let active = self.canvas.active_layer_idx;
-        self.canvas.active_layer_idx = if active == from {
-            to
-        } else if from < active && active <= to {
-            active - 1
-        } else if to <= active && active < from {
-            active + 1
-        } else {
-            active
-        };
-
-        self.mark_all_tiles_dirty();
         self.debug_assert_layer_state_in_sync();
     }
 
     pub(crate) fn add_paint_layer(&mut self) {
-        self.canvas.add_layer();
-        self.insert_layer_state(self.canvas.layers.len().saturating_sub(1));
+        let active_before = self.canvas.active_layer_idx;
+        let id = self.canvas.add_layer();
+        let new_idx = self.canvas.layers.len().saturating_sub(1);
+        self.insert_layer_state(new_idx);
+
+        let action = UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Added {
+                index: new_idx,
+                id,
+                active_before,
+                active_after: new_idx,
+            }),
+        };
+        if let Some(hist) = self.layer_state.histories.get_mut(new_idx) {
+            hist.push_action(action);
+        }
     }
 
     pub(crate) fn remove_paint_layer(&mut self, idx: usize) {
@@ -376,15 +424,42 @@ impl PainterApp {
 
         let active = self.canvas.active_layer_idx;
         self.mark_layer_tiles_with_data_dirty(idx);
+
+        let Some(id) = self.canvas.layer_id_at(idx) else {
+            return;
+        };
+        let Some(meta) = self.canvas.layer_meta_at(idx) else {
+            return;
+        };
+        let tile_snapshots = self.canvas.snapshot_layer_tiles(idx);
+
         self.canvas.layers.remove(idx);
         self.remove_layer_state(idx);
-        self.canvas.active_layer_idx = if active == idx {
+        let active_after = if active == idx {
             idx.min(self.canvas.layers.len().saturating_sub(1))
         } else if idx < active {
             active.saturating_sub(1)
         } else {
             active.min(self.canvas.layers.len().saturating_sub(1))
         };
+        self.canvas.active_layer_idx = active_after;
+
+        let action = UndoAction {
+            tiles: tile_snapshots,
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Removed {
+                index: idx,
+                id,
+                meta,
+                active_before: active,
+                active_after,
+            }),
+        };
+        if let Some(hist) = self.layer_state.histories.get_mut(active_after) {
+            hist.push_action(action);
+        }
+
         self.mark_all_tiles_dirty();
     }
 

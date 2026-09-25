@@ -7,7 +7,7 @@ use super::{
 };
 use crate::app::input_handler;
 use crate::app::render_helper;
-use crate::{canvas::Canvas, tablet::TabletInput, ui};
+use crate::{canvas::Canvas, canvas::history::History, tablet::TabletInput, ui};
 use eframe::egui;
 use eframe::egui::{Color32, Vec2};
 use egui_dock::DockState;
@@ -49,34 +49,85 @@ impl eframe::App for PainterApp {
         });
 
         // Handle Undo/Redo
-        if ctrl_z_pressed {
+        if ctrl_z_pressed && self.canvas.active_layer_idx < self.layer_state.histories.len() {
             let active_idx = self.canvas.active_layer_idx;
-            let affected = if shift_held {
-                self.layer_state
-                    .histories
-                    .get_mut(active_idx)
-                    .map(|h| {
-                        h.redo(
-                            &self.canvas,
-                            &mut self.selection_manager,
-                            &mut self.active_tool,
-                        )
-                    })
-                    .unwrap_or_default()
+            // Detach the active layer's History for the duration of the
+            // call: `History::undo`/`redo` need `&mut Canvas` to reverse a
+            // layer add/remove/move, and this avoids holding a live borrow
+            // of `self.layer_state.histories` at the same time.
+            let mut history =
+                std::mem::replace(&mut self.layer_state.histories[active_idx], History::new());
+
+            let (affected, layer_action) = if shift_held {
+                history.redo(
+                    &mut self.canvas,
+                    &mut self.selection_manager,
+                    &mut self.active_tool,
+                )
             } else {
-                self.layer_state
-                    .histories
-                    .get_mut(active_idx)
-                    .map(|h| {
-                        h.undo(
-                            &self.canvas,
-                            &mut self.selection_manager,
-                            &mut self.active_tool,
-                        )
-                    })
-                    .unwrap_or_default()
+                history.undo(
+                    &mut self.canvas,
+                    &mut self.selection_manager,
+                    &mut self.active_tool,
+                )
             };
 
+            // A structural change (layer added/removed/moved) also needs
+            // the per-layer side-car state (this same `histories` vec,
+            // render caches, UI colors) mirrored to match — `History`
+            // itself only has `&mut Canvas`, so it can't reach those here.
+            use crate::canvas::history::LayerHistoryOp;
+            match &layer_action {
+                Some(LayerHistoryOp::Added { index, .. }) => {
+                    if shift_held {
+                        // Redo: the layer was just re-inserted into
+                        // canvas.layers at `index`. Give it fresh side-car
+                        // slots, then reattach this exact History object —
+                        // it already carries whatever this layer's own
+                        // undo/redo stacks held.
+                        self.insert_layer_state(*index);
+                        self.layer_state.histories[*index] = history;
+                    } else {
+                        // Undo: the layer was just removed from
+                        // canvas.layers at `index`. Its own History
+                        // (`history`, held locally) is intentionally
+                        // dropped here — reaching this action at all means
+                        // it's the very first entry ever pushed for this
+                        // layer (nothing else could still be above it on
+                        // the SAME per-layer stack), so nothing of value is
+                        // lost except the ability to redo the add itself;
+                        // adding the layer again is one click away.
+                        self.remove_layer_state(*index);
+                    }
+                }
+                Some(LayerHistoryOp::Removed { index, .. }) => {
+                    if shift_held {
+                        self.remove_layer_state(*index);
+                    } else {
+                        self.insert_layer_state(*index);
+                    }
+                    // `history` belongs to the surviving active layer (per
+                    // the "record onto whichever layer ends up active"
+                    // rule), not the one just added/removed above — put it
+                    // back wherever the canvas now says is active.
+                    let new_active = self.canvas.active_layer_idx;
+                    self.layer_state.histories[new_active] = history;
+                }
+                Some(LayerHistoryOp::Moved { .. }) => {
+                    let new_active = self.canvas.active_layer_idx;
+                    if new_active != active_idx {
+                        self.reorder_layer_state(active_idx, new_active);
+                    }
+                    self.layer_state.histories[new_active] = history;
+                }
+                None => {
+                    self.layer_state.histories[active_idx] = history;
+                }
+            }
+
+            if layer_action.is_some() {
+                self.mark_all_tiles_dirty();
+            }
             for (tx, ty) in affected {
                 if let Some(tile) = self.tile_mut(tx.max(0) as usize, ty.max(0) as usize) {
                     tile.dirty = true;

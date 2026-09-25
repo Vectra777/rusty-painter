@@ -1,5 +1,7 @@
 use crate::{
     app::state::ColorModel,
+    canvas::history::{LayerHistoryOp, LayerMeta},
+    canvas::storage::LayerId,
     selection::{
         SelectionShape,
         transform::{TransformInfo, TransformState},
@@ -201,6 +203,150 @@ impl From<StoredColorModel> for ColorModel {
         match value {
             StoredColorModel::Rgba => Self::Rgba,
             StoredColorModel::Grayscale => Self::Grayscale,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct StoredLayerMeta {
+    name: String,
+    visible: bool,
+    opacity: f32,
+    locked: bool,
+}
+
+impl From<&LayerMeta> for StoredLayerMeta {
+    fn from(meta: &LayerMeta) -> Self {
+        Self {
+            name: meta.name.clone(),
+            visible: meta.visible,
+            opacity: meta.opacity,
+            locked: meta.locked,
+        }
+    }
+}
+
+impl StoredLayerMeta {
+    pub(super) fn into_meta(self) -> LayerMeta {
+        LayerMeta {
+            name: self.name,
+            visible: self.visible,
+            opacity: self.opacity,
+            locked: self.locked,
+        }
+    }
+}
+
+/// Mirrors `LayerHistoryOp`. A structural layer change (add/remove/move)
+/// bundled with an undo action.
+#[derive(Serialize, Deserialize)]
+pub(super) enum StoredLayerHistoryOp {
+    Added {
+        index: usize,
+        id: u64,
+        active_before: usize,
+        active_after: usize,
+    },
+    Removed {
+        index: usize,
+        id: u64,
+        meta: StoredLayerMeta,
+        active_before: usize,
+        active_after: usize,
+    },
+    Moved {
+        id: u64,
+        from: usize,
+        to: usize,
+        active_before: usize,
+        active_after: usize,
+    },
+}
+
+impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
+    fn from(op: &LayerHistoryOp) -> Self {
+        match op {
+            LayerHistoryOp::Added {
+                index,
+                id,
+                active_before,
+                active_after,
+            } => Self::Added {
+                index: *index,
+                id: id.0,
+                active_before: *active_before,
+                active_after: *active_after,
+            },
+            LayerHistoryOp::Removed {
+                index,
+                id,
+                meta,
+                active_before,
+                active_after,
+            } => Self::Removed {
+                index: *index,
+                id: id.0,
+                meta: StoredLayerMeta::from(meta),
+                active_before: *active_before,
+                active_after: *active_after,
+            },
+            LayerHistoryOp::Moved {
+                id,
+                from,
+                to,
+                active_before,
+                active_after,
+            } => Self::Moved {
+                id: id.0,
+                from: *from,
+                to: *to,
+                active_before: *active_before,
+                active_after: *active_after,
+            },
+        }
+    }
+}
+
+impl StoredLayerHistoryOp {
+    pub(super) fn into_op(self) -> LayerHistoryOp {
+        match self {
+            Self::Added {
+                index,
+                id,
+                active_before,
+                active_after,
+            } => LayerHistoryOp::Added {
+                index,
+                id: LayerId(id),
+                active_before,
+                active_after,
+            },
+            Self::Removed {
+                index,
+                id,
+                meta,
+                active_before,
+                active_after,
+            } => LayerHistoryOp::Removed {
+                index,
+                id: LayerId(id),
+                meta: meta.into_meta(),
+                active_before,
+                active_after,
+            },
+            Self::Moved {
+                id,
+                from,
+                to,
+                active_before,
+                active_after,
+            } => LayerHistoryOp::Moved {
+                id: LayerId(id),
+                from,
+                to,
+                active_before,
+                active_after,
+            },
         }
     }
 }

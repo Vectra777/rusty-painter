@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::{Color32, ColorImage, Rgba};
 
 use crate::canvas::blend::{apply_opacity_scale, premultiply, rgba_to_color32_fast};
-use crate::canvas::history::UndoAction;
+use crate::canvas::history::{LayerMeta, TileSnapshot, UndoAction};
 use crate::selection::SelectionManager;
 use crate::utils::color::{Color, ColorManipulation};
 use eframe::egui::Vec2;
@@ -395,6 +395,66 @@ impl Canvas {
         self.layers.push(layer);
         self.active_layer_idx = self.layers.len() - 1;
         id
+    }
+
+    /// Insert an empty layer with a specific (already-allocated) id and
+    /// metadata at `index`, clamped to the current layer count. Used to
+    /// reconstruct a layer shell for undo/redo of a layer add/remove; the
+    /// caller is responsible for restoring pixel content separately (via
+    /// `TileSnapshot`s resolved by the same id).
+    pub fn insert_layer_with_meta(&mut self, index: usize, id: LayerId, meta: &LayerMeta) {
+        let idx = index.min(self.layers.len());
+        let mut layer = Layer::new(id, meta.name.clone(), self.width, self.height, self.tile_size);
+        layer.visible = meta.visible;
+        layer.opacity = meta.opacity;
+        layer.locked = meta.locked;
+        self.layers.insert(idx, layer);
+        // `id` is a reused (previously-allocated) id, not a new one, but
+        // guard against ever handing out a colliding id afterward.
+        self.next_layer_id = self.next_layer_id.max(id.0 + 1);
+    }
+
+    /// Snapshot every non-empty tile of a layer as full-tile `TileSnapshot`s,
+    /// keyed by the layer's current stable id. Used to preserve a layer's
+    /// pixel content across undo/redo of an operation that removes it
+    /// (layer removal, merge-down).
+    pub fn snapshot_layer_tiles(&self, layer_idx: usize) -> Vec<TileSnapshot> {
+        let (Some(layer), Some(id)) = (self.layers.get(layer_idx), self.layer_id_at(layer_idx))
+        else {
+            return Vec::new();
+        };
+        let tile_size = self.tile_size;
+        let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
+        tiles
+            .iter()
+            .filter_map(|(&(tx, ty), cell)| {
+                let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.is_empty {
+                    return None;
+                }
+                guard.data.clone().map(|data| TileSnapshot {
+                    tx,
+                    ty,
+                    layer_id: id,
+                    x0: 0,
+                    y0: 0,
+                    width: tile_size,
+                    height: tile_size,
+                    data,
+                })
+            })
+            .collect()
+    }
+
+    /// Metadata (name/visible/opacity/locked) for a layer, without its tile
+    /// content. Used to build an undo record before removing a layer.
+    pub fn layer_meta_at(&self, layer_idx: usize) -> Option<LayerMeta> {
+        self.layers.get(layer_idx).map(|layer| LayerMeta {
+            name: layer.name.clone(),
+            visible: layer.visible,
+            opacity: layer.opacity,
+            locked: layer.locked,
+        })
     }
 
     /// Current canvas width in pixels.
@@ -1333,13 +1393,29 @@ impl Canvas {
         Some(self.active_layer_idx)
     }
 
-    pub fn merge_layer_down(&mut self, layer_idx: usize) {
+    /// Merge `layer_idx` down into the layer below it. If `history` is
+    /// given, records enough to undo the merge: the bottom layer's
+    /// pre-merge tile content (to reverse the blend), the top layer's full
+    /// content (to restore it), and a `Removed` structural op describing
+    /// the top layer itself (recreated as an empty shell on undo, before
+    /// the tile snapshots refill both layers).
+    pub fn merge_layer_down(&mut self, layer_idx: usize, mut history: Option<&mut UndoAction>) {
         if layer_idx == 0 || layer_idx >= self.layers.len() {
             return;
         }
 
+        let active_before = self.active_layer_idx;
+        let Some(top_id) = self.layer_id_at(layer_idx) else {
+            return;
+        };
+        let Some(bottom_id) = self.layer_id_at(layer_idx - 1) else {
+            return;
+        };
+        let top_meta = self.layer_meta_at(layer_idx);
+
         // Remove the top layer (source)
         let top_layer = self.layers.remove(layer_idx);
+        let tile_size = self.tile_size;
 
         {
             // Get the bottom layer (destination)
@@ -1369,6 +1445,37 @@ impl Canvas {
 
                     let mut bottom_guard =
                         bottom_tile_arc.lock().unwrap_or_else(|e| e.into_inner());
+
+                    // Capture pre-merge state for undo, before either tile
+                    // is touched: the bottom layer's current content (or
+                    // transparent, matching what the init below would
+                    // otherwise produce) and the top layer's full content.
+                    if let Some(action) = history.as_deref_mut() {
+                        let bottom_before = bottom_guard
+                            .data
+                            .clone()
+                            .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_size * tile_size]);
+                        action.tiles.push(TileSnapshot {
+                            tx: *tx,
+                            ty: *ty,
+                            layer_id: bottom_id,
+                            x0: 0,
+                            y0: 0,
+                            width: tile_size,
+                            height: tile_size,
+                            data: bottom_before,
+                        });
+                        action.tiles.push(TileSnapshot {
+                            tx: *tx,
+                            ty: *ty,
+                            layer_id: top_id,
+                            x0: 0,
+                            y0: 0,
+                            width: tile_size,
+                            height: tile_size,
+                            data: top_data.clone(),
+                        });
+                    }
 
                     // Initialize bottom data if missing
                     if bottom_guard.data.is_none() {
@@ -1407,6 +1514,16 @@ impl Canvas {
         // Adjust active layer index if needed
         if self.active_layer_idx >= self.layers.len() {
             self.active_layer_idx = self.layers.len() - 1;
+        }
+
+        if let (Some(action), Some(meta)) = (history, top_meta) {
+            action.layer_action = Some(crate::canvas::history::LayerHistoryOp::Removed {
+                index: layer_idx,
+                id: top_id,
+                meta,
+                active_before,
+                active_after: self.active_layer_idx,
+            });
         }
     }
 }

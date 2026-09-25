@@ -30,6 +30,7 @@ impl PainterApp {
                 tiles: Vec::new(),
                 selection: None,
                 transform: None,
+                layer_action: None,
             },
         });
         self.brush_state.is_drawing = true;

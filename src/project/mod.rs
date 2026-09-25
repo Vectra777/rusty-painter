@@ -20,7 +20,9 @@ mod convert;
 mod preview;
 
 use blobs::{StoredBlob, push_blob, read_blob};
-use convert::{StoredColor, StoredColorModel, StoredSelectionShape, StoredTransformInfo};
+use convert::{
+    StoredColor, StoredColorModel, StoredLayerHistoryOp, StoredSelectionShape, StoredTransformInfo,
+};
 use preview::{StoredPreview, preview_png_blob};
 
 const MAGIC: &[u8; 8] = b"RPNTV001";
@@ -344,6 +346,11 @@ struct StoredUndoAction {
     tiles: Vec<StoredTileSnapshot>,
     selection: Option<Option<StoredSelectionShape>>,
     transform: Option<StoredTransformInfo>,
+    /// Absent in files saved before layer-structural undo existed; such
+    /// files simply have no structural entries to recover (there weren't
+    /// any to begin with), same reasoning as the LayerId migration above.
+    #[serde(default)]
+    layer_action: Option<StoredLayerHistoryOp>,
 }
 
 impl StoredUndoAction {
@@ -359,11 +366,13 @@ impl StoredUndoAction {
                 .as_ref()
                 .map(|shape| shape.as_ref().map(StoredSelectionShape::from)),
             transform: action.transform.as_ref().map(StoredTransformInfo::from),
+            layer_action: action.layer_action.as_ref().map(StoredLayerHistoryOp::from),
         })
     }
 
     fn into_action(self, tile_size: usize, blobs: &[u8]) -> Result<UndoAction, String> {
         Ok(UndoAction {
+            layer_action: self.layer_action.map(StoredLayerHistoryOp::into_op),
             tiles: self
                 .tiles
                 .into_iter()
@@ -507,6 +516,7 @@ mod tests {
             }],
             selection: Some(None),
             transform: None,
+            layer_action: None,
         });
 
         let encoded = encode_project(&test_app(canvas, vec![History::new(), history])).unwrap();
