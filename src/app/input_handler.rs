@@ -232,14 +232,7 @@ fn handle_primary_release(app: &mut PainterApp) {
                             offset, rotation, scale, center,
                         );
                         app.canvas.preview_transform(idx, buffer, params);
-                        transform::mark_transform_dirty(
-                            app,
-                            captured.bounds,
-                            offset,
-                            rotation,
-                            scale,
-                            center,
-                        );
+                        transform::mark_transform_dirty(app, captured.bounds, &params);
                     }
                 } else {
                     transform::reset_transform(info);
@@ -264,14 +257,7 @@ fn handle_primary_release(app: &mut PainterApp) {
                         .apply_transform(params, selection, Some(&mut action));
 
                     transform::push_history_if_changed(app, action);
-                    transform::mark_transform_dirty(
-                        app,
-                        captured.bounds,
-                        offset,
-                        rotation,
-                        scale,
-                        center,
-                    );
+                    transform::mark_transform_dirty(app, captured.bounds, &params);
                     app.selection_manager
                         .apply_transform(offset, rotation, scale, center);
                 }

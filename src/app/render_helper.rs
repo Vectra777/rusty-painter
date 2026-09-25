@@ -6,8 +6,6 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIter
 pub struct CanvasView {
     pub origin: egui::Pos2,
     pub canvas_center: egui::Pos2,
-    pub _cos: f32,
-    pub _sin: f32,
     pub response: egui::Response,
 }
 
@@ -150,8 +148,6 @@ pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
     CanvasView {
         origin,
         canvas_center,
-        _cos: cos,
-        _sin: sin,
         response,
     }
 }

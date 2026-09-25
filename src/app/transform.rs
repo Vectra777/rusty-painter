@@ -1,6 +1,7 @@
 use crate::PainterApp;
 use crate::app::tools::Tool;
 use crate::canvas::history::UndoAction;
+use crate::canvas::storage::TransformParams;
 use eframe::egui::{self, Vec2};
 
 pub(crate) fn apply_simple_transform(app: &mut PainterApp, offset: Vec2) {
@@ -21,24 +22,12 @@ pub(crate) fn apply_simple_transform(app: &mut PainterApp, offset: Vec2) {
         .canvas
         .get_content_bounds(app.canvas.active_layer_idx, selection);
 
-    let params = crate::canvas::storage::TransformParams::new(
-        offset,
-        0.0,
-        Vec2::new(1.0, 1.0),
-        Vec2::new(0.0, 0.0),
-    );
+    let params = TransformParams::new(offset, 0.0, Vec2::new(1.0, 1.0), Vec2::new(0.0, 0.0));
     app.canvas
         .apply_transform(params, selection, Some(&mut action));
 
     push_history_if_changed(app, action);
-    mark_transform_dirty(
-        app,
-        src_bounds,
-        offset,
-        0.0,
-        Vec2::new(1.0, 1.0),
-        Vec2::new(0.0, 0.0),
-    );
+    mark_transform_dirty(app, src_bounds, &params);
     app.selection_manager
         .apply_transform(offset, 0.0, Vec2::new(1.0, 1.0), Vec2::new(0.0, 0.0));
 }
@@ -133,28 +122,17 @@ pub(crate) fn push_history_if_changed(app: &mut PainterApp, action: UndoAction) 
 pub(crate) fn mark_transform_dirty(
     app: &mut PainterApp,
     src_bounds: Option<egui::Rect>,
-    offset: Vec2,
-    rotation: f32,
-    scale: Vec2,
-    center: Vec2,
+    params: &TransformParams,
 ) {
     if let Some(bounds) = src_bounds {
         app.mark_tiles_in_bounds_dirty(bounds);
-        app.mark_tiles_in_bounds_dirty(calc_transformed_bounds(
-            bounds, offset, rotation, scale, center,
-        ));
+        app.mark_tiles_in_bounds_dirty(calc_transformed_bounds(bounds, params));
     } else {
         app.mark_all_tiles_dirty();
     }
 }
 
-fn calc_transformed_bounds(
-    src_bounds: egui::Rect,
-    offset: Vec2,
-    rotation: f32,
-    scale: Vec2,
-    center: Vec2,
-) -> egui::Rect {
+fn calc_transformed_bounds(src_bounds: egui::Rect, params: &TransformParams) -> egui::Rect {
     let corners = [
         src_bounds.min,
         egui::pos2(src_bounds.max.x, src_bounds.min.y),
@@ -162,7 +140,10 @@ fn calc_transformed_bounds(
         egui::pos2(src_bounds.min.x, src_bounds.max.y),
     ];
 
-    let (sin_r, cos_r) = rotation.sin_cos();
+    let (sin_r, cos_r) = params.rotation.sin_cos();
+    let center = params.center;
+    let scale = params.scale;
+    let offset = params.offset;
     let mut min_x = f32::MAX;
     let mut min_y = f32::MAX;
     let mut max_x = f32::MIN;
@@ -248,21 +229,9 @@ pub(crate) fn apply_live_transform_preview(
         && let Some(idx) = app.layer_state.floating_layer_idx
     {
         let center = get_transform_center(info);
-        let params = crate::canvas::storage::TransformParams::new(
-            info.offset,
-            info.rotation,
-            info.scale,
-            center,
-        );
+        let params = TransformParams::new(info.offset, info.rotation, info.scale, center);
 
         app.canvas.preview_transform(idx, buffer, params);
-        mark_transform_dirty(
-            app,
-            info.bounds,
-            info.offset,
-            info.rotation,
-            info.scale,
-            center,
-        );
+        mark_transform_dirty(app, info.bounds, &params);
     }
 }
