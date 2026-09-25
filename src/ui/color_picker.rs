@@ -1,5 +1,6 @@
 use crate::ColorModel;
 use crate::brush_engine::brush::Brush;
+use crate::ui::style::{CHECKERBOARD_DARK, CHECKERBOARD_LIGHT};
 use crate::utils::color::ColorManipulation;
 use eframe::egui;
 use egui::Color32;
@@ -30,9 +31,9 @@ fn draw_checkerboard(painter: &egui::Painter, rect: egui::Rect, cell: f32) {
                 egui::Rect::from_min_max(min, max.min(rect.max)),
                 2.0,
                 if dark {
-                    Color32::from_gray(200)
+                    CHECKERBOARD_DARK
                 } else {
-                    Color32::from_gray(240)
+                    CHECKERBOARD_LIGHT
                 },
             );
         }

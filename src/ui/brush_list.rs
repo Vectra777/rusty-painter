@@ -1,5 +1,6 @@
 use crate::brush_engine::brush::{Brush, BrushPreset};
 use crate::brush_engine::preview::stroke_preview_image;
+use crate::ui::style::{PANEL_BG, PRESET_PREVIEW_SIZE};
 use eframe::egui;
 use eframe::egui::{Color32, TextureOptions};
 use rayon::ThreadPool;
@@ -87,9 +88,8 @@ pub fn brush_list_panel(
                 for preset in presets {
                     let column = &mut col[idx];
                     column.vertical(|ui| {
-                        let preview_size = 64.0; // Increased size for better visibility
                         let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(preview_size, preview_size),
+                            egui::vec2(PRESET_PREVIEW_SIZE, PRESET_PREVIEW_SIZE),
                             egui::Sense::click(),
                         );
 
@@ -105,7 +105,7 @@ pub fn brush_list_panel(
                         };
 
                         // Draw background
-                        ui.painter().rect_filled(rect, 2.0, Color32::from_gray(30));
+                        ui.painter().rect_filled(rect, 2.0, PANEL_BG);
 
                         // Draw texture
                         let uv =

@@ -8,4 +8,5 @@ pub(crate) mod curve_editor;
 pub(crate) mod export_modal;
 pub(crate) mod general_settings;
 pub(crate) mod layers;
+pub(crate) mod style;
 pub(crate) mod top_bar;

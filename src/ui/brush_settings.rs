@@ -1,6 +1,7 @@
 use crate::brush_engine::brush::{Brush, BrushType, StabilizerAlgorithm};
 use crate::brush_engine::brush_options::{BlendMode, PixelBrushShape};
 use crate::brush_engine::hardness::SoftnessSelector;
+use crate::ui::style::TIP_SWATCH_SIZE;
 use crate::ui::{brush_preview::render_preview, curve_editor::curve_editor};
 use eframe::egui::{self, Color32};
 use rayon::ThreadPool;
@@ -146,7 +147,7 @@ pub fn brush_settings_panel(
         .max_height(120.0)
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                let size = egui::vec2(32.0, 32.0);
+                let size = egui::vec2(TIP_SWATCH_SIZE, TIP_SWATCH_SIZE);
 
                 // Circle
                 let is_selected =

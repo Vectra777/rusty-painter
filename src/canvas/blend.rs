@@ -156,86 +156,28 @@ pub fn alpha_over_brush(src: &LinearBrushColor, alpha: u8, dst: Color32) -> Colo
 
 #[inline]
 fn alpha_over_x4(src: [Color32; 4], dst: [Color32; 4]) -> [Color32; 4] {
-    let sr = f32x4::new([
-        srgb_u8_to_linear(src[0].r()),
-        srgb_u8_to_linear(src[1].r()),
-        srgb_u8_to_linear(src[2].r()),
-        srgb_u8_to_linear(src[3].r()),
-    ]);
-    let sg = f32x4::new([
-        srgb_u8_to_linear(src[0].g()),
-        srgb_u8_to_linear(src[1].g()),
-        srgb_u8_to_linear(src[2].g()),
-        srgb_u8_to_linear(src[3].g()),
-    ]);
-    let sb = f32x4::new([
-        srgb_u8_to_linear(src[0].b()),
-        srgb_u8_to_linear(src[1].b()),
-        srgb_u8_to_linear(src[2].b()),
-        srgb_u8_to_linear(src[3].b()),
-    ]);
-    let sa = f32x4::new([
-        src[0].a() as f32 / 255.0,
-        src[1].a() as f32 / 255.0,
-        src[2].a() as f32 / 255.0,
-        src[3].a() as f32 / 255.0,
-    ]);
-    let dr = f32x4::new([
-        srgb_u8_to_linear(dst[0].r()),
-        srgb_u8_to_linear(dst[1].r()),
-        srgb_u8_to_linear(dst[2].r()),
-        srgb_u8_to_linear(dst[3].r()),
-    ]);
-    let dg = f32x4::new([
-        srgb_u8_to_linear(dst[0].g()),
-        srgb_u8_to_linear(dst[1].g()),
-        srgb_u8_to_linear(dst[2].g()),
-        srgb_u8_to_linear(dst[3].g()),
-    ]);
-    let db = f32x4::new([
-        srgb_u8_to_linear(dst[0].b()),
-        srgb_u8_to_linear(dst[1].b()),
-        srgb_u8_to_linear(dst[2].b()),
-        srgb_u8_to_linear(dst[3].b()),
-    ]);
+    let sr = f32x4::new(src.map(|c| srgb_u8_to_linear(c.r())));
+    let sg = f32x4::new(src.map(|c| srgb_u8_to_linear(c.g())));
+    let sb = f32x4::new(src.map(|c| srgb_u8_to_linear(c.b())));
+    let sa = f32x4::new(src.map(|c| c.a() as f32 / 255.0));
+    let dr = f32x4::new(dst.map(|c| srgb_u8_to_linear(c.r())));
+    let dg = f32x4::new(dst.map(|c| srgb_u8_to_linear(c.g())));
+    let db = f32x4::new(dst.map(|c| srgb_u8_to_linear(c.b())));
     let inv_alpha = f32x4::splat(1.0) - sa;
     let r = (sr + dr * inv_alpha).to_array();
     let g = (sg + dg * inv_alpha).to_array();
     let b = (sb + db * inv_alpha).to_array();
-    let da = f32x4::new([
-        dst[0].a() as f32 / 255.0,
-        dst[1].a() as f32 / 255.0,
-        dst[2].a() as f32 / 255.0,
-        dst[3].a() as f32 / 255.0,
-    ]);
+    let da = f32x4::new(dst.map(|c| c.a() as f32 / 255.0));
     let a = (sa + da * inv_alpha).to_array();
 
-    [
+    std::array::from_fn(|i| {
         Color32::from_rgba_premultiplied(
-            linear_to_srgb_u8(r[0]),
-            linear_to_srgb_u8(g[0]),
-            linear_to_srgb_u8(b[0]),
-            alpha_to_u8(a[0]),
-        ),
-        Color32::from_rgba_premultiplied(
-            linear_to_srgb_u8(r[1]),
-            linear_to_srgb_u8(g[1]),
-            linear_to_srgb_u8(b[1]),
-            alpha_to_u8(a[1]),
-        ),
-        Color32::from_rgba_premultiplied(
-            linear_to_srgb_u8(r[2]),
-            linear_to_srgb_u8(g[2]),
-            linear_to_srgb_u8(b[2]),
-            alpha_to_u8(a[2]),
-        ),
-        Color32::from_rgba_premultiplied(
-            linear_to_srgb_u8(r[3]),
-            linear_to_srgb_u8(g[3]),
-            linear_to_srgb_u8(b[3]),
-            alpha_to_u8(a[3]),
-        ),
-    ]
+            linear_to_srgb_u8(r[i]),
+            linear_to_srgb_u8(g[i]),
+            linear_to_srgb_u8(b[i]),
+            alpha_to_u8(a[i]),
+        )
+    })
 }
 
 #[inline]
@@ -358,6 +300,33 @@ mod tests {
 
         for (src, dst) in cases {
             assert_color_close(alpha_over(src, dst), reference_alpha_over(src, dst));
+        }
+    }
+
+    #[test]
+    fn batch_alpha_over_matches_scalar_alpha_over() {
+        // 5 pixels: exercises both the alpha_over_x4 SIMD path (first 4)
+        // and the scalar remainder loop (5th), guarding the alpha_over_x4
+        // array-indexing -> array::map/from_fn refactor above.
+        let src = [
+            Color32::from_rgba_unmultiplied(255, 128, 64, 80),
+            Color32::from_rgba_unmultiplied(20, 220, 90, 170),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 0),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 255),
+            Color32::from_rgba_unmultiplied(10, 200, 30, 40),
+        ];
+        let dst = [
+            Color32::from_rgba_unmultiplied(64, 100, 255, 180),
+            Color32::from_rgba_unmultiplied(240, 30, 160, 90),
+            Color32::from_rgba_unmultiplied(90, 80, 70, 120),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 255),
+            Color32::from_rgba_unmultiplied(200, 200, 200, 200),
+        ];
+        let mut out = [Color32::TRANSPARENT; 5];
+        alpha_over_batch(&src, &dst, &mut out);
+
+        for i in 0..5 {
+            assert_color_close(out[i], alpha_over(src[i], dst[i]));
         }
     }
 
