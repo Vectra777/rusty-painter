@@ -2,3 +2,7 @@
 /brushes
 perf.data
 perf.data.old
+flamegraph.svg
+keystore.properties
+*.keystore
+*.jks

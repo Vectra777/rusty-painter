@@ -13,17 +13,31 @@ pub use app::PainterApp;
 pub use app::state::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation};
 
 #[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
-    use winit::platform::android::EventLoopBuilderExtAndroid;
+use winit::platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid};
 
-    let mut options = eframe::NativeOptions::default();
+#[cfg(target_os = "android")]
+fn android_native_options(app: AndroidApp) -> eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default().with_fullscreen(true),
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    };
     options.event_loop_builder = Some(Box::new(move |builder| {
         builder.with_android_app(app);
     }));
+    options
+}
 
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub fn android_main(app: AndroidApp) {
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Info),
+    );
+
+    let options = android_native_options(app);
     let _ = eframe::run_native(
-        "Rusty Painter",
+        "Rust Dab Painter",
         options,
         Box::new(|cc| {
             styling::apply_global_style(&cc.egui_ctx);

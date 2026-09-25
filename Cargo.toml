@@ -11,7 +11,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-eframe = "0.29"
+eframe = { version = "0.29", features = ["wgpu", "android-native-activity"] }
 env_logger = "0.11"
 log = "0.4"
 rand = "0.9"
@@ -35,21 +35,44 @@ octotablet = "0.1"
 rfd = "0.17.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
-android-activity = { version = "0.6", features = ["native-activity"] }
 winit = { version = "0.30.12", features = ["android-native-activity"] }
+android_logger = "0.14"
+jni = "0.21"
+ndk-context = "0.1"
 
+[package.metadata.android]
+package = "io.vectra.rustypainter"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.application]
+label = "Rust Dab Painter"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+
+[package.metadata.android.sdk]
+min_sdk_version = 29
+target_sdk_version = 36
+
+# Release signing is intentionally NOT committed here. cargo-apk reads
+# [package.metadata.android.signing.release] as plain TOML (no env-var
+# interpolation), so a real keystore path/password can't live in this
+# file without leaking. To build a signed release APK locally, add the
+# block below to your own local, uncommitted copy of this file (git
+# will show it as a dirty diff, just don't stage/commit it), or sign
+# the unsigned APK manually with `apksigner` after `cargo apk build`.
+#
+# [package.metadata.android.signing.release]
+# path = "/path/to/your/release.keystore"
+# keystore_password = "..."
+# key_alias = "..."
+# key_password = "..."
+
+[patch.crates-io]
+winit = { path = "vendor-winit" }
 
 [profile.release]
 opt-level = 2
 [profile.dev.package."*"]
 opt-level = 2
-
-[package.metadata.android]
-package_name = "com.vectra.rustypainter"
-label = "Rusty Painter"
-min_sdk_version = 24
-target_sdk_version = 34
-fullscreen = true
 
 [[bench]]
 name = "brush_bench"
