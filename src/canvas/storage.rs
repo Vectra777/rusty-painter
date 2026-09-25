@@ -634,10 +634,42 @@ impl Canvas {
         }
 
         if start_tx == end_tx && start_ty == end_ty {
-            // Fast path: Single tile access
-            let tx = start_tx as i32;
-            let ty = start_ty as i32;
+            self.write_single_tile_region(
+                x,
+                y,
+                w,
+                h,
+                start_tx as i32,
+                start_ty as i32,
+                dst_w,
+                dst_h,
+                step,
+                out,
+            );
+            return;
+        }
 
+        self.write_multi_tile_region(x, y, dst_w, dst_h, step, out);
+    }
+
+    /// Composite a region that lies entirely within one tile. Used when
+    /// `try_write_single_tile_fast`'s stricter fast path doesn't apply
+    /// (e.g. `step != 1`, so the region needs downsampling).
+    #[allow(clippy::too_many_arguments)]
+    fn write_single_tile_region(
+        &self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        tx: i32,
+        ty: i32,
+        dst_w: usize,
+        dst_h: usize,
+        step: usize,
+        out: &mut ColorImage,
+    ) {
+        {
             // 1. Get Arcs (Locking the map briefly)
             let layer_arcs: Vec<Option<Arc<Mutex<TileCell>>>> = self
                 .layers
@@ -813,10 +845,20 @@ impl Canvas {
                     }
                 }
             }
-            return;
         }
+    }
 
-        // --- FALLBACK (Multi-tile / Optimized Path) ---
+    /// Composite a region that spans multiple tiles, caching one decoded
+    /// tile per layer per output row.
+    fn write_multi_tile_region(
+        &self,
+        x: usize,
+        y: usize,
+        dst_w: usize,
+        dst_h: usize,
+        step: usize,
+        out: &mut ColorImage,
+    ) {
         // Optimization: Cache tiles and pre-convert to linear space
         for dst_y in 0..dst_h {
             let global_y = y + dst_y * step;
@@ -1382,6 +1424,92 @@ mod tests {
 
         assert_eq!(image.size, [0, 0]);
         assert!(image.pixels.is_empty());
+    }
+
+    /// Deterministic, dependency-free hash (FNV-1a) over raw RGBA bytes. See
+    /// the equivalent helper in brush_engine::brush::tests for why: a
+    /// golden-master checksum lets a refactor of write_region_to_color_image
+    /// be proven pixel-identical without a display to compare renders on.
+    fn checksum_pixels(pixels: &[Color32]) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for p in pixels {
+            for b in p.to_array() {
+                hash ^= b as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        hash
+    }
+
+    /// 8x8 canvas (2x2 grid of 4x4 tiles), two layers, each tile given a
+    /// distinct semi-transparent pattern so a tile-indexing bug in either
+    /// layer would change the checksum.
+    fn build_region_test_canvas() -> Canvas {
+        let mut canvas = Canvas::new(8, 8, Color32::from_rgba_unmultiplied(230, 230, 230, 255), 4);
+        for (li, base) in [(0usize, 10u8), (1usize, 60u8)] {
+            for (tx, ty) in [(0i32, 0i32), (1, 0), (0, 1), (1, 1)] {
+                let mut data = vec![Color32::TRANSPARENT; 16];
+                for (i, px) in data.iter_mut().enumerate() {
+                    let v = base
+                        .wrapping_add((tx as u8) * 40)
+                        .wrapping_add((ty as u8) * 20)
+                        .wrapping_add(i as u8 * 3);
+                    *px = Color32::from_rgba_unmultiplied(v, v.wrapping_add(50), v.wrapping_add(90), 180);
+                }
+                canvas.set_layer_tile_data(li, tx, ty, data);
+            }
+        }
+        canvas
+    }
+
+    /// Golden-master check for the single-tile fast path
+    /// (`try_write_single_tile_fast`, step == 1, region within one tile).
+    #[test]
+    fn write_region_single_tile_step1_is_stable() {
+        let canvas = build_region_test_canvas();
+        let mut image = ColorImage::new([4, 4], Color32::TRANSPARENT);
+        canvas.write_region_to_color_image(0, 0, 4, 4, &mut image, 1);
+        assert_eq!(checksum_pixels(&image.pixels), 0xf9e95eb826f8c02f, "GOLDEN_PLACEHOLDER:write_region_single_tile_step1_is_stable");
+    }
+
+    /// Golden-master check for the single-tile downsampling path (step > 1,
+    /// still within one tile: falls through try_write_single_tile_fast into
+    /// the "Fast path: Single tile access" block's step != 1 branch).
+    #[test]
+    fn write_region_single_tile_step2_is_stable() {
+        let canvas = build_region_test_canvas();
+        let mut image = ColorImage::new([2, 2], Color32::TRANSPARENT);
+        canvas.write_region_to_color_image(0, 0, 4, 4, &mut image, 2);
+        assert_eq!(checksum_pixels(&image.pixels), 0x14933deaac974042, "GOLDEN_PLACEHOLDER:write_region_single_tile_step2_is_stable");
+    }
+
+    /// Golden-master check for the multi-tile fallback path, step == 1,
+    /// covering the full 2x2 tile grid.
+    #[test]
+    fn write_region_multi_tile_step1_is_stable() {
+        let canvas = build_region_test_canvas();
+        let mut image = ColorImage::new([8, 8], Color32::TRANSPARENT);
+        canvas.write_region_to_color_image(0, 0, 8, 8, &mut image, 1);
+        assert_eq!(checksum_pixels(&image.pixels), 0xa3d9415bbd039077, "GOLDEN_PLACEHOLDER:write_region_multi_tile_step1_is_stable");
+    }
+
+    /// Golden-master check for the multi-tile fallback path with step > 1.
+    #[test]
+    fn write_region_multi_tile_step2_is_stable() {
+        let canvas = build_region_test_canvas();
+        let mut image = ColorImage::new([4, 4], Color32::TRANSPARENT);
+        canvas.write_region_to_color_image(0, 0, 8, 8, &mut image, 2);
+        assert_eq!(checksum_pixels(&image.pixels), 0xd25bf6d6129a85bc, "GOLDEN_PLACEHOLDER:write_region_multi_tile_step2_is_stable");
+    }
+
+    /// Golden-master check for a region that straddles tile boundaries
+    /// without being canvas-aligned (offset start, spans 3 of the 4 tiles).
+    #[test]
+    fn write_region_offset_multi_tile_is_stable() {
+        let canvas = build_region_test_canvas();
+        let mut image = ColorImage::new([5, 5], Color32::TRANSPARENT);
+        canvas.write_region_to_color_image(2, 2, 5, 5, &mut image, 1);
+        assert_eq!(checksum_pixels(&image.pixels), 0xff2bb4312a21f9bd, "GOLDEN_PLACEHOLDER:write_region_offset_multi_tile_is_stable");
     }
 
     #[test]

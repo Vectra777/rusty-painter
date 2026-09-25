@@ -70,6 +70,30 @@ pub struct Brush {
     soft_mask_cache: Vec<SoftMaskCache>,
 }
 
+/// Blend one pixel of paint into `data[idx]`. Identical in `pixel_dab` and
+/// `soft_dab`'s general path (previously duplicated inline in both).
+#[inline]
+fn apply_dab_blend(
+    blend_mode: BlendMode,
+    linear_brush: &LinearBrushColor,
+    r: u8,
+    g: u8,
+    b: u8,
+    alpha_u8: u8,
+    data: &mut [Color32],
+    idx: usize,
+) {
+    match blend_mode {
+        BlendMode::Normal => {
+            data[idx] = alpha_over_brush(linear_brush, alpha_u8, data[idx]);
+        }
+        BlendMode::Eraser => {
+            let src = Color32::from_rgba_unmultiplied(r, g, b, alpha_u8);
+            data[idx] = blend_erase(src, data[idx]);
+        }
+    }
+}
+
 impl Brush {
     /// Create a standard soft brush with the given radius, hardness, base color and spacing.
     pub fn new(diameter: f32, hardness: f32, color: Color32, spacing: f32) -> Self {
@@ -371,18 +395,16 @@ impl Brush {
                             let final_alpha = (base_alpha * alpha_mod).clamp(0.0, 1.0);
                             let alpha_u8 = (final_alpha * 255.0) as u8;
 
-                            match blend_mode {
-                                BlendMode::Normal => {
-                                    data[idx] =
-                                        alpha_over_brush(&linear_brush, alpha_u8, data[idx]);
-                                }
-                                BlendMode::Eraser => {
-                                    let src_color = Color32::from_rgba_unmultiplied(
-                                        src_r, src_g, src_b, alpha_u8,
-                                    );
-                                    data[idx] = blend_erase(src_color, data[idx]);
-                                }
-                            }
+                            apply_dab_blend(
+                                blend_mode,
+                                &linear_brush,
+                                src_r,
+                                src_g,
+                                src_b,
+                                alpha_u8,
+                                data,
+                                idx,
+                            );
                         }
                     }
                 }
@@ -615,15 +637,7 @@ impl Brush {
                         let local_x = gx - tile_x0;
                         let idx = local_y * tile_size + local_x;
 
-                        match blend_mode {
-                            BlendMode::Normal => {
-                                data[idx] = alpha_over_brush(&linear_brush, alpha_u8, data[idx]);
-                            }
-                            BlendMode::Eraser => {
-                                let src = Color32::from_rgba_unmultiplied(sr, sg, sb, alpha_u8);
-                                data[idx] = blend_erase(src, data[idx]);
-                            }
-                        }
+                        apply_dab_blend(blend_mode, &linear_brush, sr, sg, sb, alpha_u8, data, idx);
                     }
                 }
 
@@ -646,6 +660,161 @@ pub struct BrushPreset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rayon::ThreadPoolBuilder;
+
+    /// Deterministic, dependency-free hash (FNV-1a) over raw RGBA bytes.
+    /// Used as a golden-master checksum: captured once from known-correct
+    /// output, then asserted unchanged across refactors of the pixel-stamp
+    /// hot path, which is otherwise very hard to regression-test without a
+    /// display to visually compare rendered frames.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    const TILE_SIZE_FOR_TEST: usize = 64;
+
+    /// Paint each `(brush, centers)` step onto a shared fresh 2x2-tile
+    /// canvas in order, then return an FNV-1a checksum of every tile's raw
+    /// pixel bytes (layer 1, the paintable default layer). Spans multiple
+    /// tiles so both the single-tile and multi-tile/parallel dispatch code
+    /// paths run. Multiple steps let a scenario paint a base fill, then
+    /// erase/blend on top of it within the same checksum.
+    fn paint_and_checksum(steps: &[(Brush, Vec<Vec2>)]) -> u64 {
+        let canvas = Canvas::new(96, 96, Color32::TRANSPARENT, TILE_SIZE_FOR_TEST);
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+
+        for (brush, centers) in steps {
+            let mut brush = brush.clone();
+            let mut undo_action = UndoAction {
+                tiles: Vec::new(),
+                selection: None,
+                transform: None,
+            };
+            let mut modified_tiles = HashSet::new();
+            for &center in centers {
+                brush.dab(
+                    &pool,
+                    &canvas,
+                    None,
+                    center,
+                    &mut undo_action,
+                    &mut modified_tiles,
+                );
+            }
+        }
+
+        let mut bytes = Vec::new();
+        for ty in 0..2 {
+            for tx in 0..2 {
+                let data = canvas
+                    .get_layer_tile_data(1, tx, ty)
+                    .unwrap_or_else(|| vec![Color32::TRANSPARENT; TILE_SIZE_FOR_TEST * TILE_SIZE_FOR_TEST]);
+                for pixel in data {
+                    bytes.extend_from_slice(&pixel.to_array());
+                }
+            }
+        }
+        fnv1a(&bytes)
+    }
+
+    fn stroke_centers() -> Vec<Vec2> {
+        // A short diagonal stroke crossing all four tiles of the 2x2 grid.
+        vec![
+            Vec2::new(20.0, 20.0),
+            Vec2::new(40.0, 40.0),
+            Vec2::new(60.0, 60.0),
+            Vec2::new(80.0, 80.0),
+        ]
+    }
+
+    /// Golden-master check for the hard-edged Pixel brush path
+    /// (`Brush::pixel_dab`). If this fails after a refactor, the refactor
+    /// changed pixel output, not just structure.
+    #[test]
+    fn pixel_dab_output_is_stable() {
+        let mut brush = Brush::new_pixel(18.0, Color32::from_rgba_unmultiplied(200, 30, 30, 255));
+        brush.brush_options.pixel_shape = PixelBrushShape::Circle;
+        let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
+        assert_eq!(checksum, 0xc540cd961ef28f05, "GOLDEN_PLACEHOLDER:pixel_dab_output_is_stable");
+    }
+
+    /// Golden-master check for the Pixel brush with a Square tip.
+    #[test]
+    fn pixel_dab_square_output_is_stable() {
+        let mut brush = Brush::new_pixel(18.0, Color32::from_rgba_unmultiplied(30, 200, 30, 255));
+        brush.brush_options.pixel_shape = PixelBrushShape::Square;
+        let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
+        assert_eq!(
+            checksum, 0x30fed29cce6020a5,
+            "GOLDEN_PLACEHOLDER:pixel_dab_square_output_is_stable"
+        );
+    }
+
+    /// Golden-master check for the Soft brush's fast Gaussian-circle path
+    /// (anti_aliasing + Gaussian + Circle + Normal blend + no selection).
+    #[test]
+    fn soft_dab_gaussian_fast_path_output_is_stable() {
+        let brush = Brush::new(24.0, 40.0, Color32::from_rgba_unmultiplied(30, 30, 200, 255), 15.0);
+        assert!(brush.anti_aliasing);
+        assert_eq!(brush.brush_options.softness_selector, SoftnessSelector::Gaussian);
+        assert_eq!(brush.brush_options.pixel_shape, PixelBrushShape::Circle);
+        let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
+        assert_eq!(
+            checksum, 0x3746e62f3bd2ff5d,
+            "GOLDEN_PLACEHOLDER:soft_dab_gaussian_fast_path_output_is_stable"
+        );
+    }
+
+    /// Golden-master check for the Soft brush's general (non-fast-path)
+    /// path, forced by a Square tip.
+    #[test]
+    fn soft_dab_general_path_square_output_is_stable() {
+        let mut brush =
+            Brush::new(24.0, 40.0, Color32::from_rgba_unmultiplied(200, 200, 30, 255), 15.0);
+        brush.brush_options.pixel_shape = PixelBrushShape::Square;
+        let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
+        assert_eq!(
+            checksum, 0xf51081982ccff9b5,
+            "GOLDEN_PLACEHOLDER:soft_dab_general_path_square_output_is_stable"
+        );
+    }
+
+    /// Golden-master check for the Soft brush's general path without
+    /// anti-aliasing (hard edges, still goes through calc_soft_brush_alpha).
+    #[test]
+    fn soft_dab_general_path_no_aa_output_is_stable() {
+        let mut brush = Brush::new(24.0, 40.0, Color32::from_rgba_unmultiplied(200, 30, 200, 255), 15.0);
+        brush.anti_aliasing = false;
+        let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
+        assert_eq!(
+            checksum, 0x80c2a24b62e25d05,
+            "GOLDEN_PLACEHOLDER:soft_dab_general_path_no_aa_output_is_stable"
+        );
+    }
+
+    /// Golden-master check for the Soft brush's general path with the
+    /// Eraser blend mode, erasing into a pre-painted solid fill.
+    #[test]
+    fn soft_dab_general_path_eraser_output_is_stable() {
+        let fill_brush =
+            Brush::new(60.0, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 255), 15.0);
+        let mut eraser_brush = Brush::new(24.0, 40.0, Color32::from_rgba_unmultiplied(0, 0, 0, 255), 15.0);
+        eraser_brush.brush_options.blend_mode = BlendMode::Eraser;
+
+        let checksum = paint_and_checksum(&[
+            (fill_brush, vec![Vec2::new(48.0, 48.0)]),
+            (eraser_brush, stroke_centers()),
+        ]);
+        assert_eq!(
+            checksum, 0x94366dccc675d79c,
+            "GOLDEN_PLACEHOLDER:soft_dab_general_path_eraser_output_is_stable"
+        );
+    }
 
     #[test]
     fn cached_gaussian_circle_mask_matches_formula() {
