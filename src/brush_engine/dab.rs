@@ -63,12 +63,6 @@ pub(super) fn build_tile_regions(bounds: &DabBounds) -> Vec<TileRegion> {
         .collect()
 }
 
-pub(super) fn tile_coords(bounds: &DabBounds) -> Vec<(usize, usize)> {
-    (bounds.min_ty..=bounds.max_ty)
-        .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| (tx, ty)))
-        .collect()
-}
-
 pub(super) fn tile_overlaps_selection(
     selection: Option<&SelectionManager>,
     tile_x0: usize,

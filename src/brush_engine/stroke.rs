@@ -151,8 +151,9 @@ impl StrokeState {
             let mut p = pos;
             if brush.jitter > 0.0 {
                 let mut rng = rand::rng();
-                let jx = rng.random_range(-brush.jitter..=brush.jitter);
-                let jy = rng.random_range(-brush.jitter..=brush.jitter);
+                let jitter_amount = (brush.jitter / 100.0) * brush.brush_options.diameter;
+                let jx = rng.random_range(-jitter_amount..=jitter_amount);
+                let jy = rng.random_range(-jitter_amount..=jitter_amount);
                 p.x += jx;
                 p.y += jy;
             }

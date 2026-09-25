@@ -641,124 +641,122 @@ impl Canvas {
             // Pre-convert clear_color to linear space
             let clear_color_linear = Rgba::from(self.clear_color);
 
-            if true {
-                for dst_y in 0..dst_h {
-                    let global_y_start = y + dst_y * step;
-                    let row_start = dst_y * dst_w;
+            for dst_y in 0..dst_h {
+                let global_y_start = y + dst_y * step;
+                let row_start = dst_y * dst_w;
 
-                    for dst_x in 0..dst_w {
-                        let global_x_start = x + dst_x * step;
+                for dst_x in 0..dst_w {
+                    let global_x_start = x + dst_x * step;
 
-                        if step == 1 {
-                            // --- FAST PATH (1:1 Rendering) ---
-                            let local_y = global_y_start % self.tile_size;
-                            let local_x = global_x_start % self.tile_size;
-                            let src_idx = local_y * self.tile_size + local_x;
+                    if step == 1 {
+                        // --- FAST PATH (1:1 Rendering) ---
+                        let local_y = global_y_start % self.tile_size;
+                        let local_x = global_x_start % self.tile_size;
+                        let src_idx = local_y * self.tile_size + local_x;
 
-                            // Linear Accumulator (starts transparent)
-                            let mut composite = Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
+                        // Linear Accumulator (starts transparent)
+                        let mut composite = Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
 
-                            for (i, (visible, opacity, _, is_bg, is_empty)) in
-                                layer_props.iter().enumerate()
-                            {
-                                if !visible || *is_empty {
-                                    continue;
-                                }
-
-                                // Get pixel in linear space (already converted)
-                                let src = if let Some(linear_data) = &linear_tiles[i] {
-                                    linear_data[src_idx]
-                                } else if *is_bg {
-                                    clear_color_linear
-                                } else {
-                                    Rgba::TRANSPARENT
-                                };
-
-                                if src.a() == 0.0 {
-                                    continue;
-                                }
-
-                                // Apply Opacity and Blend (already in linear space)
-                                let src = if *opacity < 1.0 { src * *opacity } else { src };
-
-                                // Linear Blend: Src Over Composite
-                                composite = src + composite * (1.0 - src.a());
+                        for (i, (visible, opacity, _, is_bg, is_empty)) in
+                            layer_props.iter().enumerate()
+                        {
+                            if !visible || *is_empty {
+                                continue;
                             }
 
-                            // 4. Convert Linear Float -> sRGB (Once at the end) - Fast LUT-based
-                            out.pixels[row_start + dst_x] = rgba_to_color32_fast(composite);
-                        } else {
-                            // --- DOWNSAMPLING PATH (High Quality) ---
-                            let mut r_acc = 0.0;
-                            let mut g_acc = 0.0;
-                            let mut b_acc = 0.0;
-                            let mut a_acc = 0.0;
-                            let mut count = 0.0;
+                            // Get pixel in linear space (already converted)
+                            let src = if let Some(linear_data) = &linear_tiles[i] {
+                                linear_data[src_idx]
+                            } else if *is_bg {
+                                clear_color_linear
+                            } else {
+                                Rgba::TRANSPARENT
+                            };
 
-                            for sy in 0..step {
-                                let global_y = global_y_start + sy;
-                                if global_y >= y + h {
+                            if src.a() == 0.0 {
+                                continue;
+                            }
+
+                            // Apply Opacity and Blend (already in linear space)
+                            let src = if *opacity < 1.0 { src * *opacity } else { src };
+
+                            // Linear Blend: Src Over Composite
+                            composite = src + composite * (1.0 - src.a());
+                        }
+
+                        // 4. Convert Linear Float -> sRGB (Once at the end) - Fast LUT-based
+                        out.pixels[row_start + dst_x] = rgba_to_color32_fast(composite);
+                    } else {
+                        // --- DOWNSAMPLING PATH (High Quality) ---
+                        let mut r_acc = 0.0;
+                        let mut g_acc = 0.0;
+                        let mut b_acc = 0.0;
+                        let mut a_acc = 0.0;
+                        let mut count = 0.0;
+
+                        for sy in 0..step {
+                            let global_y = global_y_start + sy;
+                            if global_y >= y + h {
+                                continue;
+                            }
+                            let local_y = global_y % self.tile_size;
+
+                            for sx in 0..step {
+                                let global_x = global_x_start + sx;
+                                if global_x >= x + w {
                                     continue;
                                 }
-                                let local_y = global_y % self.tile_size;
+                                let local_x = global_x % self.tile_size;
 
-                                for sx in 0..step {
-                                    let global_x = global_x_start + sx;
-                                    if global_x >= x + w {
+                                let src_idx = local_y * self.tile_size + local_x;
+
+                                // Calculate the color for this sub-pixel using Linear Math
+                                let mut sub_composite =
+                                    Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
+
+                                for (i, (visible, opacity, _, is_bg, is_empty)) in
+                                    layer_props.iter().enumerate()
+                                {
+                                    if !visible || *is_empty {
                                         continue;
                                     }
-                                    let local_x = global_x % self.tile_size;
 
-                                    let src_idx = local_y * self.tile_size + local_x;
+                                    // Get pixel in linear space (already converted)
+                                    let src = if let Some(linear_data) = &linear_tiles[i] {
+                                        linear_data[src_idx]
+                                    } else if *is_bg {
+                                        clear_color_linear
+                                    } else {
+                                        Rgba::TRANSPARENT
+                                    };
 
-                                    // Calculate the color for this sub-pixel using Linear Math
-                                    let mut sub_composite =
-                                        Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
-
-                                    for (i, (visible, opacity, _, is_bg, is_empty)) in
-                                        layer_props.iter().enumerate()
-                                    {
-                                        if !visible || *is_empty {
-                                            continue;
-                                        }
-
-                                        // Get pixel in linear space (already converted)
-                                        let src = if let Some(linear_data) = &linear_tiles[i] {
-                                            linear_data[src_idx]
-                                        } else if *is_bg {
-                                            clear_color_linear
-                                        } else {
-                                            Rgba::TRANSPARENT
-                                        };
-
-                                        if src.a() == 0.0 {
-                                            continue;
-                                        }
-
-                                        // Apply Opacity and Blend (already in linear space)
-                                        let src = if *opacity < 1.0 { src * *opacity } else { src };
-                                        sub_composite = src + sub_composite * (1.0 - src.a());
+                                    if src.a() == 0.0 {
+                                        continue;
                                     }
 
-                                    r_acc += sub_composite.r();
-                                    g_acc += sub_composite.g();
-                                    b_acc += sub_composite.b();
-                                    a_acc += sub_composite.a();
-                                    count += 1.0;
+                                    // Apply Opacity and Blend (already in linear space)
+                                    let src = if *opacity < 1.0 { src * *opacity } else { src };
+                                    sub_composite = src + sub_composite * (1.0 - src.a());
                                 }
-                            }
 
-                            if count > 0.0 {
-                                let inv = 1.0 / count;
-                                // Convert the averaged Linear result back to sRGB - Fast LUT-based
-                                out.pixels[row_start + dst_x] =
-                                    rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
-                                        r_acc * inv,
-                                        g_acc * inv,
-                                        b_acc * inv,
-                                        a_acc * inv,
-                                    ));
+                                r_acc += sub_composite.r();
+                                g_acc += sub_composite.g();
+                                b_acc += sub_composite.b();
+                                a_acc += sub_composite.a();
+                                count += 1.0;
                             }
+                        }
+
+                        if count > 0.0 {
+                            let inv = 1.0 / count;
+                            // Convert the averaged Linear result back to sRGB - Fast LUT-based
+                            out.pixels[row_start + dst_x] =
+                                rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
+                                    r_acc * inv,
+                                    g_acc * inv,
+                                    b_acc * inv,
+                                    a_acc * inv,
+                                ));
                         }
                     }
                 }

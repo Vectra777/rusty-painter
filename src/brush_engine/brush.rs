@@ -2,11 +2,9 @@ use super::brush_options::BrushOptions;
 use crate::{
     brush_engine::{
         brush_options::{BlendMode, PixelBrushShape},
-        dab::{
-            TileRegion, build_tile_regions, calc_dab_bounds, tile_coords, tile_overlaps_selection,
-        },
+        dab::{TileRegion, build_tile_regions, calc_dab_bounds, tile_overlaps_selection},
         hardness::SoftnessSelector,
-        masks::{calc_soft_brush_alpha, sample_custom_mask_nn},
+        masks::{calc_soft_brush_alpha, gaussian_falloff, sample_custom_mask_nn},
     },
     canvas::{
         Canvas,
@@ -163,14 +161,7 @@ impl Brush {
 
                     let dist = dist_sq.sqrt();
                     let t = dist * inv_radius;
-                    let mut alpha_factor = if t < hardness_val || hardness_val >= 1.0 {
-                        1.0
-                    } else {
-                        let v = (t - hardness_val) / (1.0 - hardness_val);
-                        let falloff = 1.0 - v.clamp(0.0, 1.0);
-                        let f2 = falloff * falloff;
-                        f2 * (3.0 - 2.0 * falloff)
-                    };
+                    let mut alpha_factor = gaussian_falloff(t, hardness_val);
 
                     if dist > fade_start {
                         alpha_factor *= 1.0 - (dist - fade_start) * inv_fade_width;
@@ -323,10 +314,10 @@ impl Brush {
         let diameter = self.brush_options.diameter;
 
         // Parallel execution for pixel dab
-        let tiles = tile_coords(&bounds);
+        let tiles = build_tile_regions(&bounds);
 
-        let draw_tile = |(tx, ty): &(usize, usize)| {
-            if let Some(tile_arc) = canvas.lock_tile(*tx, *ty) {
+        let draw_tile = |&TileRegion { tx, ty }: &TileRegion| {
+            if let Some(tile_arc) = canvas.lock_tile(tx, ty) {
                 let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 let data = match tile.data.as_mut() {
                     Some(d) => d,
@@ -457,7 +448,7 @@ impl Brush {
             0.0
         };
 
-        let tiles = tile_coords(&bounds);
+        let tiles = build_tile_regions(&bounds);
 
         if selection.is_none()
             && blend_mode == BlendMode::Normal
@@ -470,7 +461,7 @@ impl Brush {
             let mask_base_x = center_x.floor() as i32 - mask.r_ceil;
             let mask_base_y = center_y.floor() as i32 - mask.r_ceil;
             let opacity_scale = base_alpha * flow_alpha;
-            let draw_tile = |(tx, ty): &(usize, usize)| {
+            let draw_tile = |&TileRegion { tx, ty }: &TileRegion| {
                 let tile_x0 = tx * tile_size;
                 let tile_y0 = ty * tile_size;
                 let tile_x1 = tile_x0 + tile_size;
@@ -484,7 +475,7 @@ impl Brush {
                     return;
                 }
 
-                if let Some(tile_arc) = canvas.lock_tile(*tx, *ty) {
+                if let Some(tile_arc) = canvas.lock_tile(tx, ty) {
                     let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                     let data = match tile.data.as_mut() {
                         Some(d) => d,
@@ -528,7 +519,7 @@ impl Brush {
             return;
         }
 
-        let draw_tile = |(tx, ty): &(usize, usize)| {
+        let draw_tile = |&TileRegion { tx, ty }: &TileRegion| {
             let tile_x0 = tx * tile_size;
             let tile_y0 = ty * tile_size;
             let tile_x1 = tile_x0 + tile_size;
@@ -543,7 +534,7 @@ impl Brush {
                 return;
             }
 
-            if let Some(tile_arc) = canvas.lock_tile(*tx, *ty) {
+            if let Some(tile_arc) = canvas.lock_tile(tx, ty) {
                 let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 let data = match tile.data.as_mut() {
                     Some(d) => d,

@@ -95,7 +95,7 @@ impl SoftnessCurve {
         // If secant k-1 and secant k have different signs, tangent is 0.
         // Else, tangent is arithmetic mean (simple) or harmonic mean (Fritsch-Butland).
 
-        let _tangent = |_k: usize, sec_prev: f32, sec_next: f32| -> f32 {
+        let tangent = |sec_prev: f32, sec_next: f32| -> f32 {
             if sec_prev * sec_next <= 0.0 {
                 0.0
             } else {
@@ -103,17 +103,16 @@ impl SoftnessCurve {
             }
         };
 
-        // Re-calculating secants properly for the endpoints logic
         let m0 = if i == 0 {
             secant1 // Start point
         } else {
-            (secant0 + secant1) * 0.5
+            tangent(secant0, secant1)
         };
 
         let m1 = if i == len - 2 {
             secant1 // End point
         } else {
-            (secant1 + secant2) * 0.5
+            tangent(secant1, secant2)
         };
 
         // Evaluate cubic hermite

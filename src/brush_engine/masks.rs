@@ -80,6 +80,20 @@ fn sample_custom_mask_bilinear(
     }
 }
 
+/// Smoothstep falloff used by the Gaussian softness curve: 1.0 inside the
+/// hardness radius, smoothly falling to 0.0 at the brush edge.
+#[inline]
+pub(crate) fn gaussian_falloff(t: f32, hardness_val: f32) -> f32 {
+    if t < hardness_val || hardness_val >= 1.0 {
+        1.0
+    } else {
+        let v = (t - hardness_val) / (1.0 - hardness_val);
+        let falloff = 1.0 - v.clamp(0.0, 1.0);
+        let f2 = falloff * falloff;
+        f2 * (3.0 - 2.0 * falloff)
+    }
+}
+
 pub(super) fn calc_soft_brush_alpha(
     dx: f32,
     dy: f32,
@@ -99,16 +113,7 @@ pub(super) fn calc_soft_brush_alpha(
                 let dist = dist_sq.sqrt();
                 let t = dist / radius;
                 let alpha = match softness_selector {
-                    SoftnessSelector::Gaussian => {
-                        if t < hardness_val || hardness_val >= 1.0 {
-                            1.0
-                        } else {
-                            let v = (t - hardness_val) / (1.0 - hardness_val);
-                            let falloff = 1.0 - v.clamp(0.0, 1.0);
-                            let f2 = falloff * falloff;
-                            f2 * (3.0 - 2.0 * falloff)
-                        }
-                    }
+                    SoftnessSelector::Gaussian => gaussian_falloff(t, hardness_val),
                     SoftnessSelector::Curve => softness_curve.eval(t),
                 };
                 (alpha, dist_sq)
@@ -124,16 +129,7 @@ pub(super) fn calc_soft_brush_alpha(
                 (0.0, dist_sq)
             } else {
                 let alpha = match softness_selector {
-                    SoftnessSelector::Gaussian => {
-                        if t < hardness_val || hardness_val >= 0.999 {
-                            1.0
-                        } else {
-                            let v = (t - hardness_val) / (1.0 - hardness_val);
-                            let falloff = 1.0 - v.clamp(0.0, 1.0);
-                            let f2 = falloff * falloff;
-                            f2 * (3.0 - 2.0 * falloff)
-                        }
-                    }
+                    SoftnessSelector::Gaussian => gaussian_falloff(t, hardness_val),
                     SoftnessSelector::Curve => softness_curve.eval(t),
                 };
                 (alpha, dist_sq)
