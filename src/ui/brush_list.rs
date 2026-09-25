@@ -5,6 +5,9 @@ use eframe::egui::{Color32, TextureOptions};
 use rayon::ThreadPool;
 use std::collections::HashMap;
 
+/// Temp-memory id used to flag a duplicate preset name in the save modal.
+const DUPLICATE_NAME_WARNING_ID: &str = "brush_preset_duplicate_name";
+
 /// Displays available presets and lets the user apply one to the active brush.
 pub fn brush_list_panel(
     ui: &mut egui::Ui,
@@ -24,6 +27,7 @@ pub fn brush_list_panel(
             if ui.button("+").clicked() {
                 *show_modal = true;
                 *new_preset_name = "New Preset".to_string();
+                ctx.data_mut(|d| d.remove::<bool>(egui::Id::new(DUPLICATE_NAME_WARNING_ID)));
             }
         });
     });
@@ -38,10 +42,20 @@ pub fn brush_list_panel(
             .show(&ctx, |ui| {
                 ui.label("Preset Name:");
                 ui.text_edit_singleline(new_preset_name);
+
+                let warning_id = egui::Id::new(DUPLICATE_NAME_WARNING_ID);
+                if ctx.data(|d| d.get_temp::<bool>(warning_id).unwrap_or(false)) {
+                    ui.colored_label(
+                        Color32::from_rgb(220, 80, 80),
+                        "A preset with this name already exists.",
+                    );
+                }
+
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         *show_modal = false;
+                        ctx.data_mut(|d| d.remove::<bool>(warning_id));
                     }
                     if ui.button("Save").clicked() {
                         let name = if new_preset_name.trim().is_empty() {
@@ -50,11 +64,16 @@ pub fn brush_list_panel(
                             new_preset_name.trim().to_string()
                         };
 
-                        presets.push(BrushPreset {
-                            name,
-                            brush: brush.clone(),
-                        });
-                        *show_modal = false;
+                        if presets.iter().any(|p| p.name == name) {
+                            ctx.data_mut(|d| d.insert_temp(warning_id, true));
+                        } else {
+                            presets.push(BrushPreset {
+                                name,
+                                brush: brush.clone(),
+                            });
+                            ctx.data_mut(|d| d.remove::<bool>(warning_id));
+                            *show_modal = false;
+                        }
                     }
                 });
             });

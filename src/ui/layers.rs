@@ -50,11 +50,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         ui.painter().rect_stroke(rect.shrink(1.0), 8.0, stroke);
                     }
 
-                    #[allow(deprecated)]
-                    let mut content = ui.child_ui(
-                        rect.shrink2(egui::vec2(10.0, 8.0)),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        None,
+                    let mut content = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect.shrink2(egui::vec2(10.0, 8.0)))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     );
 
                     let field_width = (rect.width() - 70.0).max(140.0);
@@ -70,7 +69,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     } else {
                         let resp = content.add_sized(
                             egui::vec2(field_width - 140.0, 24.0),
-                            egui::Label::new(layer.name.clone()),
+                            egui::Label::new(layer.name.as_str()),
                         );
                         if resp.clicked() {
                             active_idx = i;

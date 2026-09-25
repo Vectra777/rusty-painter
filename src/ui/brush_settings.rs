@@ -21,6 +21,72 @@ impl Default for BrushPreviewState {
     }
 }
 
+/// Adds a slider built by the caller and marks the preview dirty when it changes.
+fn dirty_slider(ui: &mut egui::Ui, slider: egui::Slider, preview: &mut BrushPreviewState) -> bool {
+    let changed = ui.add(slider).changed();
+    if changed {
+        preview.dirty = true;
+    }
+    changed
+}
+
+/// Adds a `selectable_value` and marks the preview dirty when it changes.
+fn dirty_selectable<T: PartialEq>(
+    ui: &mut egui::Ui,
+    current_value: &mut T,
+    selected_value: T,
+    text: &str,
+    preview: &mut BrushPreviewState,
+) -> bool {
+    let changed = ui
+        .selectable_value(current_value, selected_value, text)
+        .changed();
+    if changed {
+        preview.dirty = true;
+    }
+    changed
+}
+
+/// Adds a checkbox and marks the preview dirty when it changes.
+fn dirty_checkbox(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    text: &str,
+    preview: &mut BrushPreviewState,
+) -> bool {
+    let changed = ui.checkbox(value, text).changed();
+    if changed {
+        preview.dirty = true;
+    }
+    changed
+}
+
+/// Draws a selectable brush-tip swatch (border + custom shape) and returns its response
+/// (with hover text already attached) so the caller can check `.clicked()`.
+fn tip_swatch(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    is_selected: bool,
+    hover_text: &str,
+    draw_shape: impl FnOnce(&egui::Painter, egui::Rect),
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    ui.painter().rect_stroke(
+        rect,
+        1.0,
+        (
+            1.0,
+            if is_selected {
+                Color32::WHITE
+            } else {
+                Color32::GRAY
+            },
+        ),
+    );
+    draw_shape(ui.painter(), rect);
+    response.on_hover_text(hover_text)
+}
+
 /// Panel for tweaking the currently selected brush properties.
 pub fn brush_settings_panel(
     ui: &mut egui::Ui,
@@ -50,42 +116,26 @@ pub fn brush_settings_panel(
 
     ui.horizontal(|ui| {
         ui.label("Type:");
-        if ui
-            .selectable_value(&mut brush.brush_type, BrushType::Soft, "Soft")
-            .changed()
-        {
-            preview.dirty = true;
-        }
-        if ui
-            .selectable_value(&mut brush.brush_type, BrushType::Pixel, "Pixel")
-            .changed()
-        {
-            preview.dirty = true;
-        }
+        dirty_selectable(ui, &mut brush.brush_type, BrushType::Soft, "Soft", preview);
+        dirty_selectable(ui, &mut brush.brush_type, BrushType::Pixel, "Pixel", preview);
     });
 
     ui.horizontal(|ui| {
         ui.label("Mode:");
-        if ui
-            .selectable_value(
-                &mut brush.brush_options.blend_mode,
-                BlendMode::Normal,
-                "Normal",
-            )
-            .changed()
-        {
-            preview.dirty = true;
-        }
-        if ui
-            .selectable_value(
-                &mut brush.brush_options.blend_mode,
-                BlendMode::Eraser,
-                "Eraser",
-            )
-            .changed()
-        {
-            preview.dirty = true;
-        }
+        dirty_selectable(
+            ui,
+            &mut brush.brush_options.blend_mode,
+            BlendMode::Normal,
+            "Normal",
+            preview,
+        );
+        dirty_selectable(
+            ui,
+            &mut brush.brush_options.blend_mode,
+            BlendMode::Eraser,
+            "Eraser",
+            preview,
+        );
     });
 
     ui.add_space(5.0);
@@ -99,47 +149,25 @@ pub fn brush_settings_panel(
                 let size = egui::vec2(32.0, 32.0);
 
                 // Circle
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
                 let is_selected =
                     matches!(brush.brush_options.pixel_shape, PixelBrushShape::Circle);
-                ui.painter().rect_stroke(
-                    rect,
-                    1.0,
-                    (
-                        1.0,
-                        if is_selected {
-                            Color32::WHITE
-                        } else {
-                            Color32::GRAY
-                        },
-                    ),
-                );
-                ui.painter()
-                    .circle_filled(rect.center(), 12.0, Color32::WHITE);
-                if response.on_hover_text("Circle").clicked() {
+                if tip_swatch(ui, size, is_selected, "Circle", |painter, rect| {
+                    painter.circle_filled(rect.center(), 12.0, Color32::WHITE);
+                })
+                .clicked()
+                {
                     brush.brush_options.pixel_shape = PixelBrushShape::Circle;
                     preview.dirty = true;
                 }
 
                 // Square
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
                 let is_selected =
                     matches!(brush.brush_options.pixel_shape, PixelBrushShape::Square);
-                ui.painter().rect_stroke(
-                    rect,
-                    1.0,
-                    (
-                        1.0,
-                        if is_selected {
-                            Color32::WHITE
-                        } else {
-                            Color32::GRAY
-                        },
-                    ),
-                );
-                ui.painter()
-                    .rect_filled(rect.shrink(4.0), 0.0, Color32::WHITE);
-                if response.on_hover_text("Square").clicked() {
+                if tip_swatch(ui, size, is_selected, "Square", |painter, rect| {
+                    painter.rect_filled(rect.shrink(4.0), 0.0, Color32::WHITE);
+                })
+                .clicked()
+                {
                     brush.brush_options.pixel_shape = PixelBrushShape::Square;
                     preview.dirty = true;
                 }
@@ -147,29 +175,21 @@ pub fn brush_settings_panel(
                 // Custom tips
                 for (name, shape, texture_opt) in loaded_tips {
                     if let Some(texture) = texture_opt {
-                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
                         let is_selected = &brush.brush_options.pixel_shape == shape;
-
-                        ui.painter().rect_stroke(
-                            rect,
-                            1.0,
-                            (
-                                1.0,
-                                if is_selected {
-                                    Color32::WHITE
-                                } else {
-                                    Color32::GRAY
-                                },
-                            ),
-                        );
-                        ui.painter().image(
-                            texture.id(),
-                            rect.shrink(2.0),
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-
-                        if response.on_hover_text(name).clicked() {
+                        let texture_id = texture.id();
+                        if tip_swatch(ui, size, is_selected, name, |painter, rect| {
+                            painter.image(
+                                texture_id,
+                                rect.shrink(2.0),
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
+                        })
+                        .clicked()
+                        {
                             brush.brush_options.pixel_shape = shape.clone();
                             preview.dirty = true;
                         }
@@ -180,53 +200,46 @@ pub fn brush_settings_panel(
     ui.add_space(5.0);
 
     ui.label("Size:");
-    if ui
-        .add(egui::Slider::new(&mut brush.brush_options.diameter, 1.0..=3000.0).logarithmic(true))
-        .changed()
-    {
+    if dirty_slider(
+        ui,
+        egui::Slider::new(&mut brush.brush_options.diameter, 1.0..=3000.0).logarithmic(true),
+        preview,
+    ) {
         mask_dirty = true;
-        preview.dirty = true;
     }
 
     if brush.brush_type == BrushType::Soft {
         ui.horizontal(|ui| {
             ui.label("Softness:");
-            if ui
-                .selectable_value(
-                    &mut brush.brush_options.softness_selector,
-                    SoftnessSelector::Gaussian,
-                    "Gaussian",
-                )
-                .changed()
-            {
+            if dirty_selectable(
+                ui,
+                &mut brush.brush_options.softness_selector,
+                SoftnessSelector::Gaussian,
+                "Gaussian",
+                preview,
+            ) {
                 mask_dirty = true;
-                preview.dirty = true;
             }
-            if ui
-                .selectable_value(
-                    &mut brush.brush_options.softness_selector,
-                    SoftnessSelector::Curve,
-                    "Curve",
-                )
-                .changed()
-            {
+            if dirty_selectable(
+                ui,
+                &mut brush.brush_options.softness_selector,
+                SoftnessSelector::Curve,
+                "Curve",
+                preview,
+            ) {
                 mask_dirty = true;
-                preview.dirty = true;
             }
         });
 
         match brush.brush_options.softness_selector {
             SoftnessSelector::Gaussian => {
                 ui.label("Hardness:");
-                if ui
-                    .add(egui::Slider::new(
-                        &mut brush.brush_options.hardness,
-                        0.0..=100.0,
-                    ))
-                    .changed()
-                {
+                if dirty_slider(
+                    ui,
+                    egui::Slider::new(&mut brush.brush_options.hardness, 0.0..=100.0),
+                    preview,
+                ) {
                     mask_dirty = true;
-                    preview.dirty = true;
                 }
             }
             SoftnessSelector::Curve => {
@@ -241,119 +254,80 @@ pub fn brush_settings_panel(
     }
 
     ui.label("Opacity:");
-    if ui
-        .add(egui::Slider::new(
-            &mut brush.brush_options.opacity,
-            0.0..=1.0,
-        ))
-        .changed()
-    {
-        preview.dirty = true;
-    }
+    dirty_slider(
+        ui,
+        egui::Slider::new(&mut brush.brush_options.opacity, 0.0..=1.0),
+        preview,
+    );
 
     ui.label("Flow:");
-    if ui
-        .add(egui::Slider::new(
-            &mut brush.brush_options.flow,
-            0.0..=100.0,
-        ))
-        .changed()
-    {
-        preview.dirty = true;
-    }
+    dirty_slider(
+        ui,
+        egui::Slider::new(&mut brush.brush_options.flow, 0.0..=100.0),
+        preview,
+    );
 
     ui.label("Spacing (%):");
-    if ui
-        .add(egui::Slider::new(
-            &mut brush.brush_options.spacing,
-            1.0..=200.0,
-        ))
-        .changed()
-    {
-        preview.dirty = true;
-    }
+    dirty_slider(
+        ui,
+        egui::Slider::new(&mut brush.brush_options.spacing, 1.0..=200.0),
+        preview,
+    );
 
     ui.label("Jitter (% of size):");
-    if ui
-        .add(egui::Slider::new(&mut brush.jitter, 0.0..=50.0))
-        .changed()
-    {
-        preview.dirty = true;
-    }
+    dirty_slider(ui, egui::Slider::new(&mut brush.jitter, 0.0..=50.0), preview);
 
     ui.label("Stabilizer:");
     ui.horizontal(|ui| {
-        if ui
-            .selectable_value(
-                &mut brush.stabilizer_algorithm,
-                StabilizerAlgorithm::None,
-                "None",
-            )
-            .changed()
-        {
-            preview.dirty = true;
-        }
-        if ui
-            .selectable_value(
-                &mut brush.stabilizer_algorithm,
-                StabilizerAlgorithm::Simple,
-                "Simple",
-            )
-            .changed()
-        {
-            preview.dirty = true;
-        }
-        if ui
-            .selectable_value(
-                &mut brush.stabilizer_algorithm,
-                StabilizerAlgorithm::Dynamic,
-                "Dynamic",
-            )
-            .changed()
-        {
-            preview.dirty = true;
-        }
+        dirty_selectable(
+            ui,
+            &mut brush.stabilizer_algorithm,
+            StabilizerAlgorithm::None,
+            "None",
+            preview,
+        );
+        dirty_selectable(
+            ui,
+            &mut brush.stabilizer_algorithm,
+            StabilizerAlgorithm::Simple,
+            "Simple",
+            preview,
+        );
+        dirty_selectable(
+            ui,
+            &mut brush.stabilizer_algorithm,
+            StabilizerAlgorithm::Dynamic,
+            "Dynamic",
+            preview,
+        );
     });
 
     match brush.stabilizer_algorithm {
         StabilizerAlgorithm::None => {}
         StabilizerAlgorithm::Simple => {
-            if ui
-                .add(egui::Slider::new(&mut brush.stabilizer, 0.0..=1.0).text("Strength"))
-                .changed()
-            {
-                preview.dirty = true;
-            }
+            dirty_slider(
+                ui,
+                egui::Slider::new(&mut brush.stabilizer, 0.0..=1.0).text("Strength"),
+                preview,
+            );
         }
         StabilizerAlgorithm::Dynamic => {
-            if ui
-                .add(egui::Slider::new(&mut brush.stabilizer_mass, 0.01..=1.0).text("Mass"))
-                .changed()
-            {
-                preview.dirty = true;
-            }
-            if ui
-                .add(egui::Slider::new(&mut brush.stabilizer_drag, 0.0..=1.0).text("Drag"))
-                .changed()
-            {
-                preview.dirty = true;
-            }
+            dirty_slider(
+                ui,
+                egui::Slider::new(&mut brush.stabilizer_mass, 0.01..=1.0).text("Mass"),
+                preview,
+            );
+            dirty_slider(
+                ui,
+                egui::Slider::new(&mut brush.stabilizer_drag, 0.0..=1.0).text("Drag"),
+                preview,
+            );
         }
     }
 
     ui.separator();
-    if ui
-        .checkbox(&mut brush.pixel_perfect, "Pixel Perfect Mode")
-        .changed()
-    {
-        preview.dirty = true;
-    }
-    if ui
-        .checkbox(&mut brush.anti_aliasing, "Anti-aliasing")
-        .changed()
-    {
-        preview.dirty = true;
-    }
+    dirty_checkbox(ui, &mut brush.pixel_perfect, "Pixel Perfect Mode", preview);
+    dirty_checkbox(ui, &mut brush.anti_aliasing, "Anti-aliasing", preview);
 
     if mask_dirty {
         brush.is_changed = true;
