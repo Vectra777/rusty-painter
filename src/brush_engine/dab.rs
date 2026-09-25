@@ -1,5 +1,7 @@
 use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
+use rayon::ThreadPool;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TileRegion {
@@ -61,6 +63,47 @@ pub(super) fn build_tile_regions(bounds: &DabBounds) -> Vec<TileRegion> {
     (bounds.min_ty..=bounds.max_ty)
         .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| TileRegion { tx, ty }))
         .collect()
+}
+
+/// Pixel-range within a tile that a dab's bounds actually overlap.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TileOverlap {
+    pub min_x: usize,
+    pub max_x: usize,
+    pub min_y: usize,
+    pub max_y: usize,
+}
+
+/// Clip `bounds` to the pixel range of a single tile at `(tile_x0, tile_y0)`.
+/// Identical computation was previously duplicated at every draw_tile call
+/// site in brush.rs.
+pub(super) fn tile_overlap(
+    bounds: &DabBounds,
+    tile_x0: usize,
+    tile_y0: usize,
+    tile_size: usize,
+) -> TileOverlap {
+    TileOverlap {
+        min_x: bounds.start_x.max(tile_x0),
+        max_x: bounds.end_x.min(tile_x0 + tile_size - 1),
+        min_y: bounds.start_y.max(tile_y0),
+        max_y: bounds.end_y.min(tile_y0 + tile_size - 1),
+    }
+}
+
+/// Run `draw_tile` over every tile, serially for a small/cheap dab and via
+/// the thread pool otherwise. The exact same threshold
+/// (`tiles.len() == 1 || (tiles.len() <= 4 && diameter <= 24.0)`) was
+/// previously duplicated at every dab call site in brush.rs.
+pub(super) fn dispatch_over_tiles<F>(tiles: &[TileRegion], pool: &ThreadPool, diameter: f32, draw_tile: F)
+where
+    F: Fn(&TileRegion) + Sync,
+{
+    if tiles.len() == 1 || (tiles.len() <= 4 && diameter <= 24.0) {
+        tiles.iter().for_each(&draw_tile);
+    } else {
+        pool.install(|| tiles.par_iter().for_each(&draw_tile));
+    }
 }
 
 pub(super) fn tile_overlaps_selection(

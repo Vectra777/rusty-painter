@@ -1,5 +1,6 @@
 use super::PainterApp;
 use crate::{
+    app::painter_state::StrokeSession,
     brush_engine::stroke::{StrokeContext, StrokeState},
     canvas::history::{History, UndoAction},
 };
@@ -23,18 +24,20 @@ impl PainterApp {
     }
 
     fn initialize_stroke_state(&mut self) {
-        self.brush_state.stroke = Some(StrokeState::new());
-        self.brush_state.is_drawing = true;
-        self.layer_state.current_undo_action = Some(UndoAction {
-            tiles: Vec::new(),
-            selection: None,
-            transform: None,
+        self.brush_state.session = Some(StrokeSession {
+            stroke: StrokeState::new(),
+            undo_action: UndoAction {
+                tiles: Vec::new(),
+                selection: None,
+                transform: None,
+            },
         });
+        self.brush_state.is_drawing = true;
         self.render_cache.modified_tiles.clear();
     }
 
     fn add_initial_stroke_point(&mut self, pos: Vec2) {
-        if let Some(stroke) = &mut self.brush_state.stroke {
+        if let Some(session) = &mut self.brush_state.session {
             let has_selection = self.selection_manager.has_selection();
             let selection = if has_selection {
                 Some(&self.selection_manager)
@@ -45,10 +48,14 @@ impl PainterApp {
                 &self.workspace.pool,
                 &self.canvas,
                 selection,
-                self.layer_state.current_undo_action.as_mut().unwrap(),
+                &mut session.undo_action,
                 &mut self.render_cache.modified_tiles,
             );
-            stroke.add_point(&mut self.brush_state.brush, pos, &mut context);
+            // No pressure sample is available for the synthetic first point
+            // of a stroke; 1.0 preserves the pre-existing (unscaled) behavior.
+            session
+                .stroke
+                .add_point(&mut self.brush_state.brush, pos, 1.0, &mut context);
             self.mark_modified_tiles_dirty();
         }
     }
@@ -60,22 +67,22 @@ impl PainterApp {
     }
 
     fn end_current_stroke(&mut self) {
-        if let Some(stroke) = &mut self.brush_state.stroke {
-            stroke.end();
+        if let Some(session) = &mut self.brush_state.session {
+            session.stroke.end();
         }
     }
 
     fn save_undo_action_if_valid(&mut self) {
-        if let Some(action) = self.layer_state.current_undo_action.take()
-            && !action.tiles.is_empty()
+        if let Some(session) = self.brush_state.session.take()
+            && !session.undo_action.tiles.is_empty()
             && let Some(hist) = self.active_history_mut()
         {
-            hist.push_action(action);
+            hist.push_action(session.undo_action);
         }
     }
 
     fn clear_stroke_state(&mut self) {
-        self.brush_state.stroke = None;
+        self.brush_state.session = None;
         self.brush_state.is_drawing = false;
     }
 

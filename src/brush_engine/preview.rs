@@ -43,7 +43,9 @@ pub fn stroke_preview_image(
         let pressure = (t * std::f32::consts::PI).sin();
         brush.brush_options.diameter = (max_diameter * pressure).max(1.0);
         let mut context = StrokeContext::new(pool, &canvas, None, &mut undo, &mut modified);
-        stroke.add_point(brush, Vec2 { x, y }, &mut context);
+        // Diameter above is already the pressure-scaled value for this
+        // preview point; pass 1.0 so add_point doesn't scale it again.
+        stroke.add_point(brush, Vec2 { x, y }, 1.0, &mut context);
     }
 
     brush.brush_options.diameter = original_diameter;

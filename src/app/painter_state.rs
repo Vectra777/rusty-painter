@@ -14,6 +14,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+/// An in-progress stroke: the interpolation state plus the undo action that
+/// accumulates tile snapshots for it. These previously lived as two separate
+/// `Option`s (`BrushState.stroke` and `LayerState.current_undo_action`) kept
+/// `Some`/`None` in sync by convention across several call sites; bundling
+/// them here makes that pairing structural instead.
+pub struct StrokeSession {
+    pub stroke: StrokeState,
+    pub undo_action: UndoAction,
+}
+
 /// Brush-related state and resources
 pub struct BrushState {
     pub brush: Brush,
@@ -22,7 +32,7 @@ pub struct BrushState {
     pub preset_previews: HashMap<String, egui::TextureHandle>,
     pub loaded_brush_tips: Vec<(String, PixelBrushShape, Option<egui::TextureHandle>)>,
     pub brushes_path: PathBuf,
-    pub stroke: Option<StrokeState>,
+    pub session: Option<StrokeSession>,
     pub is_drawing: bool,
     pub use_masked_brush: bool,
     pub show_new_preset_modal: bool,
@@ -43,7 +53,7 @@ impl BrushState {
             preset_previews: HashMap::new(),
             loaded_brush_tips: Vec::new(),
             brushes_path,
-            stroke: None,
+            session: None,
             is_drawing: false,
             use_masked_brush,
             show_new_preset_modal: false,
@@ -118,7 +128,6 @@ pub struct LayerState {
     pub floating_layer_idx: Option<usize>,
     pub floating_buffer: Option<HashMap<(i32, i32), Vec<Color32>>>,
     pub histories: Vec<History>,
-    pub current_undo_action: Option<UndoAction>,
 }
 
 impl LayerState {
@@ -129,7 +138,6 @@ impl LayerState {
             floating_layer_idx: None,
             floating_buffer: None,
             histories: (0..layer_count).map(|_| History::new()).collect(),
-            current_undo_action: None,
         }
     }
 }

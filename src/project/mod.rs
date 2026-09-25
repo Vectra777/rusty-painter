@@ -8,7 +8,7 @@ use crate::{
     canvas::{
         Canvas,
         history::{History, TileSnapshot, UndoAction},
-        storage::{CanvasLayerSnapshot, CanvasTileSnapshot},
+        storage::{CanvasLayerSnapshot, CanvasTileSnapshot, LayerId},
     },
 };
 use eframe::egui::{Color32, Vec2};
@@ -64,7 +64,7 @@ impl PainterApp {
         self.layer_state = LayerState::new(layer_count);
         self.layer_state.histories = loaded.histories;
         self.render_cache = Self::initialize_render_cache(ctx, width, height, layer_count);
-        self.brush_state.stroke = None;
+        self.brush_state.session = None;
         self.brush_state.is_drawing = false;
         self.active_tool = Tool::Brush;
         self.selection_manager.clear_selection();
@@ -196,7 +196,8 @@ impl ProjectFile {
         let layers: Vec<_> = self
             .layers
             .into_iter()
-            .map(|layer| layer.into_snapshot(self.tile_size, blobs))
+            .enumerate()
+            .map(|(idx, layer)| layer.into_snapshot(idx, self.tile_size, blobs))
             .collect::<Result<_, _>>()?;
         let mut canvas = Canvas::new(
             self.width,
@@ -228,6 +229,12 @@ struct StoredLayer {
     visible: bool,
     opacity: f32,
     locked: bool,
+    /// Stable layer id. Absent in files saved before LayerId existed; such
+    /// files fall back to assigning ids by position on load (see
+    /// `into_snapshot`), which reproduces the old (position-based) behavior
+    /// exactly rather than fixing it retroactively.
+    #[serde(default)]
+    id: Option<u64>,
     tiles: Vec<StoredTile>,
 }
 
@@ -238,6 +245,7 @@ impl StoredLayer {
             visible: layer.visible,
             opacity: layer.opacity,
             locked: layer.locked,
+            id: Some(layer.id.0),
             tiles: layer
                 .tiles
                 .into_iter()
@@ -246,8 +254,14 @@ impl StoredLayer {
         })
     }
 
-    fn into_snapshot(self, tile_size: usize, blobs: &[u8]) -> Result<CanvasLayerSnapshot, String> {
+    fn into_snapshot(
+        self,
+        fallback_idx: usize,
+        tile_size: usize,
+        blobs: &[u8],
+    ) -> Result<CanvasLayerSnapshot, String> {
         Ok(CanvasLayerSnapshot {
+            id: LayerId(self.id.unwrap_or(fallback_idx as u64)),
             name: self.name,
             visible: self.visible,
             opacity: self.opacity,
@@ -367,7 +381,13 @@ impl StoredUndoAction {
 struct StoredTileSnapshot {
     tx: i32,
     ty: i32,
+    /// Legacy position-based layer reference, kept only so files saved
+    /// before LayerId existed can still resolve a layer on load. Ignored
+    /// whenever `layer_id` is present.
+    #[serde(default)]
     layer_idx: usize,
+    #[serde(default)]
+    layer_id: Option<u64>,
     x0: usize,
     y0: usize,
     width: usize,
@@ -380,7 +400,8 @@ impl StoredTileSnapshot {
         Ok(Self {
             tx: snapshot.tx,
             ty: snapshot.ty,
-            layer_idx: snapshot.layer_idx,
+            layer_idx: 0,
+            layer_id: Some(snapshot.layer_id.0),
             x0: snapshot.x0,
             y0: snapshot.y0,
             width: snapshot.width,
@@ -399,10 +420,11 @@ impl StoredTileSnapshot {
         {
             return Err("Invalid undo tile snapshot".to_string());
         }
+        let layer_id = LayerId(self.layer_id.unwrap_or(self.layer_idx as u64));
         Ok(TileSnapshot {
             tx: self.tx,
             ty: self.ty,
-            layer_idx: self.layer_idx,
+            layer_id,
             x0: self.x0,
             y0: self.y0,
             width: self.width,
@@ -476,7 +498,7 @@ mod tests {
             tiles: vec![TileSnapshot {
                 tx: 0,
                 ty: 0,
-                layer_idx: 1,
+                layer_id: LayerId(1),
                 x0: 0,
                 y0: 0,
                 width: TILE_SIZE,

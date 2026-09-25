@@ -9,6 +9,38 @@ use eframe::egui::{self, Color32, TextureOptions, Vec2};
 use std::collections::{HashMap, HashSet};
 
 impl PainterApp {
+    /// Panics in debug builds if the per-layer side-car vecs (undo history,
+    /// render cache, cache-dirty set, UI color) have drifted out of sync
+    /// with `canvas.layers`. These are kept aligned by convention rather
+    /// than by the type system, so any code path that resizes/reorders
+    /// `canvas.layers` without going through the paired helpers here would
+    /// otherwise corrupt data silently (wrong undo history applied to the
+    /// wrong layer, etc). Cheap (length checks only) — safe to call after
+    /// every mutation, and compiled out entirely in release builds.
+    fn debug_assert_layer_state_in_sync(&self) {
+        let layer_count = self.canvas.layers.len();
+        debug_assert_eq!(
+            self.layer_state.histories.len(),
+            layer_count,
+            "layer_state.histories desynced from canvas.layers"
+        );
+        debug_assert_eq!(
+            self.layer_state.layer_ui_colors.len(),
+            layer_count,
+            "layer_state.layer_ui_colors desynced from canvas.layers"
+        );
+        debug_assert_eq!(
+            self.render_cache.layer_caches.len(),
+            layer_count,
+            "render_cache.layer_caches desynced from canvas.layers"
+        );
+        debug_assert_eq!(
+            self.render_cache.layer_cache_dirty.len(),
+            layer_count,
+            "render_cache.layer_cache_dirty desynced from canvas.layers"
+        );
+    }
+
     pub(crate) fn initialize_render_cache(
         ctx: &egui::Context,
         canvas_w: usize,
@@ -99,7 +131,7 @@ impl PainterApp {
         self.layer_state.histories = (0..layer_count).map(|_| History::new()).collect();
         self.layer_state.layer_ui_colors = vec![Color32::from_gray(40); layer_count];
         self.layer_state.layer_dragging = None;
-        self.layer_state.current_undo_action = None;
+        self.brush_state.session = None;
     }
 
     fn recreate_render_cache(&mut self, width: usize, height: usize) {
@@ -109,7 +141,6 @@ impl PainterApp {
         self.render_cache.modified_tiles.clear();
         self.render_cache.tiles_x = width.div_ceil(TILE_SIZE);
         self.render_cache.tiles_y = height.div_ceil(TILE_SIZE);
-        self.brush_state.stroke = None;
         self.brush_state.is_drawing = false;
         self.viewport.is_panning = false;
         self.viewport.is_rotating = false;
@@ -330,6 +361,7 @@ impl PainterApp {
         };
 
         self.mark_all_tiles_dirty();
+        self.debug_assert_layer_state_in_sync();
     }
 
     pub(crate) fn add_paint_layer(&mut self) {
@@ -366,6 +398,7 @@ impl PainterApp {
         self.layer_state
             .layer_ui_colors
             .insert(idx, Color32::from_gray(40));
+        self.debug_assert_layer_state_in_sync();
     }
 
     pub(crate) fn remove_layer_state(&mut self, idx: usize) {
@@ -381,5 +414,6 @@ impl PainterApp {
         if idx < self.layer_state.layer_ui_colors.len() {
             self.layer_state.layer_ui_colors.remove(idx);
         }
+        self.debug_assert_layer_state_in_sync();
     }
 }

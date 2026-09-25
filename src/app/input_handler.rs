@@ -65,12 +65,9 @@ fn handle_tablet_down(app: &mut PainterApp, pos: Vec2) {
 fn handle_tablet_move(app: &mut PainterApp, pos: Vec2, pressure: f32) {
     match app.active_tool {
         Tool::Brush => {
-            if app.brush_state.stroke.is_some() {
-                let base = app.brush_state.brush.brush_options.diameter;
-                app.brush_state.brush.brush_options.diameter = (base * pressure).max(1.0);
-                add_stroke_point(app, pos);
+            if app.brush_state.session.is_some() {
+                add_stroke_point(app, pos, pressure);
                 app.mark_modified_tiles_dirty();
-                app.brush_state.brush.brush_options.diameter = base;
             } else {
                 app.start_stroke(pos);
             }
@@ -338,8 +335,10 @@ fn handle_tool_move(
 
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2, is_inside: bool) {
     if app.brush_state.is_drawing {
-        if app.brush_state.stroke.is_some() {
-            add_stroke_point(app, pos);
+        if app.brush_state.session.is_some() {
+            // Mouse input has no pressure sample; 1.0 preserves the
+            // pre-existing (unscaled) behavior for this path.
+            add_stroke_point(app, pos, 1.0);
             app.mark_modified_tiles_dirty();
         }
     } else if app.viewport.is_primary_down
@@ -379,8 +378,8 @@ fn handle_mouse_wheel(
 
 // Helper functions
 
-fn add_stroke_point(app: &mut PainterApp, pos: Vec2) {
-    if let Some(stroke) = &mut app.brush_state.stroke {
+fn add_stroke_point(app: &mut PainterApp, pos: Vec2, pressure: f32) {
+    if let Some(session) = &mut app.brush_state.session {
         let has_selection = app.selection_manager.has_selection();
         let selection = if has_selection {
             Some(&app.selection_manager)
@@ -391,9 +390,11 @@ fn add_stroke_point(app: &mut PainterApp, pos: Vec2) {
             &app.workspace.pool,
             &app.canvas,
             selection,
-            app.layer_state.current_undo_action.as_mut().unwrap(),
+            &mut session.undo_action,
             &mut app.render_cache.modified_tiles,
         );
-        stroke.add_point(&mut app.brush_state.brush, pos, &mut context);
+        session
+            .stroke
+            .add_point(&mut app.brush_state.brush, pos, pressure, &mut context);
     }
 }

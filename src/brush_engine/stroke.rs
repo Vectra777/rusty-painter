@@ -62,8 +62,41 @@ impl StrokeState {
         }
     }
 
-    /// Add a new sample to the stroke, interpolating dabs based on spacing and jitter.
-    pub fn add_point(&mut self, brush: &mut Brush, raw_pos: Vec2, context: &mut StrokeContext<'_>) {
+    /// Add a new sample to the stroke, interpolating dabs based on spacing and
+    /// jitter. `pressure` scales the effective brush diameter for this call
+    /// only (e.g. tablet pen pressure); pass `1.0` for no scaling.
+    ///
+    /// The diameter is temporarily overwritten on `brush` for the duration
+    /// of this call and restored before returning, including on panic (via
+    /// `catch_unwind`) so a mid-call panic can never leave the brush's
+    /// diameter corrupted for later strokes.
+    pub fn add_point(
+        &mut self,
+        brush: &mut Brush,
+        raw_pos: Vec2,
+        pressure: f32,
+        context: &mut StrokeContext<'_>,
+    ) {
+        let original_diameter = brush.brush_options.diameter;
+        brush.brush_options.diameter = (original_diameter * pressure).max(1.0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.add_point_at_pressure(brush, raw_pos, context);
+        }));
+
+        brush.brush_options.diameter = original_diameter;
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    fn add_point_at_pressure(
+        &mut self,
+        brush: &mut Brush,
+        raw_pos: Vec2,
+        context: &mut StrokeContext<'_>,
+    ) {
         if brush.pixel_perfect {
             self.add_point_pixel_perfect(brush, raw_pos, context);
             return;

@@ -2,7 +2,10 @@ use super::brush_options::BrushOptions;
 use crate::{
     brush_engine::{
         brush_options::{BlendMode, PixelBrushShape},
-        dab::{TileRegion, build_tile_regions, calc_dab_bounds, tile_overlaps_selection},
+        dab::{
+            TileRegion, build_tile_regions, calc_dab_bounds, dispatch_over_tiles, tile_overlap,
+            tile_overlaps_selection,
+        },
         hardness::SoftnessSelector,
         masks::{calc_soft_brush_alpha, gaussian_falloff, sample_custom_mask_nn},
     },
@@ -16,7 +19,6 @@ use crate::{
 use eframe::egui::Color32;
 use eframe::egui::Vec2;
 use rayon::ThreadPool;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashSet;
 
 /// Available shapes for how a brush applies paint.
@@ -234,6 +236,9 @@ impl Brush {
     ) {
         let layer_idx = canvas.active_layer_idx;
         let tile_size = canvas.tile_size();
+        let Some(layer_id) = canvas.layer_id_at(layer_idx) else {
+            return;
+        };
 
         for region in regions {
             // insert returns false if value was already present
@@ -255,7 +260,7 @@ impl Brush {
                 undo_action.tiles.push(TileSnapshot {
                     tx: region.tx as i32,
                     ty: region.ty as i32,
-                    layer_idx,
+                    layer_id,
                     x0: 0,
                     y0: 0,
                     width: tile_size,
@@ -326,19 +331,16 @@ impl Brush {
 
                 let tile_x0 = tx * tile_size;
                 let tile_y0 = ty * tile_size;
-                let overlap_min_x = bounds.start_x.max(tile_x0);
-                let overlap_max_x = bounds.end_x.min(tile_x0 + tile_size - 1);
-                let overlap_min_y = bounds.start_y.max(tile_y0);
-                let overlap_max_y = bounds.end_y.min(tile_y0 + tile_size - 1);
+                let overlap = tile_overlap(&bounds, tile_x0, tile_y0, tile_size);
 
                 if !tile_overlaps_selection(selection, tile_x0, tile_y0, tile_size) {
                     return; // Tile completely outside selection, skip
                 }
 
-                for gy in overlap_min_y..=overlap_max_y {
+                for gy in overlap.min_y..=overlap.max_y {
                     let dy = gy as f32 + 0.5 - center_y;
                     let py = gy as f32 + 0.5;
-                    for gx in overlap_min_x..=overlap_max_x {
+                    for gx in overlap.min_x..=overlap.max_x {
                         let dx = gx as f32 + 0.5 - center_x;
                         let px = gx as f32 + 0.5;
 
@@ -390,11 +392,7 @@ impl Brush {
             }
         };
 
-        if tiles.len() == 1 || (tiles.len() <= 4 && diameter <= 24.0) {
-            tiles.iter().for_each(draw_tile);
-        } else {
-            pool.install(|| tiles.par_iter().for_each(draw_tile));
-        }
+        dispatch_over_tiles(&tiles, pool, diameter, draw_tile);
     }
 
     /// Render a soft, anti-aliased dab using the cached mask and parallel tiling.
@@ -482,18 +480,15 @@ impl Brush {
                         None => return,
                     };
 
-                    let overlap_min_x = bounds.start_x.max(tile_x0);
-                    let overlap_max_x = bounds.end_x.min(tile_x0 + tile_size - 1);
-                    let overlap_min_y = bounds.start_y.max(tile_y0);
-                    let overlap_max_y = bounds.end_y.min(tile_y0 + tile_size - 1);
+                    let overlap = tile_overlap(&bounds, tile_x0, tile_y0, tile_size);
 
                     for span in &mask.spans {
                         let gy = mask_base_y + span.y as i32;
-                        if gy < overlap_min_y as i32 || gy > overlap_max_y as i32 {
+                        if gy < overlap.min_y as i32 || gy > overlap.max_y as i32 {
                             continue;
                         }
-                        let x_start = (mask_base_x + span.x_start as i32).max(overlap_min_x as i32);
-                        let x_end = (mask_base_x + span.x_end as i32).min(overlap_max_x as i32 + 1);
+                        let x_start = (mask_base_x + span.x_start as i32).max(overlap.min_x as i32);
+                        let x_end = (mask_base_x + span.x_end as i32).min(overlap.max_x as i32 + 1);
 
                         for gx in x_start..x_end {
                             let mx = (gx - mask_base_x) as usize;
@@ -511,11 +506,7 @@ impl Brush {
                 }
             };
 
-            if tiles.len() == 1 || (tiles.len() <= 4 && diameter <= 24.0) {
-                tiles.iter().for_each(draw_tile);
-            } else {
-                _pool.install(|| tiles.par_iter().for_each(draw_tile));
-            }
+            dispatch_over_tiles(&tiles, _pool, diameter, draw_tile);
             return;
         }
 
@@ -541,18 +532,15 @@ impl Brush {
                     None => return,
                 };
 
-                let overlap_min_x = bounds.start_x.max(tile_x0);
-                let overlap_max_x = bounds.end_x.min(tile_x0 + tile_size - 1);
-                let overlap_min_y = bounds.start_y.max(tile_y0);
-                let overlap_max_y = bounds.end_y.min(tile_y0 + tile_size - 1);
+                let overlap = tile_overlap(&bounds, tile_x0, tile_y0, tile_size);
 
                 if !tile_overlaps_selection(selection, tile_x0, tile_y0, tile_size) {
                     return; // Tile completely outside selection
                 }
 
-                for gy in overlap_min_y..=overlap_max_y {
+                for gy in overlap.min_y..=overlap.max_y {
                     let py = gy as f32 + 0.5;
-                    for gx in overlap_min_x..=overlap_max_x {
+                    for gx in overlap.min_x..=overlap.max_x {
                         let pdx = gx as f32 + 0.5 - center_x;
                         let pdy = py - center_y;
                         let px = gx as f32 + 0.5;
@@ -644,11 +632,7 @@ impl Brush {
             }
         };
 
-        if tiles.len() == 1 || (tiles.len() <= 4 && diameter <= 24.0) {
-            tiles.iter().for_each(draw_tile);
-        } else {
-            _pool.install(|| tiles.par_iter().for_each(draw_tile));
-        }
+        dispatch_over_tiles(&tiles, _pool, diameter, draw_tile);
     }
 }
 

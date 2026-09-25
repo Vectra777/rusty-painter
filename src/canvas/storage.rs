@@ -10,6 +10,14 @@ use crate::utils::color::{Color, ColorManipulation};
 use eframe::egui::Vec2;
 
 const MAX_TRANSFORM_SOURCE_PIXELS: usize = 67_108_864;
+
+/// Stable identity for a layer, independent of its current position in
+/// `Canvas::layers`. Undo history and other data that outlives a single
+/// frame must key off this instead of a raw index, since reordering,
+/// inserting or removing layers changes every index after the edit point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LayerId(pub u64);
+
 type TileMap = HashMap<(i32, i32), Arc<Mutex<TileCell>>>;
 type RowTileCache = Vec<Option<(i32, Arc<Mutex<TileCell>>, Option<Vec<Rgba>>, bool)>>;
 
@@ -250,6 +258,7 @@ fn write_transformed_tiles(
 #[derive(Debug)]
 /// Single painting layer with its own opacity, visibility and tile storage.
 pub struct Layer {
+    pub id: LayerId,
     pub name: String,
     pub visible: bool,
     pub opacity: f32, // 0..1
@@ -266,6 +275,7 @@ pub struct CanvasTileSnapshot {
 
 #[derive(Clone)]
 pub struct CanvasLayerSnapshot {
+    pub id: LayerId,
     pub name: String,
     pub visible: bool,
     pub opacity: f32,
@@ -275,8 +285,9 @@ pub struct CanvasLayerSnapshot {
 
 impl Layer {
     /// Allocate a new layer backing store but keep tile data lazy.
-    fn new(name: String, _width: usize, _height: usize, _tile_size: usize) -> Self {
+    fn new(id: LayerId, name: String, _width: usize, _height: usize, _tile_size: usize) -> Self {
         Self {
+            id,
             name,
             visible: true,
             opacity: 1.0,
@@ -297,6 +308,7 @@ impl Layer {
             );
         }
         Self {
+            id: snapshot.id,
             name: snapshot.name,
             visible: snapshot.visible,
             opacity: snapshot.opacity.clamp(0.0, 1.0),
@@ -315,6 +327,7 @@ pub struct Canvas {
 
     pub layers: Vec<Layer>,
     pub active_layer_idx: usize,
+    next_layer_id: u64,
 }
 
 #[derive(Debug)]
@@ -328,10 +341,16 @@ pub(crate) struct TileCell {
 impl Canvas {
     /// Create a new canvas with a single background layer and configured tile size.
     pub fn new(width: usize, height: usize, clear_color: Color32, tile_size: usize) -> Self {
-        let mut bg_layer = Layer::new("Background".to_string(), width, height, tile_size);
+        let mut bg_layer = Layer::new(
+            LayerId(0),
+            "Background".to_string(),
+            width,
+            height,
+            tile_size,
+        );
         bg_layer.locked = true;
 
-        let layer1 = Layer::new("Layer 1".to_string(), width, height, tile_size);
+        let layer1 = Layer::new(LayerId(1), "Layer 1".to_string(), width, height, tile_size);
 
         // Initialize background layer with clear color
         // We can't easily pre-fill all tiles without allocating massive memory.
@@ -347,14 +366,35 @@ impl Canvas {
             clear_color: premultiply(clear_color),
             layers: vec![bg_layer, layer1],
             active_layer_idx: 1,
+            next_layer_id: 2,
         }
     }
 
-    pub fn add_layer(&mut self) {
+    /// Look up a layer's current position by its stable id. O(layer count);
+    /// layer counts are small, and this is never called from a pixel-stamp
+    /// hot path.
+    pub fn layer_index_of(&self, id: LayerId) -> Option<usize> {
+        self.layers.iter().position(|layer| layer.id == id)
+    }
+
+    /// The stable id of the layer currently at `idx`, if any.
+    pub fn layer_id_at(&self, idx: usize) -> Option<LayerId> {
+        self.layers.get(idx).map(|layer| layer.id)
+    }
+
+    fn allocate_layer_id(&mut self) -> LayerId {
+        let id = LayerId(self.next_layer_id);
+        self.next_layer_id += 1;
+        id
+    }
+
+    pub fn add_layer(&mut self) -> LayerId {
         let name = format!("Layer {}", self.layers.len() + 1);
-        let layer = Layer::new(name, self.width, self.height, self.tile_size);
+        let id = self.allocate_layer_id();
+        let layer = Layer::new(id, name, self.width, self.height, self.tile_size);
         self.layers.push(layer);
         self.active_layer_idx = self.layers.len() - 1;
+        id
     }
 
     /// Current canvas width in pixels.
@@ -393,6 +433,7 @@ impl Canvas {
                     .collect();
                 tiles.sort_by_key(|tile| (tile.ty, tile.tx));
                 CanvasLayerSnapshot {
+                    id: layer.id,
                     name: layer.name.clone(),
                     visible: layer.visible,
                     opacity: layer.opacity,
@@ -410,7 +451,9 @@ impl Canvas {
     ) {
         self.layers = layers.into_iter().map(Layer::from_snapshot).collect();
         if self.layers.is_empty() {
+            let id = self.allocate_layer_id();
             self.layers.push(Layer::new(
+                id,
                 "Background".to_string(),
                 self.width,
                 self.height,
@@ -418,6 +461,15 @@ impl Canvas {
             ));
         }
         self.active_layer_idx = active_layer_idx.min(self.layers.len().saturating_sub(1));
+        // Loaded layers may carry ids from the saved file (or position-based
+        // fallback ids for files predating LayerId); make sure new layers
+        // added after this never collide with them.
+        self.next_layer_id = self
+            .layers
+            .iter()
+            .map(|layer| layer.id.0)
+            .max()
+            .map_or(0, |max_id| max_id + 1);
     }
 
     /// Size of a tile edge in pixels.
@@ -1070,7 +1122,7 @@ impl Canvas {
                     action.tiles.push(crate::canvas::history::TileSnapshot {
                         tx,
                         ty,
-                        layer_idx,
+                        layer_id: layer.id,
                         x0: 0,
                         y0: 0,
                         width: tile_size,
@@ -1178,7 +1230,9 @@ impl Canvas {
         }
 
         // Create new layer
+        let new_layer_id = self.allocate_layer_id();
         let new_layer = Layer::new(
+            new_layer_id,
             "Floating Selection".to_string(),
             self.width,
             self.height,
