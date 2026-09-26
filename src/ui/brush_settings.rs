@@ -1,15 +1,19 @@
 use crate::brush_engine::brush::{Brush, BrushType, StabilizerAlgorithm};
-use crate::brush_engine::brush_options::{BlendMode, PaintingMode, PixelBrushShape};
+use crate::brush_engine::brush_options::{PaintingMode, PixelBrushShape};
 use crate::brush_engine::hardness::SoftnessSelector;
-use crate::ui::style::TIP_SWATCH_SIZE;
+use crate::ui::style::*;
+use crate::ui::widgets::{percent_of_unit, property_row, section, segmented, slider_row};
 use crate::ui::{brush_preview::render_preview, curve_editor::curve_editor};
 use eframe::egui::{self, Color32};
 use rayon::ThreadPool;
 
 pub struct BrushPreviewState {
+    /// Strip size in points.
     pub size: [usize; 2],
     pub texture: Option<egui::TextureHandle>,
     pub dirty: bool,
+    /// Display scale the texture was rendered at.
+    pub pixels_per_point: f32,
 }
 
 impl Default for BrushPreviewState {
@@ -18,46 +22,9 @@ impl Default for BrushPreviewState {
             size: [200, 80],
             texture: None,
             dirty: true,
+            pixels_per_point: 1.0,
         }
     }
-}
-
-/// Adds a slider built by the caller and marks the preview dirty when it changes.
-fn dirty_slider(ui: &mut egui::Ui, slider: egui::Slider, preview: &mut BrushPreviewState) -> bool {
-    let changed = ui.add(slider).changed();
-    if changed {
-        preview.dirty = true;
-    }
-    changed
-}
-
-/// Adds a `selectable_value` and marks the preview dirty when it changes.
-fn dirty_selectable<T: PartialEq>(
-    ui: &mut egui::Ui,
-    current_value: &mut T,
-    selected_value: T,
-    text: &str,
-    preview: &mut BrushPreviewState,
-) -> egui::Response {
-    let response = ui.selectable_value(current_value, selected_value, text);
-    if response.changed() {
-        preview.dirty = true;
-    }
-    response
-}
-
-/// Adds a checkbox and marks the preview dirty when it changes.
-fn dirty_checkbox(
-    ui: &mut egui::Ui,
-    value: &mut bool,
-    text: &str,
-    preview: &mut BrushPreviewState,
-) -> bool {
-    let changed = ui.checkbox(value, text).changed();
-    if changed {
-        preview.dirty = true;
-    }
-    changed
 }
 
 /// Draws a selectable brush-tip swatch (border + custom shape) and returns its response
@@ -70,21 +37,21 @@ fn tip_swatch(
     draw_shape: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    ui.painter().rect_stroke(
-        rect,
-        1.0,
-        (
-            1.0,
-            if is_selected {
-                Color32::WHITE
-            } else {
-                Color32::GRAY
-            },
-        ),
-    );
+    ui.painter().rect_filled(rect, 0.0, BG_INSET);
     draw_shape(ui.painter(), rect);
+    let stroke = if is_selected {
+        egui::Stroke::new(2.0_f32, ACCENT)
+    } else if response.hovered() {
+        egui::Stroke::new(1.0_f32, TEXT_DIM)
+    } else {
+        egui::Stroke::new(1.0_f32, BORDER_LIGHT)
+    };
+    ui.painter().rect_stroke(rect, 0.0, stroke);
     response.on_hover_text(hover_text)
 }
+
+/// Height of the stroke preview strip.
+const PREVIEW_HEIGHT: usize = 72;
 
 /// Panel for tweaking the currently selected brush properties.
 pub fn brush_settings_panel(
@@ -94,112 +61,145 @@ pub fn brush_settings_panel(
     pool: &ThreadPool,
     loaded_tips: &[(String, PixelBrushShape, Option<egui::TextureHandle>)],
 ) {
-    let mut mask_dirty = false;
-
-    ui.heading("Brush Properties");
-    ui.separator();
-
-    // --- Preview Area ---
-    ui.collapsing("Preview", |ui| {
-        if preview.dirty {
-            render_preview(preview, brush, pool, ui.ctx());
-            preview.dirty = false;
-        }
-
-        if let Some(texture) = &preview.texture {
-            ui.image((texture.id(), texture.size_vec2()));
-        }
-    });
-    ui.separator();
-    // --------------------
-
-    ui.horizontal(|ui| {
-        ui.label("Type:");
-        dirty_selectable(ui, &mut brush.brush_type, BrushType::Soft, "Soft", preview);
-        dirty_selectable(ui, &mut brush.brush_type, BrushType::Pixel, "Pixel", preview);
-    });
-
-    ui.horizontal(|ui| {
-        ui.label("Mode:");
-        dirty_selectable(
-            ui,
-            &mut brush.brush_options.blend_mode,
-            BlendMode::Normal,
-            "Normal",
-            preview,
-        );
-        dirty_selectable(
-            ui,
-            &mut brush.brush_options.blend_mode,
-            BlendMode::Eraser,
-            "Eraser",
-            preview,
-        );
-    });
-
-    ui.horizontal(|ui| {
-        ui.label("Painting:");
-        dirty_selectable(
-            ui,
-            &mut brush.brush_options.painting_mode,
-            PaintingMode::BuildUp,
-            "Build-up",
-            preview,
-        )
-        .on_hover_text("Every dab adds paint at flow × opacity; overlaps keep building up.");
-        dirty_selectable(
-            ui,
-            &mut brush.brush_options.painting_mode,
-            PaintingMode::Wash,
-            "Wash",
-            preview,
-        )
-        .on_hover_text("A single stroke never exceeds the brush opacity, however much it overlaps itself.");
-    });
-
-    ui.add_space(5.0);
-
-    ui.label("Brush Tip:");
     egui::ScrollArea::vertical()
-        .id_salt("pixel_tip_selector")
-        .max_height(120.0)
+        .id_salt("brush_settings_scroll")
+        .auto_shrink([false; 2])
         .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let size = egui::vec2(TIP_SWATCH_SIZE, TIP_SWATCH_SIZE);
+            let (changed, mask_changed) =
+                brush_settings_contents(ui, brush, preview, pool, loaded_tips);
+            if changed || mask_changed {
+                preview.dirty = true;
+            }
+            if mask_changed {
+                brush.is_changed = true;
+            }
+        });
+}
 
-                // Circle
-                let is_selected =
-                    matches!(brush.brush_options.pixel_shape, PixelBrushShape::Circle);
-                if tip_swatch(ui, size, is_selected, "Circle", |painter, rect| {
-                    painter.circle_filled(rect.center(), 12.0, Color32::WHITE);
-                })
-                .clicked()
-                {
-                    brush.brush_options.pixel_shape = PixelBrushShape::Circle;
-                    preview.dirty = true;
-                }
+/// Returns `(anything changed, brush mask changed)`.
+fn brush_settings_contents(
+    ui: &mut egui::Ui,
+    brush: &mut Brush,
+    preview: &mut BrushPreviewState,
+    pool: &ThreadPool,
+    loaded_tips: &[(String, PixelBrushShape, Option<egui::TextureHandle>)],
+) -> (bool, bool) {
+    let mut changed = false;
+    let mut mask_changed = false;
+    let mut size_changed = false;
 
-                // Square
-                let is_selected =
-                    matches!(brush.brush_options.pixel_shape, PixelBrushShape::Square);
-                if tip_swatch(ui, size, is_selected, "Square", |painter, rect| {
-                    painter.rect_filled(rect.shrink(4.0), 0.0, Color32::WHITE);
-                })
-                .clicked()
-                {
-                    brush.brush_options.pixel_shape = PixelBrushShape::Square;
-                    preview.dirty = true;
-                }
+    // Preview strip, re-rendered at the panel's width.
+    let width = ((ui.available_width() as usize) / 8 * 8).clamp(120, 480);
+    if preview.size != [width, PREVIEW_HEIGHT]
+        || preview.pixels_per_point != ui.ctx().pixels_per_point()
+    {
+        preview.size = [width, PREVIEW_HEIGHT];
+        preview.dirty = true;
+    }
+    if preview.dirty {
+        render_preview(preview, brush, pool, ui.ctx());
+        preview.dirty = false;
+    }
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), PREVIEW_HEIGHT as f32),
+        egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(rect, 0.0, BG_INSET);
+    if let Some(texture) = &preview.texture {
+        let image_rect = egui::Rect::from_center_size(
+            rect.center(),
+            texture.size_vec2() / preview.pixels_per_point,
+        );
+        ui.painter().image(
+            texture.id(),
+            image_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+    ui.painter()
+        .rect_stroke(rect, 0.0, egui::Stroke::new(1.0_f32, BORDER));
+    ui.add_space(6.0);
 
-                // Custom tips
-                for (name, shape, texture_opt) in loaded_tips {
-                    if let Some(texture) = texture_opt {
-                        let is_selected = &brush.brush_options.pixel_shape == shape;
+    property_row(ui, "Type", |ui| {
+        mask_changed |= segmented(
+            ui,
+            &mut brush.brush_type,
+            &[(BrushType::Soft, "Soft"), (BrushType::Pixel, "Pixel")],
+            false,
+        );
+    });
+    ui.label(
+        egui::RichText::new(match brush.brush_type {
+            BrushType::Soft => {
+                "Smooth, anti-aliased dabs placed at sub-pixel positions: painting and inking."
+            }
+            BrushType::Pixel => {
+                "Dabs snap to whole pixels with hard edges: pixel art and crisp 1-px lines."
+            }
+        })
+        .small()
+        .color(TEXT_DIM),
+    );
+    property_row(ui, "Painting", |ui| {
+        changed |= segmented(
+            ui,
+            &mut brush.brush_options.painting_mode,
+            &[
+                (PaintingMode::BuildUp, "Build-up"),
+                (PaintingMode::Wash, "Wash"),
+            ],
+            false,
+        );
+    });
+    ui.label(
+        egui::RichText::new(match brush.brush_options.painting_mode {
+            PaintingMode::BuildUp => "Overlapping dabs keep adding paint.",
+            PaintingMode::Wash => "A stroke never exceeds the brush opacity.",
+        })
+        .small()
+        .color(TEXT_DIM),
+    );
+
+    section(ui, "Tip", true, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("pixel_tip_selector")
+            .max_height(112.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                    let side = metrics(ui.ctx()).tip_swatch;
+                    let size = egui::vec2(side, side);
+                    let shape = &mut brush.brush_options.pixel_shape;
+
+                    let selected = matches!(shape, PixelBrushShape::Circle);
+                    if tip_swatch(ui, size, selected, "Circle", |painter, rect| {
+                        painter.circle_filled(rect.center(), rect.width() * 0.32, TEXT);
+                    })
+                    .clicked()
+                    {
+                        *shape = PixelBrushShape::Circle;
+                        mask_changed = true;
+                    }
+
+                    let selected = matches!(shape, PixelBrushShape::Square);
+                    if tip_swatch(ui, size, selected, "Square", |painter, rect| {
+                        painter.rect_filled(rect.shrink(rect.width() * 0.2), 0.0, TEXT);
+                    })
+                    .clicked()
+                    {
+                        *shape = PixelBrushShape::Square;
+                        mask_changed = true;
+                    }
+
+                    for (name, tip_shape, texture_opt) in loaded_tips {
+                        let Some(texture) = texture_opt else { continue };
+                        let selected = &*shape == tip_shape;
                         let texture_id = texture.id();
-                        if tip_swatch(ui, size, is_selected, name, |painter, rect| {
+                        if tip_swatch(ui, size, selected, name, |painter, rect| {
                             painter.image(
                                 texture_id,
-                                rect.shrink(2.0),
+                                rect.shrink(3.0),
                                 egui::Rect::from_min_max(
                                     egui::pos2(0.0, 0.0),
                                     egui::pos2(1.0, 1.0),
@@ -209,150 +209,172 @@ pub fn brush_settings_panel(
                         })
                         .clicked()
                         {
-                            brush.brush_options.pixel_shape = shape.clone();
-                            preview.dirty = true;
+                            *shape = tip_shape.clone();
+                            mask_changed = true;
                         }
                     }
-                }
+                });
             });
-        });
-    ui.add_space(5.0);
+        ui.add_space(4.0);
 
-    ui.label("Size:");
-    if dirty_slider(
-        ui,
-        egui::Slider::new(&mut brush.brush_options.diameter, 1.0..=3000.0).logarithmic(true),
-        preview,
-    ) {
-        mask_dirty = true;
-    }
+        // The preview is drawn at a fixed size, so Size only rebuilds the mask.
+        size_changed |= slider_row(
+            ui,
+            "Size",
+            egui::Slider::new(&mut brush.brush_options.diameter, 1.0..=3000.0)
+                .logarithmic(true)
+                .max_decimals(0)
+                .suffix(" px"),
+        )
+        .changed();
 
-    if brush.brush_type == BrushType::Soft {
-        ui.horizontal(|ui| {
-            ui.label("Softness:");
-            if dirty_selectable(
-                ui,
-                &mut brush.brush_options.softness_selector,
-                SoftnessSelector::Gaussian,
-                "Gaussian",
-                preview,
-            )
-            .changed()
-            {
-                mask_dirty = true;
-            }
-            if dirty_selectable(
-                ui,
-                &mut brush.brush_options.softness_selector,
-                SoftnessSelector::Curve,
-                "Curve",
-                preview,
-            )
-            .changed()
-            {
-                mask_dirty = true;
-            }
-        });
-
-        match brush.brush_options.softness_selector {
-            SoftnessSelector::Gaussian => {
-                ui.label("Hardness:");
-                if dirty_slider(
+        if brush.brush_type == BrushType::Soft {
+            property_row(ui, "Softness", |ui| {
+                mask_changed |= segmented(
                     ui,
-                    egui::Slider::new(&mut brush.brush_options.hardness, 0.0..=100.0),
-                    preview,
-                ) {
-                    mask_dirty = true;
+                    &mut brush.brush_options.softness_selector,
+                    &[
+                        (SoftnessSelector::Gaussian, "Gaussian"),
+                        (SoftnessSelector::Curve, "Curve"),
+                    ],
+                    false,
+                );
+            });
+            match brush.brush_options.softness_selector {
+                SoftnessSelector::Gaussian => {
+                    mask_changed |= slider_row(
+                        ui,
+                        "Hardness",
+                        egui::Slider::new(&mut brush.brush_options.hardness, 0.0..=100.0)
+                            .max_decimals(0)
+                            .suffix("%"),
+                    )
+                    .changed();
                 }
-            }
-            SoftnessSelector::Curve => {
-                ui.label("Softness Curve:");
-                if curve_editor(ui, &mut brush.brush_options.softness_curve) {
-                    mask_dirty = true;
-                    preview.dirty = true;
+                SoftnessSelector::Curve => {
+                    mask_changed |= curve_editor(ui, &mut brush.brush_options.softness_curve);
                 }
-                ui.small("Double-click to add/remove points.");
             }
         }
-    }
-
-    ui.label("Opacity:");
-    dirty_slider(
-        ui,
-        egui::Slider::new(&mut brush.brush_options.opacity, 0.0..=1.0),
-        preview,
-    );
-
-    ui.label("Flow:");
-    dirty_slider(
-        ui,
-        egui::Slider::new(&mut brush.brush_options.flow, 0.0..=100.0),
-        preview,
-    );
-
-    ui.label("Spacing (%):");
-    dirty_slider(
-        ui,
-        egui::Slider::new(&mut brush.brush_options.spacing, 1.0..=200.0),
-        preview,
-    );
-
-    ui.label("Jitter (% of size):");
-    dirty_slider(ui, egui::Slider::new(&mut brush.jitter, 0.0..=50.0), preview);
-
-    ui.label("Stabilizer:");
-    ui.horizontal(|ui| {
-        dirty_selectable(
-            ui,
-            &mut brush.stabilizer_algorithm,
-            StabilizerAlgorithm::None,
-            "None",
-            preview,
-        );
-        dirty_selectable(
-            ui,
-            &mut brush.stabilizer_algorithm,
-            StabilizerAlgorithm::Simple,
-            "Simple",
-            preview,
-        );
-        dirty_selectable(
-            ui,
-            &mut brush.stabilizer_algorithm,
-            StabilizerAlgorithm::Dynamic,
-            "Dynamic",
-            preview,
-        );
     });
 
-    match brush.stabilizer_algorithm {
-        StabilizerAlgorithm::None => {}
-        StabilizerAlgorithm::Simple => {
-            dirty_slider(
-                ui,
-                egui::Slider::new(&mut brush.stabilizer, 0.0..=1.0).text("Strength"),
-                preview,
-            );
-        }
-        StabilizerAlgorithm::Dynamic => {
-            dirty_slider(
-                ui,
-                egui::Slider::new(&mut brush.stabilizer_mass, 0.01..=1.0).text("Mass"),
-                preview,
-            );
-            dirty_slider(
-                ui,
-                egui::Slider::new(&mut brush.stabilizer_drag, 0.0..=1.0).text("Drag"),
-                preview,
-            );
-        }
-    }
+    section(ui, "Stroke", true, |ui| {
+        changed |= slider_row(
+            ui,
+            "Opacity",
+            percent_of_unit(egui::Slider::new(
+                &mut brush.brush_options.opacity,
+                0.0..=1.0,
+            )),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Flow",
+            egui::Slider::new(&mut brush.brush_options.flow, 0.0..=100.0)
+                .max_decimals(0)
+                .suffix("%"),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Spacing",
+            egui::Slider::new(&mut brush.brush_options.spacing, 1.0..=200.0)
+                .max_decimals(0)
+                .suffix("%"),
+        )
+        .on_hover_text("Distance between dabs, as a percentage of the brush size.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Jitter",
+            egui::Slider::new(&mut brush.jitter, 0.0..=50.0)
+                .max_decimals(0)
+                .suffix("%"),
+        )
+        .on_hover_text("Random dab offset, as a percentage of the brush size.")
+        .changed();
+    });
 
-    ui.separator();
-    dirty_checkbox(ui, &mut brush.pixel_perfect, "Pixel Perfect Mode", preview);
-    dirty_checkbox(ui, &mut brush.anti_aliasing, "Anti-aliasing", preview);
+    section(ui, "Pen pressure", true, |ui| {
+        let o = &mut brush.brush_options;
+        property_row(ui, "Controls", |ui| {
+            changed |= ui.toggle_value(&mut o.pressure_size, "Size").changed();
+            changed |= ui
+                .toggle_value(&mut o.pressure_opacity, "Opacity")
+                .changed();
+            changed |= ui.toggle_value(&mut o.pressure_flow, "Flow").changed();
+        });
+        if o.pressure_size {
+            mask_changed |= slider_row(
+                ui,
+                "Min size",
+                percent_of_unit(egui::Slider::new(&mut o.pressure_min_size, 0.0..=1.0)),
+            )
+            .on_hover_text("Brush size at the lightest pressure, as a share of the full size.")
+            .changed();
+        }
+    });
 
-    if mask_dirty {
+    section(ui, "Stabilizer", true, |ui| {
+        property_row(ui, "Method", |ui| {
+            changed |= segmented(
+                ui,
+                &mut brush.stabilizer_algorithm,
+                &[
+                    (StabilizerAlgorithm::None, "None"),
+                    (StabilizerAlgorithm::Simple, "Simple"),
+                    (StabilizerAlgorithm::Dynamic, "Dynamic"),
+                ],
+                false,
+            );
+        });
+        match brush.stabilizer_algorithm {
+            StabilizerAlgorithm::None => {}
+            StabilizerAlgorithm::Simple => {
+                changed |= slider_row(
+                    ui,
+                    "Strength",
+                    percent_of_unit(egui::Slider::new(&mut brush.stabilizer, 0.0..=1.0)),
+                )
+                .changed();
+            }
+            StabilizerAlgorithm::Dynamic => {
+                changed |= slider_row(
+                    ui,
+                    "Mass",
+                    egui::Slider::new(&mut brush.stabilizer_mass, 0.01..=1.0),
+                )
+                .changed();
+                changed |= slider_row(
+                    ui,
+                    "Drag",
+                    egui::Slider::new(&mut brush.stabilizer_drag, 0.0..=1.0),
+                )
+                .changed();
+            }
+        }
+    });
+
+    section(ui, "Options", false, |ui| {
+        changed |= ui
+            .checkbox(&mut brush.pixel_perfect, "Pixel-perfect lines")
+            .on_hover_text(
+                "For thin pixel-art lines: drops the extra pixel at each corner so a \
+                 1-px line never doubles up into L-shaped clumps.",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(&mut brush.anti_aliasing, "Anti-aliasing")
+            .on_hover_text(
+                "Smooth, partly transparent edge pixels (on), or hard all-or-nothing \
+                 edges (off). Soft brushes want it on; pixel art usually off.",
+            )
+            .changed();
+    });
+
+    if size_changed {
         brush.is_changed = true;
     }
+    (changed, mask_changed)
 }

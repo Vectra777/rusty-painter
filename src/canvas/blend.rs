@@ -1,8 +1,8 @@
 use std::cell::Cell;
 use std::sync::OnceLock;
 
-use eframe::egui::{Color32, Rgba};
-use wide::f32x4;
+use eframe::egui::{Color32, ColorImage, Rgba};
+use wide::{CmpGt, f32x4, f32x8};
 
 const GAMMA_LUT_SIZE: usize = 4096;
 
@@ -59,6 +59,108 @@ fn srgb_to_linear_lut() -> &'static [f32; 256] {
 #[inline]
 fn srgb_u8_to_linear(v: u8) -> f32 {
     srgb_to_linear_lut()[v as usize]
+}
+
+/// `img` shrunk by `2^level`, each pixel the average of its block in linear
+/// light (partial blocks at the canvas edge average the pixels they have).
+// The app composites and averages in one pass (`write_tile_rect_downsampled`);
+// this two-step version stays as the reference its tests and the benchmark
+// compare against, so the binary target sees it unused.
+#[allow(dead_code)]
+pub fn downsample(img: &ColorImage, level: u32) -> ColorImage {
+    if level == 0 {
+        return img.clone();
+    }
+    let block = 1usize << level;
+    let [w, h] = img.size;
+    let (out_w, out_h) = (w.div_ceil(block), h.div_ceil(block));
+    let mut out = ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let mut sum = [0.0f32; 4];
+            let mut count = 0.0;
+            for y in oy * block..((oy + 1) * block).min(h) {
+                for x in ox * block..((ox + 1) * block).min(w) {
+                    let p = color32_to_linear(img.pixels[y * w + x]);
+                    for (s, v) in sum.iter_mut().zip(p.to_array()) {
+                        *s += v;
+                    }
+                    count += 1.0;
+                }
+            }
+            let [r, g, b, a] = sum.map(|v| v / count);
+            out.pixels[oy * out_w + ox] =
+                rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r, g, b, a));
+        }
+    }
+    out
+}
+
+/// Average, in linear light, of `src[i]` over `dst[i]` for the pixels `i`
+/// of one block (see [`alpha_over`]), rounded to sRGB once at the end.
+/// `pixels` yields `(src, dst)` pairs. Equivalent to blending each pixel with
+/// [`alpha_over`] and averaging with [`downsample`], without rounding every
+/// full-resolution pixel to 8 bits and decoding it again (at most 1/255 off).
+#[inline]
+pub(crate) fn average_over(pixels: impl Iterator<Item = (Color32, Color32)>) -> Color32 {
+    let lut = srgb_to_linear_lut();
+    let lin = |c: Color32| {
+        [
+            lut[c.r() as usize],
+            lut[c.g() as usize],
+            lut[c.b() as usize],
+            c.a() as f32 / 255.0,
+        ]
+    };
+    let mut sum = [0.0f32; 4];
+    let mut count = 0u32;
+    for (src, dst) in pixels {
+        // Same cases as `alpha_over`, before its final rounding.
+        let px = match (src.a(), dst.a()) {
+            (0, _) => lin(dst),
+            (255, _) | (_, 0) => lin(src),
+            (_, da) => {
+                let (s, d) = (lin(src), lin(dst));
+                let keep = 1.0 - s[3];
+                let a = if da == 255 { 1.0 } else { s[3] + d[3] * keep };
+                [
+                    s[0] + d[0] * keep,
+                    s[1] + d[1] * keep,
+                    s[2] + d[2] * keep,
+                    a,
+                ]
+            }
+        };
+        for (acc, v) in sum.iter_mut().zip(px) {
+            *acc += v;
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return Color32::TRANSPARENT;
+    }
+    let n = count as f32;
+    let [r, g, b, a] = sum.map(|v| v / n);
+    rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r, g, b, a))
+}
+
+/// A stored (premultiplied sRGB) colour as-is in 0..1, for gamma-space
+/// blending: no decoding to linear light.
+#[inline]
+pub(crate) fn gamma_color32_to_rgba(c: Color32) -> Rgba {
+    Rgba::from_rgba_premultiplied(
+        c.r() as f32 / 255.0,
+        c.g() as f32 / 255.0,
+        c.b() as f32 / 255.0,
+        c.a() as f32 / 255.0,
+    )
+}
+
+/// Inverse of [`gamma_color32_to_rgba`]: round gamma-space values to 8 bits.
+#[inline]
+pub(crate) fn gamma_rgba_to_color32(c: Rgba) -> Color32 {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    Color32::from_rgba_premultiplied(q(c.r()), q(c.g()), q(c.b()), q(c.a()))
 }
 
 /// Lookup-table equivalent of `Rgba::from(Color32)` (which calls `powf` per
@@ -123,6 +225,36 @@ impl Luts {
     }
 }
 
+/// Per-pixel offsets in -0.5..0.5 for dithering 8-bit alpha, by canvas
+/// position. Rounding alpha to 1/255 steps is invisible in the light parts
+/// of a soft edge, but composited in linear light the darkest steps are far
+/// apart (alpha 254/255 of black over white is already sRGB 13), which drew
+/// hard rings and flat "cubes" at the core of soft strokes. Dithering
+/// spreads that rounding into invisible grain instead.
+///
+/// A 64×64 table repeated across the canvas: at under one 8-bit step the
+/// repeat is invisible, and a lookup is cheaper than hashing every pixel.
+/// Fetch it once per row, not per pixel (the `OnceLock` check isn't free).
+fn dither_table() -> &'static [f32; 4096] {
+    static TABLE: OnceLock<[f32; 4096]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|i| {
+            crate::canvas::blend_modes::pixel_noise(i as u32 % 64, i as u32 / 64) - 0.5
+        })
+    })
+}
+
+#[inline]
+fn dither_at(table: &[f32; 4096], x: u32, y: u32) -> f32 {
+    table[((y & 63) * 64 + (x & 63)) as usize]
+}
+
+/// `alpha` (0..1) to 8 bits, rounded with the dither offset `noise`.
+#[inline]
+fn alpha_to_u8_dithered(alpha: f32, noise: f32) -> u8 {
+    (alpha.clamp(0.0, 1.0) * 255.0 + 0.5 + noise).clamp(0.0, 255.0) as u8
+}
+
 #[inline]
 fn alpha_to_u8(alpha: f32) -> u8 {
     (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
@@ -143,6 +275,8 @@ pub(crate) fn rgba_to_color32_fast(rgba: Rgba) -> Color32 {
 pub(crate) struct StrokeColor {
     /// Unpremultiplied RGB in linear light.
     linear: [f32; 3],
+    /// Unpremultiplied RGB as stored (sRGB), 0..1, for gamma-space strokes.
+    gamma: [f32; 3],
     /// What a fully covered pixel becomes (exactly the brush's RGB, opaque).
     opaque: Color32,
 }
@@ -151,7 +285,12 @@ impl StrokeColor {
     pub(crate) fn new(color: Color32) -> Self {
         let luts = Luts::get();
         Self {
-            linear: [luts.linear(color.r()), luts.linear(color.g()), luts.linear(color.b())],
+            linear: [
+                luts.linear(color.r()),
+                luts.linear(color.g()),
+                luts.linear(color.b()),
+            ],
+            gamma: [color.r(), color.g(), color.b()].map(|v| v as f32 / 255.0),
             opaque: Color32::from_rgb(color.r(), color.g(), color.b()),
         }
     }
@@ -161,18 +300,60 @@ impl StrokeColor {
 /// stroke (`original`), given each pixel's accumulated stroke `coverage`
 /// scaled by `cap` (the stroke opacity in wash mode, else 1). Pixels with zero
 /// coverage are left untouched, so they never go through a lossy round trip.
+///
+/// `origin` is the canvas position of the first pixel (the slice is one
+/// row): it seeds the alpha dither, see [`alpha_dither`].
 pub(crate) fn resolve_stroke_normal(
     original: &[Color32],
     coverage: &[f32],
     out: &mut [Color32],
     color: StrokeColor,
     cap: f32,
+    origin: [u32; 2],
 ) {
     // Kept scalar on purpose: most pixels in a dab's bounding rows have zero
     // coverage and are skipped outright, which beats resolving every pixel
     // branch-free with SIMD (measured ~1.6x slower on a real stroke).
     let luts = Luts::get();
+    let dither = dither_table();
     let [cr, cg, cb] = color.linear;
+    for (i, ((dst, &src), &cov)) in out.iter_mut().zip(original).zip(coverage).enumerate() {
+        if cov <= 0.0 {
+            continue;
+        }
+        let a = cov * cap;
+        if a >= 1.0 {
+            *dst = color.opaque;
+            continue;
+        }
+        let keep = 1.0 - a;
+        // Opaque stays exactly opaque.
+        let noise = if src.a() == 255 {
+            0.0
+        } else {
+            dither_at(dither, origin[0] + i as u32, origin[1])
+        };
+        *dst = Color32::from_rgba_premultiplied(
+            luts.srgb(cr * a + luts.linear(src.r()) * keep),
+            luts.srgb(cg * a + luts.linear(src.g()) * keep),
+            luts.srgb(cb * a + luts.linear(src.b()) * keep),
+            alpha_to_u8_dithered(a + src.a() as f32 / 255.0 * keep, noise),
+        );
+    }
+}
+
+/// [`resolve_stroke_normal`] for gamma-space documents: the brush colour
+/// and the pixel below are mixed as stored sRGB values, like Photoshop and
+/// Krita's 8-bit documents, instead of in linear light.
+pub(crate) fn resolve_stroke_normal_gamma(
+    original: &[Color32],
+    coverage: &[f32],
+    out: &mut [Color32],
+    color: StrokeColor,
+    cap: f32,
+) {
+    let [cr, cg, cb] = color.gamma;
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     for ((dst, &src), &cov) in out.iter_mut().zip(original).zip(coverage) {
         if cov <= 0.0 {
             continue;
@@ -183,27 +364,132 @@ pub(crate) fn resolve_stroke_normal(
             continue;
         }
         let keep = 1.0 - a;
+        let f = |v: u8| v as f32 / 255.0;
         *dst = Color32::from_rgba_premultiplied(
-            luts.srgb(cr * a + luts.linear(src.r()) * keep),
-            luts.srgb(cg * a + luts.linear(src.g()) * keep),
-            luts.srgb(cb * a + luts.linear(src.b()) * keep),
-            alpha_to_u8(a + src.a() as f32 / 255.0 * keep),
+            q(cr * a + f(src.r()) * keep),
+            q(cg * a + f(src.g()) * keep),
+            q(cb * a + f(src.b()) * keep),
+            q(a + f(src.a()) * keep),
         );
     }
+}
+
+/// [`resolve_stroke_normal`] 8 pixels at a time, with identical results:
+/// the blend math and gamma-table indexing are vectorised (same operations
+/// in the same order), only the table lookups themselves stay scalar.
+/// Callers pass just the span of each row that dabs reached, so nearly every
+/// pixel is covered; that is what makes the SIMD path pay off (over whole
+/// dab rectangles, full of zero-coverage pixels, it measured slower).
+pub(crate) fn resolve_stroke_normal_simd(
+    original: &[Color32],
+    coverage: &[f32],
+    out: &mut [Color32],
+    color: StrokeColor,
+    cap: f32,
+    origin: [u32; 2],
+) {
+    const LANES: usize = 8;
+    let luts = Luts::get();
+    let dither = dither_table();
+    let len = out.len().min(original.len()).min(coverage.len());
+    let chunks = len / LANES;
+    let [cr, cg, cb] = color.linear;
+    let (vcr, vcg, vcb) = (f32x8::splat(cr), f32x8::splat(cg), f32x8::splat(cb));
+    let (zero, one, half) = (f32x8::ZERO, f32x8::ONE, f32x8::splat(0.5));
+    let vcap = f32x8::splat(cap);
+    let lut_scale = f32x8::splat((GAMMA_LUT_SIZE - 1) as f32);
+    let max_index = GAMMA_LUT_SIZE as i32 - 1;
+    let to_index = |v: f32x8| {
+        (v.max(zero).min(one) * lut_scale + half)
+            .trunc_int()
+            .to_array()
+    };
+
+    for chunk in 0..chunks {
+        let base = chunk * LANES;
+        let cov = f32x8::new(coverage[base..base + LANES].try_into().unwrap());
+        let covered = cov.cmp_gt(zero).move_mask();
+        if covered == 0 {
+            continue;
+        }
+        let a = (cov * vcap).min(one);
+        let keep = one - a;
+
+        let src = &original[base..base + LANES];
+        let (mut lr, mut lg, mut lb, mut la, mut noise) = (
+            [0.0; LANES],
+            [0.0; LANES],
+            [0.0; LANES],
+            [0.0; LANES],
+            [0.0; LANES],
+        );
+        for k in 0..LANES {
+            lr[k] = luts.linear(src[k].r());
+            lg[k] = luts.linear(src[k].g());
+            lb[k] = luts.linear(src[k].b());
+            la[k] = src[k].a() as f32 / 255.0;
+            if src[k].a() != 255 {
+                noise[k] = dither_at(dither, origin[0] + (base + k) as u32, origin[1]);
+            }
+        }
+        let r = to_index(vcr * a + f32x8::new(lr) * keep);
+        let g = to_index(vcg * a + f32x8::new(lg) * keep);
+        let b = to_index(vcb * a + f32x8::new(lb) * keep);
+        let alpha = ((a + f32x8::new(la) * keep).max(zero).min(one) * f32x8::splat(255.0)
+            + half
+            + f32x8::new(noise))
+        .max(zero)
+        .min(f32x8::splat(255.0))
+        .trunc_int()
+        .to_array();
+        let a = a.to_array();
+
+        for k in 0..LANES {
+            if covered & (1 << k) == 0 {
+                continue; // untouched pixels keep their exact value
+            }
+            out[base + k] = if a[k] >= 1.0 {
+                color.opaque
+            } else {
+                let lut = |i: i32| luts.to_srgb[i.clamp(0, max_index) as usize];
+                Color32::from_rgba_premultiplied(lut(r[k]), lut(g[k]), lut(b[k]), alpha[k] as u8)
+            };
+        }
+    }
+
+    let tail = chunks * LANES;
+    resolve_stroke_normal(
+        &original[tail..len],
+        &coverage[tail..len],
+        &mut out[tail..len],
+        color,
+        cap,
+        [origin[0] + tail as u32, origin[1]],
+    );
 }
 
 /// Eraser counterpart of [`resolve_stroke_normal`]: scales the original
 /// premultiplied pixel by the uncovered fraction. A pixel whose alpha
 /// rounds to zero becomes fully transparent (black RGB), which canvas
 /// storage relies on.
-pub(crate) fn resolve_stroke_erase(original: &[Color32], coverage: &[f32], out: &mut [Color32], cap: f32) {
-    for ((dst, &src), &cov) in out.iter_mut().zip(original).zip(coverage) {
+pub(crate) fn resolve_stroke_erase(
+    original: &[Color32],
+    coverage: &[f32],
+    out: &mut [Color32],
+    cap: f32,
+    origin: [u32; 2],
+) {
+    let dither = dither_table();
+    for (i, ((dst, &src), &cov)) in out.iter_mut().zip(original).zip(coverage).enumerate() {
         if cov <= 0.0 {
             continue;
         }
         let keep = 1.0 - (cov * cap).min(1.0);
         let scale = |v: u8| (v as f32 * keep + 0.5) as u8;
-        let a = scale(src.a());
+        // The alpha dithered like painting's, so soft erased edges fade
+        // smoothly too.
+        let noise = dither_at(dither, origin[0] + i as u32, origin[1]);
+        let a = (src.a() as f32 * keep + 0.5 + noise).clamp(0.0, 255.0) as u8;
         *dst = if a == 0 {
             Color32::TRANSPARENT
         } else {
@@ -301,6 +587,57 @@ pub fn alpha_over_batch(src: &[Color32], dst: &[Color32], out: &mut [Color32]) {
     }
 }
 
+/// `Color32::to_srgba_unmultiplied`, from a table: egui's version runs
+/// `powf` three times per channel. Each output channel depends only on the
+/// channel and alpha, so a 256×256 table built with egui's own function is
+/// exact.
+#[inline]
+pub fn unmultiply(c: Color32) -> [u8; 4] {
+    use std::sync::OnceLock;
+    let a = c.a();
+    if a == 255 {
+        return [c.r(), c.g(), c.b(), 255];
+    }
+    static LUT: OnceLock<Vec<u8>> = OnceLock::new();
+    let lut = LUT.get_or_init(|| {
+        let mut t = vec![0u8; 256 * 256];
+        for alpha in 0..=255u8 {
+            for v in 0..=255u8 {
+                t[alpha as usize * 256 + v as usize] =
+                    Color32::from_rgba_premultiplied(v, v, v, alpha).to_srgba_unmultiplied()[0];
+            }
+        }
+        t
+    });
+    let row = &lut[a as usize * 256..][..256];
+    [
+        row[c.r() as usize],
+        row[c.g() as usize],
+        row[c.b() as usize],
+        a,
+    ]
+}
+
+/// `c` with its alpha replaced by `alpha`, keeping its (unpremultiplied)
+/// colour: how alpha-locked layers take paint.
+#[inline]
+pub(crate) fn with_alpha_of(c: Color32, alpha: u8) -> Color32 {
+    if alpha == 0 {
+        return Color32::TRANSPARENT;
+    }
+    if c.a() == alpha {
+        return c;
+    }
+    if c.a() == 0 {
+        // Fully erased: nothing to recolour with; keep it transparent-black.
+        return Color32::from_rgba_premultiplied(0, 0, 0, alpha);
+    }
+    let k = alpha as u32;
+    let a = c.a() as u32;
+    let scale = |v: u8| ((v as u32 * k + a / 2) / a).min(k) as u8;
+    Color32::from_rgba_premultiplied(scale(c.r()), scale(c.g()), scale(c.b()), alpha)
+}
+
 #[inline]
 pub fn alpha_over(src: Color32, dst: Color32) -> Color32 {
     match src.a() {
@@ -353,6 +690,25 @@ pub(crate) fn premultiply(color: Color32) -> Color32 {
         a as f32 / 255.0,
     );
     Color32::from(linear)
+}
+
+#[cfg(test)]
+mod unmultiply_tests {
+    use super::*;
+
+    #[test]
+    fn table_unmultiply_matches_egui_exactly() {
+        for a in 0..=255u8 {
+            for v in (0..=a).step_by(3) {
+                for c in [
+                    Color32::from_rgba_premultiplied(v, a / 2, 0, a),
+                    Color32::from_rgba_premultiplied(0, v, a, a),
+                ] {
+                    assert_eq!(unmultiply(c), c.to_srgba_unmultiplied(), "{c:?}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -436,6 +792,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn simd_resolve_matches_scalar_exactly() {
+        // Deterministic pseudo-random pixels and coverages, including zero
+        // coverage, full coverage, and caps that saturate.
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for len in [0, 1, 7, 8, 9, 16, 23, 64, 100] {
+            for &cap in &[1.0, 0.35, 2.0] {
+                let original: Vec<Color32> = (0..len)
+                    .map(|_| {
+                        let v = next();
+                        let a = (v >> 24) as u8;
+                        let pm = |c: u32| ((c & 0xff) * a as u32 / 255) as u8;
+                        Color32::from_rgba_premultiplied(pm(v), pm(v >> 8), pm(v >> 16), a)
+                    })
+                    .collect();
+                let coverage: Vec<f32> = (0..len)
+                    .map(|_| match next() % 5 {
+                        0 => 0.0,
+                        1 => 1.0,
+                        _ => (next() % 1000) as f32 / 1000.0,
+                    })
+                    .collect();
+                let color = StrokeColor::new(Color32::from_rgba_unmultiplied(
+                    (next() & 0xff) as u8,
+                    (next() & 0xff) as u8,
+                    (next() & 0xff) as u8,
+                    255,
+                ));
+                let mut scalar = original.clone();
+                let mut simd = original.clone();
+                resolve_stroke_normal(&original, &coverage, &mut scalar, color, cap, [37, 11]);
+                resolve_stroke_normal_simd(&original, &coverage, &mut simd, color, cap, [37, 11]);
+                assert_eq!(scalar, simd, "len {len}, cap {cap}");
+            }
+        }
+    }
+
+    #[test]
+    fn soft_edges_have_no_alpha_steps_near_opaque() {
+        // Black at 99.6% coverage on a transparent layer: plain rounding
+        // made every pixel alpha 254 (a flat band, sRGB 13 over white next
+        // to 0). Dithered, the row averages to the true value instead.
+        let n = 512;
+        let original = vec![Color32::TRANSPARENT; n];
+        let mut out = original.clone();
+        let cov = vec![0.996f32; n];
+        resolve_stroke_normal_simd(
+            &original,
+            &cov,
+            &mut out,
+            StrokeColor::new(Color32::BLACK),
+            1.0,
+            [0, 5],
+        );
+        let mean = out.iter().map(|p| p.a() as f32).sum::<f32>() / n as f32;
+        assert!((mean - 0.996 * 255.0).abs() < 0.2, "{mean}");
+        assert!(out.iter().any(|p| p.a() == 253) && out.iter().any(|p| p.a() == 254));
+        // Paint over opaque pixels stays exactly opaque.
+        let opaque = vec![Color32::WHITE; n];
+        let mut out = opaque.clone();
+        let cov = vec![0.4f32; n];
+        resolve_stroke_normal_simd(
+            &opaque,
+            &cov,
+            &mut out,
+            StrokeColor::new(Color32::BLACK),
+            1.0,
+            [0, 5],
+        );
+        assert!(out.iter().all(|p| p.a() == 255));
+    }
 
     #[test]
     fn resolve_erase_zero_alpha_implies_zero_rgb() {
@@ -443,7 +876,7 @@ mod tests {
         // fully transparent, not keep a stray color value.
         let original = [Color32::from_rgba_premultiplied(128, 200, 255, 1)];
         let mut out = original;
-        resolve_stroke_erase(&original, &[0.6], &mut out, 1.0);
+        resolve_stroke_erase(&original, &[0.6], &mut out, 1.0, [0, 0]);
         assert_eq!(out[0], Color32::TRANSPARENT);
     }
 
@@ -453,7 +886,14 @@ mod tests {
             let color = Color32::from_rgb(v, 255 - v, v / 3);
             let original = [Color32::from_rgba_premultiplied(10, 20, 30, 200)];
             let mut out = original;
-            resolve_stroke_normal(&original, &[1.0], &mut out, StrokeColor::new(color), 1.0);
+            resolve_stroke_normal(
+                &original,
+                &[1.0],
+                &mut out,
+                StrokeColor::new(color),
+                1.0,
+                [0, 0],
+            );
             assert_eq!(out[0], color);
         }
     }
@@ -462,8 +902,15 @@ mod tests {
     fn resolve_leaves_uncovered_pixels_untouched() {
         let original = [Color32::from_rgba_premultiplied(3, 7, 11, 13)];
         let mut out = [Color32::from_rgba_premultiplied(99, 99, 99, 99)];
-        resolve_stroke_normal(&original, &[0.0], &mut out, StrokeColor::new(Color32::RED), 1.0);
-        resolve_stroke_erase(&original, &[0.0], &mut out, 1.0);
+        resolve_stroke_normal(
+            &original,
+            &[0.0],
+            &mut out,
+            StrokeColor::new(Color32::RED),
+            1.0,
+            [0, 0],
+        );
+        resolve_stroke_erase(&original, &[0.0], &mut out, 1.0, [0, 0]);
         assert_eq!(out[0], Color32::from_rgba_premultiplied(99, 99, 99, 99));
     }
 }

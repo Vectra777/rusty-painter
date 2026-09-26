@@ -14,7 +14,7 @@ use crate::canvas::history::UndoAction;
 use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
 use rayon::ThreadPool;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -46,8 +46,9 @@ enum Job {
 struct SharedState {
     /// Jobs queued or running.
     pending: usize,
-    /// Tiles painted since the UI last collected them.
-    dirty: HashSet<(usize, usize)>,
+    /// Tiles painted since the UI last collected them, with the tile-local
+    /// rectangle that changed in each.
+    dirty: HashMap<(usize, usize), [usize; 4]>,
     finished: Vec<FinishedStroke>,
 }
 
@@ -121,7 +122,10 @@ impl StrokeWorker {
 
     fn send(&self, job: Job) {
         self.shared.lock().pending += 1;
-        let sent = self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok());
+        let sent = self
+            .jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.send(job).is_ok());
         if !sent {
             // Worker gone (only possible during shutdown): don't leave waiters hanging.
             let mut state = self.shared.lock();
@@ -161,8 +165,8 @@ impl StrokeWorker {
         state.pending == 0
     }
 
-    /// Tiles painted since the last call.
-    pub fn take_dirty(&self) -> HashSet<(usize, usize)> {
+    /// Tiles painted since the last call, with the rectangle that changed.
+    pub fn take_dirty(&self) -> HashMap<(usize, usize), [usize; 4]> {
         std::mem::take(&mut self.shared.lock().dirty)
     }
 
@@ -222,8 +226,31 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
             } = setup;
             let mut context = StrokeContext::new(pool, canvas, selection.as_ref(), undo, tiles);
             stroke.add_point(brush, pos, pressure, &mut context);
-            let dirty = std::mem::take(&mut tiles.dirty);
-            shared.lock().dirty.extend(dirty);
+            let touched = std::mem::take(&mut tiles.dirty);
+            let mut shared = shared.lock();
+            for key in touched {
+                // A tile the dabs' rectangles reached but no pixel changed in
+                // has no damage and needs no redraw.
+                let Some(rect) = tiles
+                    .buffers
+                    .get(&key)
+                    .and_then(|b| b.lock().unwrap_or_else(|e| e.into_inner()).damage.take())
+                else {
+                    continue;
+                };
+                shared
+                    .dirty
+                    .entry(key)
+                    .and_modify(|d| {
+                        *d = [
+                            d[0].min(rect[0]),
+                            d[1].min(rect[1]),
+                            d[2].max(rect[2]),
+                            d[3].max(rect[3]),
+                        ]
+                    })
+                    .or_insert(rect);
+            }
         }
         Job::End => {
             // Dropping the session releases its `Arc<Canvas>` and stroke buffers.
@@ -249,7 +276,10 @@ mod tests {
         (0..40)
             .map(|i| {
                 let t = i as f32 / 39.0;
-                (Vec2::new(10.0 + t * 100.0, 60.0 + (t * 7.0).sin() * 40.0), 0.4 + 0.6 * t)
+                (
+                    Vec2::new(10.0 + t * 100.0, 60.0 + (t * 7.0).sin() * 40.0),
+                    0.4 + 0.6 * t,
+                )
             })
             .collect()
     }
@@ -302,6 +332,10 @@ mod tests {
         assert_eq!(finished[0].undo.tiles.len(), undo.tiles.len());
         assert!(!worker.take_dirty().is_empty());
         assert!(!worker.is_busy());
-        assert_eq!(Arc::strong_count(&canvas), 1, "an idle worker holds no canvas");
+        assert_eq!(
+            Arc::strong_count(&canvas),
+            1,
+            "an idle worker holds no canvas"
+        );
     }
 }

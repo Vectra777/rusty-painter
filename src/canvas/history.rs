@@ -57,7 +57,9 @@ impl SnapshotPixels {
             Self::Raw(pixels) => pixels.clone(),
             Self::Compressed { bytes, len } => zstd::bulk::decompress(bytes, len * 4)
                 .map(|raw| {
-                    raw.chunks_exact(4)
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3]))
                         .collect()
                 })
@@ -97,6 +99,20 @@ pub struct LayerMeta {
     pub visible: bool,
     pub opacity: f32,
     pub locked: bool,
+    /// Painting keeps the existing transparency.
+    pub alpha_locked: bool,
+    pub kind: crate::canvas::storage::LayerKind,
+    pub parent: Option<LayerId>,
+    pub blend: crate::canvas::blend_modes::LayerBlend,
+}
+
+/// A layer removed alongside the main one of a `Removed` op (its mask, or
+/// a folder's contents), with its position before the removal.
+#[derive(Clone)]
+pub struct RemovedLayer {
+    pub index: usize,
+    pub id: LayerId,
+    pub meta: LayerMeta,
 }
 
 /// A structural change to the layer list (as opposed to a pixel edit),
@@ -107,6 +123,8 @@ pub enum LayerHistoryOp {
     Added {
         index: usize,
         id: LayerId,
+        /// What was added (folder, mask...); `None` means a plain layer.
+        meta: Option<LayerMeta>,
         active_before: usize,
         active_after: usize,
     },
@@ -114,6 +132,8 @@ pub enum LayerHistoryOp {
         index: usize,
         id: LayerId,
         meta: LayerMeta,
+        /// Removed together with it: its mask, a folder's contents.
+        also: Vec<RemovedLayer>,
         active_before: usize,
         active_after: usize,
     },
@@ -121,9 +141,29 @@ pub enum LayerHistoryOp {
         id: LayerId,
         from: usize,
         to: usize,
+        /// Folder before and after the move (moving into/out of folders).
+        parent_before: Option<LayerId>,
+        parent_after: Option<LayerId>,
         active_before: usize,
         active_after: usize,
     },
+}
+
+impl LayerHistoryOp {
+    /// For `Removed`: every index involved, ascending (the main layer and
+    /// `also`). Inserting at these in order restores the original layout.
+    pub fn removed_indices(&self) -> Vec<usize> {
+        match self {
+            LayerHistoryOp::Removed { index, also, .. } => {
+                let mut indices: Vec<usize> = std::iter::once(*index)
+                    .chain(also.iter().map(|r| r.index))
+                    .collect();
+                indices.sort_unstable();
+                indices
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Collection of tile snapshots captured during a single user operation.
@@ -153,7 +193,10 @@ fn compress_older_actions(stack: &mut [UndoAction]) {
         return;
     };
     for action in older {
-        action.tiles.par_iter_mut().for_each(|tile| tile.data.compress());
+        action
+            .tiles
+            .par_iter_mut()
+            .for_each(|tile| tile.data.compress());
     }
 }
 
@@ -183,6 +226,12 @@ impl History {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    /// Forget everything that could be redone (e.g. a cancelled stroke that
+    /// was just undone and should not come back).
+    pub fn discard_redo(&mut self) {
+        self.redo_stack.clear();
     }
 
     /// Push a new action onto the undo stack and clear redo, dropping the
@@ -250,10 +299,22 @@ impl History {
     /// layer shell to exist again before its tiles can be restored).
     fn prepare_for_undo(canvas: &mut Canvas, layer_action: Option<&LayerHistoryOp>) {
         if let Some(LayerHistoryOp::Removed {
-            index, id, meta, ..
+            index,
+            id,
+            meta,
+            also,
+            ..
         }) = layer_action
         {
-            canvas.insert_layer_with_meta(*index, *id, meta);
+            // Ascending original positions, so each lands where it was.
+            let mut shells: Vec<(usize, LayerId, &LayerMeta)> =
+                std::iter::once((*index, *id, meta))
+                    .chain(also.iter().map(|r| (r.index, r.id, &r.meta)))
+                    .collect();
+            shells.sort_by_key(|(index, _, _)| *index);
+            for (index, id, meta) in shells {
+                canvas.insert_layer_with_meta(index, id, meta);
+            }
         }
     }
 
@@ -274,6 +335,7 @@ impl History {
             Some(LayerHistoryOp::Added {
                 id,
                 index,
+                meta,
                 active_before,
                 active_after,
             }) => {
@@ -285,44 +347,70 @@ impl History {
                 if let Some(current) = removed_index {
                     canvas.layers.remove(current);
                 }
-                canvas.active_layer_idx = (*active_before).min(canvas.layers.len().saturating_sub(1));
+                canvas.active_layer_idx =
+                    (*active_before).min(canvas.layers.len().saturating_sub(1));
                 Some(LayerHistoryOp::Added {
                     id: *id,
                     index: removed_index.unwrap_or(*index),
+                    meta: meta.clone(),
                     active_before: *active_before,
                     active_after: *active_after,
                 })
             }
             Some(op @ LayerHistoryOp::Removed { active_before, .. }) => {
-                canvas.active_layer_idx = (*active_before).min(canvas.layers.len().saturating_sub(1));
+                canvas.active_layer_idx =
+                    (*active_before).min(canvas.layers.len().saturating_sub(1));
                 Some(op.clone())
             }
             Some(LayerHistoryOp::Moved {
                 id,
                 from,
-                to,
+                parent_before,
+                parent_after,
                 active_before,
                 active_after,
+                ..
             }) => {
-                if let Some(current) = canvas.layer_index_of(*id) {
-                    let layer = canvas.layers.remove(current);
-                    canvas.layers.insert((*from).min(canvas.layers.len()), layer);
-                }
-                canvas.active_layer_idx = (*active_before).min(canvas.layers.len().saturating_sub(1));
-                Some(LayerHistoryOp::Moved {
+                // Returned as the move actually applied (current -> target),
+                // for the caller to mirror onto its per-layer state.
+                let applied = Self::move_layer(canvas, *id, *from, *parent_before);
+                canvas.active_layer_idx =
+                    (*active_before).min(canvas.layers.len().saturating_sub(1));
+                applied.map(|(current, target)| LayerHistoryOp::Moved {
                     id: *id,
-                    from: *from,
-                    to: *to,
-                    active_before: *active_before,
-                    active_after: *active_after,
+                    from: current,
+                    to: target,
+                    parent_before: *parent_after,
+                    parent_after: *parent_before,
+                    active_before: *active_after,
+                    active_after: *active_before,
                 })
             }
             None => None,
         }
     }
 
+    /// Move layer `id` to position `to` (clamped) inside folder `parent`.
+    /// Returns `(from, to)` as applied.
+    fn move_layer(
+        canvas: &mut Canvas,
+        id: LayerId,
+        to: usize,
+        parent: Option<LayerId>,
+    ) -> Option<(usize, usize)> {
+        let current = canvas.layer_index_of(id)?;
+        let mut layer = canvas.layers.remove(current);
+        layer.parent = parent;
+        let target = to.min(canvas.layers.len());
+        canvas.layers.insert(target, layer);
+        Some((current, target))
+    }
+
     fn prepare_for_redo(canvas: &mut Canvas, layer_action: Option<&LayerHistoryOp>) {
-        if let Some(LayerHistoryOp::Added { index, id, .. }) = layer_action {
+        if let Some(LayerHistoryOp::Added {
+            index, id, meta, ..
+        }) = layer_action
+        {
             // Redoing an add: recreate the layer shell with the same
             // defaults `Canvas::add_layer` itself uses. Any content the
             // layer had is restored separately, in order, by whatever
@@ -332,12 +420,16 @@ impl History {
             // layer is guaranteed to have been empty at this point in its
             // history (opacity/visibility toggles aren't undo-tracked
             // either, matching the rest of this app's undo scope).
-            let meta = LayerMeta {
+            let meta = meta.clone().unwrap_or_else(|| LayerMeta {
                 name: format!("Layer {}", index + 1),
                 visible: true,
                 opacity: 1.0,
                 locked: false,
-            };
+                alpha_locked: false,
+                kind: Default::default(),
+                parent: None,
+                blend: Default::default(),
+            });
             canvas.insert_layer_with_meta(*index, *id, &meta);
         }
     }
@@ -353,6 +445,7 @@ impl History {
                 id,
                 index,
                 meta,
+                also,
                 active_before,
                 active_after,
             }) => {
@@ -361,39 +454,62 @@ impl History {
                 // here — Removed's re-insertion happened on the matching
                 // undo, so this layer has existed continuously since; still
                 // resolve fresh rather than trust the original index).
+                // Resolve every current position first, then remove from the
+                // highest down so earlier removals don't shift later ones.
                 let removed_index = canvas.layer_index_of(*id);
-                if let Some(current) = removed_index {
-                    canvas.layers.remove(current);
+                let also: Vec<RemovedLayer> = also
+                    .iter()
+                    .map(|r| RemovedLayer {
+                        index: canvas.layer_index_of(r.id).unwrap_or(r.index),
+                        id: r.id,
+                        meta: r.meta.clone(),
+                    })
+                    .collect();
+                let mut ids: Vec<(usize, LayerId)> = removed_index
+                    .map(|i| (i, *id))
+                    .into_iter()
+                    .chain(also.iter().map(|r| (r.index, r.id)))
+                    .collect();
+                ids.sort_by_key(|(i, _)| std::cmp::Reverse(*i));
+                for (_, layer_id) in ids {
+                    if let Some(current) = canvas.layer_index_of(layer_id) {
+                        canvas.layers.remove(current);
+                    }
                 }
-                canvas.active_layer_idx = (*active_after).min(canvas.layers.len().saturating_sub(1));
+                canvas.active_layer_idx =
+                    (*active_after).min(canvas.layers.len().saturating_sub(1));
                 Some(LayerHistoryOp::Removed {
                     id: *id,
                     index: removed_index.unwrap_or(*index),
                     meta: meta.clone(),
+                    also,
                     active_before: *active_before,
                     active_after: *active_after,
                 })
             }
             Some(op @ LayerHistoryOp::Added { active_after, .. }) => {
-                canvas.active_layer_idx = (*active_after).min(canvas.layers.len().saturating_sub(1));
+                canvas.active_layer_idx =
+                    (*active_after).min(canvas.layers.len().saturating_sub(1));
                 Some(op.clone())
             }
             Some(LayerHistoryOp::Moved {
                 id,
-                from,
                 to,
+                parent_before,
+                parent_after,
                 active_before,
                 active_after,
+                ..
             }) => {
-                if let Some(current) = canvas.layer_index_of(*id) {
-                    let layer = canvas.layers.remove(current);
-                    canvas.layers.insert((*to).min(canvas.layers.len()), layer);
-                }
-                canvas.active_layer_idx = (*active_after).min(canvas.layers.len().saturating_sub(1));
-                Some(LayerHistoryOp::Moved {
+                let applied = Self::move_layer(canvas, *id, *to, *parent_after);
+                canvas.active_layer_idx =
+                    (*active_after).min(canvas.layers.len().saturating_sub(1));
+                applied.map(|(current, target)| LayerHistoryOp::Moved {
                     id: *id,
-                    from: *from,
-                    to: *to,
+                    from: current,
+                    to: target,
+                    parent_before: *parent_before,
+                    parent_after: *parent_after,
                     active_before: *active_before,
                     active_after: *active_after,
                 })
@@ -425,9 +541,9 @@ impl History {
         let mut affected = Vec::new();
         for snapshot in &mut action.tiles {
             let tile_size = canvas.tile_size();
-            if snapshot.tx < 0
-                || snapshot.ty < 0
-                || snapshot.x0 + snapshot.width > tile_size
+            // (Tiles may sit off the canvas, at negative coordinates: pixels
+            // moved past its edge are kept.)
+            if snapshot.x0 + snapshot.width > tile_size
                 || snapshot.y0 + snapshot.height > tile_size
                 || snapshot.data.len() != snapshot.width * snapshot.height
             {
@@ -447,10 +563,7 @@ impl History {
                 );
                 continue;
             };
-            canvas.ensure_layer_tile_exists(layer_idx, snapshot.tx as usize, snapshot.ty as usize);
-            if let Some(tile_arc) =
-                canvas.lock_layer_tile(layer_idx, snapshot.tx as usize, snapshot.ty as usize)
-            {
+            if let Some(tile_arc) = canvas.ensure_layer_tile(layer_idx, snapshot.tx, snapshot.ty) {
                 let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                 // Ensure tile data exists
                 if tile.data.is_none() {
@@ -482,6 +595,12 @@ impl History {
                     data[dst_start..dst_start + len]
                         .copy_from_slice(&stored[src_start..src_start + len]);
                 }
+
+                // The tile may have gone from empty to painted or back: keep
+                // its flag true to its pixels. (Left stale, a tile emptied by
+                // e.g. liquify and then restored by undo stayed flagged empty,
+                // so it drew — and every tool read it — as a transparent hole.)
+                tile.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
 
                 // Store current region for redo/undo swap
                 snapshot.data = current_region.into();
@@ -532,7 +651,11 @@ mod tests {
 
         let mut huge = vec![action_with_tile_pixels(10_000, 9)];
         trim_oldest(&mut huge, 1000);
-        assert_eq!(huge.len(), 1, "the newest action is kept even if it alone exceeds the budget");
+        assert_eq!(
+            huge.len(),
+            1,
+            "the newest action is kept even if it alone exceeds the budget"
+        );
     }
 
     #[test]
@@ -584,6 +707,7 @@ mod tests {
             layer_action: Some(LayerHistoryOp::Added {
                 index: 2,
                 id: layer2_id,
+                meta: None,
                 active_before: 1,
                 active_after: 2,
             }),
@@ -610,7 +734,10 @@ mod tests {
         match layer_action {
             Some(LayerHistoryOp::Added { index, id, .. }) => {
                 assert_eq!(id, layer2_id);
-                assert_eq!(index, 1, "exposed index must be the corrected/current position");
+                assert_eq!(
+                    index, 1,
+                    "exposed index must be the corrected/current position"
+                );
             }
             _ => panic!("expected a corrected Added layer_action"),
         }
@@ -701,11 +828,23 @@ mod tests {
         history.push_action(action_with_tile_pixels(4096, 3));
 
         let (undo, _) = history.stacks();
-        assert!(matches!(undo[0].tiles[0].data, SnapshotPixels::Compressed { .. }));
-        assert!(matches!(undo[1].tiles[0].data, SnapshotPixels::Compressed { .. }));
+        assert!(matches!(
+            undo[0].tiles[0].data,
+            SnapshotPixels::Compressed { .. }
+        ));
+        assert!(matches!(
+            undo[1].tiles[0].data,
+            SnapshotPixels::Compressed { .. }
+        ));
         assert!(matches!(undo[2].tiles[0].data, SnapshotPixels::Raw(_)));
-        assert!(snapshot_bytes(&undo[0]) < 100, "a transparent tile compresses to a few bytes");
-        assert_eq!(undo[0].tiles[0].data.to_vec(), vec![Color32::TRANSPARENT; 4096]);
+        assert!(
+            snapshot_bytes(&undo[0]) < 100,
+            "a transparent tile compresses to a few bytes"
+        );
+        assert_eq!(
+            undo[0].tiles[0].data.to_vec(),
+            vec![Color32::TRANSPARENT; 4096]
+        );
         assert_eq!(undo[1].tiles[0].data.to_vec(), patterned);
     }
 
@@ -723,7 +862,10 @@ mod tests {
         canvas.set_layer_tile_data(1, 0, 0, red.clone());
         history.push_action(one_tile_action(red.clone()));
         canvas.set_layer_tile_data(1, 0, 0, vec![Color32::BLUE; 16]);
-        assert!(matches!(history.stacks().0[0].tiles[0].data, SnapshotPixels::Compressed { .. }));
+        assert!(matches!(
+            history.stacks().0[0].tiles[0].data,
+            SnapshotPixels::Compressed { .. }
+        ));
 
         let mut selection = SelectionManager::new();
         let mut tool = Tool::Brush;
@@ -750,6 +892,7 @@ mod tests {
             layer_action: Some(LayerHistoryOp::Added {
                 index: new_idx,
                 id: new_id,
+                meta: None,
                 active_before,
                 active_after: new_idx,
             }),
@@ -782,6 +925,7 @@ mod tests {
             layer_action: Some(LayerHistoryOp::Added {
                 index: new_idx,
                 id: new_id,
+                meta: None,
                 active_before,
                 active_after: new_idx,
             }),
@@ -827,6 +971,7 @@ mod tests {
                 index: removed_idx,
                 id: removed_id,
                 meta,
+                also: Vec::new(),
                 active_before,
                 active_after: canvas.active_layer_idx,
             }),
@@ -840,7 +985,10 @@ mod tests {
         assert_eq!(canvas.layers.len(), 3);
         let restored_idx = canvas.layer_index_of(removed_id).unwrap();
         assert_eq!(restored_idx, removed_idx);
-        assert_eq!(canvas.get_layer_tile_data(restored_idx, 0, 0), Some(painted));
+        assert_eq!(
+            canvas.get_layer_tile_data(restored_idx, 0, 0),
+            Some(painted)
+        );
         assert_eq!(canvas.active_layer_idx, active_before);
     }
 
@@ -870,6 +1018,8 @@ mod tests {
                 id: moved_id,
                 from,
                 to,
+                parent_before: None,
+                parent_after: None,
                 active_before,
                 active_after,
             }),
@@ -891,7 +1041,8 @@ mod tests {
         let tile_size = 4;
         let mut canvas = Canvas::new(tile_size, tile_size, Color32::WHITE, tile_size);
         let bottom_id = canvas.layer_id_at(1).unwrap();
-        let bottom_before = vec![Color32::from_rgba_unmultiplied(10, 10, 10, 255); tile_size * tile_size];
+        let bottom_before =
+            vec![Color32::from_rgba_unmultiplied(10, 10, 10, 255); tile_size * tile_size];
         canvas.set_layer_tile_data(1, 0, 0, bottom_before.clone());
 
         let top_id = canvas.add_layer();
@@ -909,7 +1060,10 @@ mod tests {
         assert_eq!(canvas.layers.len(), 2);
         assert!(action.layer_action.is_some());
         // Bottom layer now holds the blended result, not its original data.
-        assert_ne!(canvas.get_layer_tile_data(1, 0, 0), Some(bottom_before.clone()));
+        assert_ne!(
+            canvas.get_layer_tile_data(1, 0, 0),
+            Some(bottom_before.clone())
+        );
 
         let mut history = History::new();
         history.push_action(action);
@@ -922,8 +1076,14 @@ mod tests {
         assert_eq!(canvas.layers.len(), 3);
 
         let restored_top_idx = canvas.layer_index_of(top_id).unwrap();
-        assert_eq!(canvas.get_layer_tile_data(restored_top_idx, 0, 0), Some(top_data));
+        assert_eq!(
+            canvas.get_layer_tile_data(restored_top_idx, 0, 0),
+            Some(top_data)
+        );
         let bottom_idx = canvas.layer_index_of(bottom_id).unwrap();
-        assert_eq!(canvas.get_layer_tile_data(bottom_idx, 0, 0), Some(bottom_before));
+        assert_eq!(
+            canvas.get_layer_tile_data(bottom_idx, 0, 0),
+            Some(bottom_before)
+        );
     }
 }

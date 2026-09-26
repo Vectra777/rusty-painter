@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,29 @@ use crate::window::{
 };
 
 mod keycodes;
+
+// rusty-painter patch: winit reports a stylus as mouse events, which carry no
+// pressure or tool type. Keep the latest pen sample here so the app can read it
+// through `platform::android::pen_state`.
+static PEN_PRESSURE_BITS: AtomicU32 = AtomicU32::new(0x3f80_0000); // 1.0f32
+static PEN_IS_ERASER: AtomicBool = AtomicBool::new(false);
+static PEN_IS_STYLUS: AtomicBool = AtomicBool::new(false);
+
+fn record_pen(pointer: &android_activity::input::Pointer<'_>) {
+    let tool = pointer.tool_type();
+    PEN_PRESSURE_BITS.store(pointer.pressure().to_bits(), Ordering::Relaxed);
+    PEN_IS_ERASER.store(matches!(tool, ToolType::Eraser), Ordering::Relaxed);
+    PEN_IS_STYLUS.store(!matches!(tool, ToolType::Mouse), Ordering::Relaxed);
+}
+
+/// Latest pen sample: `(pressure, is_eraser, is_stylus)`.
+pub(crate) fn pen_state() -> (f32, bool, bool) {
+    (
+        f32::from_bits(PEN_PRESSURE_BITS.load(Ordering::Relaxed)),
+        PEN_IS_ERASER.load(Ordering::Relaxed),
+        PEN_IS_STYLUS.load(Ordering::Relaxed),
+    )
+}
 
 pub(crate) use crate::cursor::{
     NoCustomCursor as PlatformCustomCursor, NoCustomCursor as PlatformCustomCursorSource,
@@ -383,6 +406,7 @@ impl<T: 'static> EventLoop<T> {
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                         match pointer.tool_type() {
                             ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
+                                record_pen(&pointer);
                                 trace!(
                                     "Pointer input {device_id:?}, press, loc={location:?}, \
                                      pointer={pointer:?}"
@@ -439,6 +463,7 @@ impl<T: 'static> EventLoop<T> {
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                         match pointer.tool_type() {
                             ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
+                                record_pen(&pointer);
                                 trace!(
                                     "Pointer input {device_id:?}, release, loc={location:?}, \
                                      pointer={pointer:?}"
@@ -495,6 +520,7 @@ impl<T: 'static> EventLoop<T> {
                                 PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                             match pointer.tool_type() {
                                 ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
+                                    record_pen(&pointer);
                                     trace!(
                                         "Pointer input {device_id:?}, move, loc={location:?}, \
                                          pointer={pointer:?}"
@@ -541,6 +567,7 @@ impl<T: 'static> EventLoop<T> {
                                 PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                             match pointer.tool_type() {
                                 ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
+                                    record_pen(&pointer);
                                     trace!(
                                         "Pointer input {device_id:?}, cancel, loc={location:?}, \
                                          pointer={pointer:?}"

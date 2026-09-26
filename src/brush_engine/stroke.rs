@@ -2,10 +2,10 @@ use crate::brush_engine::brush::{Brush, StabilizerAlgorithm};
 use crate::canvas::Canvas;
 use crate::canvas::history::UndoAction;
 use crate::selection::SelectionManager;
+use eframe::egui::Color32;
 use eframe::egui::Vec2;
 use rand::Rng;
 use rayon::ThreadPool;
-use eframe::egui::Color32;
 use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -20,6 +20,9 @@ pub(crate) struct StrokeBuffer {
     /// Selection coverage for this tile (0..=1 per pixel), computed on first
     /// use; the selection can't change during a stroke.
     pub selection: Option<Vec<f32>>,
+    /// Pixels changed since the display last collected them, tile-local
+    /// `[x0, y0, x1, y1)`; `None` if nothing changed.
+    pub damage: Option<[usize; 4]>,
 }
 
 /// Tiles touched by the current stroke.
@@ -92,13 +95,15 @@ impl StrokeState {
     }
 
     /// Add a new sample to the stroke, interpolating dabs based on spacing and
-    /// jitter. `pressure` scales the effective brush diameter for this call
-    /// only (e.g. tablet pen pressure); pass `1.0` for no scaling.
+    /// jitter. `pressure` (0..=1, `1.0` for a mouse) drives whatever the
+    /// brush maps it to: diameter (down to `pressure_min_size`), opacity,
+    /// flow. In wash mode pressure-opacity goes to the dabs' strength instead
+    /// of the stroke's opacity cap, which must stay fixed for a whole stroke.
     ///
-    /// The diameter is temporarily overwritten on `brush` for the duration
-    /// of this call and restored before returning, including on panic (via
+    /// These are temporarily overwritten on `brush` for the duration of this
+    /// call and restored before returning, including on panic (via
     /// `catch_unwind`) so a mid-call panic can never leave the brush's
-    /// diameter corrupted for later strokes.
+    /// settings corrupted for later strokes.
     pub fn add_point(
         &mut self,
         brush: &mut Brush,
@@ -106,8 +111,23 @@ impl StrokeState {
         pressure: f32,
         context: &mut StrokeContext<'_>,
     ) {
-        let original_diameter = brush.brush_options.diameter;
-        brush.brush_options.diameter = (original_diameter * pressure).max(1.0);
+        let o = &mut brush.brush_options;
+        let (original_diameter, original_opacity, original_flow) = (o.diameter, o.opacity, o.flow);
+        let p = pressure.clamp(0.0, 1.0);
+        if o.pressure_size {
+            let factor = o.pressure_min_size + (1.0 - o.pressure_min_size) * p;
+            o.diameter = (original_diameter * factor).max(1.0);
+        }
+        if o.pressure_opacity {
+            if o.painting_mode == crate::brush_engine::brush_options::PaintingMode::Wash {
+                o.flow *= p;
+            } else {
+                o.opacity *= p;
+            }
+        }
+        if o.pressure_flow {
+            o.flow *= p;
+        }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.add_point_at_pressure(brush, raw_pos);
@@ -117,7 +137,8 @@ impl StrokeState {
             self.pending.clear();
         }));
 
-        brush.brush_options.diameter = original_diameter;
+        let o = &mut brush.brush_options;
+        (o.diameter, o.opacity, o.flow) = (original_diameter, original_opacity, original_flow);
 
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);

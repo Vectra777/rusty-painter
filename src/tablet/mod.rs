@@ -20,9 +20,34 @@ pub enum TabletPhase {
 pub struct TabletSample {
     pub pos: [f32; 2],
     pub pressure: f32,
-    #[allow(dead_code)]
     pub is_eraser: bool,
     pub phase: TabletPhase,
+}
+
+/// Latest pen sample from the platform, where the OS delivers a stylus as
+/// plain pointer events (Android): pressure and tool arrive out of band.
+#[derive(Copy, Clone, Debug)]
+pub struct PenState {
+    pub pressure: f32,
+    pub is_eraser: bool,
+    /// False when the last pointer was a real mouse.
+    pub is_stylus: bool,
+}
+
+#[cfg(target_os = "android")]
+pub fn pen_state() -> Option<PenState> {
+    let pen = winit::platform::android::pen_state();
+    Some(PenState {
+        pressure: pen.pressure,
+        is_eraser: pen.is_eraser,
+        is_stylus: pen.is_stylus,
+    })
+}
+
+/// Desktop pens go through [`TabletInput`] instead.
+#[cfg(not(target_os = "android"))]
+pub fn pen_state() -> Option<PenState> {
+    None
 }
 
 /// Minimal tablet bridge: pumps octotablet events and emits normalized samples.
@@ -82,9 +107,7 @@ impl TabletInput {
             if let Event::Tool { tool, event } = event {
                 let is_eraser = matches!(tool.tool_type, Some(tool::Type::Eraser));
                 let tool_id = tool.id();
-                self.tool_types
-                    .entry(tool_id.clone())
-                    .or_insert(is_eraser);
+                self.tool_types.entry(tool_id.clone()).or_insert(is_eraser);
                 match event {
                     ToolEvent::Down => {
                         if let Some(pos) = self.tool_positions.get(&tool_id).copied() {

@@ -27,7 +27,11 @@ pub fn stroke_preview_image(
     let original_diameter = brush.brush_options.diameter;
     let original_opacity = brush.brush_options.opacity;
     let original_color = brush.brush_options.color;
+    let original_blend = brush.brush_options.blend_mode;
     brush.brush_options.color = color;
+    // An eraser would erase from an empty preview and show nothing; paint
+    // its shape instead.
+    brush.brush_options.blend_mode = crate::brush_engine::brush_options::BlendMode::Normal;
 
     let steps = 100;
     let width = w as f32;
@@ -40,17 +44,18 @@ pub fn stroke_preview_image(
         let x = margin + t * effective_width;
         let phase = t * std::f32::consts::PI * 2.0;
         let y = height * 0.5 + phase.sin() * height * 0.35;
+        // A pen-pressure swell, applied through the brush's own pressure
+        // mapping so the preview shows what pressure does to this brush.
         let pressure = (t * std::f32::consts::PI).sin();
-        brush.brush_options.diameter = (max_diameter * pressure).max(1.0);
+        brush.brush_options.diameter = max_diameter;
         let mut context = StrokeContext::new(pool, &canvas, None, &mut undo, &mut modified);
-        // Diameter above is already the pressure-scaled value for this
-        // preview point; pass 1.0 so add_point doesn't scale it again.
-        stroke.add_point(brush, Vec2 { x, y }, 1.0, &mut context);
+        stroke.add_point(brush, Vec2 { x, y }, pressure, &mut context);
     }
 
     brush.brush_options.diameter = original_diameter;
     brush.brush_options.opacity = original_opacity;
     brush.brush_options.color = original_color;
+    brush.brush_options.blend_mode = original_blend;
 
     let mut image = ColorImage::new(size, Color32::TRANSPARENT);
     canvas.write_region_to_color_image(0, 0, w, h, &mut image, 1);

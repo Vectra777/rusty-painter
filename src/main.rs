@@ -18,7 +18,9 @@ fn main() -> eframe::Result<()> {
     env_logger::init();
 
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([960.0, 600.0]),
         // The canvas is drawn by a custom wgpu pipeline (GPU mipmaps).
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()

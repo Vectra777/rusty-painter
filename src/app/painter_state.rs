@@ -1,17 +1,17 @@
 use crate::app::gpu_canvas::TILES_PER_ATLAS;
 use crate::app::state::{CanvasTile, ColorModel, NewCanvasSettings, TILE_SIZE};
+use crate::canvas::storage::LayerId;
 use crate::{
     brush_engine::{
         brush::{Brush, BrushPreset},
-        brush_options::PixelBrushShape,
+        brush_options::{BlendMode, PixelBrushShape},
     },
     canvas::history::History,
     ui::{brush_settings::BrushPreviewState, export_modal::ExportProgress},
 };
-use crate::canvas::storage::LayerId;
 use eframe::egui::{self, Color32, Rgba, Vec2};
-use rustc_hash::FxHashMap;
 use rayon::ThreadPool;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
@@ -33,7 +33,27 @@ pub struct BrushState {
     pub use_masked_brush: bool,
     pub show_new_preset_modal: bool,
     pub new_preset_name: String,
+    /// Background color; `X` swaps it with the brush color.
+    pub secondary_color: Color32,
+    /// Most recently painted colors, newest first.
+    pub recent_colors: Vec<Color32>,
+    /// Colours kept on purpose (the palette), in order.
+    pub swatches: Vec<Color32>,
+    /// Brush and eraser keep separate settings: `brush` is the active tool's,
+    /// this is the other one's, swapped in when the tool changes.
+    pub stashed_brush: Brush,
+    pub eraser_active: bool,
+    /// Name of the preset the active tool's brush came from, and the other tool's.
+    pub active_preset: Option<String>,
+    pub stashed_preset: Option<String>,
+    /// The floating presets window is open.
+    pub show_presets: bool,
+    /// The smudge / blur stroke in progress.
+    pub blend_stroke: Option<crate::app::blend_tool::BlendStroke>,
 }
+
+/// How many colors the recent-colors strip remembers.
+pub const MAX_RECENT_COLORS: usize = 18;
 
 impl BrushState {
     pub fn new(
@@ -42,6 +62,14 @@ impl BrushState {
         brushes_path: PathBuf,
         use_masked_brush: bool,
     ) -> Self {
+        // The eraser starts from the first eraser preset, else from the brush.
+        let eraser = presets
+            .iter()
+            .find(|p| p.brush.brush_options.blend_mode == BlendMode::Eraser);
+        let eraser_preset = eraser.map(|p| p.name.clone());
+        let mut eraser_brush = eraser.map_or_else(|| brush.clone(), |p| p.brush.clone());
+        eraser_brush.brush_options.blend_mode = BlendMode::Eraser;
+        eraser_brush.brush_options.color = brush.brush_options.color;
         Self {
             brush,
             brush_preview: BrushPreviewState::default(),
@@ -53,7 +81,23 @@ impl BrushState {
             use_masked_brush,
             show_new_preset_modal: false,
             new_preset_name: String::new(),
+            secondary_color: Color32::WHITE,
+            recent_colors: Vec::new(),
+            swatches: vec![Color32::BLACK, Color32::WHITE],
+            stashed_brush: eraser_brush,
+            eraser_active: false,
+            active_preset: None,
+            stashed_preset: eraser_preset,
+            show_presets: false,
+            blend_stroke: None,
         }
+    }
+
+    /// Remember `color` at the front of the recent-colors strip.
+    pub fn remember_color(&mut self, color: Color32) {
+        self.recent_colors.retain(|&c| c != color);
+        self.recent_colors.insert(0, color);
+        self.recent_colors.truncate(MAX_RECENT_COLORS);
     }
 }
 
@@ -65,6 +109,14 @@ pub struct ViewportState {
     pub is_panning: bool,
     pub is_rotating: bool,
     pub is_primary_down: bool,
+    /// Canvas-space position under the pointer, for the status bar.
+    pub cursor_canvas: Option<Vec2>,
+    /// Screen rect of the canvas area last frame, for zooming from the UI.
+    pub canvas_area: Option<egui::Rect>,
+    /// Finger tracking for touch gestures.
+    pub touch: crate::app::touch::TouchState,
+    /// Screen position of the previous pointer event, for pan/rotate deltas.
+    pub last_pointer_pos: Option<egui::Pos2>,
 }
 
 impl ViewportState {
@@ -76,6 +128,10 @@ impl ViewportState {
             is_panning: false,
             is_rotating: false,
             is_primary_down: false,
+            cursor_canvas: None,
+            canvas_area: None,
+            touch: Default::default(),
+            last_pointer_pos: None,
         }
     }
 }
@@ -110,7 +166,14 @@ impl RenderCache {
         let tiles_x = width.div_ceil(TILE_SIZE);
         let tiles_y = height.div_ceil(TILE_SIZE);
         let tiles = (0..tiles_y)
-            .flat_map(|ty| (0..tiles_x).map(move |tx| CanvasTile { dirty: true, tx, ty }))
+            .flat_map(|ty| {
+                (0..tiles_x).map(move |tx| CanvasTile {
+                    dirty: true,
+                    tx,
+                    ty,
+                    damage: None,
+                })
+            })
             .collect();
         Self {
             tiles,
@@ -133,13 +196,54 @@ impl RenderCache {
     }
 }
 
+/// A transform session's starting point: the source layer and its tiles
+/// (the ones the float lifted pixels from) as they were, plus the selection.
+pub struct FloatSession {
+    pub source_id: crate::canvas::storage::LayerId,
+    pub source_tiles: HashMap<(i32, i32), Vec<Color32>>,
+    pub selection: Option<crate::selection::SelectionShape>,
+    /// Canvas area the floating layer last covered.
+    pub last_rect: Option<egui::Rect>,
+    /// Content bounds of the floating pixels before transforming.
+    pub src_bounds: Option<egui::Rect>,
+    /// The floating layer shows a quick (draft) preview right now.
+    pub draft_shown: bool,
+}
+
+/// See [`LayerState::float_overlay`].
+pub struct FloatOverlay {
+    pub texture: egui::TextureHandle,
+    /// Canvas area (pixel edges) the texture shows, before transforming.
+    pub area: egui::Rect,
+    /// Drawn this frame (while dragging, and until the re-rendered layer
+    /// has fully reached the screen after release).
+    pub showing: bool,
+    /// Released: the layer is rendered and shown again; hide the overlay
+    /// once every redrawn tile is on screen.
+    pub revealing: bool,
+}
+
 /// Layer UI state and undo history
 pub struct LayerState {
     pub layer_ui_colors: Vec<Color32>,
     pub layer_dragging: Option<usize>,
     pub floating_layer_idx: Option<usize>,
     pub floating_buffer: Option<HashMap<(i32, i32), Vec<Color32>>>,
+    /// What the running transform session needs to undo or cancel itself.
+    pub float_session: Option<FloatSession>,
+    /// The floating pixels as a GPU texture, drawn transformed while the
+    /// box is dragged (instead of re-rendering the layer every frame).
+    pub float_overlay: Option<FloatOverlay>,
+    /// The transform changed; the floating layer is redrawn once per frame.
+    pub transform_preview_pending: bool,
+    /// The running liquify session, if any.
+    pub liquify: Option<crate::app::liquify_tool::LiquifySession>,
     pub histories: Vec<History>,
+    /// Per-layer thumbnail textures for the layers panel, by layer index.
+    pub thumbnails: Vec<Option<egui::TextureHandle>>,
+    /// Set when canvas content may have changed since thumbnails were built.
+    pub thumbnails_dirty: bool,
+    pub thumbnails_built_at: Option<std::time::Instant>,
 }
 
 impl LayerState {
@@ -149,7 +253,14 @@ impl LayerState {
             layer_dragging: None,
             floating_layer_idx: None,
             floating_buffer: None,
+            float_session: None,
+            float_overlay: None,
+            transform_preview_pending: false,
+            liquify: None,
             histories: (0..layer_count).map(|_| History::new()).collect(),
+            thumbnails: Vec::new(),
+            thumbnails_dirty: true,
+            thumbnails_built_at: None,
         }
     }
 }
@@ -159,6 +270,9 @@ pub struct ModalState {
     pub show_new_canvas_modal: bool,
     pub new_canvas: NewCanvasSettings,
     pub show_general_settings: bool,
+    pub show_shortcuts: bool,
+    /// The selection tool's slide-out menu is open.
+    pub select_menu_open: bool,
 }
 
 impl ModalState {
@@ -167,6 +281,8 @@ impl ModalState {
             show_new_canvas_modal: false,
             new_canvas,
             show_general_settings: false,
+            show_shortcuts: false,
+            select_menu_open: false,
         }
     }
 }
@@ -213,6 +329,32 @@ pub struct WorkspaceState {
     pub auto_fit: bool,
     /// Panel size the canvas was last auto-fitted to.
     pub fitted_to: Option<egui::Vec2>,
+    /// Larger controls and gesture hints for touch screens.
+    pub touch_mode: bool,
+    /// The touch mode the egui style was last built for.
+    pub applied_touch_mode: Option<bool>,
+    /// Let a single finger paint; when off, one finger pans and only a
+    /// stylus paints.
+    pub finger_painting: bool,
+    /// Exponent applied to pen pressure (<1 soft, >1 firm). What pressure
+    /// drives (size, opacity, flow) is set per brush.
+    pub pressure_curve: f32,
+    pub show_left_panel: bool,
+    pub show_right_panel: bool,
+    /// Selection type the Select tool uses (last one picked).
+    pub select_type: crate::selection::SelectionType,
+    /// Fill tool mode and settings.
+    pub fill: crate::app::fill_tool::FillToolState,
+    /// Liquify brush mode and settings.
+    pub liquify: crate::app::liquify_tool::LiquifySettings,
+    /// Palette window state.
+    pub palette: crate::app::palette_tool::PaletteToolState,
+    /// Smudge and blur settings (the rest comes from the brush).
+    pub blend: crate::app::blend_tool::BlendToolSettings,
+    /// Transform tool: clicking another layer's pixels selects that layer.
+    pub transform_pick_layer: bool,
+    /// Android's image picker (the photo library).
+    pub gallery: crate::ui::image_gallery::GalleryState,
 }
 
 impl WorkspaceState {
@@ -229,6 +371,21 @@ impl WorkspaceState {
             color_model,
             auto_fit: true,
             fitted_to: None,
+            // Android, or a desktop touchscreen via RUSTY_PAINTER_TOUCH=1.
+            touch_mode: cfg!(target_os = "android")
+                || std::env::var_os("RUSTY_PAINTER_TOUCH").is_some(),
+            applied_touch_mode: None,
+            finger_painting: true,
+            pressure_curve: 1.0,
+            show_left_panel: true,
+            show_right_panel: true,
+            select_type: crate::selection::SelectionType::Rectangle,
+            fill: Default::default(),
+            liquify: Default::default(),
+            palette: Default::default(),
+            blend: Default::default(),
+            gallery: Default::default(),
+            transform_pick_layer: true,
         }
     }
 }

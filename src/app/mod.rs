@@ -1,16 +1,23 @@
+pub(crate) mod blend_tool;
 pub(crate) mod brush_io;
 pub(crate) mod canvas_ops;
+pub(crate) mod fill_tool;
 pub(crate) mod gpu_canvas;
+pub(crate) mod import;
 pub(crate) mod init;
 pub(crate) mod input_handler;
 pub(crate) mod layout;
+pub(crate) mod liquify_tool;
 pub(crate) mod painter;
 pub(crate) mod painter_helpers;
 pub(crate) mod painter_state;
+pub(crate) mod palette_tool;
 pub(crate) mod render_helper;
+pub(crate) mod shortcuts;
 pub(crate) mod state;
 pub(crate) mod stroke_ops;
 pub(crate) mod tools;
+pub(crate) mod touch;
 pub(crate) mod transform;
 pub(crate) mod viewport;
 

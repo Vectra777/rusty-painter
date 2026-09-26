@@ -1,8 +1,9 @@
 use crate::PainterApp;
-use crate::app::gpu_canvas::{ATLAS_BORDER, ATLAS_TEXTURE_SIZE, AtlasQuad, CanvasPaint, MIP_LEVELS, TileUpload};
+use crate::app::gpu_canvas::{
+    ATLAS_BORDER, ATLAS_TEXTURE_SIZE, AtlasQuad, CanvasPaint, MIP_LEVELS, TileUpload,
+};
 use crate::app::painter_state::{BelowCache, RenderCache};
 use crate::app::state::{ATLAS_SIZE, CanvasTile, TILE_SIZE};
-use crate::canvas::blend::{color32_to_linear, rgba_to_color32_fast};
 use crate::canvas::storage::BelowComposite;
 use eframe::egui::{self, Color32};
 use eframe::egui_wgpu;
@@ -23,7 +24,9 @@ pub struct CanvasView {
 /// composite the active layer and the ones above it.
 fn refresh_below_cache(app: &mut PainterApp, visible: &impl Fn(&CanvasTile) -> bool) {
     let active = app.canvas.active_layer_idx;
-    if !app.brush_state.is_drawing || active < 2 {
+    // The cache splits the stack at the active layer, which only works for a
+    // plain stack: folders and masks composite as a tree.
+    if !app.brush_state.is_drawing || active < 2 || app.canvas.needs_tree_compositing() {
         app.render_cache.below_cache = None;
         return;
     }
@@ -46,7 +49,12 @@ fn refresh_below_cache(app: &mut PainterApp, visible: &impl Fn(&CanvasTile) -> b
     let computed: Vec<_> = app.workspace.pool.install(|| {
         missing
             .par_iter()
-            .map(|&(tx, ty)| ((tx, ty), canvas.composite_below(active, tx as i32, ty as i32)))
+            .map(|&(tx, ty)| {
+                (
+                    (tx, ty),
+                    canvas.composite_below(active, tx as i32, ty as i32),
+                )
+            })
             .collect()
     });
     cache.tiles.extend(computed);
@@ -68,37 +76,6 @@ fn preview_level(drawing: bool, zoom: f32, pixels_per_point: f32) -> u32 {
     ((texels_per_pixel_log2 - 0.5).floor().max(0.0) as u32).min(MIP_LEVELS - 1)
 }
 
-/// `img` shrunk by `2^level`, each pixel the average of its block in linear
-/// light (partial blocks at the canvas edge average the pixels they have).
-fn downsample(img: &egui::ColorImage, level: u32) -> egui::ColorImage {
-    if level == 0 {
-        return img.clone();
-    }
-    let block = 1usize << level;
-    let [w, h] = img.size;
-    let (out_w, out_h) = (w.div_ceil(block), h.div_ceil(block));
-    let mut out = egui::ColorImage::new([out_w, out_h], Color32::TRANSPARENT);
-    for oy in 0..out_h {
-        for ox in 0..out_w {
-            let mut sum = [0.0f32; 4];
-            let mut count = 0.0;
-            for y in oy * block..((oy + 1) * block).min(h) {
-                for x in ox * block..((ox + 1) * block).min(w) {
-                    let p = color32_to_linear(img.pixels[y * w + x]);
-                    for (s, v) in sum.iter_mut().zip(p.to_array()) {
-                        *s += v;
-                    }
-                    count += 1.0;
-                }
-            }
-            let [r, g, b, a] = sum.map(|v| v / count);
-            out.pixels[oy * out_w + ox] =
-                rgba_to_color32_fast(egui::Rgba::from_rgba_premultiplied(r, g, b, a));
-        }
-    }
-    out
-}
-
 /// Part of a tile to copy into an atlas texture, in level-0 texels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Destination {
@@ -110,7 +87,12 @@ struct Destination {
 
 /// Where tile `(tx, ty)`'s pixels go: its own slot, plus the border strips of
 /// any neighbouring atlas (sides and diagonals) that mirror its edge pixels.
-fn tile_destinations(cache: &RenderCache, tx: usize, ty: usize, tile_size: [usize; 2]) -> Vec<Destination> {
+fn tile_destinations(
+    cache: &RenderCache,
+    tx: usize,
+    ty: usize,
+    tile_size: [usize; 2],
+) -> Vec<Destination> {
     let (atlas, lx, ly) = cache.atlas_slot(tx, ty);
     let (ax, ay) = (atlas % cache.atlases_x, atlas / cache.atlases_x);
     let local = [lx, ly];
@@ -158,29 +140,56 @@ fn tile_destinations(cache: &RenderCache, tx: usize, ty: usize, tile_size: [usiz
     out
 }
 
-/// The uploads for one composited tile at mip `level` (`img` already shrunk).
-fn tile_uploads(cache: &RenderCache, tx: usize, ty: usize, full_size: [usize; 2], img: &egui::ColorImage, level: u32) -> Vec<TileUpload> {
+/// The uploads for one composited tile at mip `level`. `img` holds the tile's
+/// `rect` (tile-local pixels, start aligned to `2^level`), already shrunk;
+/// `tile_size` is the whole tile's (edge-clipped) size.
+fn tile_uploads(
+    cache: &RenderCache,
+    tx: usize,
+    ty: usize,
+    tile_size: [usize; 2],
+    rect: [usize; 4],
+    img: &egui::ColorImage,
+    level: u32,
+) -> Vec<TileUpload> {
     let scale = 1usize << level;
-    tile_destinations(cache, tx, ty, full_size)
+    let origin = [rect[0], rect[1]];
+    let rect_end = [rect[2], rect[3]];
+    tile_destinations(cache, tx, ty, tile_size)
         .into_iter()
-        .map(|dest| {
-            let src = dest.src.map(|v| v / scale);
-            let end = [0, 1].map(|a| ((dest.src[a] + dest.size[a]).div_ceil(scale)).min(img.size[a]));
+        .filter_map(|dest| {
+            // Part of this destination's slice of the tile that was redrawn.
+            let mut src = [0usize; 2];
+            let mut end = [0usize; 2];
+            let mut dst = [0usize; 2];
+            for a in 0..2 {
+                let lo = dest.src[a].max(origin[a]);
+                let hi = (dest.src[a] + dest.size[a]).min(rect_end[a]);
+                if lo >= hi {
+                    return None;
+                }
+                src[a] = (lo - origin[a]) / scale;
+                end[a] = (hi - origin[a]).div_ceil(scale).min(img.size[a]);
+                dst[a] = (dest.dst[a] + (lo - dest.src[a])) / scale;
+            }
             let [w, h] = [end[0] - src[0], end[1] - src[1]];
+            if w == 0 || h == 0 {
+                return None;
+            }
             let mut pixels = Vec::with_capacity(w * h * 4);
             for y in src[1]..end[1] {
                 let row = &img.pixels[y * img.size[0] + src[0]..y * img.size[0] + end[0]];
                 pixels.extend(row.iter().flat_map(|p| p.to_array()));
             }
-            TileUpload {
+            Some(TileUpload {
                 atlas: dest.atlas,
                 level,
-                x: (dest.dst[0] / scale) as u32,
-                y: (dest.dst[1] / scale) as u32,
+                x: dst[0] as u32,
+                y: dst[1] as u32,
                 width: w as u32,
                 height: h as u32,
                 pixels,
-            }
+            })
         })
         .collect()
 }
@@ -194,7 +203,13 @@ fn visible_tile_range(
     tiles_x: usize,
     tiles_y: usize,
 ) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
-    let corners = [clip.left_top(), clip.right_top(), clip.right_bottom(), clip.left_bottom()].map(&to_canvas);
+    let corners = [
+        clip.left_top(),
+        clip.right_top(),
+        clip.right_bottom(),
+        clip.left_bottom(),
+    ]
+    .map(&to_canvas);
     let bounds = egui::Rect::from_points(&corners);
     let tile = TILE_SIZE as f32;
     let span = |min: f32, max: f32, count: usize| {
@@ -202,7 +217,10 @@ fn visible_tile_range(
         let end = ((max / tile).floor() + 1.0).clamp(0.0, count as f32) as usize;
         start.min(end)..end
     };
-    (span(bounds.min.x, bounds.max.x, tiles_x), span(bounds.min.y, bounds.max.y, tiles_y))
+    (
+        span(bounds.min.x, bounds.max.x, tiles_x),
+        span(bounds.min.y, bounds.max.y, tiles_y),
+    )
 }
 
 /// Most tiles composited and uploaded per frame (16 MiB at full resolution),
@@ -273,11 +291,36 @@ pub fn update_dirty_textures(
                         first_layer: active,
                         pixels,
                     });
+                // Only the part a stroke changed, when that's all that did;
+                // aligned to the mip block so downsampling stays exact.
+                let tile_size = [
+                    TILE_SIZE.min(canvas.width() - tile.tx * TILE_SIZE),
+                    TILE_SIZE.min(canvas.height() - tile.ty * TILE_SIZE),
+                ];
+                let rect = tile.damage.map_or([0, 0, tile_size[0], tile_size[1]], |d| {
+                    let block = 1usize << level;
+                    [
+                        d[0] / block * block,
+                        d[1] / block * block,
+                        d[2].div_ceil(block).saturating_mul(block).min(tile_size[0]),
+                        d[3].div_ceil(block).saturating_mul(block).min(tile_size[1]),
+                    ]
+                });
                 let mut img = egui::ColorImage::new([0, 0], Color32::TRANSPARENT);
-                canvas.write_tile_to_color_image(tile.tx, tile.ty, &mut img, 1, below);
-                let full_size = img.size;
-                let img = downsample(&img, level);
-                (idx, tile_uploads(cache, tile.tx, tile.ty, full_size, &img, level))
+                if level == 0 {
+                    canvas.write_tile_rect_to_color_image(tile.tx, tile.ty, rect, &mut img, below);
+                } else {
+                    // Zoomed-out stroke preview: composite and average in one
+                    // pass, straight at the uploaded mip level.
+                    let block = 1usize << level;
+                    canvas.write_tile_rect_downsampled(
+                        tile.tx, tile.ty, rect, block, &mut img, below,
+                    );
+                }
+                (
+                    idx,
+                    tile_uploads(cache, tile.tx, tile.ty, tile_size, rect, &img, level),
+                )
             })
             .collect()
     });
@@ -285,7 +328,7 @@ pub fn update_dirty_textures(
     let cache = &mut app.render_cache;
     for (idx, _) in &uploads {
         let tile = &mut cache.tiles[*idx];
-        tile.dirty = false;
+        tile.clear();
         if level > 0 {
             cache.preview_tiles.insert((tile.tx, tile.ty), level);
         } else {
@@ -302,6 +345,42 @@ fn canvas_placement(app: &PainterApp, rect: egui::Rect) -> (egui::Pos2, egui::Po
         egui::vec2(app.canvas.width() as f32, app.canvas.height() as f32) * app.viewport.zoom;
     let origin = rect.min + egui::vec2(app.viewport.offset.x, app.viewport.offset.y);
     (origin, origin + canvas_size * 0.5)
+}
+
+/// Canvas → screen mapping for overlays (selection, transform box, lasso),
+/// matching exactly how the canvas itself is drawn: zoom, pan and rotation.
+#[derive(Clone, Copy)]
+pub struct ScreenMap {
+    origin: egui::Pos2,
+    center: egui::Pos2,
+    zoom: f32,
+    cos: f32,
+    sin: f32,
+}
+
+impl ScreenMap {
+    pub fn to_screen(self, p: eframe::egui::Vec2) -> egui::Pos2 {
+        PainterApp::rotate_point(self.origin + p * self.zoom, self.center, self.cos, self.sin)
+    }
+
+    pub fn zoom(self) -> f32 {
+        self.zoom
+    }
+}
+
+/// The overlay mapping for this frame. Call it after input handling: it
+/// uses the zoom and pan input just changed, as the canvas paint does, so
+/// overlays don't lag a frame behind the picture (a flicker while zooming).
+pub fn screen_map(app: &PainterApp, view: &CanvasView) -> ScreenMap {
+    let (origin, center) = canvas_placement(app, view.rect);
+    let (sin, cos) = app.viewport.rotation.sin_cos();
+    ScreenMap {
+        origin,
+        center,
+        zoom: app.viewport.zoom,
+        cos,
+        sin,
+    }
 }
 
 /// Allocate the canvas area and reserve its place in the paint order (under
@@ -399,13 +478,171 @@ pub fn paint_canvas(app: &PainterApp, ui: &egui::Ui, view: &CanvasView, uploads:
         uploads: std::sync::Mutex::new(uploads),
         quads: atlas_quads(&placement, cache.atlases_x, cache.atlases_y),
     };
-    ui.painter()
-        .set(view.slot, egui_wgpu::Callback::new_paint_callback(target, paint));
+    ui.painter().set(
+        view.slot,
+        egui_wgpu::Callback::new_paint_callback(target, paint),
+    );
 }
 
 #[cfg(test)]
 mod tests {
+    /// Drives the real screen-update path (`update_dirty_textures`) over a
+    /// few frames and applies its uploads to an in-memory atlas, then checks
+    /// the atlas shows exactly the layers' composite.
+    struct ScreenSim {
+        ctx: egui::Context,
+        atlas: std::collections::HashMap<usize, Vec<[u8; 4]>>,
+    }
+
+    impl ScreenSim {
+        fn new() -> Self {
+            Self {
+                ctx: egui::Context::default(),
+                atlas: Default::default(),
+            }
+        }
+
+        /// Run frames until no dirty tiles are left.
+        fn settle(&mut self, app: &mut PainterApp) {
+            use crate::app::gpu_canvas::ATLAS_TEXTURE_SIZE;
+            for _ in 0..50 {
+                let mut more = false;
+                let mut uploads = Vec::new();
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 900.0),
+                    )),
+                    ..Default::default()
+                };
+                let _ = self.ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let view = draw_canvas(app, ui);
+                        let (u, m) = update_dirty_textures(app, &view, view.rect);
+                        uploads = u;
+                        more = m;
+                    });
+                });
+                for up in uploads {
+                    assert_eq!(up.level, 0, "not drawing: full resolution");
+                    let tex = self
+                        .atlas
+                        .entry(up.atlas)
+                        .or_insert_with(|| vec![[0; 4]; ATLAS_TEXTURE_SIZE * ATLAS_TEXTURE_SIZE]);
+                    for row in 0..up.height as usize {
+                        for col in 0..up.width as usize {
+                            let s = (row * up.width as usize + col) * 4;
+                            let d =
+                                (up.y as usize + row) * ATLAS_TEXTURE_SIZE + up.x as usize + col;
+                            tex[d].copy_from_slice(&up.pixels[s..s + 4]);
+                        }
+                    }
+                }
+                if !more && !app.render_cache.tiles.iter().any(|t| t.dirty) {
+                    return;
+                }
+            }
+            panic!("screen never settled");
+        }
+
+        /// Canvas pixels whose on-screen texel differs from the composite.
+        fn mismatches(&self, app: &PainterApp) -> Vec<(usize, usize)> {
+            use crate::app::gpu_canvas::{ATLAS_BORDER, ATLAS_TEXTURE_SIZE};
+            let img = app.canvas.flatten();
+            let (w, h) = (app.canvas.width(), app.canvas.height());
+            let mut bad = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let (atlas, lx, ly) = app.render_cache.atlas_slot(x / TILE_SIZE, y / TILE_SIZE);
+                    let texel = (ATLAS_BORDER + ly + y % TILE_SIZE) * ATLAS_TEXTURE_SIZE
+                        + ATLAS_BORDER
+                        + lx
+                        + x % TILE_SIZE;
+                    let shown = self.atlas.get(&atlas).map_or([0; 4], |t| t[texel]);
+                    if shown != img.pixels[y * w + x].to_array() {
+                        bad.push((x, y));
+                    }
+                }
+            }
+            bad
+        }
+    }
+
+    #[test]
+    fn screen_matches_the_layers_after_liquify_undo_redo() {
+        use crate::app::tools::Tool;
+        use crate::canvas::liquify::LiquifyMode;
+        let canvas = crate::canvas::Canvas::new(512, 384, Color32::WHITE, TILE_SIZE);
+        let mut app = crate::project::tests::test_app_pub(canvas);
+        app.recreate_render_cache(512, 384);
+        app.canvas_mut().active_layer_idx = 1;
+        app.viewport.zoom = 1.0;
+        app.viewport.offset = eframe::egui::Vec2::ZERO;
+        app.workspace.auto_fit = false;
+        let mut screen = ScreenSim::new();
+        screen.settle(&mut app);
+        assert!(screen.mismatches(&app).is_empty(), "blank canvas");
+
+        for (color, y) in [
+            (Color32::from_rgb(210, 40, 40), 150.0),
+            (Color32::from_rgb(210, 100, 40), 200.0),
+        ] {
+            app.brush_state.brush.brush_options.color = color;
+            app.brush_state.brush.brush_options.diameter = 70.0;
+            app.start_stroke_with_pressure(eframe::egui::Vec2::new(30.0, y), 1.0);
+            for i in 1..=30 {
+                app.add_stroke_point(eframe::egui::Vec2::new(30.0 + i as f32 * 14.0, y), 1.0);
+                app.stroke_worker.wait_idle();
+                app.sync_stroke_worker();
+                screen.settle(&mut app);
+            }
+            app.finish_stroke();
+            app.settle_strokes();
+            screen.settle(&mut app);
+        }
+        assert!(screen.mismatches(&app).is_empty(), "after strokes");
+
+        app.active_tool = Tool::Liquify;
+        app.workspace.liquify.radius = 80.0;
+        for (mode, y) in [
+            (LiquifyMode::Push, 240.0),
+            (LiquifyMode::TwirlCw, 220.0),
+            (LiquifyMode::Bloat, 200.0),
+        ] {
+            app.workspace.liquify.mode = mode;
+            app.liquify_press(eframe::egui::Vec2::new(150.0, y));
+            screen.settle(&mut app);
+            for i in 1..=12 {
+                app.liquify_drag(eframe::egui::Vec2::new(
+                    150.0 + i as f32 * 9.0,
+                    y - i as f32 * 3.0,
+                ));
+                app.liquify_hold(1.0 / 60.0);
+                screen.settle(&mut app);
+            }
+            app.liquify_release();
+        }
+        assert!(screen.mismatches(&app).is_empty(), "after liquify");
+        for (step, redo) in [
+            ("undo", false),
+            ("redo", true),
+            ("undo again", false),
+            ("undo stroke", false),
+        ] {
+            app.apply_history(redo);
+            screen.settle(&mut app);
+            let bad = screen.mismatches(&app);
+            assert!(
+                bad.is_empty(),
+                "{step}: {} stale pixels, e.g. {:?}",
+                bad.len(),
+                &bad[..bad.len().min(5)]
+            );
+        }
+    }
+
     use super::*;
+    use crate::canvas::blend::downsample;
 
     #[test]
     fn atlas_quads_cover_the_canvas_in_target_ndc() {
@@ -423,7 +660,8 @@ mod tests {
         assert_eq!(quads.len(), 2);
 
         let split = 2.0 * ATLAS_SIZE as f32 / 3000.0 - 1.0;
-        let close = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5;
+        let close =
+            |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5;
         let left = quads[0];
         assert_eq!(left.atlas, 0);
         assert!(close(left.corners[0], [-1.0, 1.0]));
@@ -431,7 +669,13 @@ mod tests {
         let texture = ATLAS_TEXTURE_SIZE as f32;
         let border = ATLAS_BORDER as f32 / texture;
         assert_eq!(left.uvs[0], [border, border]);
-        assert_eq!(left.uvs[2], [border + ATLAS_SIZE as f32 / texture, border + 1000.0 / texture]);
+        assert_eq!(
+            left.uvs[2],
+            [
+                border + ATLAS_SIZE as f32 / texture,
+                border + 1000.0 / texture
+            ]
+        );
 
         let right = quads[1];
         assert_eq!(right.atlas, 1);
@@ -439,7 +683,10 @@ mod tests {
         assert!(close(right.corners[2], [1.0, -1.0]));
         assert_eq!(
             right.uvs[2],
-            [border + (3000.0 - ATLAS_SIZE as f32) / texture, border + 1000.0 / texture]
+            [
+                border + (3000.0 - ATLAS_SIZE as f32) / texture,
+                border + 1000.0 / texture
+            ]
         );
     }
 
@@ -456,10 +703,30 @@ mod tests {
         assert_eq!(
             corner,
             vec![
-                Destination { atlas: 0, dst: [b + edge, b + edge], src: [0, 0], size: [TILE_SIZE, TILE_SIZE] },
-                Destination { atlas: 1, dst: [0, b + edge], src: [strip, 0], size: [b, TILE_SIZE] },
-                Destination { atlas: 2, dst: [b + edge, 0], src: [0, strip], size: [TILE_SIZE, b] },
-                Destination { atlas: 3, dst: [0, 0], src: [strip, strip], size: [b, b] },
+                Destination {
+                    atlas: 0,
+                    dst: [b + edge, b + edge],
+                    src: [0, 0],
+                    size: [TILE_SIZE, TILE_SIZE]
+                },
+                Destination {
+                    atlas: 1,
+                    dst: [0, b + edge],
+                    src: [strip, 0],
+                    size: [b, TILE_SIZE]
+                },
+                Destination {
+                    atlas: 2,
+                    dst: [b + edge, 0],
+                    src: [0, strip],
+                    size: [TILE_SIZE, b]
+                },
+                Destination {
+                    atlas: 3,
+                    dst: [0, 0],
+                    src: [strip, strip],
+                    size: [b, b]
+                },
             ]
         );
 
@@ -468,10 +735,90 @@ mod tests {
         assert_eq!(
             left,
             vec![
-                Destination { atlas: 0, dst: [b + ATLAS_SIZE, b], src: [0, 0], size: [b, TILE_SIZE] },
-                Destination { atlas: 1, dst: [b, b], src: [0, 0], size: [TILE_SIZE, TILE_SIZE] },
+                Destination {
+                    atlas: 0,
+                    dst: [b + ATLAS_SIZE, b],
+                    src: [0, 0],
+                    size: [b, TILE_SIZE]
+                },
+                Destination {
+                    atlas: 1,
+                    dst: [b, b],
+                    src: [0, 0],
+                    size: [TILE_SIZE, TILE_SIZE]
+                },
             ]
         );
+    }
+
+    /// Every atlas texel an upload set writes, keyed by (atlas, level, x, y).
+    fn texels(
+        uploads: &[TileUpload],
+    ) -> std::collections::HashMap<(usize, u32, u32, u32), [u8; 4]> {
+        let mut out = std::collections::HashMap::new();
+        for u in uploads {
+            for y in 0..u.height {
+                for x in 0..u.width {
+                    let i = ((y * u.width + x) * 4) as usize;
+                    let px = [
+                        u.pixels[i],
+                        u.pixels[i + 1],
+                        u.pixels[i + 2],
+                        u.pixels[i + 3],
+                    ];
+                    out.insert((u.atlas, u.level, u.x + x, u.y + y), px);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn damaged_rect_uploads_match_the_full_tile_upload() {
+        // A corner tile mirrored into three neighbouring atlases' borders.
+        let cache = RenderCache::new(4096, 4096);
+        let full = [TILE_SIZE, TILE_SIZE];
+        let mut tile = egui::ColorImage::new(full, Color32::TRANSPARENT);
+        for (i, px) in tile.pixels.iter_mut().enumerate() {
+            *px = Color32::from_rgba_premultiplied((i % 251) as u8, (i / 251) as u8, 7, 255);
+        }
+        for level in [0u32, 1] {
+            let full_img = downsample(&tile, level);
+            let whole = texels(&tile_uploads(
+                &cache,
+                31,
+                31,
+                full,
+                [0, 0, TILE_SIZE, TILE_SIZE],
+                &full_img,
+                level,
+            ));
+            for rect in [
+                [8, 16, 24, 40],
+                [TILE_SIZE - 6, 0, TILE_SIZE, 10],
+                [0, TILE_SIZE - 4, TILE_SIZE, TILE_SIZE],
+            ] {
+                // Crop the damaged part, as the redraw does.
+                let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+                let mut part = egui::ColorImage::new([w, h], Color32::TRANSPARENT);
+                for y in 0..h {
+                    for x in 0..w {
+                        part.pixels[y * w + x] =
+                            tile.pixels[(rect[1] + y) * TILE_SIZE + rect[0] + x];
+                    }
+                }
+                let part_img = downsample(&part, level);
+                let partial = texels(&tile_uploads(&cache, 31, 31, full, rect, &part_img, level));
+                assert!(!partial.is_empty(), "rect {rect:?} level {level}");
+                for (key, px) in &partial {
+                    assert_eq!(
+                        whole.get(key),
+                        Some(px),
+                        "rect {rect:?} level {level} texel {key:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -479,14 +826,29 @@ mod tests {
         let cache = RenderCache::new(4096, 4096);
         let full = [TILE_SIZE, TILE_SIZE];
         let img = egui::ColorImage::new([TILE_SIZE / 4, TILE_SIZE / 4], Color32::RED);
-        let uploads = tile_uploads(&cache, 31, 31, full, &img, 2);
-        let summary: Vec<_> = uploads.iter().map(|u| (u.atlas, u.level, u.x, u.y, u.width, u.height)).collect();
-        let (slot, border) = ((ATLAS_BORDER + ATLAS_SIZE - TILE_SIZE) as u32 / 4, ATLAS_BORDER as u32 / 4);
+        let uploads = tile_uploads(&cache, 31, 31, full, [0, 0, TILE_SIZE, TILE_SIZE], &img, 2);
+        let summary: Vec<_> = uploads
+            .iter()
+            .map(|u| (u.atlas, u.level, u.x, u.y, u.width, u.height))
+            .collect();
+        let (slot, border) = (
+            (ATLAS_BORDER + ATLAS_SIZE - TILE_SIZE) as u32 / 4,
+            ATLAS_BORDER as u32 / 4,
+        );
         assert_eq!(
             summary,
-            vec![(0, 2, slot, slot, 16, 16), (1, 2, 0, slot, border, 16), (2, 2, slot, 0, 16, border), (3, 2, 0, 0, border, border)]
+            vec![
+                (0, 2, slot, slot, 16, 16),
+                (1, 2, 0, slot, border, 16),
+                (2, 2, slot, 0, 16, border),
+                (3, 2, 0, 0, border, border)
+            ]
         );
-        assert!(uploads.iter().all(|u| u.pixels.len() == (u.width * u.height * 4) as usize));
+        assert!(
+            uploads
+                .iter()
+                .all(|u| u.pixels.len() == (u.width * u.height * 4) as usize)
+        );
     }
 
     #[test]
@@ -518,9 +880,17 @@ mod tests {
 
     #[test]
     fn preview_level_never_exceeds_the_level_the_gpu_samples() {
-        assert_eq!(preview_level(false, 0.1, 1.0), 0, "full resolution when not drawing");
+        assert_eq!(
+            preview_level(false, 0.1, 1.0),
+            0,
+            "full resolution when not drawing"
+        );
         assert_eq!(preview_level(true, 1.0, 1.0), 0);
-        assert_eq!(preview_level(true, 0.5, 1.0), 0, "exactly 2 texels/pixel keeps a margin");
+        assert_eq!(
+            preview_level(true, 0.5, 1.0),
+            0,
+            "exactly 2 texels/pixel keeps a margin"
+        );
         assert_eq!(preview_level(true, 0.3, 1.0), 1);
         // The user's case: a 1.375x display at 0.1 zoom samples ~log2(7.3) = 2.9,
         // so level 3 would leave level 2 stale.
@@ -529,7 +899,10 @@ mod tests {
         for zoom in [0.05f32, 0.1, 0.2, 0.33, 0.5, 0.7] {
             for ppp in [1.0f32, 1.25, 1.5, 2.0] {
                 let sampled = (1.0 / (zoom * ppp)).log2().max(0.0);
-                assert!(preview_level(true, zoom, ppp) as f32 <= sampled.floor(), "zoom {zoom} ppp {ppp}");
+                assert!(
+                    preview_level(true, zoom, ppp) as f32 <= sampled.floor(),
+                    "zoom {zoom} ppp {ppp}"
+                );
             }
         }
     }

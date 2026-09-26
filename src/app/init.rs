@@ -3,8 +3,7 @@ use super::{
     gpu_canvas::GpuCanvas,
     layout,
     painter_state::{
-        BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState,
-        WorkspaceState,
+        BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState, WorkspaceState,
     },
     state::{ColorModel, NewCanvasSettings, TILE_SIZE},
 };
@@ -78,6 +77,8 @@ impl PainterApp {
                     let mut b = Brush::new(6.0, 60.0, black, 10.0);
                     b.brush_options.flow = 30.0;
                     b.brush_options.opacity = 0.8;
+                    b.brush_options.pressure_min_size = 0.4;
+                    b.brush_options.pressure_opacity = true;
                     b.jitter = 0.5;
                     b
                 },
@@ -97,6 +98,8 @@ impl PainterApp {
                     let mut b = Brush::new(50.0, 0.0, black, 10.0);
                     b.brush_options.flow = 8.0;
                     b.brush_options.opacity = 0.6;
+                    b.brush_options.pressure_size = false;
+                    b.brush_options.pressure_flow = true;
                     b
                 },
             },
@@ -127,6 +130,7 @@ impl PainterApp {
                     let mut b = Brush::new(30.0, 80.0, black, 40.0);
                     b.jitter = 5.0;
                     b.brush_options.flow = 50.0;
+                    b.brush_options.pressure_opacity = true;
                     b
                 },
             },
@@ -146,7 +150,12 @@ impl PainterApp {
             .num_threads(max_threads)
             .build()
             .expect("failed to build thread pool");
-        WorkspaceState::new(max_threads, max_threads, std::sync::Arc::new(pool), color_model)
+        WorkspaceState::new(
+            max_threads,
+            max_threads,
+            std::sync::Arc::new(pool),
+            color_model,
+        )
     }
 
     fn get_brushes_path() -> PathBuf {

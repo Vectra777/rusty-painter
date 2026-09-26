@@ -22,7 +22,13 @@ fn with_android_env<T>(
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
     let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
     let activity = unsafe { JObject::from_raw(ctx.context() as jobject) };
-    f(&mut env, activity)
+    let result = f(&mut env, activity);
+    // A failed call leaves its Java exception pending, which would abort the
+    // next JNI call: clear it.
+    if result.is_err() && env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    result
 }
 
 #[cfg(target_os = "android")]
@@ -124,7 +130,9 @@ pub fn save_image_to_media_store(
             .l()
             .map_err(|e| e.to_string())?;
 
-        let byte_array = env.byte_array_from_slice(&bytes).map_err(|e| e.to_string())?;
+        let byte_array = env
+            .byte_array_from_slice(&bytes)
+            .map_err(|e| e.to_string())?;
         env.call_method(
             &output_stream,
             "write",
@@ -262,4 +270,294 @@ pub fn save_image_to_media_store(
 #[cfg(not(target_os = "android"))]
 pub fn share_uri(_uri: &str, _mime: &str, _title: &str) -> Result<(), String> {
     Err("Android share backend is unavailable on this platform".to_string())
+}
+
+/// An image in the device's photo library.
+#[derive(Clone, Debug)]
+pub struct GalleryImage {
+    pub id: i64,
+    pub name: String,
+}
+
+#[cfg(target_os = "android")]
+fn jerr(e: jni::errors::Error) -> String {
+    e.to_string()
+}
+
+#[cfg(target_os = "android")]
+fn image_permissions(env: &mut jni::JNIEnv<'_>) -> Result<Vec<&'static str>, String> {
+    let sdk = env
+        .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
+        .and_then(|v| v.i())
+        .map_err(jerr)?;
+    Ok(match sdk {
+        // Android 14 can grant access to just the photos the user picks.
+        34.. => vec![
+            "android.permission.READ_MEDIA_IMAGES",
+            "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        ],
+        33 => vec!["android.permission.READ_MEDIA_IMAGES"],
+        _ => vec!["android.permission.READ_EXTERNAL_STORAGE"],
+    })
+}
+
+#[cfg(target_os = "android")]
+fn content_resolver<'a>(
+    env: &mut jni::JNIEnv<'a>,
+    activity: &JObject<'_>,
+) -> Result<JObject<'a>, String> {
+    env.call_method(
+        activity,
+        "getContentResolver",
+        "()Landroid/content/ContentResolver;",
+        &[],
+    )
+    .and_then(|v| v.l())
+    .map_err(jerr)
+}
+
+#[cfg(target_os = "android")]
+fn images_collection<'a>(env: &mut jni::JNIEnv<'a>) -> Result<JObject<'a>, String> {
+    env.get_static_field(
+        "android/provider/MediaStore$Images$Media",
+        "EXTERNAL_CONTENT_URI",
+        "Landroid/net/Uri;",
+    )
+    .and_then(|v| v.l())
+    .map_err(jerr)
+}
+
+#[cfg(target_os = "android")]
+fn image_uri<'a>(env: &mut jni::JNIEnv<'a>, id: i64) -> Result<JObject<'a>, String> {
+    let collection = images_collection(env)?;
+    env.call_static_method(
+        "android/content/ContentUris",
+        "withAppendedId",
+        "(Landroid/net/Uri;J)Landroid/net/Uri;",
+        &[JValue::Object(&collection), JValue::Long(id)],
+    )
+    .and_then(|v| v.l())
+    .map_err(jerr)
+}
+
+#[cfg(target_os = "android")]
+fn string_array<'a>(
+    env: &mut jni::JNIEnv<'a>,
+    items: &[&str],
+) -> Result<jni::objects::JObjectArray<'a>, String> {
+    let array = env
+        .new_object_array(items.len() as i32, "java/lang/String", JObject::null())
+        .map_err(jerr)?;
+    for (i, item) in items.iter().enumerate() {
+        let s = env.new_string(item).map_err(jerr)?;
+        env.set_object_array_element(&array, i as i32, &s)
+            .map_err(jerr)?;
+    }
+    Ok(array)
+}
+
+/// Whether the app may read the photo library (fully or the photos the
+/// user picked).
+#[cfg(target_os = "android")]
+pub fn has_image_access() -> bool {
+    with_android_env(|env, activity| {
+        for perm in image_permissions(env)? {
+            let name = env.new_string(perm).map_err(jerr)?;
+            let granted = env
+                .call_method(
+                    &activity,
+                    "checkSelfPermission",
+                    "(Ljava/lang/String;)I",
+                    &[JValue::Object(&JObject::from(name))],
+                )
+                .and_then(|v| v.i())
+                .map_err(jerr)?;
+            if granted == 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+    .unwrap_or(false)
+}
+
+/// Show the system prompt for photo access. The answer isn't reported
+/// back; poll [`has_image_access`].
+#[cfg(target_os = "android")]
+pub fn request_image_access() -> Result<(), String> {
+    with_android_env(|env, activity| {
+        let perms = image_permissions(env)?;
+        let array = string_array(env, &perms)?;
+        env.call_method(
+            &activity,
+            "requestPermissions",
+            "([Ljava/lang/String;I)V",
+            &[JValue::Object(&array), JValue::Int(7)],
+        )
+        .map_err(jerr)?;
+        Ok(())
+    })
+}
+
+/// The newest `limit` images in the photo library.
+#[cfg(target_os = "android")]
+pub fn list_images(limit: usize) -> Result<Vec<GalleryImage>, String> {
+    with_android_env(|env, activity| {
+        let resolver = content_resolver(env, &activity)?;
+        let collection = images_collection(env)?;
+        let projection = string_array(env, &["_id", "_display_name"])?;
+        let sort = env.new_string("date_modified DESC").map_err(jerr)?;
+        let cursor = env
+            .call_method(
+                &resolver,
+                "query",
+                "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+                &[
+                    JValue::Object(&collection),
+                    JValue::Object(&projection),
+                    JValue::Object(&JObject::null()),
+                    JValue::Object(&JObject::null()),
+                    JValue::Object(&JObject::from(sort)),
+                ],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        if cursor.is_null() {
+            return Err("The photo library isn't available".to_string());
+        }
+        let mut out = Vec::new();
+        while out.len() < limit
+            && env
+                .call_method(&cursor, "moveToNext", "()Z", &[])
+                .and_then(|v| v.z())
+                .map_err(jerr)?
+        {
+            let id = env
+                .call_method(&cursor, "getLong", "(I)J", &[JValue::Int(0)])
+                .and_then(|v| v.j())
+                .map_err(jerr)?;
+            let name_obj = env
+                .call_method(
+                    &cursor,
+                    "getString",
+                    "(I)Ljava/lang/String;",
+                    &[JValue::Int(1)],
+                )
+                .and_then(|v| v.l())
+                .map_err(jerr)?;
+            let name = if name_obj.is_null() {
+                String::from("Image")
+            } else {
+                let js = JString::from(name_obj);
+                let name: String = env.get_string(&js).map(Into::into).unwrap_or_default();
+                // Keep the local reference table small over long lists.
+                let _ = env.delete_local_ref(js);
+                name
+            };
+            out.push(GalleryImage { id, name });
+        }
+        let _ = env.call_method(&cursor, "close", "()V", &[]);
+        Ok(out)
+    })
+}
+
+/// A small preview of image `id`: `(width, height, RGBA bytes)`.
+#[cfg(target_os = "android")]
+pub fn load_thumbnail(id: i64, size: i32) -> Result<(usize, usize, Vec<u8>), String> {
+    with_android_env(|env, activity| {
+        let resolver = content_resolver(env, &activity)?;
+        let uri = image_uri(env, id)?;
+        let dims = env
+            .new_object(
+                "android/util/Size",
+                "(II)V",
+                &[JValue::Int(size), JValue::Int(size)],
+            )
+            .map_err(jerr)?;
+        let bitmap = env
+            .call_method(
+                &resolver,
+                "loadThumbnail",
+                "(Landroid/net/Uri;Landroid/util/Size;Landroid/os/CancellationSignal;)Landroid/graphics/Bitmap;",
+                &[JValue::Object(&uri), JValue::Object(&dims), JValue::Object(&JObject::null())],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        let w = env
+            .call_method(&bitmap, "getWidth", "()I", &[])
+            .and_then(|v| v.i())
+            .map_err(jerr)?;
+        let h = env
+            .call_method(&bitmap, "getHeight", "()I", &[])
+            .and_then(|v| v.i())
+            .map_err(jerr)?;
+        let pixels = env.new_int_array(w * h).map_err(jerr)?;
+        env.call_method(
+            &bitmap,
+            "getPixels",
+            "([IIIIIII)V",
+            &[
+                JValue::Object(&pixels),
+                JValue::Int(0),
+                JValue::Int(w),
+                JValue::Int(0),
+                JValue::Int(0),
+                JValue::Int(w),
+                JValue::Int(h),
+            ],
+        )
+        .map_err(jerr)?;
+        let mut argb = vec![0i32; (w * h) as usize];
+        env.get_int_array_region(&pixels, 0, &mut argb)
+            .map_err(jerr)?;
+        let _ = env.call_method(&bitmap, "recycle", "()V", &[]);
+        let rgba = argb
+            .iter()
+            .flat_map(|&p| {
+                let p = p as u32;
+                [(p >> 16) as u8, (p >> 8) as u8, p as u8, (p >> 24) as u8]
+            })
+            .collect();
+        Ok((w as usize, h as usize, rgba))
+    })
+}
+
+/// The encoded file bytes of image `id`.
+#[cfg(target_os = "android")]
+pub fn read_image(id: i64) -> Result<Vec<u8>, String> {
+    with_android_env(|env, activity| {
+        let resolver = content_resolver(env, &activity)?;
+        let uri = image_uri(env, id)?;
+        let stream = env
+            .call_method(
+                &resolver,
+                "openInputStream",
+                "(Landroid/net/Uri;)Ljava/io/InputStream;",
+                &[JValue::Object(&uri)],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        if stream.is_null() {
+            return Err("Couldn't open the image".to_string());
+        }
+        const CHUNK: usize = 1 << 16;
+        let buffer = env.new_byte_array(CHUNK as i32).map_err(jerr)?;
+        let mut chunk = vec![0i8; CHUNK];
+        let mut out = Vec::new();
+        loop {
+            let n = env
+                .call_method(&stream, "read", "([B)I", &[JValue::Object(&buffer)])
+                .and_then(|v| v.i())
+                .map_err(jerr)?;
+            if n < 0 {
+                break;
+            }
+            let n = n as usize;
+            env.get_byte_array_region(&buffer, 0, &mut chunk[..n])
+                .map_err(jerr)?;
+            out.extend(chunk[..n].iter().map(|&b| b as u8));
+        }
+        let _ = env.call_method(&stream, "close", "()V", &[]);
+        Ok(out)
+    })
 }

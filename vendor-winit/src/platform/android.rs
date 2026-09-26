@@ -75,6 +75,24 @@ use crate::window::{Window, WindowAttributes};
 
 use self::activity::{AndroidApp, ConfigurationRef, Rect};
 
+/// Latest stylus sample (rusty-painter patch). Winit delivers a stylus as mouse
+/// events without pressure; read this alongside them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenState {
+    /// Normalized pressure (0..=1) of the most recent stylus/mouse event.
+    pub pressure: f32,
+    /// The pen's eraser end is in use.
+    pub is_eraser: bool,
+    /// The most recent pointer was a stylus rather than a mouse.
+    pub is_stylus: bool,
+}
+
+/// The most recent stylus sample.
+pub fn pen_state() -> PenState {
+    let (pressure, is_eraser, is_stylus) = crate::platform_impl::pen_state();
+    PenState { pressure, is_eraser, is_stylus }
+}
+
 /// Additional methods on [`EventLoop`] that are specific to Android.
 pub trait EventLoopExtAndroid {
     /// Get the [`AndroidApp`] which was used to create this event loop.

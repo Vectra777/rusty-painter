@@ -151,7 +151,8 @@ fn mip_region(x: u32, y: u32, width: u32, height: u32, from: u32, to: u32) -> [u
 fn merge_uploads(mut uploads: Vec<TileUpload>) -> Vec<TileUpload> {
     uploads.sort_by_key(|u| (u.atlas, u.level, u.y, u.height, u.x));
     let joins_right = |a: &TileUpload, b: &TileUpload| {
-        (a.atlas, a.level, a.y, a.height) == (b.atlas, b.level, b.y, b.height) && a.x + a.width == b.x
+        (a.atlas, a.level, a.y, a.height) == (b.atlas, b.level, b.y, b.height)
+            && a.x + a.width == b.x
     };
     let mut bands: Vec<TileUpload> = Vec::with_capacity(uploads.len());
     let mut rest = uploads.into_iter().peekable();
@@ -185,7 +186,8 @@ fn merge_uploads(mut uploads: Vec<TileUpload>) -> Vec<TileUpload> {
     for band in bands {
         match merged.last_mut() {
             Some(prev)
-                if (prev.atlas, prev.level, prev.x, prev.width) == (band.atlas, band.level, band.x, band.width)
+                if (prev.atlas, prev.level, prev.x, prev.width)
+                    == (band.atlas, band.level, band.x, band.width)
                     && prev.y + prev.height == band.y =>
             {
                 prev.pixels.extend_from_slice(&band.pixels);
@@ -317,7 +319,12 @@ impl GpuCanvas {
         } else {
             "fs_display_gamma_framebuffer"
         };
-        let display = pipeline("canvas display", display_entry, target_format, Some(egui_blend));
+        let display = pipeline(
+            "canvas display",
+            display_entry,
+            target_format,
+            Some(egui_blend),
+        );
         let downsample = pipeline("canvas downsample", "fs_downsample", ATLAS_FORMAT, None);
 
         let sampler = |label, mag_filter, mipmap_filter| {
@@ -336,8 +343,16 @@ impl GpuCanvas {
             downsample,
             layout,
             // Crisp pixels when zoomed in (as before), trilinear when zoomed out.
-            display_sampler: sampler("canvas display", wgpu::FilterMode::Nearest, wgpu::FilterMode::Linear),
-            downsample_sampler: sampler("canvas downsample", wgpu::FilterMode::Linear, wgpu::FilterMode::Nearest),
+            display_sampler: sampler(
+                "canvas display",
+                wgpu::FilterMode::Nearest,
+                wgpu::FilterMode::Linear,
+            ),
+            downsample_sampler: sampler(
+                "canvas downsample",
+                wgpu::FilterMode::Linear,
+                wgpu::FilterMode::Nearest,
+            ),
             atlases: Vec::new(),
             generation: None,
             quad_buffer: None,
@@ -345,7 +360,12 @@ impl GpuCanvas {
         }
     }
 
-    fn bind_group(&self, device: &wgpu::Device, view: &wgpu::TextureView, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
+    fn bind_group(
+        &self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("canvas atlas"),
             layout: &self.layout,
@@ -414,7 +434,12 @@ impl GpuCanvas {
 
     /// Copy every upload into its mip level through mapped staging buffers
     /// and per-upload copy commands.
-    fn copy_uploads(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, uploads: &[TileUpload]) {
+    fn copy_uploads(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uploads: &[TileUpload],
+    ) {
         self.copy_uploads_chunked(device, encoder, uploads, MAX_STAGING_BYTES);
     }
 
@@ -441,7 +466,12 @@ impl GpuCanvas {
         self.copy_chunk(device, encoder, &uploads[start..]);
     }
 
-    fn copy_chunk(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, uploads: &[TileUpload]) {
+    fn copy_chunk(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uploads: &[TileUpload],
+    ) {
         let size: u64 = uploads.iter().map(staged_bytes).sum();
         if size == 0 {
             return;
@@ -503,7 +533,12 @@ impl GpuCanvas {
 
     /// Write the uploads, then regenerate just their regions of every smaller
     /// level, one render pass per level per touched atlas.
-    fn upload(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, uploads: &[TileUpload]) {
+    fn upload(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uploads: &[TileUpload],
+    ) {
         self.copy_uploads(device, encoder, uploads);
 
         for (atlas_idx, atlas) in self.atlases.iter().enumerate() {
@@ -515,9 +550,20 @@ impl GpuCanvas {
                 let size = (ATLAS_TEXTURE_SIZE >> level) as f32;
                 let mut vertices = Vec::with_capacity(mine.len() * 24);
                 for upload in mine.iter().filter(|u| u.level < level) {
-                    let [x0, y0, x1, y1] =
-                        mip_region(upload.x, upload.y, upload.width, upload.height, upload.level, level);
-                    let (u0, v0, u1, v1) = (x0 as f32 / size, y0 as f32 / size, x1 as f32 / size, y1 as f32 / size);
+                    let [x0, y0, x1, y1] = mip_region(
+                        upload.x,
+                        upload.y,
+                        upload.width,
+                        upload.height,
+                        upload.level,
+                        level,
+                    );
+                    let (u0, v0, u1, v1) = (
+                        x0 as f32 / size,
+                        y0 as f32 / size,
+                        x1 as f32 / size,
+                        y1 as f32 / size,
+                    );
                     let ndc = |u: f32, v: f32| [u * 2.0 - 1.0, 1.0 - v * 2.0];
                     quad_vertices(
                         &[ndc(u0, v0), ndc(u1, v0), ndc(u1, v1), ndc(u0, v1)],
@@ -605,7 +651,11 @@ impl egui_wgpu::CallbackTrait for CanvasPaint {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(gpu) = resources.get_mut::<GpuCanvas>() {
             gpu.ensure_atlases(device, self.generation, self.atlas_count);
-            let uploads = self.uploads.lock().map(|mut u| std::mem::take(&mut *u)).unwrap_or_default();
+            let uploads = self
+                .uploads
+                .lock()
+                .map(|mut u| std::mem::take(&mut *u))
+                .unwrap_or_default();
             gpu.upload(device, egui_encoder, &merge_uploads(uploads));
             gpu.prepare_quads(device, &self.quads);
         }
@@ -689,11 +739,19 @@ mod tests {
 
     fn linear(v: u8) -> f32 {
         let s = v as f32 / 255.0;
-        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
     }
 
     fn gamma(l: f32) -> u8 {
-        let s = if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+        let s = if l <= 0.0031308 {
+            l * 12.92
+        } else {
+            1.055 * l.powf(1.0 / 2.4) - 0.055
+        };
         (s * 255.0).round() as u8
     }
 
@@ -709,7 +767,10 @@ mod tests {
 
     fn assert_close(actual: &[u8], expected: &[u8], what: &str) {
         for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-            assert!((*a as i16 - *e as i16).abs() <= 1, "{what}: byte {i}: {a} vs {e}");
+            assert!(
+                (*a as i16 - *e as i16).abs() <= 1,
+                "{what}: byte {i}: {a} vs {e}"
+            );
         }
     }
 
@@ -726,7 +787,12 @@ mod tests {
         let pixels: Vec<u8> = (0..size * size)
             .flat_map(|i| {
                 let (x, y) = (i % size, i / size);
-                [(x * 4) as u8, (y * 4) as u8, ((x + y) * 3) as u8, 255 - ((x ^ y) % 7) as u8 * 20]
+                [
+                    (x * 4) as u8,
+                    (y * 4) as u8,
+                    ((x + y) * 3) as u8,
+                    255 - ((x ^ y) % 7) as u8 * 20,
+                ]
             })
             .collect();
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -753,7 +819,12 @@ mod tests {
             let got = read_texture(&device, &queue, texture, level, level_size, level_size);
             let at = |x: u32, y: u32| {
                 let i = ((y * previous_size + x) * 4) as usize;
-                [previous[i], previous[i + 1], previous[i + 2], previous[i + 3]]
+                [
+                    previous[i],
+                    previous[i + 1],
+                    previous[i + 2],
+                    previous[i + 3],
+                ]
             };
             let expected: Vec<u8> = (0..level_size * level_size)
                 .flat_map(|i| {
@@ -835,7 +906,9 @@ mod tests {
         canvas.ensure_atlases(&device, 0, 1);
         // A 16x16 block at level 2 (a 64 px tile at 1/4 scale), placed at an
         // odd-looking but aligned spot.
-        let pixels: Vec<u8> = (0..16 * 16).flat_map(|i| [i as u8, 255 - i as u8, 90, 255]).collect();
+        let pixels: Vec<u8> = (0..16 * 16)
+            .flat_map(|i| [i as u8, 255 - i as u8, 90, 255])
+            .collect();
         let mut encoder = device.create_command_encoder(&Default::default());
         canvas.upload(
             &device,
@@ -877,7 +950,9 @@ mod tests {
             y,
             width: 2,
             height: 2,
-            pixels: (0..4).flat_map(|i| [x as u8, y as u8, i as u8, atlas as u8]).collect(),
+            pixels: (0..4)
+                .flat_map(|i| [x as u8, y as u8, i as u8, atlas as u8])
+                .collect(),
         };
         let mut uploads = vec![upload(1, 0, 0)];
         for y in [0, 2] {
@@ -888,15 +963,24 @@ mod tests {
         let merged = merge_uploads(uploads);
         assert_eq!(merged.len(), 2);
         let big = &merged[0];
-        assert_eq!((big.atlas, big.x, big.y, big.width, big.height), (0, 0, 0, 6, 4));
+        assert_eq!(
+            (big.atlas, big.x, big.y, big.width, big.height),
+            (0, 0, 0, 6, 4)
+        );
         for py in 0..4u32 {
             for px in 0..6u32 {
                 let i = ((py * 6 + px) * 4) as usize;
                 let (tile_x, tile_y, within) = (px / 2 * 2, py / 2 * 2, (py % 2) * 2 + px % 2);
-                assert_eq!(big.pixels[i..i + 4], [tile_x as u8, tile_y as u8, within as u8, 0]);
+                assert_eq!(
+                    big.pixels[i..i + 4],
+                    [tile_x as u8, tile_y as u8, within as u8, 0]
+                );
             }
         }
-        assert_eq!((merged[1].atlas, merged[1].width, merged[1].height), (1, 2, 2));
+        assert_eq!(
+            (merged[1].atlas, merged[1].width, merged[1].height),
+            (1, 2, 2)
+        );
     }
 
     #[test]
@@ -914,7 +998,9 @@ mod tests {
             y: 0,
             width: 64,
             height: 64,
-            pixels: (0..64 * 64).flat_map(|i| [shade, i as u8, (i / 64) as u8, 255]).collect(),
+            pixels: (0..64 * 64)
+                .flat_map(|i| [shade, i as u8, (i / 64) as u8, 255])
+                .collect(),
         };
         let uploads = vec![tile(0, 10), tile(64, 20), tile(128, 30)];
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -925,7 +1011,11 @@ mod tests {
         for (n, upload) in uploads.iter().enumerate() {
             for row in 0..64usize {
                 let got_row = &got[(row * 192 + n * 64) * 4..(row * 192 + n * 64 + 64) * 4];
-                assert_eq!(got_row, &upload.pixels[row * 256..(row + 1) * 256], "tile {n} row {row}");
+                assert_eq!(
+                    got_row,
+                    &upload.pixels[row * 256..(row + 1) * 256],
+                    "tile {n} row {row}"
+                );
             }
         }
     }

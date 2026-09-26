@@ -1,132 +1,276 @@
+//! Softness curve editor (brush falloff from the dab center to its edge).
+//!
+//! Interaction, like the curve tools in Photoshop/Krita:
+//! - press on a point to grab it (picked where the press happened, so a quick
+//!   drag can't miss it); points can pass their neighbours;
+//! - press on empty space to add a point there and keep dragging it;
+//! - right-click a point, or drag it out of the box, to remove it;
+//! - the end points only move vertically.
+
 use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
-use eframe::egui;
+use crate::ui::style::*;
+use eframe::egui::{self, Color32, Pos2, RichText, Sense, Stroke};
+
+/// Drawn handle radius, and the margin that keeps edge handles unclipped.
+const HANDLE_RADIUS: f32 = 5.0;
+/// How far past the box (in points) a middle point must be dragged to delete it.
+const DELETE_DISTANCE: f32 = 36.0;
+/// Closest two points may get horizontally.
+const MIN_GAP: f32 = 0.002;
+
+/// Quick shapes offered under the editor.
+const PRESETS: [(&str, &[(f32, f32)]); 4] = [
+    ("Linear", &[(0.0, 1.0), (1.0, 0.0)]),
+    ("Soft", &[(0.0, 1.0), (0.25, 0.5), (0.6, 0.12), (1.0, 0.0)]),
+    (
+        "Round",
+        &[(0.0, 1.0), (0.5, 0.85), (0.85, 0.35), (1.0, 0.0)],
+    ),
+    ("Hard", &[(0.0, 1.0), (0.75, 0.97), (0.92, 0.4), (1.0, 0.0)]),
+];
+
+#[derive(Clone, Copy, Default)]
+struct DragState {
+    /// Index of the grabbed point (kept up to date as points pass each other).
+    point: Option<usize>,
+}
 
 pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool {
+    let touch = metrics(ui.ctx()).touch;
+    let hit_radius = if touch { 24.0 } else { 12.0 };
     let mut changed = false;
-    let size = egui::Vec2::new(ui.available_width(), 150.0);
-    let (response, painter) = ui.allocate_painter(size, egui::Sense::click_and_drag());
-    let rect = response.rect;
 
-    painter.rect_filled(rect, 3.0, egui::Color32::from_gray(30));
+    let width = ui.available_width();
+    let height = (width * 0.62).clamp(110.0, 220.0);
+    let (response, painter) =
+        ui.allocate_painter(egui::vec2(width, height), Sense::click_and_drag());
+    let outer = response.rect;
+    let rect = outer.shrink(HANDLE_RADIUS + 2.0);
 
-    let to_screen = |p: &CurvePoint| -> egui::Pos2 {
-        egui::Pos2::new(
+    let to_screen = |p: &CurvePoint| {
+        Pos2::new(
             rect.min.x + p.x * rect.width(),
             rect.max.y - p.y * rect.height(),
         )
     };
-    let from_screen = |pos: egui::Pos2| -> CurvePoint {
-        CurvePoint {
-            x: ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0),
-            y: ((rect.max.y - pos.y) / rect.height()).clamp(0.0, 1.0),
-        }
+    let from_screen = |pos: Pos2| CurvePoint {
+        x: ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0),
+        y: ((rect.max.y - pos.y) / rect.height()).clamp(0.0, 1.0),
+    };
+    let nearest = |curve: &SoftnessCurve, pos: Pos2| {
+        curve
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, to_screen(p).distance(pos)))
+            .filter(|(_, d)| *d <= hit_radius)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     };
 
-    for y in [0.0, 1.0] {
-        painter.line_segment(
-            [
-                to_screen(&CurvePoint { x: 0.0, y }),
-                to_screen(&CurvePoint { x: 1.0, y }),
-            ],
-            egui::Stroke::new(1.0, egui::Color32::GRAY),
-        );
-    }
+    let state_id = response.id.with("curve_drag");
+    let mut state: DragState = ui.data(|d| d.get_temp(state_id)).unwrap_or_default();
+    let (pressed, down, press_origin, pointer) = ui.input(|i| {
+        (
+            i.pointer.primary_pressed(),
+            i.pointer.primary_down(),
+            i.pointer.press_origin(),
+            i.pointer.interact_pos(),
+        )
+    });
 
-    if curve.points.len() >= 2 {
-        let mut points = Vec::with_capacity(101);
-        for i in 0..=100 {
-            let t = i as f32 / 100.0;
-            points.push(to_screen(&CurvePoint {
-                x: t,
-                y: curve.eval(t),
-            }));
-        }
-        painter.add(egui::Shape::line(
-            points,
-            egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
-        ));
-    }
-
-    let dragged_point_id = ui.make_persistent_id("curve_dragged_point");
-    let mut dragging: Option<usize> = ui.data(|d| d.get_temp(dragged_point_id));
-
-    if dragging.is_none()
-        && response.drag_started()
-        && let Some(pointer_pos) = response.interact_pointer_pos().or(response.hover_pos())
+    // Press: grab the nearest point, or add one where the press happened.
+    if pressed
+        && state.point.is_none()
+        && let Some(origin) = press_origin
+        && outer.contains(origin)
     {
-        dragging = curve
-            .points
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| {
-                let dist = to_screen(p).distance(pointer_pos);
-                (dist < 15.0).then_some((i, dist))
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i);
-        ui.data_mut(|d| d.insert_temp(dragged_point_id, dragging));
-    }
-
-    if let Some(idx) = dragging {
-        if ui.input(|i| i.pointer.primary_down()) {
-            if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
-                let new_p = from_screen(pointer_pos);
-                let len = curve.points.len();
-                if idx < len {
-                    if idx == 0 || idx == len - 1 {
-                        curve.points[idx].y = new_p.y;
-                    } else {
-                        let prev_x = curve.points[idx - 1].x;
-                        let next_x = curve.points[idx + 1].x;
-                        let p = &mut curve.points[idx];
-                        p.x = new_p.x.clamp(prev_x + 0.01, next_x - 0.01);
-                        p.y = new_p.y;
-                    }
-                    changed = true;
-                }
+        state.point = match nearest(curve, origin) {
+            Some(i) => Some(i),
+            None => {
+                let p = from_screen(origin);
+                let last = curve.points.len().saturating_sub(1);
+                let at = curve
+                    .points
+                    .iter()
+                    .position(|q| q.x > p.x)
+                    .unwrap_or(last)
+                    .clamp(1, last.max(1));
+                let x = p.x.clamp(MIN_GAP, 1.0 - MIN_GAP);
+                curve.points.insert(at, CurvePoint::new(x, p.y));
+                changed = true;
+                Some(at)
             }
-            ui.data_mut(|d| d.insert_temp(dragged_point_id, dragging));
-            ui.ctx().request_repaint();
-        } else {
-            ui.data_mut(|d| d.remove_temp::<Option<usize>>(dragged_point_id));
-        }
+        };
     }
 
-    if response.double_clicked()
-        && let Some(pointer_pos) = response.interact_pointer_pos().or(response.hover_pos())
+    // Right-click removes a middle point.
+    if response.secondary_clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+        && let Some(i) = nearest(curve, pos)
+        && i > 0
+        && i + 1 < curve.points.len()
     {
-        let new_p = from_screen(pointer_pos);
-        let clicked_point_idx = curve
-            .points
-            .iter()
-            .enumerate()
-            .find_map(|(i, p)| (to_screen(p).distance(pointer_pos) < 10.0).then_some(i));
+        curve.points.remove(i);
+        changed = true;
+    }
 
-        if let Some(idx) = clicked_point_idx {
-            if idx > 0 && idx < curve.points.len() - 1 {
+    // Drag: follow the pointer; middle points may pass their neighbours.
+    let mut delete_pending = false;
+    if let Some(mut idx) = state.point {
+        if !down || idx >= curve.points.len() {
+            // Released: a middle point dragged out of the box is deleted.
+            if idx > 0 && idx + 1 < curve.points.len() && pointer.is_some_and(|p| outside(rect, p))
+            {
                 curve.points.remove(idx);
                 changed = true;
             }
-        } else if let Some(insert_idx) = curve.points.iter().position(|p| new_p.x < p.x)
-            && insert_idx > 0
-        {
-            curve.points.insert(insert_idx, new_p);
+            state.point = None;
+        } else if let Some(pos) = pointer {
+            let target = from_screen(pos);
+            let last = curve.points.len() - 1;
+            if idx == 0 || idx == last {
+                curve.points[idx].y = target.y;
+            } else {
+                curve.points[idx] =
+                    CurvePoint::new(target.x.clamp(MIN_GAP, 1.0 - MIN_GAP), target.y);
+                // Keep points sorted by x, tracking the grabbed one.
+                while idx > 1 && curve.points[idx].x < curve.points[idx - 1].x {
+                    curve.points.swap(idx, idx - 1);
+                    idx -= 1;
+                }
+                while idx + 1 < last && curve.points[idx].x > curve.points[idx + 1].x {
+                    curve.points.swap(idx, idx + 1);
+                    idx += 1;
+                }
+                delete_pending = outside(rect, pos);
+            }
+            state.point = Some(idx);
             changed = true;
+            ui.ctx().request_repaint();
         }
     }
+    ui.data_mut(|d| d.insert_temp(state_id, state));
 
-    for (i, p) in curve.points.iter().enumerate() {
-        let center = to_screen(p);
-        let is_being_dragged = Some(i) == dragging;
-        let radius = if is_being_dragged { 6.0 } else { 4.0 };
-        let color = if is_being_dragged {
-            egui::Color32::WHITE
-        } else {
-            egui::Color32::YELLOW
-        };
-        painter.circle_filled(center, radius, color);
-        painter.circle_stroke(center, radius, egui::Stroke::new(1.0, egui::Color32::BLACK));
+    // --- Drawing ---
+    painter.rect_filled(outer, 0.0, BG_INSET);
+    for q in [0.25, 0.5, 0.75] {
+        let x = egui::lerp(rect.x_range(), q);
+        let y = egui::lerp(rect.y_range(), q);
+        painter.vline(
+            x,
+            rect.y_range(),
+            Stroke::new(1.0_f32, BORDER_LIGHT.gamma_multiply(0.5)),
+        );
+        painter.hline(
+            rect.x_range(),
+            y,
+            Stroke::new(1.0_f32, BORDER_LIGHT.gamma_multiply(0.5)),
+        );
+    }
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, BORDER_LIGHT));
+
+    if curve.points.len() >= 2 {
+        let points: Vec<Pos2> = (0..=120)
+            .map(|i| {
+                let t = i as f32 / 120.0;
+                to_screen(&CurvePoint::new(t, curve.eval(t)))
+            })
+            .collect();
+        // Fill under the curve: a hint of the dab's opacity profile.
+        let mut fill = points.clone();
+        fill.push(rect.right_bottom());
+        fill.push(rect.left_bottom());
+        painter.add(egui::Shape::Path(egui::epaint::PathShape {
+            points: fill,
+            closed: true,
+            fill: ACCENT.gamma_multiply(0.12),
+            stroke: egui::epaint::PathStroke::NONE,
+        }));
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, ACCENT)));
     }
 
+    let hovered_point = response.hover_pos().and_then(|p| nearest(curve, p));
+    for (i, p) in curve.points.iter().enumerate() {
+        let center = to_screen(p);
+        let grabbed = state.point == Some(i);
+        let radius = if grabbed || hovered_point == Some(i) {
+            HANDLE_RADIUS + 1.5
+        } else {
+            HANDLE_RADIUS
+        };
+        let fill = if grabbed && delete_pending {
+            Color32::from_rgb(214, 76, 76)
+        } else if grabbed {
+            ACCENT
+        } else {
+            TEXT_STRONG
+        };
+        painter.rect_filled(
+            egui::Rect::from_center_size(center, egui::vec2(radius, radius) * 2.0),
+            0.0,
+            fill,
+        );
+        painter.rect_stroke(
+            egui::Rect::from_center_size(center, egui::vec2(radius, radius) * 2.0),
+            0.0,
+            Stroke::new(1.0_f32, Color32::BLACK),
+        );
+    }
+
+    // Readout for the grabbed or hovered point.
+    let readout = state
+        .point
+        .or(hovered_point)
+        .and_then(|i| curve.points.get(i))
+        .map(|p| {
+            if delete_pending {
+                "Release to remove".to_string()
+            } else {
+                format!(
+                    "{:.0}% from center → {:.0}% opacity",
+                    p.x * 100.0,
+                    p.y * 100.0
+                )
+            }
+        });
+    if let Some(text) = readout {
+        painter.text(
+            rect.right_top() + egui::vec2(-4.0, 4.0),
+            egui::Align2::RIGHT_TOP,
+            text,
+            egui::TextStyle::Small.resolve(ui.style()),
+            TEXT,
+        );
+    }
+    if hovered_point.is_some() || state.point.is_some() {
+        ui.ctx().set_cursor_icon(if state.point.is_some() {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        });
+    }
+
+    // Quick shapes.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (name, shape) in PRESETS {
+            if ui.small_button(name).clicked() {
+                curve.points = shape.iter().map(|&(x, y)| CurvePoint::new(x, y)).collect();
+                changed = true;
+            }
+        }
+    });
+    ui.label(
+        RichText::new("Click to add · drag to move · right-click or drag out to remove")
+            .small()
+            .color(TEXT_DIM),
+    );
+
     changed
+}
+
+/// Whether `pos` is far enough outside `rect` to mean "remove".
+fn outside(rect: egui::Rect, pos: Pos2) -> bool {
+    !rect.expand(DELETE_DISTANCE).contains(pos)
 }

@@ -2,6 +2,7 @@ use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
 use rayon::ThreadPool;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::slice::ParallelSlice;
 use rustc_hash::FxHashMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -76,7 +77,8 @@ pub(super) struct PlacedDab {
 
 impl PlacedDab {
     pub fn new(center: Vec2, bounds: DabBounds, r_ceil: i32) -> Self {
-        let quantize = |v: f32| ((v - v.floor()) * 16.0).floor().clamp(0.0, 15.0) as u8 as f32 / 16.0;
+        let quantize =
+            |v: f32| ((v - v.floor()) * 16.0).floor().clamp(0.0, 15.0) as u8 as f32 / 16.0;
         Self {
             center,
             bounds,
@@ -113,7 +115,13 @@ pub(super) fn bucket_by_tile(dabs: &[PlacedDab]) -> Vec<TileBucket> {
 }
 
 /// Whether a dab of radius `r` at `center` can reach the tile at `(x0, y0)`.
-pub(super) fn dab_reaches_tile(center: Vec2, r: f32, x0: usize, y0: usize, tile_size: usize) -> bool {
+pub(super) fn dab_reaches_tile(
+    center: Vec2,
+    r: f32,
+    x0: usize,
+    y0: usize,
+    tile_size: usize,
+) -> bool {
     !(center.x < x0 as f32 - r
         || center.x > (x0 + tile_size) as f32 + r
         || center.y < y0 as f32 - r
@@ -127,18 +135,6 @@ pub(super) struct TileOverlap {
     pub max_x: usize,
     pub min_y: usize,
     pub max_y: usize,
-}
-
-impl TileOverlap {
-    /// Smallest rectangle containing both.
-    pub fn union(self, other: Self) -> Self {
-        Self {
-            min_x: self.min_x.min(other.min_x),
-            max_x: self.max_x.max(other.max_x),
-            min_y: self.min_y.min(other.min_y),
-            max_y: self.max_y.max(other.max_y),
-        }
-    }
 }
 
 /// Clip `bounds` to the pixel range of a single tile at `(tile_x0, tile_y0)`.
@@ -158,9 +154,10 @@ pub(super) fn tile_overlap(
     }
 }
 
-/// Below this much total pixel work, running tiles serially beats entering
-/// the thread pool.
-const PARALLEL_MIN_PIXELS: usize = 1024;
+/// Pixel work (dab area) that justifies one more thread. Below this per
+/// thread, extra threads mostly hand off work and spin: measured on a
+/// 16-thread pool, a 20 px brush used 3.5 cores to paint no faster than one.
+const PIXELS_PER_THREAD: usize = 16384;
 
 /// Run `draw_tile` over every bucket: serially for a small batch, otherwise
 /// once through the thread pool (one dispatch per batch, not per dab).
@@ -172,10 +169,25 @@ pub(super) fn dispatch_over_buckets<F>(
 ) where
     F: Fn(&TileBucket) + Sync,
 {
-    if buckets.len() == 1 || work_pixels <= PARALLEL_MIN_PIXELS {
+    // Give work to only as many threads as the batch justifies: split the
+    // tiles into that many chunks, so rayon wakes that many workers instead
+    // of spreading a small batch over the whole pool.
+    let threads = (work_pixels / PIXELS_PER_THREAD)
+        .min(pool.current_num_threads())
+        .min(buckets.len());
+    if threads <= 1 {
         buckets.iter().for_each(&draw_tile);
-    } else {
+    } else if threads >= pool.current_num_threads() {
+        // Enough work for the whole pool: rayon's dynamic splitting balances
+        // uneven tiles better than fixed chunks.
         pool.install(|| buckets.par_iter().for_each(&draw_tile));
+    } else {
+        let chunk = buckets.len().div_ceil(threads);
+        pool.install(|| {
+            buckets
+                .par_chunks(chunk)
+                .for_each(|tiles| tiles.iter().for_each(&draw_tile))
+        });
     }
 }
 

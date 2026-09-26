@@ -46,12 +46,50 @@ pub struct NewCanvasSettings {
     pub background: BackgroundChoice,
     pub custom_bg: Color32,
     pub color_model: ColorModel,
+    /// Colour space the new document blends in.
+    pub blend_space: crate::canvas::blend_modes::BlendSpace,
 }
+
+/// A changed rectangle inside one tile, in tile-local pixels:
+/// `[x0, y0, x1, y1)` (end exclusive).
+pub type TileRect = [usize; 4];
 
 pub struct CanvasTile {
     pub dirty: bool,
     pub tx: usize,
     pub ty: usize,
+    /// When only part of a dirty tile changed (brush strokes), that part;
+    /// `None` means the whole tile. Redraw composites and uploads just this.
+    pub damage: Option<TileRect>,
+}
+
+impl CanvasTile {
+    /// The whole tile needs redrawing.
+    pub fn mark_full(&mut self) {
+        self.dirty = true;
+        self.damage = None;
+    }
+
+    /// `rect` changed. Grows an existing partial damage; a tile already
+    /// fully dirty stays fully dirty.
+    pub fn mark_rect(&mut self, rect: TileRect) {
+        if !self.dirty {
+            self.dirty = true;
+            self.damage = Some(rect);
+        } else if let Some(d) = &mut self.damage {
+            *d = [
+                d[0].min(rect[0]),
+                d[1].min(rect[1]),
+                d[2].max(rect[2]),
+                d[3].max(rect[3]),
+            ];
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.dirty = false;
+        self.damage = None;
+    }
 }
 
 impl CanvasUnit {
@@ -84,6 +122,7 @@ impl NewCanvasSettings {
             background: BackgroundChoice::White,
             custom_bg: Color32::WHITE,
             color_model: ColorModel::Rgba,
+            blend_space: canvas.blend_space,
         }
     }
 
@@ -201,6 +240,7 @@ mod tests {
             background: BackgroundChoice::White,
             custom_bg: Color32::WHITE,
             color_model: ColorModel::Rgba,
+            blend_space: Default::default(),
         };
         assert_eq!(settings.validated_dimensions().unwrap(), (9_600, 14_400));
     }
@@ -217,6 +257,7 @@ mod tests {
             background: BackgroundChoice::Custom,
             custom_bg: Color32::from_rgb(255, 0, 0),
             color_model: ColorModel::Grayscale,
+            blend_space: Default::default(),
         };
 
         let [r, g, b, _] = settings

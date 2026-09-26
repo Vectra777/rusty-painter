@@ -1,98 +1,198 @@
-name: Rust build & release
+name: Release
 
+# Run by hand from the Actions tab ("Run workflow"), choosing the version and
+# platforms, or by pushing a tag like `v0.2.0` (all platforms, published).
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 0.1.0)"
+        description: "Release version (e.g. 0.2.0)"
         required: true
         type: string
-      prerelease:
-        description: "Mark this release as a prerelease"
-        required: false
-        default: false
+      linux:
+        description: "Build Linux (x86_64)"
         type: boolean
+        default: true
+      windows:
+        description: "Build Windows (x86_64)"
+        type: boolean
+        default: true
+      android:
+        description: "Build Android (arm64 APK)"
+        type: boolean
+        default: true
+      publish:
+        description: "Publish a GitHub release (off = builds only, downloadable from this run)"
+        type: boolean
+        default: true
+      prerelease:
+        description: "Mark the release as a prerelease"
+        type: boolean
+        default: false
+  push:
+    tags: ["v*"]
 
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: rusty-painter
+  # From the form, or the tag without its leading "v".
+  VERSION: ${{ inputs.version || github.ref_name }}
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    name: Build x86_64-unknown-linux-gnu
+  ci:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+    with:
+      audit: false
+
+  linux:
+    name: Linux build
+    needs: ci
+    if: ${{ github.event_name == 'push' || inputs.linux }}
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo builds
-        uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          key: x86_64-unknown-linux-gnu
-
-      - name: Build release binary
-        run: cargo build --locked --release --target x86_64-unknown-linux-gnu
-
-      - name: Run tests
-        run: cargo test --locked --release
-
-      - name: Package release asset
+          key: release-linux
+      - run: cargo build --locked --release
+      - name: Package
         run: |
           set -euo pipefail
-          mkdir -p dist/tmp
-
-          BIN_PATH="target/x86_64-unknown-linux-gnu/release/${BIN_NAME}"
-          ARCHIVE_NAME="rusty-painter-linux-x86_64.zip"
-
-          cp "${BIN_PATH}" dist/tmp/
-          cp README.md dist/tmp/
-          if [ -f LICENSE ]; then cp LICENSE dist/tmp/; fi
-
-          (cd dist/tmp && zip -r "../${ARCHIVE_NAME}" .)
-          rm -rf dist/tmp
-        shell: bash
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          V="${VERSION#v}"
+          NAME="rusty-painter-${V}-linux-x86_64"
+          mkdir -p "dist/${NAME}"
+          cp "target/release/${BIN_NAME}" README.md "dist/${NAME}/"
+          if [ -f LICENSE ]; then cp LICENSE "dist/${NAME}/"; fi
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+      - uses: actions/upload-artifact@v4
         with:
-          name: linux-x86_64-bundle
+          name: linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows build
+    needs: ci
+    if: ${{ github.event_name == 'push' || inputs.windows }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows
+      - run: cargo build --locked --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = $env:VERSION -replace '^v', ''
+          $name = "rusty-painter-$v-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/release/$env:BIN_NAME.exe", README.md "dist/$name/"
+          if (Test-Path LICENSE) { Copy-Item LICENSE "dist/$name/" }
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
           path: dist/*.zip
           if-no-files-found: error
 
-  release:
-    name: Publish release
-    needs: build
+  android:
+    name: Android build
+    needs: ci
+    if: ${{ github.event_name == 'push' || inputs.android }}
     runs-on: ubuntu-latest
-
+    env:
+      NDK_VERSION: "29.0.14206865"
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Android SDK components
+        run: |
+          # Same NDK as local builds; platform/build-tools for target_sdk 36.
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;${NDK_VERSION}" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/release.keystore"
+          if [ -n "${KEYSTORE_BASE64}" ] && [ -n "${KEYSTORE_PASSWORD}" ]; then
+            echo "${KEYSTORE_BASE64}" | base64 --decode > "$KS"
+            PASS="${KEYSTORE_PASSWORD}"
+          else
+            # Without the secrets the APK is still installable, but signed
+            # with a throwaway key: Android refuses to update an install
+            # signed with a different key, so set the secrets for real releases.
+            echo "::warning::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD not set; signing with a throwaway key."
+            PASS="throwaway-$(openssl rand -hex 12)"
+            keytool -genkeypair -keystore "$KS" -storepass "$PASS" -keypass "$PASS" \
+              -alias release -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Rusty Painter CI"
+          fi
+          echo "::add-mask::$PASS"
+          # cargo-apk signs release builds with these.
+          echo "CARGO_APK_RELEASE_KEYSTORE=$KS" >> "$GITHUB_ENV"
+          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+      - name: Build APK
+        run: scripts/build-android.sh aarch64-linux-android release
+      - name: Package
+        run: |
+          set -euo pipefail
+          V="${VERSION#v}"
+          mkdir -p dist
+          cp target/release/apk/rusty-painter.apk "dist/rusty-painter-${V}-android-arm64.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/*.apk
+          if-no-files-found: error
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+  release:
+    name: Publish GitHub release
+    needs: [linux, windows, android]
+    # Runs if every selected build succeeded (unselected ones are skipped).
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (github.event_name == 'push' || inputs.publish) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-
-      - name: Create source archive
-        run: git archive --format=zip -o dist/rusty-painter-source.zip HEAD
-
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Source archive
+        run: |
+          V="${VERSION#v}"
+          git archive --format=zip -o "dist/rusty-painter-${V}-source.zip" HEAD
+      - name: Tag name
+        id: tag
+        run: echo "tag=v${VERSION#v}" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.version }}
-          name: Rusty Painter v${{ inputs.version }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Rusty Painter ${{ steps.tag.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          prerelease: ${{ inputs.prerelease }}
-          files: |
-            dist/rusty-painter-linux-x86_64.zip
-            dist/rusty-painter-source.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: ${{ inputs.prerelease || false }}
+          generate_release_notes: true
+          files: dist/*

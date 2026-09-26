@@ -13,7 +13,7 @@ pub use app::PainterApp;
 pub use app::state::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation};
 
 #[cfg(target_os = "android")]
-use winit::platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid};
+use winit::platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp};
 
 #[cfg(target_os = "android")]
 fn android_native_options(app: AndroidApp) -> eframe::NativeOptions {

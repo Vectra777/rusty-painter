@@ -43,7 +43,34 @@ scripts/build-android.sh
 
 If you have multiple Android SDK/NDK installs, ensure your environment points to the intended one (e.g. `ANDROID_HOME` and `ANDROID_NDK_HOME`).
 
-**Release signing** is not committed. `Cargo.toml` has a commented-out `[package.metadata.android.signing.release]` template; `cargo-apk` reads signing config as plain TOML with no environment-variable interpolation, so uncomment and fill it in locally (never commit it), or sign the built APK afterwards with `apksigner` instead.
+**Release signing** is not committed. `cargo-apk` signs release builds with the keystore given by two environment variables:
+
+```bash
+export CARGO_APK_RELEASE_KEYSTORE=/path/to/release.keystore
+export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=...
+scripts/build-android.sh aarch64-linux-android release   # -> target/release/apk/rusty-painter.apk
+```
+
+(The commented-out `[package.metadata.android.signing.release]` block in `Cargo.toml` works too, but must never be committed.)
+
+## Profiling
+```bash
+scripts/flamegraph.sh            # use the app, close the window -> flamegraph.svg
+FREQ=199 scripts/flamegraph.sh   # fewer samples
+```
+Needs `perf` and `cargo install flamegraph`. The script builds with frame pointers into `target/profiling` and records with `--call-graph fp --no-inline`. Plain `cargo flamegraph` uses DWARF call graphs and inline resolution, which here wrote a large `perf.data` and spent ~7 minutes at full CPU turning a 10 s recording into a graph.
+
+## CI and releases
+- **CI** (`.github/workflows/ci.yml`) runs on every push to `master` and on pull requests: `cargo fmt --check`, `clippy -D warnings`, tests, a bench build, an Android compile check, and `cargo audit`.
+- **Release** (`.github/workflows/release.yml`) runs the same checks first, then builds and publishes:
+  - **By hand:** GitHub → *Actions* → *Release* → *Run workflow*. Enter the version and tick the platforms (Linux, Windows, Android). Untick *Publish* to only build; the files are then downloadable from the run page.
+  - **By tag:** `git tag v0.2.0 && git push origin v0.2.0` builds all three and publishes release `v0.2.0`.
+  - Assets: `rusty-painter-<version>-linux-x86_64.tar.gz`, `-windows-x86_64.zip`, `-android-arm64.apk`, plus a source zip.
+- **Android signing in CI:** add two repository secrets (*Settings → Secrets and variables → Actions*):
+  - `ANDROID_KEYSTORE_BASE64`: `base64 -w0 release.keystore`
+  - `ANDROID_KEYSTORE_PASSWORD`: its password
+
+  Without them the APK is signed with a throwaway key: it installs, but Android won't let a later release update it (different signature), so set them before sharing APKs. Keep the keystore safe: losing it means users must uninstall to upgrade.
 
 ## Controls
 - **Paint**: Left click and drag

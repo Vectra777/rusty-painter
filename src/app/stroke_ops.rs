@@ -1,4 +1,5 @@
 use super::PainterApp;
+use crate::brush_engine::brush_options::BlendMode;
 use crate::brush_engine::stroke_worker::StrokeSetup;
 use crate::canvas::Canvas;
 use crate::selection::SelectionManager;
@@ -7,16 +8,22 @@ use std::sync::Arc;
 
 impl PainterApp {
     pub(crate) fn start_stroke(&mut self, pos: Vec2) {
-        if self.is_active_layer_locked() {
+        self.start_stroke_with_pressure(pos, 1.0);
+    }
+
+    /// Start a stroke whose first dab uses `pressure` (a size factor).
+    pub(crate) fn start_stroke_with_pressure(&mut self, pos: Vec2, pressure: f32) {
+        if self.is_active_layer_locked() || self.is_active_layer_folder() {
             return;
+        }
+        if self.brush_state.brush.brush_options.blend_mode != BlendMode::Eraser {
+            let color = self.brush_state.brush.brush_options.color;
+            self.brush_state.remember_color(color);
         }
         let selection = self
             .selection_manager
             .has_selection()
-            .then(|| SelectionManager {
-                current_shape: self.selection_manager.current_shape.clone(),
-                is_dragging: false,
-            });
+            .then(|| SelectionManager::with_shape(self.selection_manager.current_shape.clone()));
         self.stroke_worker.begin(StrokeSetup {
             canvas: Arc::clone(&self.canvas),
             brush: self.brush_state.brush.clone(),
@@ -28,7 +35,8 @@ impl PainterApp {
         self.render_cache.below_cache = None;
         // No pressure sample is available for the synthetic first point
         // of a stroke; 1.0 preserves the pre-existing (unscaled) behavior.
-        self.stroke_worker.sample(pos, 1.0);
+        self.stroke_worker.sample(pos, pressure);
+        self.viewport.touch.stroke_started = Some(std::time::Instant::now());
     }
 
     pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
@@ -45,6 +53,13 @@ impl PainterApp {
         self.render_cache.below_cache = None;
     }
 
+    fn is_active_layer_folder(&self) -> bool {
+        self.canvas
+            .layers
+            .get(self.canvas.active_layer_idx)
+            .is_some_and(|l| l.kind == crate::canvas::storage::LayerKind::Group)
+    }
+
     fn is_active_layer_locked(&self) -> bool {
         self.canvas
             .layers
@@ -57,8 +72,8 @@ impl PainterApp {
     /// for redraw and file finished strokes into their layer's undo history.
     /// Returns whether it still has queued samples to paint.
     pub(crate) fn sync_stroke_worker(&mut self) -> bool {
-        for (tx, ty) in self.stroke_worker.take_dirty() {
-            self.mark_tile_dirty(tx, ty);
+        for ((tx, ty), rect) in self.stroke_worker.take_dirty() {
+            self.mark_tile_damage(tx, ty, rect);
         }
         for finished in self.stroke_worker.take_finished() {
             if let Some(history) = self.layer_state.histories.get_mut(finished.layer_idx) {

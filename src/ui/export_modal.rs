@@ -4,7 +4,6 @@ use crate::{
     utils::exporter::{ExportFormat, save_color_image},
 };
 use eframe::egui;
-use eframe::egui::ColorImage;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -17,6 +16,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     let mut open = app.export_state.show_modal;
     egui::Window::new("Export Canvas")
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -82,9 +82,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     // Flatten on the UI thread, then save on a worker thread.
                     // The shared canvas is not cloned across threads; size limits keep this bounded.
                     app.stroke_worker.wait_idle();
-                    let mut img = ColorImage::new([w, h], egui::Color32::TRANSPARENT);
-                    app.canvas
-                        .write_region_to_color_image(0, 0, w, h, &mut img, 1);
+                    let img = app.canvas.flatten();
 
                     app.export_state.in_progress = true;
                     app.export_state.progress = 0.05;

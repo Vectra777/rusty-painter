@@ -4,12 +4,20 @@ on:
   pull_request:
   push:
     branches: [main, master]
+  # Reused by the release workflow so a release always passes the same checks.
+  workflow_call:
+    inputs:
+      audit:
+        description: "Run cargo audit (advisories in dependencies)"
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  rust:
+  test:
+    name: Format, lint & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,9 +27,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo check --locked --benches
 
+  android-check:
+    # Android-only code (vendored winit patch, JNI glue) isn't compiled by the
+    # desktop build, so it can break silently; check it on every push.
+    name: Android compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - name: cargo check (aarch64-linux-android)
+        run: |
+          # The runner image ships an Android NDK; C dependencies (zstd) need its clang.
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export ANDROID_NDK_ROOT="$NDK"
+          export CC_aarch64_linux_android="$TC/aarch64-linux-android29-clang"
+          export AR_aarch64_linux_android="$TC/llvm-ar"
+          cargo check --locked --lib --target aarch64-linux-android
+
+  audit:
+    name: Dependency audit
+    # Skipped when a release reuses this workflow: a new upstream advisory
+    # shouldn't block shipping, it shows up on the next push instead.
+    # (`github.workflow` is the caller's name when called; a missing input
+    # compares equal to false, so test the name rather than the input alone.)
+    if: ${{ github.workflow == 'CI' || inputs.audit }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-audit --locked
       - run: cargo audit

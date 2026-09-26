@@ -26,6 +26,16 @@ impl ExportFormat {
         }
     }
 
+    /// MIME type, e.g. for Android's MediaStore.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn mime_type(&self) -> &'static str {
+        match self {
+            ExportFormat::Png => "image/png",
+            ExportFormat::Jpeg => "image/jpeg",
+            ExportFormat::Tiff => "image/tiff",
+        }
+    }
+
     fn image_format(&self) -> ImageFormat {
         match self {
             ExportFormat::Png => ImageFormat::Png,
@@ -35,13 +45,8 @@ impl ExportFormat {
     }
 }
 
-/// Save a precomputed color image to disk.
-pub fn save_color_image(
-    img: ColorImage,
-    path: impl Into<PathBuf>,
-    format: ExportFormat,
-) -> Result<(), String> {
-    let path = path.into();
+/// Convert an egui image into an `image` RGBA buffer.
+pub(crate) fn to_rgba_image(img: ColorImage) -> Result<image::RgbaImage, String> {
     let width = img.size[0];
     let height = img.size[1];
     let byte_len = width
@@ -49,16 +54,74 @@ pub fn save_color_image(
         .and_then(|px| px.checked_mul(4))
         .ok_or_else(|| "Image is too large to export".to_string())?;
 
-    // Convert egui ColorImage to raw RGBA bytes
-    let mut bytes = Vec::with_capacity(byte_len);
-    for px in &img.pixels {
-        let [r, g, b, a] = px.to_srgba_unmultiplied();
-        bytes.extend_from_slice(&[r, g, b, a]);
-    }
+    // Unpremultiply to raw RGBA bytes, in parallel.
+    use rayon::prelude::*;
+    let mut bytes = vec![0u8; byte_len];
+    bytes
+        .par_chunks_mut(4 * 4096)
+        .zip(img.pixels.par_chunks(4096))
+        .for_each(|(out, px)| {
+            for (o, &p) in out.as_chunks_mut::<4>().0.iter_mut().zip(px) {
+                o.copy_from_slice(&crate::canvas::blend::unmultiply(p));
+            }
+        });
 
-    let rgba = image::RgbaImage::from_raw(width as u32, height as u32, bytes)
-        .ok_or_else(|| "Failed to build RGBA image".to_string())?;
+    image::RgbaImage::from_raw(width as u32, height as u32, bytes)
+        .ok_or_else(|| "Failed to build RGBA image".to_string())
+}
 
-    rgba.save_with_format(path, format.image_format())
-        .map_err(|e| e.to_string())
+/// JPEG has no transparency: flatten onto white. The pixels are
+/// premultiplied, so "over white" is adding the uncovered part of white.
+fn to_rgb_on_white(img: &ColorImage) -> Result<image::RgbImage, String> {
+    use rayon::prelude::*;
+    let (width, height) = (img.size[0], img.size[1]);
+    let mut bytes = vec![0u8; width * height * 3];
+    bytes
+        .par_chunks_mut(3 * 4096)
+        .zip(img.pixels.par_chunks(4096))
+        .for_each(|(out, px)| {
+            for (o, &p) in out.as_chunks_mut::<3>().0.iter_mut().zip(px) {
+                let white = 255 - p.a();
+                o.copy_from_slice(&[
+                    p.r().saturating_add(white),
+                    p.g().saturating_add(white),
+                    p.b().saturating_add(white),
+                ]);
+            }
+        });
+    image::RgbImage::from_raw(width as u32, height as u32, bytes)
+        .ok_or_else(|| "Failed to build RGB image".to_string())
+}
+
+/// Encode `img` as `format` into `out`.
+fn encode_into<W: std::io::Write + std::io::Seek>(
+    img: ColorImage,
+    format: ExportFormat,
+    out: &mut W,
+) -> Result<(), String> {
+    let result = match format {
+        ExportFormat::Jpeg => to_rgb_on_white(&img)?.write_to(out, format.image_format()),
+        _ => to_rgba_image(img)?.write_to(out, format.image_format()),
+    };
+    result.map_err(|e| e.to_string())
+}
+
+/// Save a precomputed color image to disk.
+pub fn save_color_image(
+    img: ColorImage,
+    path: impl Into<PathBuf>,
+    format: ExportFormat,
+) -> Result<(), String> {
+    let file = std::fs::File::create(path.into()).map_err(|e| e.to_string())?;
+    let mut out = std::io::BufWriter::new(file);
+    encode_into(img, format, &mut out)?;
+    std::io::Write::flush(&mut out).map_err(|e| e.to_string())
+}
+
+/// Encode a color image in memory (for Android's MediaStore).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn encode_color_image(img: ColorImage, format: ExportFormat) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    encode_into(img, format, &mut std::io::Cursor::new(&mut bytes))?;
+    Ok(bytes)
 }

@@ -44,6 +44,14 @@ pub struct BrushOptions {
     pub opacity: f32, // 0..1
     pub blend_mode: BlendMode,
     pub painting_mode: PaintingMode,
+    /// Pen pressure scales the diameter, down to `pressure_min_size` of it.
+    pub pressure_size: bool,
+    /// Diameter fraction (0..1) at zero pressure.
+    pub pressure_min_size: f32,
+    /// Pen pressure scales the opacity.
+    pub pressure_opacity: bool,
+    /// Pen pressure scales the flow.
+    pub pressure_flow: bool,
 }
 
 impl BrushOptions {
@@ -61,6 +69,10 @@ impl BrushOptions {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             painting_mode: PaintingMode::BuildUp,
+            pressure_size: true,
+            pressure_min_size: 0.0,
+            pressure_opacity: false,
+            pressure_flow: false,
         }
     }
 }

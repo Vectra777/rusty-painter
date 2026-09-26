@@ -1,4 +1,5 @@
 use crate::app::state::{MAX_CANVAS_DIMENSION, MAX_CANVAS_DPI};
+use crate::canvas::blend_modes::BlendSpace;
 use crate::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation, PainterApp};
 use eframe::egui;
 
@@ -10,6 +11,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     let mut open = app.modal_state.show_new_canvas_modal;
     egui::Window::new("New Canvas")
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -114,6 +116,12 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
             });
             ui.weak("Grayscale paints in a single channel.");
 
+            ui.horizontal(|ui| {
+                ui.label("Color blending");
+                blend_space_picker(ui, &mut settings.blend_space);
+            });
+            ui.weak(blend_space_hint(settings.blend_space));
+
             let validation = settings.validated_dimensions();
             match validation {
                 Ok((px_w, px_h)) => {
@@ -143,4 +151,27 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
         });
 
     app.modal_state.show_new_canvas_modal = open;
+}
+
+/// Linear / Gamma choice for how a document blends colours.
+pub(crate) fn blend_space_picker(ui: &mut egui::Ui, space: &mut BlendSpace) -> bool {
+    let mut changed = false;
+    changed |= ui
+        .selectable_value(space, BlendSpace::Linear, "Linear light")
+        .changed();
+    changed |= ui
+        .selectable_value(space, BlendSpace::Gamma, "Gamma (Krita / Photoshop)")
+        .changed();
+    changed
+}
+
+pub(crate) fn blend_space_hint(space: BlendSpace) -> &'static str {
+    match space {
+        BlendSpace::Linear => {
+            "Physically correct mixing: bright, clean colour blends and lighter soft edges."
+        }
+        BlendSpace::Gamma => {
+            "Mixes stored sRGB values like Krita and Photoshop: familiar soft-brush falloff and blend modes."
+        }
+    }
 }

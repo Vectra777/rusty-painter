@@ -1,18 +1,30 @@
 use eframe::egui::Vec2;
-use eframe::egui::{self, Color32, Painter, Pos2, Shape, Stroke};
+use eframe::egui::{Color32, Painter, Pos2, Shape, Stroke};
+use std::sync::Arc;
+pub mod mask;
 pub mod transform;
+
+pub use mask::{SelectionMask, SelectionMode};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SelectionType {
     Rectangle,
     Circle,
     Lasso,
+    /// Paint the selection with a soft round brush.
+    Brush,
 }
 
 #[derive(Clone, Debug)]
 pub enum SelectionShape {
-    Rectangle { start: Vec2, end: Vec2 },
-    Circle { center: Vec2, radius: f32 },
+    Rectangle {
+        start: Vec2,
+        end: Vec2,
+    },
+    Circle {
+        center: Vec2,
+        radius: f32,
+    },
     Lasso {
         points: Vec<Vec2>,
         /// Axis-aligned bounding box of `points`, kept up to date on every mutation
@@ -22,6 +34,9 @@ pub enum SelectionShape {
         bbox_min: Vec2,
         bbox_max: Vec2,
     },
+    /// Per-pixel selection: combinations (add/subtract), painted and
+    /// transformed selections.
+    Mask(Arc<SelectionMask>),
 }
 
 pub(crate) fn new_lasso_shape(points: Vec<Vec2>) -> SelectionShape {
@@ -74,7 +89,8 @@ fn shape_row_spans(shape: &SelectionShape, y: f32, spans: &mut Vec<(f32, f32)>) 
             for i in 0..points.len() {
                 if (points[i].y > y) != (points[j].y > y) {
                     crossings.push(
-                        (points[j].x - points[i].x) * (y - points[i].y) / (points[j].y - points[i].y)
+                        (points[j].x - points[i].x) * (y - points[i].y)
+                            / (points[j].y - points[i].y)
                             + points[i].x,
                     );
                 }
@@ -82,14 +98,92 @@ fn shape_row_spans(shape: &SelectionShape, y: f32, spans: &mut Vec<(f32, f32)>) 
             }
             crossings.sort_by(f32::total_cmp);
             // Even-odd rule: inside between each consecutive pair of crossings.
-            for pair in crossings.chunks_exact(2) {
+            for pair in crossings.as_chunks::<2>().0 {
                 let (a, b) = (pair[0].max(bbox_min.x), pair[1].min(bbox_max.x));
                 if a <= b {
                     spans.push((a, b));
                 }
             }
         }
+        // Coverage comes straight from the mask (see `shape_row_coverage`).
+        SelectionShape::Mask(_) => {}
     }
+}
+
+/// Anti-aliased coverage (0..=1) of pixels `x0..x0 + out.len()` in row `y`
+/// for `shape`: 8×8 samples per pixel for vector shapes, stored coverage
+/// for masks.
+pub(crate) fn shape_row_coverage(shape: &SelectionShape, y: usize, x0: usize, out: &mut [f32]) {
+    if let SelectionShape::Mask(mask) = shape {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = mask.value((x0 + i) as i32, y as i32) as f32 / 255.0;
+        }
+        return;
+    }
+    const S: usize = 8;
+    let mut counts = vec![0u32; out.len()];
+    let mut spans = Vec::new();
+    for j in 0..S {
+        let sy = y as f32 + (j as f32 + 0.5) / S as f32;
+        spans.clear();
+        shape_row_spans(shape, sy, &mut spans);
+        for &(a, b) in &spans {
+            add_span_samples(a, b, x0, S, &mut counts);
+        }
+    }
+    let inv = 1.0 / (S * S) as f32;
+    for (slot, count) in out.iter_mut().zip(counts) {
+        *slot = count as f32 * inv;
+    }
+}
+
+/// A shape's area as a mask, over its bounds clipped to the canvas.
+fn rasterize_shape(shape: &SelectionShape, canvas_size: [usize; 2]) -> Option<SelectionMask> {
+    if let SelectionShape::Mask(mask) = shape {
+        return Some((**mask).clone());
+    }
+    let b = shape_bounds(shape)?;
+    let (w, h) = (canvas_size[0] as i32, canvas_size[1] as i32);
+    let bounds = [
+        (b.min.x.floor() as i32 - 1).clamp(0, w),
+        (b.min.y.floor() as i32 - 1).clamp(0, h),
+        (b.max.x.ceil() as i32 + 1).clamp(0, w),
+        (b.max.y.ceil() as i32 + 1).clamp(0, h),
+    ];
+    Some(SelectionMask::rasterize(bounds, |y, x0, out| {
+        shape_row_coverage(shape, y, x0, out)
+    }))
+}
+
+/// Canvas-space bounding box of a shape.
+fn shape_bounds(shape: &SelectionShape) -> Option<eframe::egui::Rect> {
+    use eframe::egui::{Rect, pos2, vec2};
+    match shape {
+        SelectionShape::Rectangle { start, end } => Some(Rect::from_two_pos(
+            pos2(start.x, start.y),
+            pos2(end.x, end.y),
+        )),
+        SelectionShape::Circle { center, radius } => Some(Rect::from_center_size(
+            pos2(center.x, center.y),
+            vec2(*radius * 2.0, *radius * 2.0),
+        )),
+        SelectionShape::Lasso {
+            points,
+            bbox_min,
+            bbox_max,
+        } => (!points.is_empty()).then(|| {
+            Rect::from_min_max(pos2(bbox_min.x, bbox_min.y), pos2(bbox_max.x, bbox_max.y))
+        }),
+        SelectionShape::Mask(mask) => Some(Rect::from_min_size(
+            pos2(mask.x0 as f32, mask.y0 as f32),
+            vec2(mask.w as f32, mask.h as f32),
+        )),
+    }
+}
+
+/// Area of a shape, to tell a click (deselect) from a drag.
+fn shape_is_tiny(shape: &SelectionShape) -> bool {
+    shape_bounds(shape).is_none_or(|b| b.width() < 2.0 || b.height() < 2.0)
 }
 
 /// Count the samples of span `[a, b]` falling in each pixel of `counts`
@@ -117,8 +211,23 @@ fn add_span_samples(a: f32, b: f32, x0: usize, s: usize, counts: &mut [u32]) {
 pub struct SelectionManager {
     pub current_shape: Option<SelectionShape>,
     pub is_dragging: bool,
-    // For now we just visualize the creation.
-    // In a full implementation we would have a committed mask here.
+    /// How new selections combine with the current one (Shift/Alt
+    /// override it per drag).
+    pub mode: SelectionMode,
+    /// Canvas size, to clip rasterized selections.
+    pub canvas_size: [usize; 2],
+    /// Selection brush radius and hardness (0..=1).
+    pub brush_radius: f32,
+    pub brush_hardness: f32,
+    /// During an add/subtract drag: the selection being combined into,
+    /// and the mode for this drag.
+    drag_base: Option<SelectionShape>,
+    drag_mode: SelectionMode,
+    /// During a selection-brush drag: the full-canvas mask being painted,
+    /// the last dab position, and the path (drawn while painting).
+    brush_mask: Option<SelectionMask>,
+    brush_last: Option<Vec2>,
+    pub brush_path: Vec<Vec2>,
 }
 
 impl Default for SelectionManager {
@@ -132,12 +241,62 @@ impl SelectionManager {
         Self {
             current_shape: None,
             is_dragging: false,
+            mode: SelectionMode::Replace,
+            canvas_size: [usize::MAX / 4, usize::MAX / 4],
+            brush_radius: 24.0,
+            brush_hardness: 0.8,
+            drag_base: None,
+            drag_mode: SelectionMode::Replace,
+            brush_mask: None,
+            brush_last: None,
+            brush_path: Vec::new(),
         }
     }
 
+    /// A manager holding `shape`, e.g. a copy of the selection for a stroke.
+    pub fn with_shape(shape: Option<SelectionShape>) -> Self {
+        Self {
+            current_shape: shape,
+            ..Self::new()
+        }
+    }
+
+    /// Start a selection with the manager's own mode.
     pub fn start_selection(&mut self, pos: Vec2, sel_type: SelectionType) {
+        self.start_selection_with_mode(pos, sel_type, self.mode);
+    }
+
+    /// Start a selection of `sel_type` at `pos`, combining with the current
+    /// selection according to `mode`.
+    pub fn start_selection_with_mode(
+        &mut self,
+        pos: Vec2,
+        sel_type: SelectionType,
+        mode: SelectionMode,
+    ) {
         self.is_dragging = true;
+        self.drag_mode = mode;
+        self.drag_base = match mode {
+            SelectionMode::Replace => None,
+            _ => self.current_shape.take(),
+        };
         match sel_type {
+            SelectionType::Brush => {
+                let [w, h] = self.canvas_size;
+                let mut mask = SelectionMask::empty(0, 0, w.min(1 << 15), h.min(1 << 15));
+                // Add/subtract paint onto the current selection.
+                if let Some(base) = &self.drag_base
+                    && let Some(base) = rasterize_shape(base, self.canvas_size)
+                {
+                    mask = mask.combine(&base, SelectionMode::Add);
+                }
+                let subtract = mode == SelectionMode::Subtract;
+                mask.stamp(pos, self.brush_radius, self.brush_hardness, !subtract);
+                self.brush_mask = Some(mask);
+                self.brush_last = Some(pos);
+                self.brush_path = vec![pos];
+                self.current_shape = None;
+            }
             SelectionType::Rectangle => {
                 self.current_shape = Some(SelectionShape::Rectangle {
                     start: pos,
@@ -158,6 +317,20 @@ impl SelectionManager {
 
     pub fn update_selection(&mut self, pos: Vec2) {
         if !self.is_dragging {
+            return;
+        }
+        if let (Some(mask), Some(last)) = (&mut self.brush_mask, self.brush_last) {
+            // Dabs along the segment, a quarter radius apart.
+            let add = self.drag_mode != SelectionMode::Subtract;
+            let step = (self.brush_radius * 0.25).max(0.5);
+            let dist = (pos - last).length();
+            let n = (dist / step).ceil().max(1.0) as usize;
+            for i in 1..=n {
+                let p = last + (pos - last) * (i as f32 / n as f32);
+                mask.stamp(p, self.brush_radius, self.brush_hardness, add);
+            }
+            self.brush_last = Some(pos);
+            self.brush_path.push(pos);
             return;
         }
         if let Some(shape) = &mut self.current_shape {
@@ -190,17 +363,88 @@ impl SelectionManager {
                         }
                     }
                 }
+                SelectionShape::Mask(_) => {}
             }
         }
     }
 
     pub fn end_selection(&mut self) {
         self.is_dragging = false;
+        let base = self.drag_base.take();
+        if let Some(mask) = self.brush_mask.take() {
+            self.brush_last = None;
+            self.brush_path.clear();
+            self.current_shape = mask.cropped().map(|m| SelectionShape::Mask(Arc::new(m)));
+            return;
+        }
+        let Some(shape) = self.current_shape.take() else {
+            self.current_shape = base;
+            return;
+        };
+        // A click without a drag: deselect (replace) or keep (add/subtract).
+        if shape_is_tiny(&shape) {
+            self.current_shape = base;
+            return;
+        }
+        self.current_shape = match base {
+            None => Some(shape),
+            Some(base) => {
+                let combined = match (
+                    rasterize_shape(&base, self.canvas_size),
+                    rasterize_shape(&shape, self.canvas_size),
+                ) {
+                    (Some(a), Some(b)) => a.combine(&b, self.drag_mode).cropped(),
+                    (None, Some(b)) if self.drag_mode == SelectionMode::Add => b.cropped(),
+                    (Some(a), _) => a.cropped(),
+                    _ => None,
+                };
+                combined.map(|m| SelectionShape::Mask(Arc::new(m)))
+            }
+        };
     }
 
     pub fn clear_selection(&mut self) {
         self.current_shape = None;
         self.is_dragging = false;
+        self.drag_base = None;
+        self.brush_mask = None;
+        self.brush_last = None;
+        self.brush_path.clear();
+    }
+
+    /// Select the whole canvas.
+    pub fn select_all(&mut self) {
+        let [w, h] = self.canvas_size;
+        self.clear_selection();
+        self.current_shape = Some(SelectionShape::Rectangle {
+            start: Vec2::ZERO,
+            end: Vec2::new(w as f32, h as f32),
+        });
+    }
+
+    /// Swap selected and unselected pixels (within the canvas).
+    pub fn invert(&mut self) {
+        let [w, h] = self.canvas_size;
+        let all = SelectionMask::new(0, 0, w, h, vec![255; w * h]);
+        self.current_shape = match self
+            .current_shape
+            .take()
+            .and_then(|s| rasterize_shape(&s, self.canvas_size))
+        {
+            None => Some(SelectionShape::Rectangle {
+                start: Vec2::ZERO,
+                end: Vec2::new(w as f32, h as f32),
+            }),
+            Some(current) => all
+                .combine(&current, SelectionMode::Subtract)
+                .cropped()
+                .map(|m| SelectionShape::Mask(Arc::new(m))),
+        };
+    }
+
+    /// The selection being combined into during an add/subtract drag.
+    pub fn drag_base(&self) -> Option<&SelectionShape> {
+        self.drag_base.as_ref()
     }
 
     pub fn contains(&self, p: Vec2) -> bool {
@@ -249,6 +493,7 @@ impl SelectionManager {
                     }
                     inside
                 }
+                SelectionShape::Mask(mask) => mask.contains(x, y),
             }
         } else {
             true
@@ -306,24 +551,9 @@ impl SelectionManager {
     /// sub-row's inside spans are computed exactly, so cost is per span, not
     /// per sample.
     pub fn row_coverage(&self, y: usize, x0: usize, out: &mut [f32]) {
-        const S: usize = 8;
-        let Some(shape) = &self.current_shape else {
-            out.fill(1.0);
-            return;
-        };
-        let mut counts = vec![0u32; out.len()];
-        let mut spans = Vec::new();
-        for j in 0..S {
-            let sy = y as f32 + (j as f32 + 0.5) / S as f32;
-            spans.clear();
-            shape_row_spans(shape, sy, &mut spans);
-            for &(a, b) in &spans {
-                add_span_samples(a, b, x0, S, &mut counts);
-            }
-        }
-        let inv = 1.0 / (S * S) as f32;
-        for (slot, count) in out.iter_mut().zip(counts) {
-            *slot = count as f32 * inv;
+        match &self.current_shape {
+            Some(shape) => shape_row_coverage(shape, y, x0, out),
+            None => out.fill(1.0),
         }
     }
 
@@ -333,130 +563,30 @@ impl SelectionManager {
 
     /// Get the bounding rectangle of the current selection in canvas coordinates.
     pub fn get_bounds(&self) -> Option<eframe::egui::Rect> {
-        if let Some(shape) = &self.current_shape {
-            match shape {
-                SelectionShape::Rectangle { start, end } => {
-                    let min_x = start.x.min(end.x);
-                    let max_x = start.x.max(end.x);
-                    let min_y = start.y.min(end.y);
-                    let max_y = start.y.max(end.y);
-                    Some(eframe::egui::Rect::from_min_max(
-                        eframe::egui::pos2(min_x, min_y),
-                        eframe::egui::pos2(max_x, max_y),
-                    ))
-                }
-                SelectionShape::Circle { center, radius } => {
-                    Some(eframe::egui::Rect::from_center_size(
-                        eframe::egui::pos2(center.x, center.y),
-                        eframe::egui::vec2(*radius * 2.0, *radius * 2.0),
-                    ))
-                }
-                SelectionShape::Lasso {
-                    points,
-                    bbox_min,
-                    bbox_max,
-                } => {
-                    if points.is_empty() {
-                        return None;
-                    }
-                    Some(eframe::egui::Rect::from_min_max(
-                        eframe::egui::pos2(bbox_min.x, bbox_min.y),
-                        eframe::egui::pos2(bbox_max.x, bbox_max.y),
-                    ))
-                }
-            }
-        } else {
-            None
-        }
+        self.current_shape.as_ref().and_then(shape_bounds)
     }
 
-    pub fn draw_overlay(
-        &self,
-        painter: &Painter,
-        zoom: f32,
-        offset: Pos2,
-        _canvas_height: f32,
-        transform: Option<&crate::selection::transform::TransformInfo>,
-    ) {
-        if let Some(shape) = &self.current_shape {
-            let to_screen = |v: Vec2| -> Pos2 {
-                let mut p = v;
-                if let Some(info) = transform
-                    && let Some(bounds) = info.bounds
-                {
-                    let center = Vec2::new(bounds.center().x, bounds.center().y);
-                    let (sin_r, cos_r) = info.rotation.sin_cos();
-
-                    let dx = p.x - center.x;
-                    let dy = p.y - center.y;
-
-                    let sx = dx * info.scale.x;
-                    let sy = dy * info.scale.y;
-
-                    let rx = sx * cos_r - sy * sin_r;
-                    let ry = sx * sin_r + sy * cos_r;
-
-                    p.x = rx + center.x + info.offset.x;
-                    p.y = ry + center.y + info.offset.y;
-                }
-                Pos2::new(offset.x + p.x * zoom, offset.y + p.y * zoom)
+    /// Draw the selection outline. `to_screen` maps canvas points to the
+    /// screen (zoom, pan and canvas rotation); `zoom` sets curve detail.
+    pub fn draw_overlay(&self, painter: &Painter, zoom: f32, to_screen: &dyn Fn(Vec2) -> Pos2) {
+        // While add/subtract-dragging, the selection being combined into.
+        if let Some(base) = &self.drag_base {
+            draw_shape_outline(painter, base, to_screen, zoom);
+        }
+        if self.brush_mask.is_some() {
+            // The painted path, until the mask is traced on release.
+            let color = if self.drag_mode == SelectionMode::Subtract {
+                Color32::from_rgba_unmultiplied(255, 80, 80, 70)
+            } else {
+                Color32::from_rgba_unmultiplied(80, 160, 255, 70)
             };
-
-            let stroke_white = Stroke::new(1.0, Color32::WHITE);
-            let stroke_black = Stroke::new(1.0, Color32::BLACK);
-            let dash_len = 5.0;
-            let gap_len = 5.0;
-
-            match shape {
-                SelectionShape::Rectangle { start, end } => {
-                    let p1 = to_screen(*start);
-                    let p2 = to_screen(*end);
-                    let rect = egui::Rect::from_two_pos(p1, p2);
-
-                    let points = vec![
-                        rect.min,
-                        Pos2::new(rect.max.x, rect.min.y),
-                        rect.max,
-                        Pos2::new(rect.min.x, rect.max.y),
-                        rect.min,
-                    ];
-                    painter.add(Shape::dashed_line(&points, stroke_white, dash_len, gap_len));
-                    painter.add(Shape::line(points, stroke_black));
-                }
-                SelectionShape::Circle { center, radius } => {
-                    let center_screen = to_screen(*center);
-                    let radius_screen = *radius * zoom;
-
-                    let n = 64;
-                    let mut points = Vec::with_capacity(n + 1);
-                    for i in 0..=n {
-                        let angle = (i as f32 / n as f32) * 2.0 * std::f32::consts::PI;
-                        let (sin, cos) = angle.sin_cos();
-                        points.push(
-                            center_screen + eframe::egui::Vec2::new(cos, sin) * radius_screen,
-                        );
-                    }
-                    painter.add(Shape::dashed_line(&points, stroke_white, dash_len, gap_len));
-                    painter.add(Shape::line(points, stroke_black));
-                }
-                SelectionShape::Lasso { points, .. } => {
-                    if points.len() < 2 {
-                        return;
-                    }
-                    let mut outline_points: Vec<Pos2> =
-                        points.iter().map(|p| to_screen(*p)).collect();
-                    if let Some(&first) = outline_points.first() {
-                        outline_points.push(first);
-                    }
-                    painter.add(Shape::dashed_line(
-                        &outline_points,
-                        stroke_white,
-                        dash_len,
-                        gap_len,
-                    ));
-                    painter.add(Shape::line(outline_points, stroke_black));
-                }
+            for p in &self.brush_path {
+                painter.circle_filled(to_screen(*p), self.brush_radius * zoom, color);
             }
+            return;
+        }
+        if let Some(shape) = &self.current_shape {
+            draw_shape_outline(painter, shape, to_screen, zoom);
         }
     }
 
@@ -521,6 +651,9 @@ impl SelectionManager {
                         }
                         (*bbox_min, *bbox_max) = compute_lasso_bbox(points);
                     }
+                    SelectionShape::Mask(mask) => {
+                        *mask = Arc::new(transform_mask(mask, offset, rotation, scale, center));
+                    }
                 }
             } else {
                 // Simple translation/uniform scale
@@ -546,7 +679,122 @@ impl SelectionManager {
                         }
                         (*bbox_min, *bbox_max) = compute_lasso_bbox(points);
                     }
+                    SelectionShape::Mask(mask) => {
+                        *mask = Arc::new(transform_mask(mask, offset, rotation, scale, center));
+                    }
                 }
+            }
+        }
+    }
+}
+
+/// A mask moved/rotated/scaled like the pixels under it (nearest-neighbour).
+fn transform_mask(
+    mask: &SelectionMask,
+    offset: Vec2,
+    rotation: f32,
+    scale: Vec2,
+    center: Vec2,
+) -> SelectionMask {
+    let (sin_r, cos_r) = rotation.sin_cos();
+    let forward = |p: Vec2| {
+        let (dx, dy) = ((p.x - center.x) * scale.x, (p.y - center.y) * scale.y);
+        Vec2::new(
+            dx * cos_r - dy * sin_r + center.x + offset.x,
+            dx * sin_r + dy * cos_r + center.y + offset.y,
+        )
+    };
+    let (x0, y0) = (mask.x0 as f32, mask.y0 as f32);
+    let (x1, y1) = (x0 + mask.w as f32, y0 + mask.h as f32);
+    let corners = [
+        Vec2::new(x0, y0),
+        Vec2::new(x1, y0),
+        Vec2::new(x1, y1),
+        Vec2::new(x0, y1),
+    ]
+    .map(forward);
+    let min = corners.iter().fold(Vec2::splat(f32::MAX), |a, c| {
+        Vec2::new(a.x.min(c.x), a.y.min(c.y))
+    });
+    let max = corners.iter().fold(Vec2::splat(f32::MIN), |a, c| {
+        Vec2::new(a.x.max(c.x), a.y.max(c.y))
+    });
+    let bounds = [
+        min.x.floor() as i32,
+        min.y.floor() as i32,
+        max.x.ceil() as i32,
+        max.y.ceil() as i32,
+    ];
+    let (sx, sy) = (
+        if scale.x.abs() < 1e-6 { 1e-6 } else { scale.x },
+        if scale.y.abs() < 1e-6 { 1e-6 } else { scale.y },
+    );
+    mask.resample(bounds, |p| {
+        let (dx, dy) = (p.x - center.x - offset.x, p.y - center.y - offset.y);
+        let (rx, ry) = (dx * cos_r + dy * sin_r, -dx * sin_r + dy * cos_r);
+        Vec2::new(rx / sx + center.x, ry / sy + center.y)
+    })
+}
+
+/// Marching-ants outline: a solid black line under white dashes, so it
+/// shows on any colour.
+fn draw_path(painter: &Painter, points: &[Pos2]) {
+    if points.len() < 2 {
+        return;
+    }
+    painter.add(Shape::line(
+        points.to_vec(),
+        Stroke::new(1.0_f32, Color32::BLACK),
+    ));
+    painter.extend(Shape::dashed_line(
+        points,
+        Stroke::new(1.0_f32, Color32::WHITE),
+        4.0,
+        4.0,
+    ));
+}
+
+fn draw_shape_outline(
+    painter: &Painter,
+    shape: &SelectionShape,
+    to_screen: &dyn Fn(Vec2) -> Pos2,
+    zoom: f32,
+) {
+    match shape {
+        SelectionShape::Rectangle { start, end } => {
+            let corners = [
+                *start,
+                Vec2::new(end.x, start.y),
+                *end,
+                Vec2::new(start.x, end.y),
+                *start,
+            ];
+            draw_path(painter, &corners.map(to_screen));
+        }
+        SelectionShape::Circle { center, radius } => {
+            let n = ((radius * zoom * 0.5) as usize).clamp(24, 256);
+            let points: Vec<Pos2> = (0..=n)
+                .map(|i| {
+                    let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                    to_screen(*center + Vec2::new(a.cos(), a.sin()) * *radius)
+                })
+                .collect();
+            draw_path(painter, &points);
+        }
+        SelectionShape::Lasso { points, .. } => {
+            let mut pts: Vec<Pos2> = points.iter().map(|p| to_screen(*p)).collect();
+            if let Some(&first) = pts.first() {
+                pts.push(first);
+            }
+            draw_path(painter, &pts);
+        }
+        SelectionShape::Mask(mask) => {
+            for outline in mask.outline() {
+                let mut pts: Vec<Pos2> = outline.iter().map(|p| to_screen(*p)).collect();
+                if let Some(&first) = pts.first() {
+                    pts.push(first);
+                }
+                draw_path(painter, &pts);
             }
         }
     }
@@ -555,6 +803,118 @@ impl SelectionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn drag(
+        sel: &mut SelectionManager,
+        t: SelectionType,
+        mode: SelectionMode,
+        a: (f32, f32),
+        b: (f32, f32),
+    ) {
+        sel.start_selection_with_mode(Vec2::new(a.0, a.1), t, mode);
+        sel.update_selection(Vec2::new(b.0, b.1));
+        sel.end_selection();
+    }
+
+    #[test]
+    fn shift_adds_and_alt_subtracts_selections() {
+        let mut sel = SelectionManager::new();
+        sel.canvas_size = [200, 200];
+        drag(
+            &mut sel,
+            SelectionType::Rectangle,
+            SelectionMode::Replace,
+            (10.0, 10.0),
+            (50.0, 50.0),
+        );
+        drag(
+            &mut sel,
+            SelectionType::Rectangle,
+            SelectionMode::Add,
+            (100.0, 100.0),
+            (140.0, 140.0),
+        );
+        assert!(matches!(sel.current_shape, Some(SelectionShape::Mask(_))));
+        assert!(sel.contains_coords(20.5, 20.5) && sel.contains_coords(120.5, 120.5));
+        assert!(!sel.contains_coords(75.5, 75.5));
+        drag(
+            &mut sel,
+            SelectionType::Circle,
+            SelectionMode::Subtract,
+            (30.0, 30.0),
+            (38.0, 30.0),
+        );
+        assert!(!sel.contains_coords(30.5, 30.5), "hole punched");
+        assert!(sel.contains_coords(12.5, 12.5));
+    }
+
+    #[test]
+    fn a_click_deselects_but_keeps_the_selection_when_adding() {
+        let mut sel = SelectionManager::new();
+        drag(
+            &mut sel,
+            SelectionType::Rectangle,
+            SelectionMode::Replace,
+            (10.0, 10.0),
+            (50.0, 50.0),
+        );
+        drag(
+            &mut sel,
+            SelectionType::Rectangle,
+            SelectionMode::Add,
+            (70.0, 70.0),
+            (70.5, 70.5),
+        );
+        assert!(sel.has_selection(), "a click in add mode changes nothing");
+        drag(
+            &mut sel,
+            SelectionType::Rectangle,
+            SelectionMode::Replace,
+            (70.0, 70.0),
+            (70.5, 70.5),
+        );
+        assert!(!sel.has_selection(), "a plain click deselects");
+    }
+
+    #[test]
+    fn the_selection_brush_paints_and_erases() {
+        let mut sel = SelectionManager::new();
+        sel.canvas_size = [120, 120];
+        sel.brush_radius = 6.0;
+        drag(
+            &mut sel,
+            SelectionType::Brush,
+            SelectionMode::Replace,
+            (20.0, 60.0),
+            (100.0, 60.0),
+        );
+        assert!(sel.contains_coords(60.5, 60.5) && !sel.contains_coords(60.5, 80.5));
+        drag(
+            &mut sel,
+            SelectionType::Brush,
+            SelectionMode::Subtract,
+            (60.0, 50.0),
+            (60.0, 70.0),
+        );
+        assert!(!sel.contains_coords(60.5, 60.5) && sel.contains_coords(30.5, 60.5));
+    }
+
+    #[test]
+    fn rotating_a_rectangle_keeps_it_rotated() {
+        let mut sel = SelectionManager::with_shape(Some(SelectionShape::Rectangle {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 10.0),
+        }));
+        sel.apply_transform(
+            Vec2::ZERO,
+            std::f32::consts::FRAC_PI_2,
+            Vec2::new(1.0, 1.0),
+            Vec2::new(50.0, 5.0),
+        );
+        // A quarter turn about the centre: now tall and thin, not a bigger box.
+        assert!(sel.contains_coords(50.0, 40.0));
+        assert!(!sel.contains_coords(20.0, 5.0));
+    }
 
     #[test]
     fn rectangle_selection_contains_edges() {
@@ -591,10 +951,7 @@ mod tests {
             }),
         ];
         for shape in shapes {
-            let selection = SelectionManager {
-                current_shape: shape,
-                is_dragging: false,
-            };
+            let selection = SelectionManager::with_shape(shape);
             let mut row = [false; 100];
             for y in 0..100 {
                 selection.row_mask(y, 3, &mut row);
@@ -616,28 +973,26 @@ mod tests {
 
     #[test]
     fn row_coverage_is_antialiased_and_area_correct() {
-        let pixel_aligned = SelectionManager {
-            current_shape: Some(SelectionShape::Rectangle {
-                start: Vec2::new(2.0, 3.0),
-                end: Vec2::new(7.0, 9.0),
-            }),
-            is_dragging: false,
-        };
+        let pixel_aligned = SelectionManager::with_shape(Some(SelectionShape::Rectangle {
+            start: Vec2::new(2.0, 3.0),
+            end: Vec2::new(7.0, 9.0),
+        }));
         let grid = coverage_grid(&pixel_aligned, 12);
         for y in 0..12 {
             for x in 0..12 {
                 let inside = (2..7).contains(&x) && (3..9).contains(&y);
-                assert_eq!(grid[y * 12 + x], if inside { 1.0 } else { 0.0 }, "x={x} y={y}");
+                assert_eq!(
+                    grid[y * 12 + x],
+                    if inside { 1.0 } else { 0.0 },
+                    "x={x} y={y}"
+                );
             }
         }
 
-        let half_pixel_edge = SelectionManager {
-            current_shape: Some(SelectionShape::Rectangle {
-                start: Vec2::new(2.5, 0.0),
-                end: Vec2::new(8.0, 12.0),
-            }),
-            is_dragging: false,
-        };
+        let half_pixel_edge = SelectionManager::with_shape(Some(SelectionShape::Rectangle {
+            start: Vec2::new(2.5, 0.0),
+            end: Vec2::new(8.0, 12.0),
+        }));
         assert_eq!(coverage_grid(&half_pixel_edge, 12)[5 * 12 + 2], 0.5);
 
         let polygon_area = 0.5 * 40.0 * 13.0 * 13.0 * (std::f32::consts::TAU / 40.0).sin();
@@ -651,24 +1006,27 @@ mod tests {
             ),
             (
                 new_lasso_shape(
-                (0..40)
-                    .map(|i| {
-                        let a = i as f32 * std::f32::consts::TAU / 40.0;
-                        Vec2::new(20.0 + a.cos() * 13.0, 20.0 + a.sin() * 13.0)
-                    })
-                    .collect(),
+                    (0..40)
+                        .map(|i| {
+                            let a = i as f32 * std::f32::consts::TAU / 40.0;
+                            Vec2::new(20.0 + a.cos() * 13.0, 20.0 + a.sin() * 13.0)
+                        })
+                        .collect(),
                 ),
                 polygon_area,
             ),
         ] {
-            let selection = SelectionManager {
-                current_shape: Some(shape),
-                is_dragging: false,
-            };
+            let selection = SelectionManager::with_shape(Some(shape));
             let grid = coverage_grid(&selection, 40);
             let area: f32 = grid.iter().sum();
-            assert!((area - expected).abs() / expected < 0.005, "area {area} vs {expected}");
-            assert!(grid.iter().any(|&c| c > 0.0 && c < 1.0), "edges are anti-aliased");
+            assert!(
+                (area - expected).abs() / expected < 0.005,
+                "area {area} vs {expected}"
+            );
+            assert!(
+                grid.iter().any(|&c| c > 0.0 && c < 1.0),
+                "edges are anti-aliased"
+            );
             assert_eq!(grid[20 * 40 + 20], 1.0);
             assert_eq!(grid[0], 0.0);
         }

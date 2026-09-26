@@ -1,7 +1,8 @@
 use crate::{
     app::state::ColorModel,
-    canvas::history::{LayerHistoryOp, LayerMeta},
-    canvas::storage::LayerId,
+    canvas::blend_modes::LayerBlend,
+    canvas::history::{LayerHistoryOp, LayerMeta, RemovedLayer},
+    canvas::storage::{LayerId, LayerKind},
     selection::{
         SelectionShape,
         transform::{TransformInfo, TransformState},
@@ -25,9 +26,25 @@ impl StoredColor {
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum StoredSelectionShape {
-    Rectangle { start: StoredVec2, end: StoredVec2 },
-    Circle { center: StoredVec2, radius: f32 },
-    Lasso { points: Vec<StoredVec2> },
+    Rectangle {
+        start: StoredVec2,
+        end: StoredVec2,
+    },
+    Circle {
+        center: StoredVec2,
+        radius: f32,
+    },
+    Lasso {
+        points: Vec<StoredVec2>,
+    },
+    /// Per-pixel selection: its box and zstd-compressed coverage bytes.
+    Mask {
+        x0: i32,
+        y0: i32,
+        w: usize,
+        h: usize,
+        coverage_zstd: Vec<u8>,
+    },
 }
 
 impl From<&SelectionShape> for StoredSelectionShape {
@@ -43,6 +60,13 @@ impl From<&SelectionShape> for StoredSelectionShape {
             },
             SelectionShape::Lasso { points, .. } => Self::Lasso {
                 points: points.iter().copied().map(StoredVec2::from).collect(),
+            },
+            SelectionShape::Mask(mask) => Self::Mask {
+                x0: mask.x0,
+                y0: mask.y0,
+                w: mask.w,
+                h: mask.h,
+                coverage_zstd: zstd::bulk::compress(&mask.data, 3).unwrap_or_default(),
             },
         }
     }
@@ -62,6 +86,23 @@ impl StoredSelectionShape {
             Self::Lasso { points } => {
                 crate::selection::new_lasso_shape(points.into_iter().map(Into::into).collect())
             }
+            Self::Mask {
+                x0,
+                y0,
+                w,
+                h,
+                coverage_zstd,
+            } => {
+                // A mask that fails to decode becomes an empty selection of
+                // the same size rather than failing the whole load.
+                let data = zstd::bulk::decompress(&coverage_zstd, w * h)
+                    .ok()
+                    .filter(|d| d.len() == w * h)
+                    .unwrap_or_else(|| vec![0; w * h]);
+                SelectionShape::Mask(std::sync::Arc::new(crate::selection::SelectionMask::new(
+                    x0, y0, w, h, data,
+                )))
+            }
         }
     }
 }
@@ -74,6 +115,8 @@ pub(super) struct StoredTransformInfo {
     scale: StoredVec2,
     bounds: Option<StoredRect>,
     state: StoredTransformState,
+    #[serde(default)]
+    corners: Option<[StoredVec2; 4]>,
 }
 
 impl From<&TransformInfo> for StoredTransformInfo {
@@ -85,6 +128,7 @@ impl From<&TransformInfo> for StoredTransformInfo {
             scale: StoredVec2::from(info.scale),
             bounds: info.bounds.map(StoredRect::from),
             state: StoredTransformState::from(info.state),
+            corners: info.corners.map(|c| c.map(StoredVec2::from)),
         }
     }
 }
@@ -98,6 +142,7 @@ impl StoredTransformInfo {
             scale: self.scale.into(),
             bounds: self.bounds.map(Into::into),
             state: self.state.into(),
+            corners: self.corners.map(|c| c.map(Into::into)),
         }
     }
 }
@@ -108,6 +153,7 @@ enum StoredTransformState {
     Moving,
     Rotating,
     Scaling(usize),
+    Corner(usize),
 }
 
 impl From<TransformState> for StoredTransformState {
@@ -117,6 +163,7 @@ impl From<TransformState> for StoredTransformState {
             TransformState::Moving => Self::Moving,
             TransformState::Rotating => Self::Rotating,
             TransformState::Scaling(idx) => Self::Scaling(idx),
+            TransformState::Corner(idx) => Self::Corner(idx),
         }
     }
 }
@@ -128,6 +175,7 @@ impl From<StoredTransformState> for TransformState {
             StoredTransformState::Moving => Self::Moving,
             StoredTransformState::Rotating => Self::Rotating,
             StoredTransformState::Scaling(idx) => Self::Scaling(idx),
+            StoredTransformState::Corner(idx) => Self::Corner(idx),
         }
     }
 }
@@ -207,12 +255,54 @@ impl From<StoredColorModel> for ColorModel {
     }
 }
 
+/// Mirrors `LayerKind`. Absent in files saved before folders/masks.
+#[derive(Serialize, Deserialize, Default, Clone, Copy)]
+pub(super) enum StoredLayerKind {
+    #[default]
+    Paint,
+    Group,
+    Mask {
+        owner: u64,
+    },
+}
+
+impl From<LayerKind> for StoredLayerKind {
+    fn from(kind: LayerKind) -> Self {
+        match kind {
+            LayerKind::Paint => Self::Paint,
+            LayerKind::Group => Self::Group,
+            LayerKind::Mask { owner } => Self::Mask { owner: owner.0 },
+        }
+    }
+}
+
+impl From<StoredLayerKind> for LayerKind {
+    fn from(kind: StoredLayerKind) -> Self {
+        match kind {
+            StoredLayerKind::Paint => Self::Paint,
+            StoredLayerKind::Group => Self::Group,
+            StoredLayerKind::Mask { owner } => Self::Mask {
+                owner: LayerId(owner),
+            },
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredLayerMeta {
     name: String,
     visible: bool,
     opacity: f32,
     locked: bool,
+    #[serde(default)]
+    alpha_locked: bool,
+    #[serde(default)]
+    kind: StoredLayerKind,
+    #[serde(default)]
+    parent: Option<u64>,
+    /// Blend mode key (`LayerBlend::key`); absent in older files = Normal.
+    #[serde(default)]
+    blend: Option<String>,
 }
 
 impl From<&LayerMeta> for StoredLayerMeta {
@@ -222,6 +312,10 @@ impl From<&LayerMeta> for StoredLayerMeta {
             visible: meta.visible,
             opacity: meta.opacity,
             locked: meta.locked,
+            alpha_locked: meta.alpha_locked,
+            kind: meta.kind.into(),
+            parent: meta.parent.map(|p| p.0),
+            blend: Some(meta.blend.key().to_string()),
         }
     }
 }
@@ -233,17 +327,35 @@ impl StoredLayerMeta {
             visible: self.visible,
             opacity: self.opacity,
             locked: self.locked,
+            alpha_locked: self.alpha_locked,
+            kind: self.kind.into(),
+            parent: self.parent.map(LayerId),
+            blend: self
+                .blend
+                .as_deref()
+                .and_then(LayerBlend::from_key)
+                .unwrap_or_default(),
         }
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub(super) struct StoredRemovedLayer {
+    index: usize,
+    id: u64,
+    meta: StoredLayerMeta,
+}
+
 /// Mirrors `LayerHistoryOp`. A structural layer change (add/remove/move)
-/// bundled with an undo action.
+/// bundled with an undo action. Fields added with folders/masks default,
+/// so older files still load.
 #[derive(Serialize, Deserialize)]
 pub(super) enum StoredLayerHistoryOp {
     Added {
         index: usize,
         id: u64,
+        #[serde(default)]
+        meta: Option<StoredLayerMeta>,
         active_before: usize,
         active_after: usize,
     },
@@ -251,6 +363,8 @@ pub(super) enum StoredLayerHistoryOp {
         index: usize,
         id: u64,
         meta: StoredLayerMeta,
+        #[serde(default)]
+        also: Vec<StoredRemovedLayer>,
         active_before: usize,
         active_after: usize,
     },
@@ -258,6 +372,10 @@ pub(super) enum StoredLayerHistoryOp {
         id: u64,
         from: usize,
         to: usize,
+        #[serde(default)]
+        parent_before: Option<u64>,
+        #[serde(default)]
+        parent_after: Option<u64>,
         active_before: usize,
         active_after: usize,
     },
@@ -269,11 +387,13 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
             LayerHistoryOp::Added {
                 index,
                 id,
+                meta,
                 active_before,
                 active_after,
             } => Self::Added {
                 index: *index,
                 id: id.0,
+                meta: meta.as_ref().map(StoredLayerMeta::from),
                 active_before: *active_before,
                 active_after: *active_after,
             },
@@ -281,12 +401,21 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                 index,
                 id,
                 meta,
+                also,
                 active_before,
                 active_after,
             } => Self::Removed {
                 index: *index,
                 id: id.0,
                 meta: StoredLayerMeta::from(meta),
+                also: also
+                    .iter()
+                    .map(|r| StoredRemovedLayer {
+                        index: r.index,
+                        id: r.id.0,
+                        meta: StoredLayerMeta::from(&r.meta),
+                    })
+                    .collect(),
                 active_before: *active_before,
                 active_after: *active_after,
             },
@@ -294,12 +423,16 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                 id,
                 from,
                 to,
+                parent_before,
+                parent_after,
                 active_before,
                 active_after,
             } => Self::Moved {
                 id: id.0,
                 from: *from,
                 to: *to,
+                parent_before: parent_before.map(|p| p.0),
+                parent_after: parent_after.map(|p| p.0),
                 active_before: *active_before,
                 active_after: *active_after,
             },
@@ -313,11 +446,13 @@ impl StoredLayerHistoryOp {
             Self::Added {
                 index,
                 id,
+                meta,
                 active_before,
                 active_after,
             } => LayerHistoryOp::Added {
                 index,
                 id: LayerId(id),
+                meta: meta.map(StoredLayerMeta::into_meta),
                 active_before,
                 active_after,
             },
@@ -325,12 +460,21 @@ impl StoredLayerHistoryOp {
                 index,
                 id,
                 meta,
+                also,
                 active_before,
                 active_after,
             } => LayerHistoryOp::Removed {
                 index,
                 id: LayerId(id),
                 meta: meta.into_meta(),
+                also: also
+                    .into_iter()
+                    .map(|r| RemovedLayer {
+                        index: r.index,
+                        id: LayerId(r.id),
+                        meta: r.meta.into_meta(),
+                    })
+                    .collect(),
                 active_before,
                 active_after,
             },
@@ -338,12 +482,16 @@ impl StoredLayerHistoryOp {
                 id,
                 from,
                 to,
+                parent_before,
+                parent_after,
                 active_before,
                 active_after,
             } => LayerHistoryOp::Moved {
                 id: LayerId(id),
                 from,
                 to,
+                parent_before: parent_before.map(LayerId),
+                parent_after: parent_after.map(LayerId),
                 active_before,
                 active_after,
             },

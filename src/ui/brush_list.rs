@@ -1,158 +1,240 @@
+//! Floating brush presets window (toolbar button or `P`): one column of wide
+//! stroke previews with the preset name inside, like Clip Studio's brush
+//! list. Picking a preset loads it into the tool it belongs to: eraser
+//! presets switch to the eraser, the others to the brush.
+
+use crate::PainterApp;
 use crate::brush_engine::brush::{Brush, BrushPreset};
+use crate::brush_engine::brush_options::BlendMode;
 use crate::brush_engine::preview::stroke_preview_image;
-use crate::ui::style::{PANEL_BG, PRESET_PREVIEW_SIZE};
-use eframe::egui;
-use eframe::egui::{Color32, TextureOptions};
+use crate::ui::icons::Icon;
+use crate::ui::style::*;
+use crate::ui::widgets::icon_button;
+use eframe::egui::{self, Color32, RichText, Stroke, TextureOptions};
 use rayon::ThreadPool;
-use std::collections::HashMap;
 
 /// Temp-memory id used to flag a duplicate preset name in the save modal.
 const DUPLICATE_NAME_WARNING_ID: &str = "brush_preset_duplicate_name";
+/// Preview texture size; drawn stretched to the tile width.
+const PREVIEW_PX: [usize; 2] = [480, 96];
+const PREVIEW_DIAMETER: f32 = 26.0;
+const WINDOW_WIDTH: f32 = 280.0;
 
-/// Displays available presets and lets the user apply one to the active brush.
-pub fn brush_list_panel(
-    ui: &mut egui::Ui,
-    brush: &mut Brush,
-    presets: &mut Vec<BrushPreset>,
-    previews: &mut HashMap<String, egui::TextureHandle>,
-    pool: &ThreadPool,
-    show_modal: &mut bool,
-    new_preset_name: &mut String,
-) {
-    ui.set_min_width(200.0);
-    let ctx = ui.ctx().clone();
+pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
+    if !app.brush_state.show_presets {
+        return;
+    }
+    let m = metrics(ctx);
+    let mut open = true;
+    let default_pos = egui::pos2(m.toolbar_width + 8.0, m.menu_height + m.bar_height + 8.0);
+    egui::Window::new("Brush Presets")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable([false, true])
+        .default_pos(default_pos)
+        .default_height(520.0)
+        .min_width(WINDOW_WIDTH)
+        .max_width(WINDOW_WIDTH)
+        .show(ctx, |ui| {
+            if let Some(index) = presets_list(app, ui) {
+                app.apply_preset(index);
+                // On a tablet the window is in the way once a preset is picked.
+                if m.touch {
+                    app.brush_state.show_presets = false;
+                }
+            }
+        });
+    if !open {
+        app.brush_state.show_presets = false;
+    }
+    save_preset_modal(app, ctx);
+}
+
+/// The list; returns the index of the preset the user picked.
+fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<usize> {
+    let m = metrics(ui.ctx());
+    let mut picked = None;
 
     ui.horizontal(|ui| {
-        ui.heading("Presets");
+        let tool = if app.brush_state.eraser_active {
+            "eraser"
+        } else {
+            "brush"
+        };
+        ui.label(
+            RichText::new(format!("Active {tool}"))
+                .small()
+                .color(TEXT_DIM),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("+").clicked() {
-                *show_modal = true;
-                *new_preset_name = "New Preset".to_string();
-                ctx.data_mut(|d| d.remove::<bool>(egui::Id::new(DUPLICATE_NAME_WARNING_ID)));
+            if icon_button(
+                ui,
+                Icon::Plus,
+                m.header_button,
+                false,
+                "Save current settings as a preset",
+            )
+            .clicked()
+            {
+                app.brush_state.show_new_preset_modal = true;
+                app.brush_state.new_preset_name = "New Preset".to_string();
+                ui.ctx()
+                    .data_mut(|d| d.remove::<bool>(egui::Id::new(DUPLICATE_NAME_WARNING_ID)));
             }
         });
     });
-    ui.separator();
 
-    // Modal for new preset
-    if *show_modal {
-        egui::Window::new("Save Brush Preset")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(&ctx, |ui| {
-                ui.label("Preset Name:");
-                ui.text_edit_singleline(new_preset_name);
-
-                let warning_id = egui::Id::new(DUPLICATE_NAME_WARNING_ID);
-                if ctx.data(|d| d.get_temp::<bool>(warning_id).unwrap_or(false)) {
-                    ui.colored_label(
-                        Color32::from_rgb(220, 80, 80),
-                        "A preset with this name already exists.",
-                    );
-                }
-
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        *show_modal = false;
-                        ctx.data_mut(|d| d.remove::<bool>(warning_id));
-                    }
-                    if ui.button("Save").clicked() {
-                        let name = if new_preset_name.trim().is_empty() {
-                            "Untitled Brush".to_string()
-                        } else {
-                            new_preset_name.trim().to_string()
-                        };
-
-                        if presets.iter().any(|p| p.name == name) {
-                            ctx.data_mut(|d| d.insert_temp(warning_id, true));
-                        } else {
-                            presets.push(BrushPreset {
-                                name,
-                                brush: brush.clone(),
-                            });
-                            ctx.data_mut(|d| d.remove::<bool>(warning_id));
-                            *show_modal = false;
-                        }
-                    }
-                });
-            });
-    }
-
+    let tile_height = if m.touch { 76.0 } else { 58.0 };
+    let pool = app.workspace.pool.clone();
+    let eraser_first = app.brush_state.eraser_active;
     egui::ScrollArea::vertical()
         .id_salt("brush_presets_scroll")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.columns(3, |col| {
-                let mut idx = 0;
-                for preset in presets {
-                    let column = &mut col[idx];
-                    column.vertical(|ui| {
-                        let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(PRESET_PREVIEW_SIZE, PRESET_PREVIEW_SIZE),
-                            egui::Sense::click(),
-                        );
+            ui.spacing_mut().item_spacing.y = 4.0;
+            // The active tool's presets first.
+            let sections = if eraser_first {
+                [true, false]
+            } else {
+                [false, true]
+            };
+            for erasers in sections {
+                ui.label(
+                    RichText::new(if erasers { "ERASERS" } else { "BRUSHES" })
+                        .small()
+                        .strong()
+                        .color(TEXT_DIM),
+                );
+                let bs = &mut app.brush_state;
+                for (index, preset) in bs.presets.iter().enumerate() {
+                    let is_eraser = preset.brush.brush_options.blend_mode == BlendMode::Eraser;
+                    if is_eraser != erasers {
+                        continue;
+                    }
+                    let texture = bs
+                        .preset_previews
+                        .entry(preset.name.clone())
+                        .or_insert_with(|| preview_texture(&preset.brush, &pool, ui.ctx()))
+                        .id();
+                    let active = bs.active_preset.as_deref() == Some(preset.name.as_str())
+                        && bs.eraser_active == is_eraser;
+                    if preset_tile(ui, &preset.name, texture, tile_height, active).clicked() {
+                        picked = Some(index);
+                    }
+                }
+                ui.add_space(6.0);
+            }
+        });
+    picked
+}
 
-                        // Ensure preview exists
-                        let texture_id = if let Some(tex) = previews.get(&preset.name) {
-                            tex.id()
-                        } else {
-                            // Generate preview
-                            let tex = generate_preset_preview(&preset.brush, pool, &ctx);
-                            let id = tex.id();
-                            previews.insert(preset.name.clone(), tex);
-                            id
-                        };
+/// A wide preview tile with the name drawn inside it.
+fn preset_tile(
+    ui: &mut egui::Ui,
+    name: &str,
+    texture: egui::TextureId,
+    height: f32,
+    active: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        0.0,
+        if response.hovered() {
+            BG_RAISED
+        } else {
+            BG_INSET
+        },
+    );
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    painter.image(
+        texture,
+        rect.shrink2(egui::vec2(8.0, 6.0)),
+        uv,
+        Color32::WHITE,
+    );
 
-                        // Draw background
-                        ui.painter().rect_filled(rect, 2.0, PANEL_BG);
+    // Name in the top-left corner on a dark chip so it reads over the stroke.
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let galley = painter.layout_no_wrap(name.to_string(), font, TEXT_STRONG);
+    let chip = egui::Rect::from_min_size(
+        rect.min + egui::vec2(4.0, 4.0),
+        galley.size() + egui::vec2(8.0, 4.0),
+    );
+    painter.rect_filled(chip, 0.0, Color32::from_black_alpha(150));
+    painter.galley(chip.min + egui::vec2(4.0, 2.0), galley, TEXT_STRONG);
 
-                        // Draw texture
-                        let uv =
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                        ui.painter().image(texture_id, rect, uv, Color32::WHITE);
+    let stroke = if active {
+        Stroke::new(2.0_f32, ACCENT)
+    } else if response.hovered() {
+        Stroke::new(1.0_f32, TEXT_DIM)
+    } else {
+        Stroke::new(1.0_f32, BORDER)
+    };
+    painter.rect_stroke(rect, 0.0, stroke);
+    response.on_hover_text(name)
+}
 
-                        // Selection highlight
-                        // We don't strictly track which preset is "selected" in PainterApp yet,
-                        // but we could highlight if active brush matches preset?
-                        // For now just hover effect
-                        if response.hovered() {
-                            ui.painter().rect_stroke(
-                                rect,
-                                2.0,
-                                egui::Stroke::new(1.0, Color32::WHITE),
-                            );
-                        } else {
-                            ui.painter().rect_stroke(
-                                rect,
-                                2.0,
-                                egui::Stroke::new(1.0, Color32::GRAY),
-                            );
-                        }
+fn preview_texture(brush: &Brush, pool: &ThreadPool, ctx: &egui::Context) -> egui::TextureHandle {
+    let mut brush = brush.clone();
+    let image = stroke_preview_image(
+        &mut brush,
+        pool,
+        PREVIEW_PX,
+        64,
+        PREVIEW_INK,
+        PREVIEW_DIAMETER,
+    );
+    ctx.load_texture("preset_preview", image, TextureOptions::LINEAR)
+}
 
-                        let response = response.on_hover_text(&preset.name);
-                        if response.clicked() {
-                            let current_color = brush.brush_options.color;
-                            *brush = preset.brush.clone();
-                            brush.brush_options.color = current_color;
-                        }
-
-                        ui.label(egui::RichText::new(&preset.name).size(10.0).weak());
-                    });
-                    column.add_space(8.0);
-                    idx += 1;
-                    idx %= 3;
+/// Name prompt for saving the active tool's settings as a new preset.
+fn save_preset_modal(app: &mut PainterApp, ctx: &egui::Context) {
+    let bs = &mut app.brush_state;
+    if !bs.show_new_preset_modal {
+        return;
+    }
+    let warning_id = egui::Id::new(DUPLICATE_NAME_WARNING_ID);
+    egui::Window::new("Save Brush Preset")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label("Preset name");
+            ui.text_edit_singleline(&mut bs.new_preset_name);
+            if ctx.data(|d| d.get_temp::<bool>(warning_id).unwrap_or(false)) {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    "A preset with this name already exists.",
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    bs.show_new_preset_modal = false;
+                    ctx.data_mut(|d| d.remove::<bool>(warning_id));
+                }
+                if ui.button("Save").clicked() {
+                    let name = match bs.new_preset_name.trim() {
+                        "" => "Untitled Brush".to_string(),
+                        name => name.to_string(),
+                    };
+                    if bs.presets.iter().any(|p| p.name == name) {
+                        ctx.data_mut(|d| d.insert_temp(warning_id, true));
+                    } else {
+                        bs.presets.push(BrushPreset {
+                            name: name.clone(),
+                            brush: bs.brush.clone(),
+                        });
+                        bs.active_preset = Some(name);
+                        ctx.data_mut(|d| d.remove::<bool>(warning_id));
+                        bs.show_new_preset_modal = false;
+                    }
                 }
             });
         });
-}
-
-fn generate_preset_preview(
-    brush_template: &Brush,
-    pool: &ThreadPool,
-    ctx: &egui::Context,
-) -> egui::TextureHandle {
-    let mut brush = brush_template.clone();
-    let image = stroke_preview_image(&mut brush, pool, [128, 128], 32, Color32::WHITE, 20.0);
-    ctx.load_texture("preset_preview", image, TextureOptions::LINEAR)
 }

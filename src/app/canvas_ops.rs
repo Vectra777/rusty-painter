@@ -4,7 +4,8 @@ use super::{
     state::{CanvasTile, ColorModel, TILE_SIZE},
 };
 use crate::canvas::Canvas;
-use crate::canvas::history::{History, LayerHistoryOp, UndoAction};
+use crate::canvas::history::{History, LayerHistoryOp, RemovedLayer, UndoAction};
+use crate::canvas::storage::{LayerId, LayerKind};
 use eframe::egui::{self, Color32, Vec2};
 
 impl PainterApp {
@@ -30,9 +31,50 @@ impl PainterApp {
         );
     }
 
+    /// Only `rect` (tile-local pixels) of tile `(tx, ty)` changed.
+    pub(crate) fn mark_tile_damage(
+        &mut self,
+        tx: usize,
+        ty: usize,
+        rect: crate::app::state::TileRect,
+    ) {
+        if let Some(tile) = self.tile_mut(tx, ty) {
+            tile.mark_rect(rect);
+        }
+    }
+
+    /// Mark exactly the canvas pixels `[x0, y0, x1, y1)` changed: each tile
+    /// gets just its part as damage, so the display recomposites and
+    /// uploads that part rather than whole tiles (as brush strokes do).
+    pub(crate) fn mark_rect_damage(&mut self, rect: [i32; 4]) {
+        let ts = TILE_SIZE as i32;
+        let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let [x0, y0, x1, y1] = [
+            rect[0].max(0),
+            rect[1].max(0),
+            rect[2].min(w),
+            rect[3].min(h),
+        ];
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        for ty in y0 / ts..=(y1 - 1) / ts {
+            for tx in x0 / ts..=(x1 - 1) / ts {
+                let (ox, oy) = (tx * ts, ty * ts);
+                let local = [
+                    (x0.max(ox) - ox) as usize,
+                    (y0.max(oy) - oy) as usize,
+                    (x1.min(ox + ts) - ox) as usize,
+                    (y1.min(oy + ts) - oy) as usize,
+                ];
+                self.mark_tile_damage(tx as usize, ty as usize, local);
+            }
+        }
+    }
+
     pub(crate) fn mark_tile_dirty(&mut self, tx: usize, ty: usize) {
         if let Some(tile) = self.tile_mut(tx, ty) {
-            tile.dirty = true;
+            tile.mark_full();
         }
     }
 
@@ -44,12 +86,7 @@ impl PainterApp {
         self.render_cache.tiles.get_mut(idx)
     }
 
-    fn rebuild_canvas(
-        &mut self,
-        width: usize,
-        height: usize,
-        background: Color32,
-    ) {
+    fn rebuild_canvas(&mut self, width: usize, height: usize, background: Color32) {
         self.reset_canvas_state(width, height, background);
         self.recreate_render_cache(width, height);
         self.reset_viewport_state();
@@ -91,6 +128,7 @@ impl PainterApp {
             .new_canvas
             .background_color32(self.workspace.color_model);
         self.rebuild_canvas(width, height, background);
+        self.canvas_mut().blend_space = self.modal_state.new_canvas.blend_space;
         self.brush_state.brush.brush_options.color = Self::convert_color_for_model(
             self.brush_state.brush.brush_options.color,
             self.workspace.color_model,
@@ -106,7 +144,7 @@ impl PainterApp {
 
     pub(crate) fn mark_all_tiles_dirty(&mut self) {
         for tile in &mut self.render_cache.tiles {
-            tile.dirty = true;
+            tile.mark_full();
         }
     }
 
@@ -134,7 +172,7 @@ impl PainterApp {
             for tx in min_tx..=max_tx.min(tiles_x - 1) {
                 let idx = ty * tiles_x + tx;
                 if let Some(tile) = self.render_cache.tiles.get_mut(idx) {
-                    tile.dirty = true;
+                    tile.mark_full();
                 }
             }
         }
@@ -159,28 +197,38 @@ impl PainterApp {
                 if has_data {
                     let idx = ty * tiles_x + tx;
                     if let Some(tile) = self.render_cache.tiles.get_mut(idx) {
-                        tile.dirty = true;
+                        tile.mark_full();
                     }
                 }
             }
         }
     }
 
-    pub(crate) fn reorder_layers(&mut self, from: usize, to: usize) {
+    /// Move layer `from` so it ends at position `to` (as `Vec::remove` then
+    /// `insert`) inside folder `parent`, with undo. The background (index 0)
+    /// stays at the bottom, and a folder can't move into itself.
+    pub(crate) fn move_layer(&mut self, from: usize, to: usize, parent: Option<LayerId>) {
         let len = self.canvas.layers.len();
-        if from >= len {
+        if from == 0 || from >= len {
             return;
         }
-        let to = to.min(len.saturating_sub(1));
-        if from == to {
-            return;
-        }
+        let to = to.clamp(1, len - 1);
         let Some(moved_id) = self.canvas.layer_id_at(from) else {
             return;
         };
+        let parent_before = self.canvas.layers[from].parent;
+        if from == to && parent_before == parent {
+            return;
+        }
+        if let Some(p) = parent
+            && self.canvas.is_within(p, moved_id)
+        {
+            return;
+        }
 
         let canvas = self.canvas_mut();
-        let layer = canvas.layers.remove(from);
+        let mut layer = canvas.layers.remove(from);
+        layer.parent = parent;
         canvas.layers.insert(to, layer);
         self.reorder_layer_state(from, to);
 
@@ -204,6 +252,8 @@ impl PainterApp {
                 id: moved_id,
                 from,
                 to,
+                parent_before,
+                parent_after: parent,
                 active_before,
                 active_after,
             }),
@@ -213,6 +263,7 @@ impl PainterApp {
         }
 
         self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
         self.debug_assert_layer_state_in_sync();
     }
 
@@ -230,63 +281,215 @@ impl PainterApp {
         self.debug_assert_layer_state_in_sync();
     }
 
-    pub(crate) fn add_paint_layer(&mut self) {
+    /// "`base` N" with N one more than the highest number already used.
+    fn next_layer_name(&self, base: &str) -> String {
+        let prefix = format!("{base} ");
+        let highest = self
+            .canvas
+            .layers
+            .iter()
+            .filter_map(|l| l.name.strip_prefix(&prefix)?.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("{base} {}", highest + 1)
+    }
+
+    /// Where a new entry goes to sit just above the selected one: in the
+    /// same folder, or at the top of the selected folder when `into_folder`.
+    pub(crate) fn insertion_point(&self, into_folder: bool) -> (usize, Option<LayerId>) {
+        let active = self
+            .canvas
+            .active_layer_idx
+            .min(self.canvas.layers.len() - 1);
+        let layer = &self.canvas.layers[active];
+        match layer.kind {
+            LayerKind::Group if into_folder => {
+                let top_child = self
+                    .canvas
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.parent == Some(layer.id))
+                    .map(|(i, _)| i + 1)
+                    .max();
+                (top_child.unwrap_or(active), Some(layer.id))
+            }
+            LayerKind::Mask { owner } => {
+                let owner_idx = self.canvas.layer_index_of(owner).unwrap_or(active);
+                (owner_idx + 1, self.canvas.layers[owner_idx].parent)
+            }
+            _ => (active + 1, layer.parent),
+        }
+    }
+
+    /// Insert a new entry with undo; returns its index.
+    pub(crate) fn insert_entry(
+        &mut self,
+        index: usize,
+        name: String,
+        kind: LayerKind,
+        parent: Option<LayerId>,
+        select: bool,
+    ) -> usize {
         let active_before = self.canvas.active_layer_idx;
-        let id = self.canvas_mut().add_layer();
-        let new_idx = self.canvas.layers.len().saturating_sub(1);
-        self.insert_layer_state(new_idx);
+        let id = self
+            .canvas_mut()
+            .insert_new_layer(index, name, kind, parent);
+        let idx = self.canvas.layer_index_of(id).unwrap_or(index);
+        self.insert_layer_state(idx);
+        let active_after = if select {
+            idx
+        } else if active_before >= idx {
+            active_before + 1
+        } else {
+            active_before
+        };
+        self.canvas_mut().active_layer_idx = active_after;
 
         let action = UndoAction {
             tiles: Vec::new(),
             selection: None,
             transform: None,
             layer_action: Some(LayerHistoryOp::Added {
-                index: new_idx,
+                index: idx,
                 id,
+                meta: self.canvas.layer_meta_at(idx),
                 active_before,
-                active_after: new_idx,
+                active_after,
             }),
         };
-        if let Some(hist) = self.layer_state.histories.get_mut(new_idx) {
+        if let Some(hist) = self.layer_state.histories.get_mut(idx) {
             hist.push_action(action);
         }
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+        idx
     }
 
-    pub(crate) fn remove_paint_layer(&mut self, idx: usize) {
-        if idx >= self.canvas.layers.len() || self.canvas.layers.len() <= 1 || idx == 0 {
+    /// Add a paint layer above the selected one (inside a selected folder)
+    /// and select it.
+    pub(crate) fn add_layer_and_select(&mut self) {
+        let (index, parent) = self.insertion_point(true);
+        let name = self.next_layer_name("Layer");
+        self.insert_entry(index, name, LayerKind::Paint, parent, true);
+    }
+
+    /// Add an empty folder above the selected layer and select it.
+    pub(crate) fn add_folder(&mut self) {
+        let (index, parent) = self.insertion_point(false);
+        let name = self.next_layer_name("Folder");
+        self.insert_entry(index, name, LayerKind::Group, parent, true);
+    }
+
+    /// Give the selected paint layer a mask (showing everything) and select
+    /// the mask for painting; selects the existing mask if there is one.
+    pub(crate) fn add_mask_to_active(&mut self) {
+        let active = self.canvas.active_layer_idx;
+        let Some(layer) = self.canvas.layers.get(active) else {
+            return;
+        };
+        if layer.kind != LayerKind::Paint || active == 0 {
             return;
         }
+        let owner = layer.id;
+        if let Some(mask) = self.canvas.mask_index_of(owner) {
+            self.canvas_mut().active_layer_idx = mask;
+            return;
+        }
+        let name = format!("{} mask", layer.name);
+        // Masks go on top of the list; their position doesn't matter (they
+        // follow their owner by id), and it keeps them off index 0.
+        let end = self.canvas.layers.len();
+        self.insert_entry(end, name, LayerKind::Mask { owner }, None, true);
+    }
 
-        let active = self.canvas.active_layer_idx;
-        self.mark_layer_tiles_with_data_dirty(idx);
-
+    /// Delete a layer with undo, together with its mask, or a folder with
+    /// everything inside it.
+    pub(crate) fn remove_layer(&mut self, idx: usize) {
+        let len = self.canvas.layers.len();
+        if idx == 0 || idx >= len || len <= 1 {
+            return;
+        }
         let Some(id) = self.canvas.layer_id_at(idx) else {
             return;
         };
         let Some(meta) = self.canvas.layer_meta_at(idx) else {
             return;
         };
-        let tile_snapshots = self.canvas.snapshot_layer_tiles(idx);
 
-        self.canvas_mut().layers.remove(idx);
-        self.remove_layer_state(idx);
-        let active_after = if active == idx {
-            idx.min(self.canvas.layers.len().saturating_sub(1))
-        } else if idx < active {
-            active.saturating_sub(1)
+        // Everything that goes with it: nested layers (for a folder) and the
+        // masks of every removed layer.
+        let mut doomed: Vec<usize> = (0..len)
+            .filter(|&i| i != idx && self.canvas.is_within(self.canvas.layers[i].id, id))
+            .collect();
+        let owners: Vec<LayerId> = std::iter::once(idx)
+            .chain(doomed.iter().copied())
+            .map(|i| self.canvas.layers[i].id)
+            .collect();
+        for owner in owners {
+            if let Some(mask) = self.canvas.mask_index_of(owner)
+                && mask != idx
+                && !doomed.contains(&mask)
+            {
+                doomed.push(mask);
+            }
+        }
+        doomed.sort_unstable();
+
+        let also: Vec<RemovedLayer> = doomed
+            .iter()
+            .filter_map(|&i| {
+                Some(RemovedLayer {
+                    index: i,
+                    id: self.canvas.layer_id_at(i)?,
+                    meta: self.canvas.layer_meta_at(i)?,
+                })
+            })
+            .collect();
+        let mut tiles = self.canvas.snapshot_layer_tiles(idx);
+        for &i in &doomed {
+            tiles.extend(self.canvas.snapshot_layer_tiles(i));
+        }
+
+        // Pick what's selected afterwards, by id: the selected layer if it
+        // survives, else the owner of a deleted mask, else what was below.
+        let active = self.canvas.active_layer_idx;
+        let removed: Vec<usize> = std::iter::once(idx).chain(doomed.iter().copied()).collect();
+        let keep_id = if !removed.contains(&active) {
+            self.canvas.layer_id_at(active)
+        } else if let LayerKind::Mask { owner } = meta.kind {
+            Some(owner)
         } else {
-            active.min(self.canvas.layers.len().saturating_sub(1))
+            (0..idx)
+                .rev()
+                .find(|i| !removed.contains(i))
+                .and_then(|i| self.canvas.layer_id_at(i))
         };
+
+        for &i in &removed {
+            self.mark_layer_tiles_with_data_dirty(i);
+        }
+        let mut descending = removed.clone();
+        descending.sort_unstable_by(|a, b| b.cmp(a));
+        for i in descending {
+            self.canvas_mut().layers.remove(i);
+            self.remove_layer_state(i);
+        }
+        let active_after = keep_id
+            .and_then(|k| self.canvas.layer_index_of(k))
+            .unwrap_or(0)
+            .min(self.canvas.layers.len().saturating_sub(1));
         self.canvas_mut().active_layer_idx = active_after;
 
         let action = UndoAction {
-            tiles: tile_snapshots,
+            tiles,
             selection: None,
             transform: None,
             layer_action: Some(LayerHistoryOp::Removed {
                 index: idx,
                 id,
                 meta,
+                also,
                 active_before: active,
                 active_after,
             }),
@@ -296,6 +499,7 @@ impl PainterApp {
         }
 
         self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
     }
 
     pub(crate) fn insert_layer_state(&mut self, idx: usize) {
@@ -313,6 +517,36 @@ impl PainterApp {
         }
         if idx < self.layer_state.layer_ui_colors.len() {
             self.layer_state.layer_ui_colors.remove(idx);
+        }
+        self.debug_assert_layer_state_in_sync();
+    }
+
+    /// Mirror several entries inserted into `canvas.layers` at once (a layer
+    /// with its mask, a folder with its contents). `ascending` are their
+    /// final positions; the per-layer state is only in sync after all of them.
+    pub(crate) fn insert_layer_states(&mut self, ascending: &[usize]) {
+        for &idx in ascending {
+            let idx = idx.min(self.layer_state.histories.len());
+            self.layer_state.histories.insert(idx, History::new());
+            self.layer_state
+                .layer_ui_colors
+                .insert(idx, Color32::from_gray(40));
+        }
+        self.debug_assert_layer_state_in_sync();
+    }
+
+    /// Mirror several entries removed from `canvas.layers` at once, given
+    /// their positions before removal.
+    pub(crate) fn remove_layer_states(&mut self, indices: &[usize]) {
+        let mut descending = indices.to_vec();
+        descending.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in descending {
+            if idx < self.layer_state.histories.len() {
+                self.layer_state.histories.remove(idx);
+            }
+            if idx < self.layer_state.layer_ui_colors.len() {
+                self.layer_state.layer_ui_colors.remove(idx);
+            }
         }
         self.debug_assert_layer_state_in_sync();
     }
