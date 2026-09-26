@@ -5,16 +5,32 @@ use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
 use rand::Rng;
 use rayon::ThreadPool;
+use eframe::egui::Color32;
+use rustc_hash::FxHashMap;
 use std::collections::HashSet;
+use std::sync::Mutex;
 
-/// Tiles touched by the current stroke, tracked for two different lifetimes.
+/// Per-tile state for indirect painting (Krita's temporary stroke device):
+/// dabs only accumulate `coverage`, and the tile's pixels are re-resolved from
+/// `original` (the tile as it was when the stroke first touched it) plus the
+/// coverage. Pixels are never re-quantized to 8 bits between dabs.
+pub(crate) struct StrokeBuffer {
+    pub original: Vec<Color32>,
+    pub coverage: Vec<f32>,
+    /// Selection coverage for this tile (0..=1 per pixel), computed on first
+    /// use; the selection can't change during a stroke.
+    pub selection: Option<Vec<f32>>,
+}
+
+/// Tiles touched by the current stroke.
 #[derive(Default)]
 pub struct StrokeTiles {
-    /// Tiles already snapshotted for undo; lives for the whole stroke.
-    pub snapshotted: HashSet<(usize, usize)>,
     /// Tiles painted since the last redraw; drained every frame so redraw
     /// cost tracks new dabs, not the whole stroke's footprint.
     pub dirty: HashSet<(usize, usize)>,
+    /// One buffer per tile this stroke has touched (also marks the tiles
+    /// already snapshotted for undo).
+    pub(crate) buffers: FxHashMap<(usize, usize), Mutex<StrokeBuffer>>,
 }
 
 /// Shared drawing dependencies for adding points to a stroke.
@@ -258,12 +274,6 @@ impl StrokeState {
             });
         }
         self.last_pos = Some(pos);
-    }
-
-    /// Reset the stroke state.
-    pub fn end(&mut self) {
-        self.last_pos = None;
-        self.dist_until_next_blit = 0.0;
     }
 }
 

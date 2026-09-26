@@ -25,12 +25,21 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 let mut vis_changed = false;
                 let mut opacity_released = false;
                 let mut delete_clicked = false;
+                // Widgets edit copies; the canvas is only borrowed exclusively
+                // (which ends an in-progress stroke) when something changed.
+                let current = &app.canvas.layers[i];
+                let mut edited = (
+                    current.visible,
+                    current.locked,
+                    current.name.clone(),
+                    current.opacity,
+                );
                 ui.horizontal(|ui| {
-                    let layer = &mut app.canvas.layers[i];
-                    if ui.checkbox(&mut layer.visible, "").changed() {
+                    let (visible, locked, name, opacity) = &mut edited;
+                    if ui.checkbox(visible, "").changed() {
                         vis_changed = true;
                     }
-                    ui.checkbox(&mut layer.locked, "🔒");
+                    ui.checkbox(locked, "🔒");
 
                     let is_active = i == active_idx;
                     let desired = egui::vec2(ui.available_width() - 40.0, 60.0);
@@ -59,7 +68,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     let field_width = (rect.width() - 70.0).max(140.0);
                     if is_active {
                         let resp = content.add(
-                            egui::TextEdit::singleline(&mut layer.name)
+                            egui::TextEdit::singleline(name)
                                 .desired_width(field_width - 140.0)
                                 .hint_text("Layer name"),
                         );
@@ -69,7 +78,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     } else {
                         let resp = content.add_sized(
                             egui::vec2(field_width - 140.0, 24.0),
-                            egui::Label::new(layer.name.as_str()),
+                            egui::Label::new(name.as_str()),
                         );
                         if resp.clicked() {
                             active_idx = i;
@@ -77,7 +86,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     }
 
                     let response = content
-                        .add(egui::Slider::new(&mut layer.opacity, 0.0..=1.0).show_value(false));
+                        .add(egui::Slider::new(opacity, 0.0..=1.0).show_value(false));
                     opacity_released =
                         response.drag_stopped() || (response.changed() && !response.dragged());
 
@@ -132,6 +141,18 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     });
                 });
 
+                if let Some(layer) = app.canvas.layers.get(i) {
+                    let (visible, locked, name, opacity) = edited;
+                    if (visible, locked, opacity) != (layer.visible, layer.locked, layer.opacity)
+                        || name != layer.name
+                    {
+                        let layer = &mut app.canvas_mut().layers[i];
+                        layer.visible = visible;
+                        layer.locked = locked;
+                        layer.name = name;
+                        layer.opacity = opacity;
+                    }
+                }
                 if vis_changed {
                     needs_refresh = true;
                     app.mark_layer_tiles_with_data_dirty(i);
@@ -198,7 +219,9 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         needs_refresh = true;
     }
 
-    app.canvas.active_layer_idx = active_idx;
+    if active_idx != app.canvas.active_layer_idx {
+        app.canvas_mut().active_layer_idx = active_idx;
+    }
     if needs_refresh {
         app.mark_all_tiles_dirty();
         ctx.request_repaint();

@@ -1,27 +1,26 @@
 use super::brush_options::BrushOptions;
 use crate::{
     brush_engine::{
-        brush_options::{BlendMode, PixelBrushShape},
+        brush_options::{BlendMode, PaintingMode, PixelBrushShape},
         dab::{
-            PlacedDab, TileBucket, TileRegion, bucket_by_tile, calc_dab_bounds, dab_reaches_tile,
-            dispatch_over_buckets, tile_overlap, tile_overlaps_selection,
+            PlacedDab, TileBucket, TileOverlap, TileRegion, bucket_by_tile, calc_dab_bounds,
+            dab_reaches_tile, dispatch_over_buckets, tile_overlap, tile_overlaps_selection,
         },
         hardness::SoftnessSelector,
-        masks::{calc_soft_brush_alpha, gaussian_falloff, sample_custom_mask_nn},
-        stroke::StrokeTiles,
+        masks::{calc_soft_brush_alpha, sample_custom_mask_nn},
+        stroke::{StrokeBuffer, StrokeTiles},
     },
     canvas::{
         Canvas,
+        blend::{StrokeColor, resolve_stroke_erase, resolve_stroke_normal},
         history::{TileSnapshot, UndoAction},
-        storage::{LinearBrushColor, alpha_over_brush, alpha_over_brush_batch, blend_erase},
     },
     selection::SelectionManager,
 };
-use eframe::egui::Color32;
-use eframe::egui::Vec2;
+use eframe::egui::{Color32, Vec2};
 use rayon::ThreadPool;
-use std::sync::Arc;
-use wide::{CmpGt, CmpLt, f32x4};
+use rustc_hash::FxHashMap;
+use std::sync::Mutex;
 
 /// Available shapes for how a brush applies paint.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -49,111 +48,77 @@ struct GaussianTip {
 }
 
 impl GaussianTip {
-    #[inline]
-    fn alpha(&self, dist_sq: f32, dist: f32, t: f32) -> u8 {
+    /// Scalar reference for one pixel; [`row_kernel`] must match it bit for bit.
+    #[cfg(test)]
+    fn alpha(&self, dist_sq: f32, dist: f32, t: f32) -> f32 {
         if dist_sq >= self.r_sq {
-            return 0;
+            return 0.0;
         }
-        let mut alpha_factor = gaussian_falloff(t, self.hardness);
+        let mut alpha_factor = super::masks::gaussian_falloff(t, self.hardness);
         if dist > self.fade_start {
             alpha_factor *= 1.0 - (dist - self.fade_start) * self.inv_fade_width;
         }
-        (alpha_factor.clamp(0.0, 1.0) * 255.0) as u8
+        alpha_factor.clamp(0.0, 1.0)
     }
 
-    /// Four lanes of [`Self::alpha`], branch-free: both sides of each branch
-    /// are computed and selected per lane, with the same float operations in
-    /// the same order as the scalar version, so every lane is bit-identical.
-    /// `fast_max`/`fast_min` are safe here: no input can be NaN.
-    #[inline]
-    fn alpha_x4(&self, dist_sq: f32x4, dist: f32x4, t: f32x4) -> wide::i32x4 {
-        let zero = f32x4::splat(0.0);
-        let one = f32x4::splat(1.0);
-        let mut alpha = if self.hardness >= 1.0 {
-            one
-        } else {
-            let hardness = f32x4::splat(self.hardness);
-            let v = (t - hardness) / f32x4::splat(1.0 - self.hardness);
-            let falloff = one - v.fast_max(zero).fast_min(one);
-            let smooth = falloff * falloff * (f32x4::splat(3.0) - f32x4::splat(2.0) * falloff);
-            t.cmp_lt(hardness).blend(one, smooth)
-        };
-        let fade_start = f32x4::splat(self.fade_start);
-        let faded = alpha * (one - (dist - fade_start) * f32x4::splat(self.inv_fade_width));
-        alpha = dist.cmp_gt(fade_start).blend(faded, alpha);
-        let alpha = dist_sq
-            .cmp_lt(f32x4::splat(self.r_sq))
-            .blend(alpha.fast_max(zero).fast_min(one) * f32x4::splat(255.0), zero);
-        alpha.fast_trunc_int()
-    }
-
-    /// Mask alphas for one dab row, for mask columns `mx0..mx0 + out.len()`.
-    /// Computed on the fly per tile instead of building (and caching) a full
-    /// per-dab mask: pressure changes the diameter every sample, so such a
-    /// cache almost never hit.
-    fn row(&self, pdy: f32, frac_x: f32, mx0: usize, out: &mut [u8]) {
-        let r_ceil = self.r_ceil as f32;
-        let pdy_sq = pdy * pdy;
-        let mut k = 0;
-        // 4-wide distance/sqrt; per-lane operation order matches the scalar
-        // tail, so results are bit-identical either way.
-        while k + 4 <= out.len() {
-            let mx_f = (mx0 + k) as f32;
-            let pdx = f32x4::new([mx_f, mx_f + 1.0, mx_f + 2.0, mx_f + 3.0])
-                - f32x4::splat(r_ceil)
-                + f32x4::splat(0.5)
-                - f32x4::splat(frac_x);
-            let dist_sq = pdx * pdx + f32x4::splat(pdy_sq);
-            let dist = dist_sq.sqrt();
-            let t = dist * f32x4::splat(self.inv_radius);
-            let alphas = self.alpha_x4(dist_sq, dist, t).to_array();
-            for (slot, alpha) in out[k..k + 4].iter_mut().zip(alphas) {
-                *slot = alpha as u8;
-            }
-            k += 4;
+    /// Tip alphas for one dab row, for tip columns `mx0..mx0 + out.len()`.
+    /// `pdy` is the row's vertical offset from the dab center.
+    ///
+    /// Runs the AVX2 build of [`row_kernel`] when the CPU has it (8 lanes),
+    /// else the baseline build (4 lanes); both are bit-identical.
+    fn row(&self, pdy: f32, frac_x: f32, mx0: usize, out: &mut [f32]) {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU supports AVX2, checked just above.
+            unsafe { row_kernel_avx2(self, pdy, frac_x, mx0, out) };
+            return;
         }
-        for (i, slot) in out.iter_mut().enumerate().skip(k) {
-            let pdx = (mx0 + i) as f32 - r_ceil + 0.5 - frac_x;
-            let dist_sq = pdx * pdx + pdy_sq;
-            let dist = dist_sq.sqrt();
-            *slot = self.alpha(dist_sq, dist, dist * self.inv_radius);
-        }
+        row_kernel(self, pdy, frac_x, mx0, out);
     }
 }
 
-/// Blend `pixels` wherever `mask` is non-zero, one contiguous run at a time,
-/// in chunks of 64 through `blend`.
-fn blend_mask_runs(
-    mask: &[u8],
-    opacity_scale: f32,
-    pixels: &mut [Color32],
-    blend: &impl Fn(&[u8], &mut [Color32]),
-) {
-    const CHUNK: usize = 64;
-    let mut alphas = [0u8; CHUNK];
-    let mut x = 0;
-    while x < mask.len() {
-        if mask[x] == 0 {
-            x += 1;
-            continue;
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn row_kernel_avx2(tip: &GaussianTip, pdy: f32, frac_x: f32, mx0: usize, out: &mut [f32]) {
+    row_kernel(tip, pdy, frac_x, mx0, out);
+}
+
+/// [`GaussianTip::alpha`] for a run of columns, written as a straight loop
+/// with branch-free selects so the compiler vectorizes it to whatever width
+/// the enclosing function's target features allow. Each select mirrors the
+/// scalar branch (`x > 0 ? x : 0` is exactly SSE `maxps(x, 0)`, etc.), so
+/// every lane is bit-identical to [`GaussianTip::alpha`].
+#[inline(always)]
+fn row_kernel(tip: &GaussianTip, pdy: f32, frac_x: f32, mx0: usize, out: &mut [f32]) {
+    let r_ceil = tip.r_ceil as f32;
+    let pdy_sq = pdy * pdy;
+    let hardness = tip.hardness;
+    let soft = hardness < 1.0;
+    let soft_span = 1.0 - hardness;
+    let base = mx0 as i32;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let pdx = (base + i as i32) as f32 - r_ceil + 0.5 - frac_x;
+        let dist_sq = pdx * pdx + pdy_sq;
+        let dist = dist_sq.sqrt();
+        let t = dist * tip.inv_radius;
+        let mut alpha = 1.0;
+        if soft {
+            let v = (t - hardness) / soft_span;
+            let v = if v > 0.0 { v } else { 0.0 };
+            let v = if v < 1.0 { v } else { 1.0 };
+            let falloff = 1.0 - v;
+            let smooth = falloff * falloff * (3.0 - 2.0 * falloff);
+            alpha = if t < hardness { 1.0 } else { smooth };
         }
-        let run_start = x;
-        while x < mask.len() && mask[x] != 0 {
-            x += 1;
-        }
-        let mut c = run_start;
-        while c < x {
-            let n = CHUNK.min(x - c);
-            for (a, &m) in alphas[..n].iter_mut().zip(&mask[c..c + n]) {
-                *a = (m as f32 * opacity_scale).clamp(0.0, 255.0) as u8;
-            }
-            blend(&alphas[..n], &mut pixels[c..c + n]);
-            c += n;
-        }
+        let faded = alpha * (1.0 - (dist - tip.fade_start) * tip.inv_fade_width);
+        alpha = if dist > tip.fade_start { faded } else { alpha };
+        alpha = if alpha > 0.0 { alpha } else { 0.0 };
+        alpha = if alpha < 1.0 { alpha } else { 1.0 };
+        *slot = if dist_sq < tip.r_sq { alpha } else { 0.0 };
     }
 }
 
-/// User-facing brush configuration and scratch buffers.
+/// User-facing brush configuration.
 #[derive(Clone, Debug)]
 pub struct Brush {
     pub brush_options: BrushOptions,
@@ -166,32 +131,136 @@ pub struct Brush {
     pub stabilizer_algorithm: StabilizerAlgorithm,
     pub stabilizer_mass: f32, // 0.01..1.0
     pub stabilizer_drag: f32, // 0.0..1.0
-    /// Linear-light table for the current brush RGB, rebuilt only when the color changes.
-    linear_color: Option<([u8; 3], Arc<LinearBrushColor>)>,
 }
 
-/// Blend one pixel of paint into `data[idx]`. Identical in `pixel_dab` and
-/// `soft_dab`'s general path (previously duplicated inline in both).
-#[inline]
-fn apply_dab_blend(
+/// Shared inputs for painting one batch of dabs into the stroke buffers.
+struct BatchCtx<'a> {
+    canvas: &'a Canvas,
+    selection: Option<&'a SelectionManager>,
+    dabs: &'a [PlacedDab],
+    buffers: &'a FxHashMap<(usize, usize), Mutex<StrokeBuffer>>,
+    r: f32,
     blend_mode: BlendMode,
-    linear_brush: &LinearBrushColor,
-    r: u8,
-    g: u8,
-    b: u8,
-    alpha_u8: u8,
-    data: &mut [Color32],
-    idx: usize,
-) {
-    match blend_mode {
-        BlendMode::Normal => {
-            data[idx] = alpha_over_brush(linear_brush, alpha_u8, data[idx]);
-        }
-        BlendMode::Eraser => {
-            let src = Color32::from_rgba_unmultiplied(r, g, b, alpha_u8);
-            data[idx] = blend_erase(src, data[idx]);
+    color: StrokeColor,
+    /// Coverage multiplier when resolving: the stroke opacity in wash mode.
+    cap: f32,
+    /// Soft brushes use anti-aliased selection edges; pixel brushes keep
+    /// hard, pixel-center edges (pixel art).
+    antialiased_selection: bool,
+}
+
+/// A whole tile's selection coverage, row by row.
+fn tile_selection_coverage(
+    selection: &SelectionManager,
+    tile_x0: usize,
+    tile_y0: usize,
+    tile_size: usize,
+    antialiased: bool,
+) -> Vec<f32> {
+    let mut coverage = vec![0.0; tile_size * tile_size];
+    let mut inside = vec![false; tile_size];
+    for (ly, row) in coverage.chunks_exact_mut(tile_size).enumerate() {
+        if antialiased {
+            selection.row_coverage(tile_y0 + ly, tile_x0, row);
+        } else {
+            selection.row_mask(tile_y0 + ly, tile_x0, &mut inside);
+            for (c, &i) in row.iter_mut().zip(&inside) {
+                *c = if i { 1.0 } else { 0.0 };
+            }
         }
     }
+    coverage
+}
+
+/// Stamp every tile's dabs into its stroke coverage (`cov += a * (1 - cov)`,
+/// in stroke order), then re-resolve the pixels those dabs touched, once per
+/// tile. `stamp(dab, gy, x0, out)` writes the dab's alpha, already scaled by
+/// the stroke strength, for canvas row `gy` and columns `x0..x0 + out.len()`.
+fn paint_batch(
+    pool: &ThreadPool,
+    ctx: &BatchCtx<'_>,
+    buckets: &[TileBucket],
+    work_pixels: usize,
+    stamp: &(impl Fn(&PlacedDab, usize, usize, &mut [f32]) + Sync),
+) {
+    let tile_size = ctx.canvas.tile_size();
+    let draw_tile = |(region, dab_ids): &TileBucket| {
+        let tile_x0 = region.tx * tile_size;
+        let tile_y0 = region.ty * tile_size;
+        if !tile_overlaps_selection(ctx.selection, tile_x0, tile_y0, tile_size) {
+            return;
+        }
+        let Some(buffer) = ctx.buffers.get(&(region.tx, region.ty)) else {
+            return;
+        };
+        let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sel) = ctx.selection
+            && buffer.selection.is_none()
+        {
+            buffer.selection = Some(tile_selection_coverage(
+                sel,
+                tile_x0,
+                tile_y0,
+                tile_size,
+                ctx.antialiased_selection,
+            ));
+        }
+        let StrokeBuffer {
+            coverage,
+            selection: selection_coverage,
+            ..
+        } = &mut *buffer;
+        let mut alpha_row = vec![0.0f32; tile_size];
+        let mut touched: Option<TileOverlap> = None;
+
+        for &i in dab_ids {
+            let dab = &ctx.dabs[i];
+            if !dab_reaches_tile(dab.center, ctx.r, tile_x0, tile_y0, tile_size) {
+                continue;
+            }
+            let overlap = tile_overlap(&dab.bounds, tile_x0, tile_y0, tile_size);
+            let width = overlap.max_x - overlap.min_x + 1;
+            for gy in overlap.min_y..=overlap.max_y {
+                let alphas = &mut alpha_row[..width];
+                stamp(dab, gy, overlap.min_x, alphas);
+                let start = (gy - tile_y0) * tile_size + (overlap.min_x - tile_x0);
+                if let Some(sel) = selection_coverage {
+                    for (alpha, &s) in alphas.iter_mut().zip(&sel[start..start + width]) {
+                        *alpha *= s;
+                    }
+                }
+                for (cov, &alpha) in coverage[start..start + width].iter_mut().zip(alphas.iter()) {
+                    *cov += alpha * (1.0 - *cov);
+                }
+            }
+            touched = Some(touched.map_or(overlap, |t| t.union(overlap)));
+        }
+
+        let Some(rect) = touched else {
+            return;
+        };
+        let Some(tile_arc) = ctx.canvas.lock_tile(region.tx, region.ty) else {
+            return;
+        };
+        let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(data) = tile.data.as_mut() else {
+            return;
+        };
+        let width = rect.max_x - rect.min_x + 1;
+        for gy in rect.min_y..=rect.max_y {
+            let start = (gy - tile_y0) * tile_size + (rect.min_x - tile_x0);
+            let range = start..start + width;
+            let (original, coverage) = (&buffer.original[range.clone()], &buffer.coverage[range.clone()]);
+            match ctx.blend_mode {
+                BlendMode::Normal => {
+                    resolve_stroke_normal(original, coverage, &mut data[range], ctx.color, ctx.cap)
+                }
+                BlendMode::Eraser => resolve_stroke_erase(original, coverage, &mut data[range], ctx.cap),
+            }
+        }
+        tile.is_empty = false;
+    };
+    dispatch_over_buckets(buckets, pool, work_pixels, draw_tile);
 }
 
 impl Brush {
@@ -208,7 +277,6 @@ impl Brush {
             stabilizer_mass: 0.1,
             stabilizer_drag: 0.5,
             is_changed: false,
-            linear_color: None,
         }
     }
 
@@ -225,30 +293,17 @@ impl Brush {
             stabilizer_mass: 0.1,
             stabilizer_drag: 0.5,
             is_changed: false,
-            linear_color: None,
-        }
-    }
-
-    fn linear_color(&mut self) -> Arc<LinearBrushColor> {
-        let c = self.brush_options.color;
-        let key = [c.r(), c.g(), c.b()];
-        match &self.linear_color {
-            Some((cached_key, color)) if *cached_key == key => color.clone(),
-            _ => {
-                let color = Arc::new(LinearBrushColor::new(key[0], key[1], key[2]));
-                self.linear_color = Some((key, color.clone()));
-                color
-            }
         }
     }
 
     /// Paint a batch of dabs (in stroke order) with the current brush.
     ///
-    /// Dabs are grouped per tile and each tile applies its dabs in order, so
-    /// the result is identical to painting them one by one, but every tile is
-    /// locked once and the thread pool is entered once per batch.
+    /// Dabs are grouped per tile; each tile accumulates its dabs into the
+    /// stroke's coverage buffer in order, then its touched pixels are
+    /// resolved once. The result is identical to painting the dabs one by
+    /// one, with each tile locked once per batch.
     pub(crate) fn dabs(
-        &mut self,
+        &self,
         pool: &ThreadPool,
         canvas: &Canvas,
         selection: Option<&SelectionManager>,
@@ -256,7 +311,8 @@ impl Brush {
         undo_action: &mut UndoAction,
         stroke_tiles: &mut StrokeTiles,
     ) {
-        let r = self.brush_options.diameter / 2.0;
+        let o = &self.brush_options;
+        let r = o.diameter / 2.0;
         let r_ceil = r.ceil() as i32;
         let tile_size = canvas.tile_size();
         let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
@@ -273,23 +329,34 @@ impl Brush {
 
         let buckets = bucket_by_tile(&dabs);
         let regions: Vec<TileRegion> = buckets.iter().map(|(region, _)| *region).collect();
-        self.snapshot_tiles(canvas, &regions, undo_action, stroke_tiles);
+        Self::snapshot_tiles(canvas, &regions, undo_action, stroke_tiles);
 
+        let wash = o.painting_mode == PaintingMode::Wash;
+        // Build-up scales every dab by opacity; wash instead caps the whole
+        // stroke at opacity when resolving.
+        let strength = o.color.a() as f32 / 255.0 * (o.flow / 100.0) * if wash { 1.0 } else { o.opacity };
+        let ctx = BatchCtx {
+            canvas,
+            selection,
+            dabs: &dabs,
+            buffers: &stroke_tiles.buffers,
+            r,
+            blend_mode: o.blend_mode,
+            color: StrokeColor::new(o.color),
+            cap: if wash { o.opacity } else { 1.0 },
+            antialiased_selection: self.brush_type == BrushType::Soft,
+        };
         let side = (2 * r_ceil + 1).max(1) as usize;
         let work_pixels = dabs.len() * side * side;
         match self.brush_type {
-            BrushType::Soft => {
-                self.soft_dabs(pool, canvas, selection, &dabs, &buckets, work_pixels)
-            }
-            BrushType::Pixel => {
-                self.pixel_dabs(pool, canvas, selection, &dabs, &buckets, work_pixels)
-            }
+            BrushType::Soft => self.paint_soft(pool, &ctx, &buckets, work_pixels, strength),
+            BrushType::Pixel => self.paint_pixel(pool, &ctx, &buckets, work_pixels, strength),
         }
     }
 
-    /// Snapshot tiles about to be modified so undo can restore them later.
+    /// On a tile's first touch this stroke: snapshot it for undo and create
+    /// its stroke buffer from the same pre-stroke pixels.
     fn snapshot_tiles(
-        &self,
         canvas: &Canvas,
         regions: &[TileRegion],
         undo_action: &mut UndoAction,
@@ -302,301 +369,166 @@ impl Brush {
         };
 
         for region in regions {
-            stroke_tiles.dirty.insert((region.tx, region.ty));
-            // insert returns false if value was already present
-            if !stroke_tiles.snapshotted.insert((region.tx, region.ty)) {
+            let key = (region.tx, region.ty);
+            stroke_tiles.dirty.insert(key);
+            if stroke_tiles.buffers.contains_key(&key) {
                 continue;
             }
-
-            canvas.ensure_layer_tile_exists(layer_idx, region.tx, region.ty);
-
-            if let Some(tile_arc) = canvas.lock_layer_tile(layer_idx, region.tx, region.ty) {
-                let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(data) = tile.data.as_mut() else {
-                    continue;
-                };
-
-                // Snapshot the ENTIRE tile to avoid artifacts if we draw on other parts of it later
-                let patch = data.clone();
-
-                undo_action.tiles.push(TileSnapshot {
-                    tx: region.tx as i32,
-                    ty: region.ty as i32,
-                    layer_id,
-                    x0: 0,
-                    y0: 0,
-                    width: tile_size,
-                    height: tile_size,
-                    data: patch,
-                });
-            }
+            let Some(tile_arc) = canvas.lock_layer_tile(layer_idx, region.tx, region.ty) else {
+                continue;
+            };
+            let tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(data) = tile.data.as_ref() else {
+                continue;
+            };
+            undo_action.tiles.push(TileSnapshot {
+                tx: region.tx as i32,
+                ty: region.ty as i32,
+                layer_id,
+                x0: 0,
+                y0: 0,
+                width: tile_size,
+                height: tile_size,
+                data: data.clone().into(),
+            });
+            stroke_tiles.buffers.insert(
+                key,
+                Mutex::new(StrokeBuffer {
+                    original: data.clone(),
+                    coverage: vec![0.0; tile_size * tile_size],
+                    selection: None,
+                }),
+            );
         }
     }
 
-    /// Render hard, pixel-aligned dabs.
-    fn pixel_dabs(
-        &mut self,
+    /// Hard, pixel-aligned dabs.
+    fn paint_pixel(
+        &self,
         pool: &ThreadPool,
-        canvas: &Canvas,
-        selection: Option<&SelectionManager>,
-        dabs: &[PlacedDab],
+        ctx: &BatchCtx<'_>,
         buckets: &[TileBucket],
         work_pixels: usize,
+        strength: f32,
     ) {
-        let r = self.brush_options.diameter / 2.0;
+        let r = ctx.r;
         let r_sq = r * r;
-        let tile_size = canvas.tile_size();
-        let src_base = self.brush_options.color;
-        let base_alpha = self.brush_options.color.a() as f32
-            * self.brush_options.opacity
-            * (self.brush_options.flow / 100.0);
-        let (src_r, src_g, src_b) = (src_base.r(), src_base.g(), src_base.b());
-        let linear_brush = self.linear_color();
-        let blend_mode = self.brush_options.blend_mode;
         let pixel_shape = &self.brush_options.pixel_shape;
         let diameter = self.brush_options.diameter;
-
-        let draw_tile = |(region, dab_ids): &TileBucket| {
-            let tile_x0 = region.tx * tile_size;
-            let tile_y0 = region.ty * tile_size;
-            if !tile_overlaps_selection(selection, tile_x0, tile_y0, tile_size) {
-                return;
+        let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+            let dy = gy as f32 + 0.5 - dab.center.y;
+            for (i, slot) in out.iter_mut().enumerate() {
+                let dx = (x0 + i) as f32 + 0.5 - dab.center.x;
+                let (in_shape, alpha_mod) = match pixel_shape {
+                    PixelBrushShape::Circle => (dx * dx + dy * dy <= r_sq, 1.0),
+                    PixelBrushShape::Square => (dx.abs() <= r && dy.abs() <= r, 1.0),
+                    PixelBrushShape::Custom {
+                        width,
+                        height,
+                        data,
+                    } => sample_custom_mask_nn(dx, dy, diameter, *width, *height, data),
+                };
+                *slot = if in_shape { (strength * alpha_mod).clamp(0.0, 1.0) } else { 0.0 };
             }
-            let Some(tile_arc) = canvas.lock_tile(region.tx, region.ty) else {
-                return;
-            };
-            let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(data) = tile.data.as_mut() else {
-                return;
-            };
-
-            let mut sel_row = vec![true; tile_size];
-            for &i in dab_ids {
-                let dab = &dabs[i];
-                let overlap = tile_overlap(&dab.bounds, tile_x0, tile_y0, tile_size);
-                for gy in overlap.min_y..=overlap.max_y {
-                    let dy = gy as f32 + 0.5 - dab.center.y;
-                    if let Some(sel) = selection {
-                        sel.row_mask(gy, overlap.min_x, &mut sel_row[..=overlap.max_x - overlap.min_x]);
-                    }
-                    for gx in overlap.min_x..=overlap.max_x {
-                        let dx = gx as f32 + 0.5 - dab.center.x;
-
-                        if !sel_row[gx - overlap.min_x] {
-                            continue;
-                        }
-
-                        let (in_shape, alpha_mod) = match pixel_shape {
-                            PixelBrushShape::Circle => (dx * dx + dy * dy <= r_sq, 1.0),
-                            PixelBrushShape::Square => (dx.abs() <= r && dy.abs() <= r, 1.0),
-                            PixelBrushShape::Custom {
-                                width,
-                                height,
-                                data,
-                            } => sample_custom_mask_nn(dx, dy, diameter, *width, *height, data),
-                        };
-
-                        if in_shape {
-                            let idx = (gy - tile_y0) * tile_size + (gx - tile_x0);
-                            let final_alpha = (base_alpha * alpha_mod).clamp(0.0, 1.0);
-                            let alpha_u8 = (final_alpha * 255.0) as u8;
-                            apply_dab_blend(
-                                blend_mode,
-                                &linear_brush,
-                                src_r,
-                                src_g,
-                                src_b,
-                                alpha_u8,
-                                data,
-                                idx,
-                            );
-                        }
-                    }
-                }
-            }
-            tile.is_empty = false;
         };
-
-        dispatch_over_buckets(buckets, pool, work_pixels, draw_tile);
+        paint_batch(pool, ctx, buckets, work_pixels, &stamp);
     }
 
-    /// Render soft, anti-aliased dabs.
-    fn soft_dabs(
-        &mut self,
+    /// Soft, anti-aliased dabs.
+    fn paint_soft(
+        &self,
         pool: &ThreadPool,
-        canvas: &Canvas,
-        selection: Option<&SelectionManager>,
-        dabs: &[PlacedDab],
+        ctx: &BatchCtx<'_>,
         buckets: &[TileBucket],
         work_pixels: usize,
+        strength: f32,
     ) {
-        let r = self.brush_options.diameter / 2.0;
+        let o = &self.brush_options;
+        let r = ctx.r;
         let r_sq = r * r;
-        let tile_size = canvas.tile_size();
-        let base_color = self.brush_options.color;
-        let (sr, sg, sb) = (base_color.r(), base_color.g(), base_color.b());
-        let linear_brush = self.linear_color();
-        let base_alpha = base_color.a() as f32 / 255.0;
-        let flow_alpha = self.brush_options.opacity * (self.brush_options.flow / 100.0);
-        let blend_mode = self.brush_options.blend_mode;
+        let hardness_val = (o.hardness / 100.0).clamp(0.0, 1.0);
+        let softness_selector = o.softness_selector;
+        let softness_curve = &o.softness_curve;
+        let pixel_shape = &o.pixel_shape;
+        let diameter = o.diameter;
         let anti_aliasing = self.anti_aliasing;
-        let hardness_val = (self.brush_options.hardness / 100.0).clamp(0.0, 1.0);
-        let softness_selector = self.brush_options.softness_selector;
-        let softness_curve = &self.brush_options.softness_curve;
-        let pixel_shape = &self.brush_options.pixel_shape;
-        let diameter = self.brush_options.diameter;
 
-        // Pre-compute fade values for anti-aliasing (1.5 pixel outer fade)
+        // 1.5 pixel outer anti-aliasing fade
         let fade_start = (r - 1.5).max(0.0);
         let fade_width = 1.5_f32.min(r);
         let inv_fade_width = if fade_width > 0.0 { 1.0 / fade_width } else { 0.0 };
 
-        let fast_path = anti_aliasing
+        if anti_aliasing
             && softness_selector == SoftnessSelector::Gaussian
-            && matches!(pixel_shape, PixelBrushShape::Circle);
-        let tip = GaussianTip {
-            r_ceil: r.ceil() as i32,
-            r_sq,
-            inv_radius: if r > 0.0 { 1.0 / r } else { 0.0 },
-            hardness: hardness_val,
-            fade_start,
-            inv_fade_width,
-        };
-        let opacity_scale = base_alpha * flow_alpha;
-        let blend_run = |alphas: &[u8], pixels: &mut [Color32]| match blend_mode {
-            BlendMode::Normal => alpha_over_brush_batch(&linear_brush, alphas, pixels),
-            BlendMode::Eraser => {
-                for (pixel, &alpha) in pixels.iter_mut().zip(alphas) {
-                    *pixel = blend_erase(Color32::from_rgba_premultiplied(0, 0, 0, alpha), *pixel);
-                }
-            }
-        };
-
-        let draw_tile = |(region, dab_ids): &TileBucket| {
-            let tile_x0 = region.tx * tile_size;
-            let tile_y0 = region.ty * tile_size;
-            if !tile_overlaps_selection(selection, tile_x0, tile_y0, tile_size) {
-                return;
-            }
-            let Some(tile_arc) = canvas.lock_tile(region.tx, region.ty) else {
-                return;
+            && matches!(pixel_shape, PixelBrushShape::Circle)
+        {
+            let tip = GaussianTip {
+                r_ceil: r.ceil() as i32,
+                r_sq,
+                inv_radius: if r > 0.0 { 1.0 / r } else { 0.0 },
+                hardness: hardness_val,
+                fade_start,
+                inv_fade_width,
             };
-            let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(data) = tile.data.as_mut() else {
-                return;
+            let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+                let my = gy as i32 - dab.base_y;
+                let pdy = my as f32 - tip.r_ceil as f32 + 0.5 - dab.frac_y;
+                tip.row(pdy, dab.frac_x, (x0 as i32 - dab.base_x) as usize, out);
+                for alpha in out.iter_mut() {
+                    *alpha *= strength;
+                }
             };
-            let mut mask_row = if fast_path { vec![0u8; tile_size] } else { Vec::new() };
-            let mut sel_row = vec![true; tile_size];
-            let mut painted = false;
+            paint_batch(pool, ctx, buckets, work_pixels, &stamp);
+            return;
+        }
 
-            for &i in dab_ids {
-                let dab = &dabs[i];
-                if !dab_reaches_tile(dab.center, r, tile_x0, tile_y0, tile_size) {
-                    continue;
-                }
-                painted = true;
-                let overlap = tile_overlap(&dab.bounds, tile_x0, tile_y0, tile_size);
-
-                if fast_path {
-                    let width = overlap.max_x - overlap.min_x + 1;
-                    let mx0 = (overlap.min_x as i32 - dab.base_x) as usize;
-                    for gy in overlap.min_y..=overlap.max_y {
-                        let my = gy as i32 - dab.base_y;
-                        let pdy = my as f32 - tip.r_ceil as f32 + 0.5 - dab.frac_y;
-                        let mask = &mut mask_row[..width];
-                        tip.row(pdy, dab.frac_x, mx0, mask);
-                        if let Some(sel) = selection {
-                            let inside = &mut sel_row[..width];
-                            sel.row_mask(gy, overlap.min_x, inside);
-                            for (alpha, &inside) in mask.iter_mut().zip(inside.iter()) {
-                                if !inside {
-                                    *alpha = 0;
-                                }
+        let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+            let pdy = gy as f32 + 0.5 - dab.center.y;
+            for (i, slot) in out.iter_mut().enumerate() {
+                let pdx = (x0 + i) as f32 + 0.5 - dab.center.x;
+                let alpha_factor = if anti_aliasing {
+                    let (base_alpha_at_pixel, dist_sq) = calc_soft_brush_alpha(
+                        pdx,
+                        pdy,
+                        r,
+                        pixel_shape,
+                        hardness_val,
+                        softness_selector,
+                        softness_curve,
+                    );
+                    if base_alpha_at_pixel <= 0.0 {
+                        0.0
+                    } else {
+                        let dist_for_aa = match pixel_shape {
+                            PixelBrushShape::Circle => dist_sq.sqrt(),
+                            PixelBrushShape::Square | PixelBrushShape::Custom { .. } => {
+                                pdx.abs().max(pdy.abs())
                             }
-                        }
-                        let start = (gy - tile_y0) * tile_size + (overlap.min_x - tile_x0);
-                        blend_mask_runs(mask, opacity_scale, &mut data[start..start + width], &blend_run);
-                    }
-                    continue;
-                }
-
-                for gy in overlap.min_y..=overlap.max_y {
-                    let py = gy as f32 + 0.5;
-                    if let Some(sel) = selection {
-                        sel.row_mask(gy, overlap.min_x, &mut sel_row[..=overlap.max_x - overlap.min_x]);
-                    }
-                    for gx in overlap.min_x..=overlap.max_x {
-                        let pdx = gx as f32 + 0.5 - dab.center.x;
-                        let pdy = py - dab.center.y;
-
-                        if !sel_row[gx - overlap.min_x] {
-                            continue;
-                        }
-
-                        let alpha_factor = if anti_aliasing {
-                            let (base_alpha_at_pixel, dist_sq) = calc_soft_brush_alpha(
-                                pdx,
-                                pdy,
-                                r,
-                                pixel_shape,
-                                hardness_val,
-                                softness_selector,
-                                softness_curve,
-                            );
-
-                            if base_alpha_at_pixel <= 0.0 {
-                                0.0
-                            } else {
-                                // 1.5 pixel outer fade using the pre-computed distance
-                                let dist_for_aa = match pixel_shape {
-                                    PixelBrushShape::Circle => dist_sq.sqrt(),
-                                    PixelBrushShape::Square => pdx.abs().max(pdy.abs()),
-                                    PixelBrushShape::Custom { .. } => pdx.abs().max(pdy.abs()),
-                                };
-
-                                if dist_for_aa >= r {
-                                    0.0
-                                } else if dist_for_aa > fade_start {
-                                    let fraction = (dist_for_aa - fade_start) * inv_fade_width;
-                                    base_alpha_at_pixel * (1.0 - fraction)
-                                } else {
-                                    base_alpha_at_pixel
-                                }
-                            }
-                        } else {
-                            let (in_shape, alpha_mod) = match pixel_shape {
-                                PixelBrushShape::Circle => ((pdx * pdx + pdy * pdy) <= r_sq, 1.0),
-                                PixelBrushShape::Square => (pdx.abs() <= r && pdy.abs() <= r, 1.0),
-                                PixelBrushShape::Custom {
-                                    width,
-                                    height,
-                                    data,
-                                } => sample_custom_mask_nn(pdx, pdy, diameter, *width, *height, data),
-                            };
-                            if in_shape { alpha_mod } else { 0.0 }
                         };
-
-                        if alpha_factor <= 0.0 {
-                            continue;
+                        if dist_for_aa >= r {
+                            0.0
+                        } else if dist_for_aa > fade_start {
+                            base_alpha_at_pixel * (1.0 - (dist_for_aa - fade_start) * inv_fade_width)
+                        } else {
+                            base_alpha_at_pixel
                         }
-
-                        let src_a = (base_alpha * flow_alpha * alpha_factor).clamp(0.0, 1.0);
-                        if src_a <= 0.0 {
-                            continue;
-                        }
-                        let alpha_u8 = (src_a * 255.0) as u8;
-                        let idx = (gy - tile_y0) * tile_size + (gx - tile_x0);
-                        apply_dab_blend(blend_mode, &linear_brush, sr, sg, sb, alpha_u8, data, idx);
                     }
-                }
-            }
-
-            if painted {
-                tile.is_empty = false;
+                } else {
+                    let (in_shape, alpha_mod) = match pixel_shape {
+                        PixelBrushShape::Circle => ((pdx * pdx + pdy * pdy) <= r_sq, 1.0),
+                        PixelBrushShape::Square => (pdx.abs() <= r && pdy.abs() <= r, 1.0),
+                        PixelBrushShape::Custom {
+                            width,
+                            height,
+                            data,
+                        } => sample_custom_mask_nn(pdx, pdy, diameter, *width, *height, data),
+                    };
+                    if in_shape { alpha_mod } else { 0.0 }
+                };
+                *slot = if alpha_factor <= 0.0 { 0.0 } else { (strength * alpha_factor).clamp(0.0, 1.0) };
             }
         };
-
-        dispatch_over_buckets(buckets, pool, work_pixels, draw_tile);
+        paint_batch(pool, ctx, buckets, work_pixels, &stamp);
     }
 }
 
@@ -663,7 +595,7 @@ mod tests {
         let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
 
         for (brush, centers) in steps {
-            let mut brush = brush.clone();
+            let brush = brush.clone();
             let mut undo_action = UndoAction {
                 tiles: Vec::new(),
                 selection: None,
@@ -724,22 +656,10 @@ mod tests {
     }
 
     #[test]
-    fn linear_color_table_follows_brush_color_changes() {
-        let mut brush = Brush::new(8.0, 100.0, Color32::RED, 25.0);
-        let red = brush.linear_color();
-        assert!(Arc::ptr_eq(&red, &brush.linear_color()), "same color reuses the table");
-
-        brush.brush_options.color = Color32::BLUE;
-        let blue = brush.linear_color();
-        assert!(!Arc::ptr_eq(&red, &blue));
-        assert_eq!(alpha_over_brush(&blue, 255, Color32::WHITE), Color32::BLUE);
-    }
-
-    #[test]
     fn dirty_tiles_track_only_dabs_since_last_drain() {
         let canvas = Canvas::new(96, 96, Color32::TRANSPARENT, TILE_SIZE_FOR_TEST);
         let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-        let mut brush = Brush::new(8.0, 50.0, Color32::BLACK, 25.0);
+        let brush = Brush::new(8.0, 50.0, Color32::BLACK, 25.0);
         let mut undo_action = UndoAction {
             tiles: Vec::new(),
             selection: None,
@@ -756,7 +676,8 @@ mod tests {
         brush.dabs(&pool, &canvas, None, &[second], &mut undo_action, &mut stroke_tiles);
 
         assert_eq!(stroke_tiles.dirty, HashSet::from([(1, 1)]));
-        assert_eq!(stroke_tiles.snapshotted, HashSet::from([(0, 0), (1, 1)]));
+        let buffered: HashSet<_> = stroke_tiles.buffers.keys().copied().collect();
+        assert_eq!(buffered, HashSet::from([(0, 0), (1, 1)]));
     }
 
     /// Golden-master check for the Soft brush's fast Gaussian-circle path
@@ -769,7 +690,7 @@ mod tests {
         assert_eq!(brush.brush_options.pixel_shape, PixelBrushShape::Circle);
         let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
         assert_eq!(
-            checksum, 0x3746e62f3bd2ff5d,
+            checksum, 0xfca7dbcd8180e865,
             "GOLDEN_PLACEHOLDER:soft_dab_gaussian_fast_path_output_is_stable"
         );
     }
@@ -783,7 +704,7 @@ mod tests {
         brush.brush_options.pixel_shape = PixelBrushShape::Square;
         let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
         assert_eq!(
-            checksum, 0xf51081982ccff9b5,
+            checksum, 0xa6323891d5f5143d,
             "GOLDEN_PLACEHOLDER:soft_dab_general_path_square_output_is_stable"
         );
     }
@@ -801,10 +722,10 @@ mod tests {
         );
     }
 
-    /// Golden-master check for the Soft brush's general path with the
-    /// Eraser blend mode, erasing into a pre-painted solid fill.
+    /// Golden-master check for the Eraser blend mode, erasing into a
+    /// pre-painted solid fill.
     #[test]
-    fn soft_dab_general_path_eraser_output_is_stable() {
+    fn soft_dab_eraser_output_is_stable() {
         let fill_brush =
             Brush::new(60.0, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 255), 15.0);
         let mut eraser_brush = Brush::new(24.0, 40.0, Color32::from_rgba_unmultiplied(0, 0, 0, 255), 15.0);
@@ -815,8 +736,8 @@ mod tests {
             (eraser_brush, stroke_centers()),
         ]);
         assert_eq!(
-            checksum, 0x99e2b1f695633483,
-            "GOLDEN_PLACEHOLDER:soft_dab_general_path_eraser_output_is_stable"
+            checksum, 0xf877ab8ee4bd7297,
+            "GOLDEN_PLACEHOLDER:soft_dab_eraser_output_is_stable"
         );
     }
 
@@ -824,7 +745,36 @@ mod tests {
     fn soft_dab_selection_output_is_stable() {
         let brush = Brush::new(24.0, 40.0, Color32::from_rgba_unmultiplied(30, 150, 90, 255), 15.0);
         let checksum = paint_and_checksum_in(&[(brush, stroke_centers())], Some(&star_selection()));
-        assert_eq!(checksum, 0xc6cc6a71eff28584, "GOLDEN_PLACEHOLDER:soft_dab_selection_output_is_stable");
+        assert_eq!(checksum, 0x7b79b57ad8c7f794, "GOLDEN_PLACEHOLDER:soft_dab_selection_output_is_stable");
+    }
+
+    #[test]
+    fn selection_only_changes_pixels_on_its_antialiased_edge() {
+        let brush = Brush::new(24.0, 40.0, Color32::from_rgba_unmultiplied(30, 150, 90, 255), 15.0);
+        let steps = [(brush, stroke_centers())];
+        let free = paint_bytes_in(&steps, None);
+        let selection = star_selection();
+        let masked = paint_bytes_in(&steps, Some(&selection));
+
+        // paint_bytes_in lays tiles out (0,0), (1,0), (0,1), (1,1), 64x64 each.
+        let mut checked_inside = 0;
+        for tile in 0..4 {
+            let (tx, ty) = (tile % 2, tile / 2);
+            for ly in 0..64 {
+                let mut row = [0.0f32; 64];
+                selection.row_coverage(ty * 64 + ly, tx * 64, &mut row);
+                for (lx, &cov) in row.iter().enumerate() {
+                    let i = (tile * 64 * 64 + ly * 64 + lx) * 4;
+                    if cov == 1.0 {
+                        assert_eq!(masked[i..i + 4], free[i..i + 4]);
+                        checked_inside += 1;
+                    } else if cov == 0.0 {
+                        assert_eq!(masked[i..i + 4], [0, 0, 0, 0]);
+                    }
+                }
+            }
+        }
+        assert!(checked_inside > 500);
     }
 
     #[test]
@@ -832,6 +782,66 @@ mod tests {
         let brush = Brush::new_pixel(18.0, Color32::from_rgba_unmultiplied(90, 30, 150, 255));
         let checksum = paint_and_checksum_in(&[(brush, stroke_centers())], Some(&star_selection()));
         assert_eq!(checksum, 0x322bba2014492c15, "GOLDEN_PLACEHOLDER:pixel_dab_selection_output_is_stable");
+    }
+
+    /// Dab centers off the pixel grid, so sub-pixel placement and rounding
+    /// both matter.
+    fn fractional_centers() -> Vec<Vec2> {
+        (0..30)
+            .map(|i| Vec2::new(14.3 + i as f32 * 2.37, 20.7 + (i as f32 * 0.4).sin() * 25.1))
+            .collect()
+    }
+
+    #[test]
+    fn soft_partial_flow_fractional_output_is_stable() {
+        let mut brush = Brush::new(30.0, 30.0, Color32::from_rgba_unmultiplied(220, 120, 40, 255), 10.0);
+        brush.brush_options.flow = 50.0;
+        let checksum = paint_and_checksum(&[(brush, fractional_centers())]);
+        assert_eq!(checksum, 0x8d76a58ccb7039a9, "GOLDEN_PLACEHOLDER:soft_partial_flow_fractional_output_is_stable");
+    }
+
+    #[test]
+    fn eraser_partial_flow_fractional_output_is_stable() {
+        let fill = Brush::new(60.0, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 255), 15.0);
+        let mut eraser = Brush::new(24.0, 40.0, Color32::BLACK, 15.0);
+        eraser.brush_options.blend_mode = BlendMode::Eraser;
+        eraser.brush_options.flow = 40.0;
+        let checksum = paint_and_checksum(&[
+            (fill, vec![Vec2::new(48.0, 48.0)]),
+            (eraser, fractional_centers()),
+        ]);
+        assert_eq!(checksum, 0xad4b90a79f1db115, "GOLDEN_PLACEHOLDER:eraser_partial_flow_fractional_output_is_stable");
+    }
+
+    fn max_alpha(bytes: &[u8]) -> u8 {
+        bytes.chunks_exact(4).map(|px| px[3]).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn wash_mode_caps_a_stroke_at_its_opacity() {
+        let dense: Vec<Vec2> = (0..40).map(|i| Vec2::new(40.0 + i as f32 * 0.5, 48.0)).collect();
+        let mut brush = Brush::new(30.0, 80.0, Color32::from_rgb(20, 90, 200), 5.0);
+        brush.brush_options.opacity = 0.5;
+        brush.brush_options.flow = 60.0;
+
+        let build_up = max_alpha(&paint_bytes_in(&[(brush.clone(), dense.clone())], None));
+        brush.brush_options.painting_mode = PaintingMode::Wash;
+        let wash = max_alpha(&paint_bytes_in(&[(brush, dense)], None));
+
+        assert!(build_up > 250, "build-up keeps accumulating past opacity: {build_up}");
+        assert!((127..=128).contains(&wash), "wash tops out at opacity: {wash}");
+    }
+
+    #[test]
+    fn pixel_brush_honors_opacity_and_flow() {
+        let mut brush = Brush::new_pixel(9.0, Color32::from_rgb(200, 40, 40));
+        brush.brush_options.opacity = 0.5;
+        let half = max_alpha(&paint_bytes_in(&[(brush.clone(), vec![Vec2::new(20.5, 20.5)])], None));
+        brush.brush_options.opacity = 1.0;
+        brush.brush_options.flow = 25.0;
+        let quarter = max_alpha(&paint_bytes_in(&[(brush, vec![Vec2::new(20.5, 20.5)])], None));
+        assert!((127..=128).contains(&half), "{half}");
+        assert!((63..=64).contains(&quarter), "{quarter}");
     }
 
     #[test]
@@ -852,7 +862,7 @@ mod tests {
         let (frac_x, frac_y) = (0.25, 0.5);
         let my = 12usize;
         let pdy = my as f32 - 12.0 + 0.5 - frac_y;
-        let mut row = [0u8; 25];
+        let mut row = [0.0f32; 25];
         tip.row(pdy, frac_x, 0, &mut row);
 
         for (mx, &alpha) in row.iter().enumerate() {
@@ -874,12 +884,12 @@ mod tests {
             } else {
                 base
             };
-            assert!((alpha as f32 / 255.0 - expected).abs() <= 1.0 / 255.0, "mx={mx}");
+            assert!((alpha - expected).abs() <= 1e-5, "mx={mx}");
         }
     }
 
     #[test]
-    fn gaussian_tip_simd_lanes_match_scalar() {
+    fn gaussian_tip_kernels_match_scalar_reference() {
         for hardness in [0.0, 0.2, 0.5, 0.99, 1.0] {
             for r in [0.6_f32, 3.0, 12.0, 40.5] {
                 let fade_start = (r - 1.5).max(0.0);
@@ -892,24 +902,30 @@ mod tests {
                     fade_start,
                     inv_fade_width: 1.0 / fade_width,
                 };
-                for step in 0..400 {
-                    let base = step as f32 * (r + 2.0) / 100.0;
-                    let dist = f32x4::new([base, base + 0.013, base + 0.37, base + 0.71]);
-                    let dist_sq = dist * dist;
-                    let t = dist * f32x4::splat(tip.inv_radius);
-                    let simd = tip.alpha_x4(dist_sq, dist, t).to_array();
-                    let (dist_sq, dist, t) = (dist_sq.to_array(), dist.to_array(), t.to_array());
-                    for lane in 0..4 {
-                        let scalar = tip.alpha(dist_sq[lane], dist[lane], t[lane]);
-                        assert_eq!(simd[lane] as u8, scalar, "h={hardness} r={r} d={}", dist[lane]);
+                let side = (2 * tip.r_ceil + 1) as usize;
+                for (frac_x, frac_y) in [(0.0, 0.0), (0.3125, 0.9375), (0.5, 0.0625)] {
+                    for my in 0..side {
+                        let pdy = my as f32 - tip.r_ceil as f32 + 0.5 - frac_y;
+                        // Odd starts and lengths exercise vector bodies and tails.
+                        let (mx0, len) = (my % 3, side - my % 3);
+                        let mut baseline = vec![0.0f32; len];
+                        let mut dispatched = vec![0.0f32; len];
+                        row_kernel(&tip, pdy, frac_x, mx0, &mut baseline);
+                        tip.row(pdy, frac_x, mx0, &mut dispatched);
+                        for i in 0..len {
+                            let pdx = (mx0 + i) as f32 - tip.r_ceil as f32 + 0.5 - frac_x;
+                            let dist_sq = pdx * pdx + pdy * pdy;
+                            let dist = dist_sq.sqrt();
+                            let expected = tip.alpha(dist_sq, dist, dist * tip.inv_radius).to_bits();
+                            assert_eq!(baseline[i].to_bits(), expected, "h={hardness} r={r} my={my} i={i}");
+                            assert_eq!(dispatched[i].to_bits(), expected, "h={hardness} r={r} my={my} i={i}");
+                        }
                     }
                 }
             }
         }
     }
 
-    /// Dense, overlapping dabs straddling tile corners on a multi-threaded
-    /// pool: one batched call must match painting the dabs one at a time.
     #[test]
     fn batched_dabs_match_one_at_a_time() {
         let centers: Vec<Vec2> = (0..40)
@@ -923,7 +939,7 @@ mod tests {
             let paint = |batched: bool| {
                 let canvas = Canvas::new(128, 128, Color32::TRANSPARENT, 32);
                 let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-                let mut brush = brush.clone();
+                let brush = brush.clone();
                 let mut undo = UndoAction {
                     tiles: Vec::new(),
                     selection: None,

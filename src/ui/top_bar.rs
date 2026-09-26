@@ -74,7 +74,7 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
             }
             if ui.button("Open").clicked()
                 && let Some(path) = open_project_dialog()
-                && let Err(err) = app.load_project_from_path(ctx, path)
+                && let Err(err) = app.load_project_from_path(path)
             {
                 log::error!("{err}");
                 app.export_state.message = Some(err);

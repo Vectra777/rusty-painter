@@ -1,5 +1,5 @@
 use crate::brush_engine::brush::{Brush, BrushType, StabilizerAlgorithm};
-use crate::brush_engine::brush_options::{BlendMode, PixelBrushShape};
+use crate::brush_engine::brush_options::{BlendMode, PaintingMode, PixelBrushShape};
 use crate::brush_engine::hardness::SoftnessSelector;
 use crate::ui::style::TIP_SWATCH_SIZE;
 use crate::ui::{brush_preview::render_preview, curve_editor::curve_editor};
@@ -38,14 +38,12 @@ fn dirty_selectable<T: PartialEq>(
     selected_value: T,
     text: &str,
     preview: &mut BrushPreviewState,
-) -> bool {
-    let changed = ui
-        .selectable_value(current_value, selected_value, text)
-        .changed();
-    if changed {
+) -> egui::Response {
+    let response = ui.selectable_value(current_value, selected_value, text);
+    if response.changed() {
         preview.dirty = true;
     }
-    changed
+    response
 }
 
 /// Adds a checkbox and marks the preview dirty when it changes.
@@ -139,6 +137,26 @@ pub fn brush_settings_panel(
         );
     });
 
+    ui.horizontal(|ui| {
+        ui.label("Painting:");
+        dirty_selectable(
+            ui,
+            &mut brush.brush_options.painting_mode,
+            PaintingMode::BuildUp,
+            "Build-up",
+            preview,
+        )
+        .on_hover_text("Every dab adds paint at flow × opacity; overlaps keep building up.");
+        dirty_selectable(
+            ui,
+            &mut brush.brush_options.painting_mode,
+            PaintingMode::Wash,
+            "Wash",
+            preview,
+        )
+        .on_hover_text("A single stroke never exceeds the brush opacity, however much it overlaps itself.");
+    });
+
     ui.add_space(5.0);
 
     ui.label("Brush Tip:");
@@ -218,7 +236,9 @@ pub fn brush_settings_panel(
                 SoftnessSelector::Gaussian,
                 "Gaussian",
                 preview,
-            ) {
+            )
+            .changed()
+            {
                 mask_dirty = true;
             }
             if dirty_selectable(
@@ -227,7 +247,9 @@ pub fn brush_settings_panel(
                 SoftnessSelector::Curve,
                 "Curve",
                 preview,
-            ) {
+            )
+            .changed()
+            {
                 mask_dirty = true;
             }
         });

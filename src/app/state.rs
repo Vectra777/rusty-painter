@@ -1,5 +1,5 @@
 use crate::canvas::Canvas;
-use eframe::egui::{Color32, TextureHandle};
+use eframe::egui::Color32;
 
 pub const TILE_SIZE: usize = 64;
 pub const ATLAS_SIZE: usize = 2048;
@@ -50,17 +50,8 @@ pub struct NewCanvasSettings {
 
 pub struct CanvasTile {
     pub dirty: bool,
-    pub atlas_idx: usize,
-    pub atlas_x: usize,
-    pub atlas_y: usize,
-    pub pixel_w: usize,
-    pub pixel_h: usize,
     pub tx: usize,
     pub ty: usize,
-}
-
-pub struct TextureAtlas {
-    pub texture: TextureHandle,
 }
 
 impl CanvasUnit {

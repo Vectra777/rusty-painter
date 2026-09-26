@@ -6,3 +6,4 @@ pub mod hardness;
 mod masks;
 pub mod preview;
 pub mod stroke;
+pub mod stroke_worker;

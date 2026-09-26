@@ -1,18 +1,48 @@
 use super::PainterApp;
-use crate::{
-    app::painter_state::StrokeSession,
-    brush_engine::stroke::{StrokeContext, StrokeState},
-    canvas::history::{History, UndoAction},
-};
+use crate::brush_engine::stroke_worker::StrokeSetup;
+use crate::canvas::Canvas;
+use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
+use std::sync::Arc;
 
 impl PainterApp {
     pub(crate) fn start_stroke(&mut self, pos: Vec2) {
         if self.is_active_layer_locked() {
             return;
         }
-        self.initialize_stroke_state();
-        self.add_initial_stroke_point(pos);
+        let selection = self
+            .selection_manager
+            .has_selection()
+            .then(|| SelectionManager {
+                current_shape: self.selection_manager.current_shape.clone(),
+                is_dragging: false,
+            });
+        self.stroke_worker.begin(StrokeSetup {
+            canvas: Arc::clone(&self.canvas),
+            brush: self.brush_state.brush.clone(),
+            selection,
+            pool: Arc::clone(&self.workspace.pool),
+            layer_idx: self.canvas.active_layer_idx,
+        });
+        self.brush_state.is_drawing = true;
+        self.render_cache.below_cache = None;
+        // No pressure sample is available for the synthetic first point
+        // of a stroke; 1.0 preserves the pre-existing (unscaled) behavior.
+        self.stroke_worker.sample(pos, 1.0);
+    }
+
+    pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
+        if self.brush_state.is_drawing {
+            self.stroke_worker.sample(pos, pressure);
+        }
+    }
+
+    pub(crate) fn finish_stroke(&mut self) {
+        if self.brush_state.is_drawing {
+            self.stroke_worker.end();
+        }
+        self.brush_state.is_drawing = false;
+        self.render_cache.below_cache = None;
     }
 
     fn is_active_layer_locked(&self) -> bool {
@@ -23,75 +53,45 @@ impl PainterApp {
             .unwrap_or(false)
     }
 
-    fn initialize_stroke_state(&mut self) {
-        self.brush_state.session = Some(StrokeSession {
-            stroke: StrokeState::new(),
-            undo_action: UndoAction {
-                tiles: Vec::new(),
-                selection: None,
-                transform: None,
-                layer_action: None,
-            },
-        });
-        self.brush_state.is_drawing = true;
-        self.render_cache.stroke_tiles.snapshotted.clear();
-        self.render_cache.below_cache = None;
-    }
-
-    fn add_initial_stroke_point(&mut self, pos: Vec2) {
-        if let Some(session) = &mut self.brush_state.session {
-            let has_selection = self.selection_manager.has_selection();
-            let selection = if has_selection {
-                Some(&self.selection_manager)
-            } else {
-                None
-            };
-            let mut context = StrokeContext::new(
-                &self.workspace.pool,
-                &self.canvas,
-                selection,
-                &mut session.undo_action,
-                &mut self.render_cache.stroke_tiles,
-            );
-            // No pressure sample is available for the synthetic first point
-            // of a stroke; 1.0 preserves the pre-existing (unscaled) behavior.
-            session
-                .stroke
-                .add_point(&mut self.brush_state.brush, pos, 1.0, &mut context);
-            self.mark_modified_tiles_dirty();
+    /// Per-frame hand-off from the stroke worker: mark the tiles it painted
+    /// for redraw and file finished strokes into their layer's undo history.
+    /// Returns whether it still has queued samples to paint.
+    pub(crate) fn sync_stroke_worker(&mut self) -> bool {
+        for (tx, ty) in self.stroke_worker.take_dirty() {
+            self.mark_tile_dirty(tx, ty);
         }
-    }
-
-    pub(crate) fn finish_stroke(&mut self) {
-        self.end_current_stroke();
-        self.save_undo_action_if_valid();
-        self.clear_stroke_state();
-    }
-
-    fn end_current_stroke(&mut self) {
-        if let Some(session) = &mut self.brush_state.session {
-            session.stroke.end();
+        for finished in self.stroke_worker.take_finished() {
+            if let Some(history) = self.layer_state.histories.get_mut(finished.layer_idx) {
+                history.push_action(finished.undo);
+            }
         }
+        self.stroke_worker.is_busy()
     }
 
-    fn save_undo_action_if_valid(&mut self) {
-        if let Some(session) = self.brush_state.session.take()
-            && !session.undo_action.tiles.is_empty()
-            && let Some(hist) = self.active_history_mut()
-        {
-            hist.push_action(session.undo_action);
-        }
+    /// Wait until every queued sample is painted and its results collected,
+    /// without ending an in-progress stroke (for saving/exporting).
+    pub(crate) fn settle_strokes(&mut self) {
+        self.stroke_worker.wait_idle();
+        self.sync_stroke_worker();
     }
 
-    fn clear_stroke_state(&mut self) {
-        self.brush_state.session = None;
-        self.brush_state.is_drawing = false;
-        self.render_cache.below_cache = None;
+    /// End any in-progress stroke and let the worker go idle, which releases
+    /// its share of the canvas. Use [`exclusive`] afterwards at call sites that
+    /// also borrow other fields; otherwise prefer [`Self::canvas_mut`].
+    pub(crate) fn release_canvas(&mut self) {
+        self.finish_stroke();
+        self.settle_strokes();
     }
 
-    fn active_history_mut(&mut self) -> Option<&mut History> {
-        self.layer_state
-            .histories
-            .get_mut(self.canvas.active_layer_idx)
+    /// Exclusive access to the canvas (see [`Self::release_canvas`]).
+    pub(crate) fn canvas_mut(&mut self) -> &mut Canvas {
+        self.release_canvas();
+        exclusive(&mut self.canvas)
     }
+}
+
+/// The canvas behind `canvas`, which must be unshared: call
+/// [`PainterApp::release_canvas`] first.
+pub(crate) fn exclusive(canvas: &mut Arc<Canvas>) -> &mut Canvas {
+    Arc::get_mut(canvas).expect("an idle stroke worker holds no canvas reference")
 }

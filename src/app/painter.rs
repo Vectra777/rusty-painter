@@ -6,17 +6,26 @@ use super::{
     },
 };
 use crate::app::input_handler;
+use crate::app::stroke_ops::exclusive;
 use crate::app::render_helper;
-use crate::{canvas::Canvas, canvas::history::History, tablet::TabletInput, ui};
+use crate::brush_engine::stroke_worker::StrokeWorker;
+use crate::{canvas::Canvas, tablet::TabletInput, ui};
+use std::sync::Arc;
 use eframe::egui;
 use eframe::egui::{Color32, Vec2};
 use egui_dock::DockState;
 
 use crate::selection::SelectionManager;
 
+/// How long a frame waits for the stroke worker before drawing anyway.
+const STROKE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(5);
+
 /// Main egui application that owns the canvas, brush state, UI and rendering caches.
 pub struct PainterApp {
-    pub(crate) canvas: Canvas,
+    /// Shared with the stroke worker while a stroke is painted; use
+    /// [`PainterApp::canvas_mut`] for exclusive access.
+    pub(crate) canvas: Arc<Canvas>,
+    pub(crate) stroke_worker: StrokeWorker,
 
     // Grouped state
     pub(crate) brush_state: BrushState,
@@ -49,6 +58,10 @@ impl eframe::App for PainterApp {
         });
 
         // Handle Undo/Redo
+        if ctrl_z_pressed {
+            // Finish any stroke first so it is in the history (and undoable).
+            self.release_canvas();
+        }
         if ctrl_z_pressed && self.canvas.active_layer_idx < self.layer_state.histories.len() {
             let active_idx = self.canvas.active_layer_idx;
             // Detach the active layer's History for the duration of the
@@ -56,17 +69,17 @@ impl eframe::App for PainterApp {
             // layer add/remove/move, and this avoids holding a live borrow
             // of `self.layer_state.histories` at the same time.
             let mut history =
-                std::mem::replace(&mut self.layer_state.histories[active_idx], History::new());
+                std::mem::take(&mut self.layer_state.histories[active_idx]);
 
             let (affected, layer_action) = if shift_held {
                 history.redo(
-                    &mut self.canvas,
+                    exclusive(&mut self.canvas),
                     &mut self.selection_manager,
                     &mut self.active_tool,
                 )
             } else {
                 history.undo(
-                    &mut self.canvas,
+                    exclusive(&mut self.canvas),
                     &mut self.selection_manager,
                     &mut self.active_tool,
                 )
@@ -185,8 +198,11 @@ impl eframe::App for PainterApp {
         layout::show_tool_docks(self, ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.workspace.first_frame {
-                let available = ui.available_size();
+            // Keep the canvas fitted while the window settles (the window
+            // manager may resize it after the first frame), until the user
+            // moves the view themselves.
+            let available = ui.available_size();
+            if self.workspace.auto_fit && self.workspace.fitted_to != Some(available) {
                 let canvas_w = self.canvas.width() as f32;
                 let canvas_h = self.canvas.height() as f32;
 
@@ -199,16 +215,25 @@ impl eframe::App for PainterApp {
                     x: offset.x,
                     y: offset.y,
                 };
-                self.workspace.first_frame = false;
+                self.workspace.fitted_to = Some(available);
             }
 
-            render_helper::update_dirty_textures(self);
             let view = render_helper::draw_canvas(self, ui);
 
             input_handler::handle_input(self, ctx, &view.response, view.origin, view.canvas_center);
-            // egui applies texture updates before painting the frame, so uploading the
-            // tiles this frame's dabs dirtied shows them now instead of next frame.
-            render_helper::update_dirty_textures(self);
+            // Give the stroke worker a short budget to paint this frame's
+            // samples so they usually show this frame; a heavy brush can't
+            // stall the frame beyond it and simply shows up next frame.
+            if self.brush_state.is_drawing {
+                self.stroke_worker.wait_idle_for(STROKE_FRAME_BUDGET);
+            }
+            if self.sync_stroke_worker() {
+                needs_repaint = true;
+            }
+            // Composite and paint after input, so this frame's dabs and any
+            // pan/zoom show up in this frame.
+            let uploads = render_helper::update_dirty_textures(self, &view, ui.clip_rect());
+            render_helper::paint_canvas(self, ui, &view, uploads);
 
             if self.brush_state.is_drawing {
                 needs_repaint = true;
@@ -235,7 +260,7 @@ impl eframe::App for PainterApp {
             });
 
             if c_pressed {
-                self.canvas.clear(Color32::WHITE);
+                self.canvas_mut().clear(Color32::WHITE);
                 for tile in &mut self.render_cache.tiles {
                     tile.dirty = true;
                 }

@@ -81,6 +81,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
                     // Flatten on the UI thread, then save on a worker thread.
                     // The shared canvas is not cloned across threads; size limits keep this bounded.
+                    app.stroke_worker.wait_idle();
                     let mut img = ColorImage::new([w, h], egui::Color32::TRANSPARENT);
                     app.canvas
                         .write_region_to_color_image(0, 0, w, h, &mut img, 1);

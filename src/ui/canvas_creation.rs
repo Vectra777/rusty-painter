@@ -133,7 +133,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     .add_enabled(validation.is_ok(), egui::Button::new("Create"))
                     .clicked()
                 {
-                    app.apply_new_canvas(ctx);
+                    app.apply_new_canvas();
                     app.modal_state.show_new_canvas_modal = false;
                 }
                 if ui.button("Cancel").clicked() {

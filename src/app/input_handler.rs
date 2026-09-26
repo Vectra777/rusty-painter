@@ -1,7 +1,7 @@
 use crate::PainterApp;
 use crate::app::tools::Tool;
+use crate::app::stroke_ops::exclusive;
 use crate::app::transform;
-use crate::brush_engine::stroke::StrokeContext;
 use crate::canvas::history::UndoAction;
 use crate::selection::transform::TransformState;
 use crate::tablet::TabletPhase;
@@ -65,9 +65,8 @@ fn handle_tablet_down(app: &mut PainterApp, pos: Vec2) {
 fn handle_tablet_move(app: &mut PainterApp, pos: Vec2, pressure: f32) {
     match app.active_tool {
         Tool::Brush => {
-            if app.brush_state.session.is_some() {
-                add_stroke_point(app, pos, pressure);
-                app.mark_modified_tiles_dirty();
+            if app.brush_state.is_drawing {
+                app.add_stroke_point(pos, pressure);
             } else {
                 app.start_stroke(pos);
             }
@@ -209,6 +208,9 @@ fn handle_primary_press(app: &mut PainterApp, response: &egui::Response, canvas_
 }
 
 fn handle_primary_release(app: &mut PainterApp) {
+    if matches!(app.active_tool, Tool::Transform(_)) {
+        app.release_canvas();
+    }
     match app.active_tool {
         Tool::Brush => app.finish_stroke(),
         Tool::Select(_) => app.selection_manager.end_selection(),
@@ -228,7 +230,7 @@ fn handle_primary_release(app: &mut PainterApp) {
                         let params = crate::canvas::storage::TransformParams::new(
                             offset, rotation, scale, center,
                         );
-                        app.canvas.preview_transform(idx, buffer, params);
+                        exclusive(&mut app.canvas).preview_transform(idx, buffer, params);
                         transform::mark_transform_dirty(app, captured.bounds, &params);
                     }
                 } else {
@@ -251,8 +253,7 @@ fn handle_primary_release(app: &mut PainterApp) {
                     let params = crate::canvas::storage::TransformParams::new(
                         offset, rotation, scale, center,
                     );
-                    app.canvas
-                        .apply_transform(params, selection, Some(&mut action));
+                    exclusive(&mut app.canvas).apply_transform(params, selection, Some(&mut action));
 
                     transform::push_history_if_changed(app, action);
                     transform::mark_transform_dirty(app, captured.bounds, &params);
@@ -280,9 +281,11 @@ fn handle_pointer_move(
     let delta = ctx.input(|i| i.pointer.delta());
 
     if app.viewport.is_rotating {
+        app.workspace.auto_fit = false;
         app.viewport.rotation += delta.x * -0.005;
         ctx.request_repaint();
     } else if app.viewport.is_panning {
+        app.workspace.auto_fit = false;
         app.viewport.offset.x += delta.x;
         app.viewport.offset.y += delta.y;
         ctx.request_repaint();
@@ -336,12 +339,9 @@ fn handle_tool_move(
 
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2, is_inside: bool) {
     if app.brush_state.is_drawing {
-        if app.brush_state.session.is_some() {
-            // Mouse input has no pressure sample; 1.0 preserves the
-            // pre-existing (unscaled) behavior for this path.
-            add_stroke_point(app, pos, 1.0);
-            app.mark_modified_tiles_dirty();
-        }
+        // Mouse input has no pressure sample; 1.0 preserves the
+        // pre-existing (unscaled) behavior for this path.
+        app.add_stroke_point(pos, 1.0);
     } else if app.viewport.is_primary_down
         && !app.viewport.is_panning
         && response.hovered()
@@ -372,30 +372,8 @@ fn handle_mouse_wheel(
             egui::MouseWheelUnit::Page => delta.y * 10.0,
         };
         let factor = (1.0 - scroll * 0.1).clamp(0.5, 2.0);
+        app.workspace.auto_fit = false;
         app.viewport.zoom = (app.viewport.zoom * factor).clamp(0.1, 20.0);
         ctx.request_repaint();
-    }
-}
-
-// Helper functions
-
-fn add_stroke_point(app: &mut PainterApp, pos: Vec2, pressure: f32) {
-    if let Some(session) = &mut app.brush_state.session {
-        let has_selection = app.selection_manager.has_selection();
-        let selection = if has_selection {
-            Some(&app.selection_manager)
-        } else {
-            None
-        };
-        let mut context = StrokeContext::new(
-            &app.workspace.pool,
-            &app.canvas,
-            selection,
-            &mut session.undo_action,
-            &mut app.render_cache.stroke_tiles,
-        );
-        session
-            .stroke
-            .add_point(&mut app.brush_state.brush, pos, pressure, &mut context);
     }
 }

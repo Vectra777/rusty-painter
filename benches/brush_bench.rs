@@ -81,5 +81,63 @@ fn bench_pressure_stroke(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_soft_dab, bench_pressure_stroke);
+/// A 1500 px soft brush dragged across a 4000 px canvas: the case Krita's
+/// "Instant Preview" exists for.
+fn bench_huge_brush_stroke(c: &mut Criterion) {
+    let pool = ThreadPoolBuilder::new().build().unwrap();
+    let canvas = Canvas::new(4000, 4000, Color32::WHITE, 64);
+    let mut brush = Brush::new(1500.0, 40.0, Color32::from_rgba_unmultiplied(200, 60, 30, 255), 10.0);
+    let points: Vec<Vec2> = (0..40)
+        .map(|i| Vec2::new(250.0 + i as f32 * 90.0, 2000.0 + (i as f32 * 0.2).sin() * 600.0))
+        .collect();
+
+    let mut group = c.benchmark_group("huge_brush");
+    group.sample_size(10);
+    group.bench_function("stroke_1500px_40_samples", |b| {
+        b.iter(|| {
+            let mut undo_action = UndoAction {
+                tiles: Vec::new(),
+                selection: None,
+                transform: None,
+                layer_action: None,
+            };
+            let mut stroke_tiles = StrokeTiles::default();
+            let mut stroke = StrokeState::new();
+            let mut context =
+                StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut stroke_tiles);
+            for &pos in &points {
+                stroke.add_point(&mut brush, pos, 1.0, &mut context);
+            }
+        });
+    });
+    group.finish();
+}
+
+/// Recompositing the ~600 display tiles a 1500 px dab dirties (what one frame
+/// of a huge-brush stroke costs on the display side), across the pool.
+fn bench_composite_dirty_tiles(c: &mut Criterion) {
+    use eframe::egui::ColorImage;
+    use rayon::prelude::*;
+    let pool = ThreadPoolBuilder::new().build().unwrap();
+    let canvas = Canvas::new(4000, 4000, Color32::WHITE, 64);
+    let tiles: Vec<(usize, usize)> = (20..44).flat_map(|ty| (20..44).map(move |tx| (tx, ty))).collect();
+    c.bench_function("composite_576_tiles", |b| {
+        b.iter(|| {
+            pool.install(|| {
+                tiles.par_iter().for_each(|&(tx, ty)| {
+                    let mut img = ColorImage::new([0, 0], Color32::TRANSPARENT);
+                    canvas.write_tile_to_color_image(tx, ty, &mut img, 1, None);
+                })
+            })
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_soft_dab,
+    bench_pressure_stroke,
+    bench_huge_brush_stroke,
+    bench_composite_dirty_tiles
+);
 criterion_main!(benches);

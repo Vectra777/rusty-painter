@@ -26,9 +26,7 @@ pub struct LayerId(pub u64);
 type TileMap = FxHashMap<(i32, i32), Arc<Mutex<TileCell>>>;
 type RowTileCache = Vec<Option<(i32, Arc<Mutex<TileCell>>, Option<Vec<Rgba>>, bool)>>;
 
-pub use crate::canvas::blend::{
-    LinearBrushColor, alpha_over_batch, alpha_over_brush, alpha_over_brush_batch, blend_erase,
-};
+pub use crate::canvas::blend::alpha_over_batch;
 
 /// Transform operation parameters
 #[derive(Clone, Copy, Debug)]
@@ -483,7 +481,7 @@ impl Canvas {
                     y0: 0,
                     width: tile_size,
                     height: tile_size,
-                    data,
+                    data: data.into(),
                 })
             })
             .collect()
@@ -1259,7 +1257,7 @@ impl Canvas {
                         y0: 0,
                         width: tile_size,
                         height: tile_size,
-                        data,
+                        data: data.into(),
                     });
                 }
             }
@@ -1493,7 +1491,7 @@ impl Canvas {
                             y0: 0,
                             width: tile_size,
                             height: tile_size,
-                            data: bottom_before,
+                            data: bottom_before.into(),
                         });
                         action.tiles.push(TileSnapshot {
                             tx: *tx,
@@ -1503,7 +1501,7 @@ impl Canvas {
                             y0: 0,
                             width: tile_size,
                             height: tile_size,
-                            data: top_data.clone(),
+                            data: top_data.clone().into(),
                         });
                     }
 
@@ -1592,7 +1590,7 @@ mod tests {
     /// distinct semi-transparent pattern so a tile-indexing bug in either
     /// layer would change the checksum.
     fn build_region_test_canvas() -> Canvas {
-        let mut canvas = Canvas::new(8, 8, Color32::from_rgba_unmultiplied(230, 230, 230, 255), 4);
+        let canvas = Canvas::new(8, 8, Color32::from_rgba_unmultiplied(230, 230, 230, 255), 4);
         for (li, base) in [(0usize, 10u8), (1usize, 60u8)] {
             for (tx, ty) in [(0i32, 0i32), (1, 0), (0, 1), (1, 1)] {
                 let mut data = vec![Color32::TRANSPARENT; 16];

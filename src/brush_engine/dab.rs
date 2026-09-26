@@ -129,6 +129,18 @@ pub(super) struct TileOverlap {
     pub max_y: usize,
 }
 
+impl TileOverlap {
+    /// Smallest rectangle containing both.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            min_x: self.min_x.min(other.min_x),
+            max_x: self.max_x.max(other.max_x),
+            min_y: self.min_y.min(other.min_y),
+            max_y: self.max_y.max(other.max_y),
+        }
+    }
+}
+
 /// Clip `bounds` to the pixel range of a single tile at `(tile_x0, tile_y0)`.
 /// Identical computation was previously duplicated at every draw_tile call
 /// site in brush.rs.

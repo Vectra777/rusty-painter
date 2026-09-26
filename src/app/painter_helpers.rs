@@ -2,21 +2,6 @@
 use crate::brush_engine::brush_options::PixelBrushShape;
 use eframe::egui::TextureHandle;
 
-/// Atlas layout information
-#[derive(Debug, Clone, Copy)]
-pub struct AtlasLayout {
-    pub cols: usize,
-    pub capacity: usize,
-}
-
-/// Position within an atlas
-#[derive(Debug, Clone, Copy)]
-pub struct AtlasPosition {
-    pub atlas_idx: usize,
-    pub x: usize,
-    pub y: usize,
-}
-
 /// Brush tip data extracted from image
 pub struct BrushData {
     pub width: usize,

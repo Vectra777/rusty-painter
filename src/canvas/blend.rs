@@ -138,98 +138,78 @@ pub(crate) fn rgba_to_color32_fast(rgba: Rgba) -> Color32 {
     )
 }
 
-pub fn blend_erase(src: Color32, dst: Color32) -> Color32 {
-    let src_a = src.a() as u32;
-    let inv = 255 - src_a;
-    let out_a = (dst.a() as u32 * inv + 127) / 255;
-    if out_a == 0 {
-        // Each channel rounds independently, so a low-alpha, high-value pixel can
-        // round alpha down to 0 while a color channel rounds down to 1 instead of
-        // 0. Canvas storage relies on alpha==0 implying black premultiplied RGB.
-        return Color32::TRANSPARENT;
-    }
-    let out_r = (dst.r() as u32 * inv + 127) / 255;
-    let out_g = (dst.g() as u32 * inv + 127) / 255;
-    let out_b = (dst.b() as u32 * inv + 127) / 255;
-    Color32::from_rgba_premultiplied(
-        out_r.min(255) as u8,
-        out_g.min(255) as u8,
-        out_b.min(255) as u8,
-        out_a.min(255) as u8,
-    )
+/// The brush color of a stroke, prepared for resolving stroke buffers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StrokeColor {
+    /// Unpremultiplied RGB in linear light.
+    linear: [f32; 3],
+    /// What a fully covered pixel becomes (exactly the brush's RGB, opaque).
+    opaque: Color32,
 }
 
-#[derive(Clone, Debug)]
-pub struct LinearBrushColor {
-    r: [f32; 256],
-    g: [f32; 256],
-    b: [f32; 256],
-    a: [f32; 256],
-    premul: [Color32; 256],
-    is_black: bool,
-}
-
-impl LinearBrushColor {
-    pub fn new(r: u8, g: u8, b: u8) -> Self {
-        let mut color = Self {
-            r: [0.0; 256],
-            g: [0.0; 256],
-            b: [0.0; 256],
-            a: [0.0; 256],
-            premul: [Color32::TRANSPARENT; 256],
-            is_black: r == 0 && g == 0 && b == 0,
-        };
-
-        for alpha in 0..=255 {
-            let premul = Color32::from_rgba_unmultiplied(r, g, b, alpha as u8);
-            color.r[alpha] = srgb_u8_to_linear(premul.r());
-            color.g[alpha] = srgb_u8_to_linear(premul.g());
-            color.b[alpha] = srgb_u8_to_linear(premul.b());
-            color.a[alpha] = alpha as f32 / 255.0;
-            color.premul[alpha] = premul;
+impl StrokeColor {
+    pub(crate) fn new(color: Color32) -> Self {
+        let luts = Luts::get();
+        Self {
+            linear: [luts.linear(color.r()), luts.linear(color.g()), luts.linear(color.b())],
+            opaque: Color32::from_rgb(color.r(), color.g(), color.b()),
         }
-
-        color
     }
 }
 
-#[inline]
-pub fn alpha_over_brush(src: &LinearBrushColor, alpha: u8, dst: Color32) -> Color32 {
-    match alpha {
-        0 => return dst,
-        255 => return src.premul[255],
-        _ => {}
+/// Composite a stroke of `color` over the pixels the tile had before the
+/// stroke (`original`), given each pixel's accumulated stroke `coverage`
+/// scaled by `cap` (the stroke opacity in wash mode, else 1). Pixels with zero
+/// coverage are left untouched, so they never go through a lossy round trip.
+pub(crate) fn resolve_stroke_normal(
+    original: &[Color32],
+    coverage: &[f32],
+    out: &mut [Color32],
+    color: StrokeColor,
+    cap: f32,
+) {
+    // Kept scalar on purpose: most pixels in a dab's bounding rows have zero
+    // coverage and are skipped outright, which beats resolving every pixel
+    // branch-free with SIMD (measured ~1.6x slower on a real stroke).
+    let luts = Luts::get();
+    let [cr, cg, cb] = color.linear;
+    for ((dst, &src), &cov) in out.iter_mut().zip(original).zip(coverage) {
+        if cov <= 0.0 {
+            continue;
+        }
+        let a = cov * cap;
+        if a >= 1.0 {
+            *dst = color.opaque;
+            continue;
+        }
+        let keep = 1.0 - a;
+        *dst = Color32::from_rgba_premultiplied(
+            luts.srgb(cr * a + luts.linear(src.r()) * keep),
+            luts.srgb(cg * a + luts.linear(src.g()) * keep),
+            luts.srgb(cb * a + luts.linear(src.b()) * keep),
+            alpha_to_u8(a + src.a() as f32 / 255.0 * keep),
+        );
     }
-    if dst.a() == 0 {
-        return src.premul[alpha as usize];
+}
+
+/// Eraser counterpart of [`resolve_stroke_normal`]: scales the original
+/// premultiplied pixel by the uncovered fraction. A pixel whose alpha
+/// rounds to zero becomes fully transparent (black RGB), which canvas
+/// storage relies on.
+pub(crate) fn resolve_stroke_erase(original: &[Color32], coverage: &[f32], out: &mut [Color32], cap: f32) {
+    for ((dst, &src), &cov) in out.iter_mut().zip(original).zip(coverage) {
+        if cov <= 0.0 {
+            continue;
+        }
+        let keep = 1.0 - (cov * cap).min(1.0);
+        let scale = |v: u8| (v as f32 * keep + 0.5) as u8;
+        let a = scale(src.a());
+        *dst = if a == 0 {
+            Color32::TRANSPARENT
+        } else {
+            Color32::from_rgba_premultiplied(scale(src.r()), scale(src.g()), scale(src.b()), a)
+        };
     }
-
-    let idx = alpha as usize;
-    let src_a = src.a[idx];
-    let inv_alpha = 1.0 - src_a;
-
-    let dst_r = srgb_u8_to_linear(dst.r()) * inv_alpha;
-    let dst_g = srgb_u8_to_linear(dst.g()) * inv_alpha;
-    let dst_b = srgb_u8_to_linear(dst.b()) * inv_alpha;
-
-    let (out_r, out_g, out_b) = if src.is_black {
-        (dst_r, dst_g, dst_b)
-    } else {
-        (src.r[idx] + dst_r, src.g[idx] + dst_g, src.b[idx] + dst_b)
-    };
-
-    let out_a = if dst.a() == 255 {
-        255
-    } else {
-        alpha_to_u8(src_a + (dst.a() as f32 / 255.0) * inv_alpha)
-    };
-
-    Color32::from_rgba_premultiplied(
-        linear_to_srgb_u8(out_r),
-        linear_to_srgb_u8(out_g),
-        linear_to_srgb_u8(out_b),
-        out_a,
-    )
 }
 
 /// Plain unrolled stand-in for `[T; 4]::map`: the std version goes through
@@ -274,56 +254,6 @@ fn pack_colors_x4(luts: Luts, r: [f32; 4], g: [f32; 4], b: [f32; 4], a: [f32; 4]
             alpha_to_u8(a[3]),
         ),
     ]
-}
-
-#[inline]
-fn alpha_over_brush_x4(luts: Luts, src: &LinearBrushColor, alpha: [u8; 4], dst: [Color32; 4]) -> [Color32; 4] {
-    let idx = map4(alpha, |a| a as usize);
-    let src_a = f32x4::new(map4(idx, |i| src.a[i]));
-    let inv_alpha = f32x4::splat(1.0) - src_a;
-
-    let dst_r = f32x4::new(map4(dst, |c| luts.linear(c.r()))) * inv_alpha;
-    let dst_g = f32x4::new(map4(dst, |c| luts.linear(c.g()))) * inv_alpha;
-    let dst_b = f32x4::new(map4(dst, |c| luts.linear(c.b()))) * inv_alpha;
-
-    let (out_r, out_g, out_b) = if src.is_black {
-        (dst_r, dst_g, dst_b)
-    } else {
-        let src_r = f32x4::new(map4(idx, |i| src.r[i]));
-        let src_g = f32x4::new(map4(idx, |i| src.g[i]));
-        let src_b = f32x4::new(map4(idx, |i| src.b[i]));
-        (src_r + dst_r, src_g + dst_g, src_b + dst_b)
-    };
-
-    let dst_a = f32x4::new(map4(dst, |c| c.a() as f32 / 255.0));
-    let out_a = (src_a + dst_a * inv_alpha).to_array();
-
-    pack_colors_x4(luts, out_r.to_array(), out_g.to_array(), out_b.to_array(), out_a)
-}
-
-/// Batched form of [`alpha_over_brush`] for a run of pixels sharing one brush
-/// color (e.g. a contiguous mask span). Matches the scalar function within
-/// LUT rounding (~1/255) since it always takes the general blend path instead
-/// of the alpha==0/255/dst-transparent shortcuts — the same tradeoff already
-/// accepted by `alpha_over_batch` below.
-#[inline]
-pub fn alpha_over_brush_batch(src: &LinearBrushColor, alphas: &[u8], dst: &mut [Color32]) {
-    assert_eq!(alphas.len(), dst.len());
-    let luts = Luts::get();
-
-    let simd_len = dst.len() / 4 * 4;
-    let mut i = 0;
-    while i < simd_len {
-        let a = [alphas[i], alphas[i + 1], alphas[i + 2], alphas[i + 3]];
-        let d = [dst[i], dst[i + 1], dst[i + 2], dst[i + 3]];
-        let blended = alpha_over_brush_x4(luts, src, a, d);
-        dst[i..i + 4].copy_from_slice(&blended);
-        i += 4;
-    }
-
-    for i in simd_len..dst.len() {
-        dst[i] = alpha_over_brush(src, alphas[i], dst[i]);
-    }
 }
 
 #[inline]
@@ -458,16 +388,6 @@ mod tests {
     }
 
     #[test]
-    fn blend_erase_zero_alpha_implies_zero_rgb() {
-        // src_a=254 -> inv=1. dst.a()=1 rounds to out_a=(1*1+127)/255=0, but
-        // out_r for dst.r()=128 would independently round to 1 without the
-        // early-out, violating "alpha==0 implies premultiplied RGB==0".
-        let src = Color32::from_rgba_premultiplied(0, 0, 0, 254);
-        let dst = Color32::from_rgba_premultiplied(128, 200, 255, 1);
-        assert_eq!(blend_erase(src, dst), Color32::TRANSPARENT);
-    }
-
-    #[test]
     fn lut_alpha_over_matches_rgba_reference() {
         let cases = [
             (
@@ -516,49 +436,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn brush_alpha_over_matches_regular_alpha_over() {
-        let cases = [
-            (
-                LinearBrushColor::new(240, 120, 30),
-                (240, 120, 30),
-                Color32::from_rgba_unmultiplied(40, 80, 220, 180),
-            ),
-            (
-                LinearBrushColor::new(0, 0, 0),
-                (0, 0, 0),
-                Color32::from_rgba_unmultiplied(240, 240, 240, 255),
-            ),
-        ];
 
-        for (brush, (r, g, b), dst) in cases {
-            for alpha in [0, 1, 80, 170, 254, 255] {
-                let src = Color32::from_rgba_unmultiplied(r, g, b, alpha);
-                assert_color_close(alpha_over_brush(&brush, alpha, dst), alpha_over(src, dst));
-            }
+    #[test]
+    fn resolve_erase_zero_alpha_implies_zero_rgb() {
+        // A low-alpha, high-value pixel whose alpha rounds to 0 must become
+        // fully transparent, not keep a stray color value.
+        let original = [Color32::from_rgba_premultiplied(128, 200, 255, 1)];
+        let mut out = original;
+        resolve_stroke_erase(&original, &[0.6], &mut out, 1.0);
+        assert_eq!(out[0], Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn resolve_normal_full_coverage_is_the_exact_brush_color() {
+        for v in 0..=255u8 {
+            let color = Color32::from_rgb(v, 255 - v, v / 3);
+            let original = [Color32::from_rgba_premultiplied(10, 20, 30, 200)];
+            let mut out = original;
+            resolve_stroke_normal(&original, &[1.0], &mut out, StrokeColor::new(color), 1.0);
+            assert_eq!(out[0], color);
         }
     }
 
     #[test]
-    fn batch_alpha_over_brush_matches_scalar_alpha_over_brush() {
-        // 5 pixels covering the alpha==0, alpha==255 and dst.a()==0 shortcuts
-        // that alpha_over_brush special-cases and alpha_over_brush_x4 folds
-        // into the general formula instead: exercises both the SIMD path
-        // (first 4) and the scalar remainder (5th).
-        let brush = LinearBrushColor::new(240, 120, 30);
-        let alphas = [0u8, 255, 170, 80, 40];
-        let dst = [
-            Color32::from_rgba_unmultiplied(64, 100, 255, 180),
-            Color32::from_rgba_unmultiplied(240, 30, 160, 90),
-            Color32::from_rgba_unmultiplied(0, 0, 0, 0),
-            Color32::from_rgba_unmultiplied(0, 0, 0, 255),
-            Color32::from_rgba_unmultiplied(200, 200, 200, 200),
-        ];
-        let mut out = dst;
-        alpha_over_brush_batch(&brush, &alphas, &mut out);
-
-        for i in 0..5 {
-            assert_color_close(out[i], alpha_over_brush(&brush, alphas[i], dst[i]));
-        }
+    fn resolve_leaves_uncovered_pixels_untouched() {
+        let original = [Color32::from_rgba_premultiplied(3, 7, 11, 13)];
+        let mut out = [Color32::from_rgba_premultiplied(99, 99, 99, 99)];
+        resolve_stroke_normal(&original, &[0.0], &mut out, StrokeColor::new(Color32::RED), 1.0);
+        resolve_stroke_erase(&original, &[0.0], &mut out, 1.0);
+        assert_eq!(out[0], Color32::from_rgba_premultiplied(99, 99, 99, 99));
     }
 }

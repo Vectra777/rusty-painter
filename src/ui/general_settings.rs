@@ -8,10 +8,6 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
         &mut app.brush_state.use_masked_brush,
         "Use masked brush (fast)",
     );
-    ui.checkbox(
-        &mut app.render_cache.disable_lod,
-        "High quality zoom out (slower)",
-    );
     let threads_changed = ui
         .add(
             egui::Slider::new(
@@ -26,7 +22,7 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
             .num_threads(app.workspace.thread_count)
             .build()
     {
-        app.workspace.pool = pool;
+        app.workspace.pool = std::sync::Arc::new(pool);
     }
     ui.separator();
     ui.label("Controls:");

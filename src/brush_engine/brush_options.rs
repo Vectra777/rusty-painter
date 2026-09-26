@@ -21,6 +21,16 @@ pub enum BlendMode {
     Eraser,
 }
 
+/// How a stroke's dabs combine, as in Krita.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PaintingMode {
+    /// Every dab adds paint at flow × opacity, so overlaps keep building up.
+    BuildUp,
+    /// Dabs build up at flow, but the stroke as a whole never exceeds its
+    /// opacity (overlapping dabs within one stroke don't darken past it).
+    Wash,
+}
+
 #[derive(Clone, Debug)]
 pub struct BrushOptions {
     pub diameter: f32,
@@ -33,6 +43,7 @@ pub struct BrushOptions {
     pub flow: f32,    // 0..100
     pub opacity: f32, // 0..1
     pub blend_mode: BlendMode,
+    pub painting_mode: PaintingMode,
 }
 
 impl BrushOptions {
@@ -49,6 +60,7 @@ impl BrushOptions {
             flow: 100.0,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
+            painting_mode: PaintingMode::BuildUp,
         }
     }
 }

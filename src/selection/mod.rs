@@ -45,6 +45,75 @@ fn compute_lasso_bbox(points: &[Vec2]) -> (Vec2, Vec2) {
     (min, max)
 }
 
+/// Inside spans `[a, b]` of `shape` along the horizontal line at `y`.
+fn shape_row_spans(shape: &SelectionShape, y: f32, spans: &mut Vec<(f32, f32)>) {
+    match shape {
+        SelectionShape::Rectangle { start, end } => {
+            if y >= start.y.min(end.y) && y <= start.y.max(end.y) {
+                spans.push((start.x.min(end.x), start.x.max(end.x)));
+            }
+        }
+        SelectionShape::Circle { center, radius } => {
+            let dy = y - center.y;
+            let h_sq = radius * radius - dy * dy;
+            if h_sq >= 0.0 {
+                let h = h_sq.sqrt();
+                spans.push((center.x - h, center.x + h));
+            }
+        }
+        SelectionShape::Lasso {
+            points,
+            bbox_min,
+            bbox_max,
+        } => {
+            if points.len() < 3 || y < bbox_min.y || y > bbox_max.y {
+                return;
+            }
+            let mut crossings: Vec<f32> = Vec::new();
+            let mut j = points.len() - 1;
+            for i in 0..points.len() {
+                if (points[i].y > y) != (points[j].y > y) {
+                    crossings.push(
+                        (points[j].x - points[i].x) * (y - points[i].y) / (points[j].y - points[i].y)
+                            + points[i].x,
+                    );
+                }
+                j = i;
+            }
+            crossings.sort_by(f32::total_cmp);
+            // Even-odd rule: inside between each consecutive pair of crossings.
+            for pair in crossings.chunks_exact(2) {
+                let (a, b) = (pair[0].max(bbox_min.x), pair[1].min(bbox_max.x));
+                if a <= b {
+                    spans.push((a, b));
+                }
+            }
+        }
+    }
+}
+
+/// Count the samples of span `[a, b]` falling in each pixel of `counts`
+/// (pixel `x0 + i`). Samples sit at `(k + 0.5) / s` for integer `k`.
+fn add_span_samples(a: f32, b: f32, x0: usize, s: usize, counts: &mut [u32]) {
+    let s_f = s as f32;
+    let first = (x0 * s) as i64;
+    let last = ((x0 + counts.len()) * s) as i64 - 1;
+    let k_min = ((a * s_f - 0.5).ceil() as i64).max(first);
+    let k_max = ((b * s_f - 0.5).floor() as i64).min(last);
+    if k_min > k_max {
+        return;
+    }
+    let s = s as i64;
+    let mut k = k_min;
+    while k <= k_max {
+        let pixel = k / s;
+        let pixel_end = (pixel + 1) * s - 1;
+        let upto = pixel_end.min(k_max);
+        counts[(pixel - x0 as i64) as usize] += (upto - k + 1) as u32;
+        k = upto + 1;
+    }
+}
+
 pub struct SelectionManager {
     pub current_shape: Option<SelectionShape>,
     pub is_dragging: bool,
@@ -229,6 +298,32 @@ impl SelectionManager {
                 passed += 1;
             }
             *slot = px >= bbox_min.x && px <= bbox_max.x && (crossings.len() - passed) % 2 == 1;
+        }
+    }
+
+    /// Anti-aliased selection coverage (0..=1) of pixels `x0..x0 + out.len()`
+    /// in row `y`, from an 8×8 grid of samples per pixel (65 levels). Each
+    /// sub-row's inside spans are computed exactly, so cost is per span, not
+    /// per sample.
+    pub fn row_coverage(&self, y: usize, x0: usize, out: &mut [f32]) {
+        const S: usize = 8;
+        let Some(shape) = &self.current_shape else {
+            out.fill(1.0);
+            return;
+        };
+        let mut counts = vec![0u32; out.len()];
+        let mut spans = Vec::new();
+        for j in 0..S {
+            let sy = y as f32 + (j as f32 + 0.5) / S as f32;
+            spans.clear();
+            shape_row_spans(shape, sy, &mut spans);
+            for &(a, b) in &spans {
+                add_span_samples(a, b, x0, S, &mut counts);
+            }
+        }
+        let inv = 1.0 / (S * S) as f32;
+        for (slot, count) in out.iter_mut().zip(counts) {
+            *slot = count as f32 * inv;
         }
     }
 
@@ -508,6 +603,74 @@ mod tests {
                     assert_eq!(inside, expected, "x={} y={y}", 3 + i);
                 }
             }
+        }
+    }
+
+    fn coverage_grid(selection: &SelectionManager, size: usize) -> Vec<f32> {
+        let mut grid = vec![0.0; size * size];
+        for y in 0..size {
+            selection.row_coverage(y, 0, &mut grid[y * size..(y + 1) * size]);
+        }
+        grid
+    }
+
+    #[test]
+    fn row_coverage_is_antialiased_and_area_correct() {
+        let pixel_aligned = SelectionManager {
+            current_shape: Some(SelectionShape::Rectangle {
+                start: Vec2::new(2.0, 3.0),
+                end: Vec2::new(7.0, 9.0),
+            }),
+            is_dragging: false,
+        };
+        let grid = coverage_grid(&pixel_aligned, 12);
+        for y in 0..12 {
+            for x in 0..12 {
+                let inside = (2..7).contains(&x) && (3..9).contains(&y);
+                assert_eq!(grid[y * 12 + x], if inside { 1.0 } else { 0.0 }, "x={x} y={y}");
+            }
+        }
+
+        let half_pixel_edge = SelectionManager {
+            current_shape: Some(SelectionShape::Rectangle {
+                start: Vec2::new(2.5, 0.0),
+                end: Vec2::new(8.0, 12.0),
+            }),
+            is_dragging: false,
+        };
+        assert_eq!(coverage_grid(&half_pixel_edge, 12)[5 * 12 + 2], 0.5);
+
+        let polygon_area = 0.5 * 40.0 * 13.0 * 13.0 * (std::f32::consts::TAU / 40.0).sin();
+        for (shape, expected) in [
+            (
+                SelectionShape::Circle {
+                    center: Vec2::new(20.3, 19.7),
+                    radius: 13.2,
+                },
+                std::f32::consts::PI * 13.2 * 13.2,
+            ),
+            (
+                new_lasso_shape(
+                (0..40)
+                    .map(|i| {
+                        let a = i as f32 * std::f32::consts::TAU / 40.0;
+                        Vec2::new(20.0 + a.cos() * 13.0, 20.0 + a.sin() * 13.0)
+                    })
+                    .collect(),
+                ),
+                polygon_area,
+            ),
+        ] {
+            let selection = SelectionManager {
+                current_shape: Some(shape),
+                is_dragging: false,
+            };
+            let grid = coverage_grid(&selection, 40);
+            let area: f32 = grid.iter().sum();
+            assert!((area - expected).abs() / expected < 0.005, "area {area} vs {expected}");
+            assert!(grid.iter().any(|&c| c > 0.0 && c < 1.0), "edges are anti-aliased");
+            assert_eq!(grid[20 * 40 + 20], 1.0);
+            assert_eq!(grid[0], 0.0);
         }
     }
 }

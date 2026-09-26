@@ -1,5 +1,6 @@
 pub(crate) mod brush_io;
 pub(crate) mod canvas_ops;
+pub(crate) mod gpu_canvas;
 pub(crate) mod init;
 pub(crate) mod input_handler;
 pub(crate) mod layout;

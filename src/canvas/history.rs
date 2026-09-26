@@ -17,7 +17,74 @@ pub struct TileSnapshot {
     pub y0: usize,
     pub width: usize,
     pub height: usize,
-    pub data: Vec<Color32>,
+    pub data: SnapshotPixels,
+}
+
+/// A snapshot's pixels: raw while it's the newest undo step (instant undo),
+/// zstd-compressed once older. Tiles compress extremely well (a transparent
+/// 64x64 tile shrinks from 16 KiB to a few bytes), so the same memory budget
+/// holds far more history.
+#[derive(Clone)]
+pub enum SnapshotPixels {
+    Raw(Vec<Color32>),
+    Compressed { bytes: Vec<u8>, len: usize },
+}
+
+impl From<Vec<Color32>> for SnapshotPixels {
+    fn from(pixels: Vec<Color32>) -> Self {
+        Self::Raw(pixels)
+    }
+}
+
+impl SnapshotPixels {
+    /// Number of pixels.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Raw(pixels) => pixels.len(),
+            Self::Compressed { len, .. } => *len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The pixels, decompressing if needed. A snapshot that fails to
+    /// decompress (never expected) yields an empty vec, which callers
+    /// reject as an invalid snapshot rather than restoring garbage.
+    pub fn to_vec(&self) -> Vec<Color32> {
+        match self {
+            Self::Raw(pixels) => pixels.clone(),
+            Self::Compressed { bytes, len } => zstd::bulk::decompress(bytes, len * 4)
+                .map(|raw| {
+                    raw.chunks_exact(4)
+                        .map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3]))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Bytes of pixel data held in memory.
+    fn held_bytes(&self) -> usize {
+        match self {
+            Self::Raw(pixels) => pixels.len() * std::mem::size_of::<Color32>(),
+            Self::Compressed { bytes, .. } => bytes.len(),
+        }
+    }
+
+    fn compress(&mut self) {
+        let Self::Raw(pixels) = self else {
+            return;
+        };
+        let raw: Vec<u8> = pixels.iter().flat_map(|p| p.to_array()).collect();
+        if let Ok(bytes) = zstd::bulk::compress(&raw, 1) {
+            *self = Self::Compressed {
+                bytes,
+                len: pixels.len(),
+            };
+        }
+    }
 }
 
 /// Plain-data layer metadata (no tile content), enough to reconstruct an
@@ -71,16 +138,23 @@ pub struct UndoAction {
 }
 
 /// Pixel memory one layer's undo stack may hold before its oldest actions are
-/// dropped. Full-tile snapshots add up fast: a stroke across a 4K canvas saves
-/// about 4000 tiles, roughly 64 MiB.
+/// dropped, counting older steps at their compressed size. Uncompressed, a
+/// stroke across a 4K canvas saves about 4000 tiles, roughly 64 MiB.
 const MAX_UNDO_BYTES: usize = 512 * 1024 * 1024;
 
 fn snapshot_bytes(action: &UndoAction) -> usize {
-    action
-        .tiles
-        .iter()
-        .map(|tile| tile.data.len() * std::mem::size_of::<Color32>())
-        .sum()
+    action.tiles.iter().map(|tile| tile.data.held_bytes()).sum()
+}
+
+/// Compress the pixels of every action except the newest.
+fn compress_older_actions(stack: &mut [UndoAction]) {
+    use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
+    let Some((_, older)) = stack.split_last_mut() else {
+        return;
+    };
+    for action in older {
+        action.tiles.par_iter_mut().for_each(|tile| tile.data.compress());
+    }
 }
 
 /// Drop the oldest actions until the stack fits in `max_bytes`, always
@@ -116,6 +190,7 @@ impl History {
     pub fn push_action(&mut self, action: UndoAction) {
         self.undo_stack.push(action);
         self.redo_stack.clear();
+        compress_older_actions(&mut self.undo_stack);
         trim_oldest(&mut self.undo_stack, MAX_UNDO_BYTES);
     }
 
@@ -382,6 +457,11 @@ impl History {
                     tile.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
                 }
                 let data = tile.data.as_mut().unwrap();
+                let stored = snapshot.data.to_vec();
+                if stored.len() != snapshot.width * snapshot.height {
+                    log::error!("Skipping undo snapshot that failed to decompress");
+                    continue;
+                }
 
                 // Extract current region
                 let mut current_region =
@@ -400,11 +480,11 @@ impl History {
                     let src_start = row * snapshot.width;
                     let len = snapshot.width;
                     data[dst_start..dst_start + len]
-                        .copy_from_slice(&snapshot.data[src_start..src_start + len]);
+                        .copy_from_slice(&stored[src_start..src_start + len]);
                 }
 
                 // Store current region for redo/undo swap
-                snapshot.data = current_region;
+                snapshot.data = current_region.into();
                 affected.push((snapshot.tx, snapshot.ty));
             }
         }
@@ -434,7 +514,7 @@ mod tests {
                 y0: 0,
                 width: pixels,
                 height: 1,
-                data: vec![Color32::TRANSPARENT; pixels],
+                data: vec![Color32::TRANSPARENT; pixels].into(),
             }],
             selection: None,
             transform: None,
@@ -468,7 +548,7 @@ mod tests {
                 y0: 3,
                 width: 4,
                 height: 4,
-                data: vec![Color32::BLACK; 16],
+                data: vec![Color32::BLACK; 16].into(),
             }],
             selection: None,
             transform: None,
@@ -561,7 +641,7 @@ mod tests {
                 y0: 0,
                 width: tile_size,
                 height: tile_size,
-                data: original.clone(),
+                data: original.clone().into(),
             }],
             selection: None,
             transform: None,
@@ -584,6 +664,73 @@ mod tests {
         // not blindly write into position 1 (now the Background layer).
         assert_eq!(canvas.get_layer_tile_data(0, 0, 0), Some(original));
         assert_ne!(canvas.get_layer_tile_data(1, 0, 0), Some(painted));
+    }
+
+    fn one_tile_action(data: Vec<Color32>) -> UndoAction {
+        UndoAction {
+            tiles: vec![TileSnapshot {
+                tx: 0,
+                ty: 0,
+                layer_id: LayerId(1),
+                x0: 0,
+                y0: 0,
+                width: 4,
+                height: 4,
+                data: data.into(),
+            }],
+            selection: None,
+            transform: None,
+            layer_action: None,
+        }
+    }
+
+    #[test]
+    fn older_actions_are_compressed_losslessly_newest_stays_raw() {
+        let patterned: Vec<Color32> = (0..4096u32)
+            .map(|i| Color32::from_rgba_premultiplied(i as u8, (i / 16) as u8, 255 - i as u8, 200))
+            .collect();
+        let mut history = History::new();
+        history.push_action(action_with_tile_pixels(4096, 1));
+        history.push_action(UndoAction {
+            tiles: vec![TileSnapshot {
+                data: patterned.clone().into(),
+                ..action_with_tile_pixels(4096, 2).tiles.remove(0)
+            }],
+            ..action_with_tile_pixels(0, 2)
+        });
+        history.push_action(action_with_tile_pixels(4096, 3));
+
+        let (undo, _) = history.stacks();
+        assert!(matches!(undo[0].tiles[0].data, SnapshotPixels::Compressed { .. }));
+        assert!(matches!(undo[1].tiles[0].data, SnapshotPixels::Compressed { .. }));
+        assert!(matches!(undo[2].tiles[0].data, SnapshotPixels::Raw(_)));
+        assert!(snapshot_bytes(&undo[0]) < 100, "a transparent tile compresses to a few bytes");
+        assert_eq!(undo[0].tiles[0].data.to_vec(), vec![Color32::TRANSPARENT; 4096]);
+        assert_eq!(undo[1].tiles[0].data.to_vec(), patterned);
+    }
+
+    #[test]
+    fn undo_restores_exact_pixels_from_a_compressed_snapshot() {
+        let mut canvas = Canvas::new(4, 4, Color32::WHITE, 4);
+        let before: Vec<Color32> = (0..16u8)
+            .map(|i| Color32::from_rgba_premultiplied(i * 9, 255 - i * 7, i * 3, 200))
+            .collect();
+        let red = vec![Color32::RED; 16];
+        canvas.set_layer_tile_data(1, 0, 0, before.clone());
+
+        let mut history = History::new();
+        history.push_action(one_tile_action(before.clone()));
+        canvas.set_layer_tile_data(1, 0, 0, red.clone());
+        history.push_action(one_tile_action(red.clone()));
+        canvas.set_layer_tile_data(1, 0, 0, vec![Color32::BLUE; 16]);
+        assert!(matches!(history.stacks().0[0].tiles[0].data, SnapshotPixels::Compressed { .. }));
+
+        let mut selection = SelectionManager::new();
+        let mut tool = Tool::Brush;
+        history.undo(&mut canvas, &mut selection, &mut tool);
+        assert_eq!(canvas.get_layer_tile_data(1, 0, 0), Some(red));
+        history.undo(&mut canvas, &mut selection, &mut tool);
+        assert_eq!(canvas.get_layer_tile_data(1, 0, 0), Some(before));
     }
 
     /// Undoing a layer-add removes the layer and restores the previously

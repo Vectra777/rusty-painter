@@ -1,10 +1,12 @@
 use crate::PainterApp;
+use crate::app::stroke_ops::exclusive;
 use crate::app::tools::Tool;
 use crate::canvas::history::UndoAction;
 use crate::canvas::storage::TransformParams;
 use eframe::egui::{self, Vec2};
 
 pub(crate) fn apply_simple_transform(app: &mut PainterApp, offset: Vec2) {
+    app.release_canvas();
     let mut action = UndoAction {
         tiles: Vec::new(),
         selection: Some(app.selection_manager.current_shape.clone()),
@@ -24,8 +26,7 @@ pub(crate) fn apply_simple_transform(app: &mut PainterApp, offset: Vec2) {
         .get_content_bounds(app.canvas.active_layer_idx, selection);
 
     let params = TransformParams::new(offset, 0.0, Vec2::new(1.0, 1.0), Vec2::new(0.0, 0.0));
-    app.canvas
-        .apply_transform(params, selection, Some(&mut action));
+    exclusive(&mut app.canvas).apply_transform(params, selection, Some(&mut action));
 
     push_history_if_changed(app, action);
     mark_transform_dirty(app, src_bounds, &params);
@@ -35,9 +36,10 @@ pub(crate) fn apply_simple_transform(app: &mut PainterApp, offset: Vec2) {
 
 pub(crate) fn create_floating_layer(app: &mut PainterApp) {
     if app.selection_manager.has_selection() && app.layer_state.floating_layer_idx.is_none() {
+        app.release_canvas();
         let sel_bounds = app.selection_manager.get_bounds();
 
-        if let Some(idx) = app.canvas.float_selection(&app.selection_manager) {
+        if let Some(idx) = exclusive(&mut app.canvas).float_selection(&app.selection_manager) {
             app.layer_state.floating_layer_idx = Some(idx);
             app.layer_state.floating_buffer = Some(app.canvas.capture_layer_pixels(idx));
 
@@ -67,7 +69,7 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
             transform: None,
             layer_action: None,
         };
-        app.canvas.merge_layer_down(idx, Some(&mut action));
+        app.canvas_mut().merge_layer_down(idx, Some(&mut action));
         app.layer_state.floating_layer_idx = None;
         app.layer_state.floating_buffer = None;
         app.selection_manager.clear_selection();
@@ -239,13 +241,17 @@ pub(crate) fn apply_live_transform_preview(
     app: &mut PainterApp,
     info: &crate::selection::transform::TransformInfo,
 ) {
+    if app.layer_state.floating_buffer.is_none() {
+        return;
+    }
+    app.release_canvas();
     if let Some(buffer) = &app.layer_state.floating_buffer
         && let Some(idx) = app.layer_state.floating_layer_idx
     {
         let center = get_transform_center(info);
         let params = TransformParams::new(info.offset, info.rotation, info.scale, center);
 
-        app.canvas.preview_transform(idx, buffer, params);
+        exclusive(&mut app.canvas).preview_transform(idx, buffer, params);
         mark_transform_dirty(app, info.bounds, &params);
     }
 }

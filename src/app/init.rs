@@ -1,7 +1,10 @@
 use super::{
-    PainterApp, layout,
+    PainterApp,
+    gpu_canvas::GpuCanvas,
+    layout,
     painter_state::{
-        BrushState, ExportState, LayerState, ModalState, ViewportState, WorkspaceState,
+        BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState,
+        WorkspaceState,
     },
     state::{ColorModel, NewCanvasSettings, TILE_SIZE},
 };
@@ -25,8 +28,13 @@ impl PainterApp {
 
         let presets = Self::create_default_brush_presets(black);
         let workspace = Self::create_workspace(color_model);
-        let render_cache =
-            Self::initialize_render_cache(&cc.egui_ctx, canvas_w, canvas_h, layer_count);
+        let render_cache = RenderCache::new(canvas_w, canvas_h);
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            let gpu = GpuCanvas::new(&render_state.device, render_state.target_format);
+            render_state.renderer.write().callback_resources.insert(gpu);
+        } else {
+            log::error!("No wgpu render state: the canvas cannot be displayed");
+        }
         let dock_left = layout::default_left_dock();
         let dock_right = layout::default_right_dock();
 
@@ -42,7 +50,8 @@ impl PainterApp {
         let export_state = ExportState::new();
 
         let mut app = Self {
-            canvas,
+            canvas: std::sync::Arc::new(canvas),
+            stroke_worker: Default::default(),
             brush_state,
             viewport,
             render_cache,
@@ -137,7 +146,7 @@ impl PainterApp {
             .num_threads(max_threads)
             .build()
             .expect("failed to build thread pool");
-        WorkspaceState::new(max_threads, max_threads, pool, color_model)
+        WorkspaceState::new(max_threads, max_threads, std::sync::Arc::new(pool), color_model)
     }
 
     fn get_brushes_path() -> PathBuf {

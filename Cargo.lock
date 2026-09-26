@@ -3099,6 +3099,7 @@ dependencies = [
  "log",
  "ndk-context",
  "octotablet",
+ "pollster 0.4.0",
  "rand 0.9.4",
  "rayon",
  "rfd",

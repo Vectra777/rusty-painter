@@ -1,31 +1,26 @@
-use crate::app::state::{CanvasTile, ColorModel, NewCanvasSettings, TextureAtlas};
+use crate::app::gpu_canvas::TILES_PER_ATLAS;
+use crate::app::state::{CanvasTile, ColorModel, NewCanvasSettings, TILE_SIZE};
 use crate::{
     brush_engine::{
         brush::{Brush, BrushPreset},
         brush_options::PixelBrushShape,
-        stroke::{StrokeState, StrokeTiles},
     },
-    canvas::history::{History, UndoAction},
+    canvas::history::History,
     ui::{brush_settings::BrushPreviewState, export_modal::ExportProgress},
 };
 use crate::canvas::storage::LayerId;
 use eframe::egui::{self, Color32, Rgba, Vec2};
 use rustc_hash::FxHashMap;
 use rayon::ThreadPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 /// An in-progress stroke: the interpolation state plus the undo action that
 /// accumulates tile snapshots for it. These previously lived as two separate
 /// `Option`s (`BrushState.stroke` and `LayerState.current_undo_action`) kept
 /// `Some`/`None` in sync by convention across several call sites; bundling
 /// them here makes that pairing structural instead.
-pub struct StrokeSession {
-    pub stroke: StrokeState,
-    pub undo_action: UndoAction,
-}
-
 /// Brush-related state and resources
 pub struct BrushState {
     pub brush: Brush,
@@ -34,7 +29,6 @@ pub struct BrushState {
     pub preset_previews: HashMap<String, egui::TextureHandle>,
     pub loaded_brush_tips: Vec<(String, PixelBrushShape, Option<egui::TextureHandle>)>,
     pub brushes_path: PathBuf,
-    pub session: Option<StrokeSession>,
     pub is_drawing: bool,
     pub use_masked_brush: bool,
     pub show_new_preset_modal: bool,
@@ -55,7 +49,6 @@ impl BrushState {
             preset_previews: HashMap::new(),
             loaded_brush_tips: Vec::new(),
             brushes_path,
-            session: None,
             is_drawing: false,
             use_masked_brush,
             show_new_preset_modal: false,
@@ -93,43 +86,50 @@ pub struct BelowCache {
     pub tiles: FxHashMap<(usize, usize), Vec<Rgba>>,
 }
 
-/// GPU texture atlas and rendering cache
+/// Display tiles and their GPU atlas grid.
 pub struct RenderCache {
     pub tiles: Vec<CanvasTile>,
-    pub atlases: Vec<TextureAtlas>,
     pub tiles_x: usize,
     pub tiles_y: usize,
-    pub layer_caches: Vec<HashMap<(usize, usize), egui::ColorImage>>,
-    pub layer_cache_dirty: Vec<HashSet<(usize, usize)>>,
-    pub stroke_tiles: StrokeTiles,
+    /// Atlas grid size; each atlas holds a `TILES_PER_ATLAS`² block of tiles.
+    pub atlases_x: usize,
+    pub atlases_y: usize,
     /// Composite of the layers below the active one, per tile, valid for the
     /// current stroke only (nothing but the active layer changes mid-stroke).
     pub below_cache: Option<BelowCache>,
+    /// Bumped whenever the canvas is rebuilt, so the GPU recreates its atlases.
     pub texture_generation: u64,
-    pub disable_lod: bool,
+    /// Tiles whose atlas content is only exact from this mip level up (a
+    /// zoomed-out stroke preview); finer levels still need a full upload.
+    pub preview_tiles: FxHashMap<(usize, usize), u32>,
 }
 
 impl RenderCache {
-    pub fn new(
-        tiles: Vec<CanvasTile>,
-        atlases: Vec<TextureAtlas>,
-        tiles_x: usize,
-        tiles_y: usize,
-        layer_count: usize,
-        disable_lod: bool,
-    ) -> Self {
+    /// A render cache for a `width`×`height` canvas, every tile dirty.
+    pub fn new(width: usize, height: usize) -> Self {
+        let tiles_x = width.div_ceil(TILE_SIZE);
+        let tiles_y = height.div_ceil(TILE_SIZE);
+        let tiles = (0..tiles_y)
+            .flat_map(|ty| (0..tiles_x).map(move |tx| CanvasTile { dirty: true, tx, ty }))
+            .collect();
         Self {
             tiles,
-            atlases,
             tiles_x,
             tiles_y,
-            layer_caches: vec![HashMap::new(); layer_count],
-            layer_cache_dirty: vec![HashSet::new(); layer_count],
-            stroke_tiles: StrokeTiles::default(),
+            atlases_x: tiles_x.div_ceil(TILES_PER_ATLAS),
+            atlases_y: tiles_y.div_ceil(TILES_PER_ATLAS),
             below_cache: None,
             texture_generation: 0,
-            disable_lod,
+            preview_tiles: FxHashMap::default(),
         }
+    }
+
+    /// The atlas holding tile `(tx, ty)` and the tile's pixel offset in it.
+    pub fn atlas_slot(&self, tx: usize, ty: usize) -> (usize, usize, usize) {
+        let atlas = (ty / TILES_PER_ATLAS) * self.atlases_x + tx / TILES_PER_ATLAS;
+        let x = (tx % TILES_PER_ATLAS) * TILE_SIZE;
+        let y = (ty % TILES_PER_ATLAS) * TILE_SIZE;
+        (atlas, x, y)
     }
 }
 
@@ -206,16 +206,20 @@ impl Default for ExportState {
 pub struct WorkspaceState {
     pub thread_count: usize,
     pub max_threads: usize,
-    pub pool: ThreadPool,
+    pub pool: Arc<ThreadPool>,
     pub color_model: ColorModel,
-    pub first_frame: bool,
+    /// Fit the canvas to the panel whenever the panel size changes, until the
+    /// user pans, zooms or rotates the view.
+    pub auto_fit: bool,
+    /// Panel size the canvas was last auto-fitted to.
+    pub fitted_to: Option<egui::Vec2>,
 }
 
 impl WorkspaceState {
     pub fn new(
         thread_count: usize,
         max_threads: usize,
-        pool: ThreadPool,
+        pool: Arc<ThreadPool>,
         color_model: ColorModel,
     ) -> Self {
         Self {
@@ -223,7 +227,8 @@ impl WorkspaceState {
             max_threads,
             pool,
             color_model,
-            first_frame: true,
+            auto_fit: true,
+            fitted_to: None,
         }
     }
 }

@@ -45,35 +45,30 @@ pub(crate) fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, Stri
 
 impl PainterApp {
     pub(crate) fn save_project_to_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
-        if self.brush_state.is_drawing {
-            self.finish_stroke();
-        }
+        // Saves every painted pixel and files the stroke into undo history.
+        self.release_canvas();
         save_project(self, with_project_extension(path.as_ref()))
     }
 
-    pub(crate) fn load_project_from_path(
-        &mut self,
-        ctx: &eframe::egui::Context,
-        path: impl AsRef<Path>,
-    ) -> Result<(), String> {
+    pub(crate) fn load_project_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let loaded = load_project(path)?;
         let width = loaded.canvas.width();
         let height = loaded.canvas.height();
         let layer_count = loaded.canvas.layers.len();
 
-        self.canvas = loaded.canvas;
+        *self.canvas_mut() = loaded.canvas;
         self.workspace.color_model = loaded.color_model;
         self.layer_state = LayerState::new(layer_count);
         self.layer_state.histories = loaded.histories;
-        self.render_cache = Self::initialize_render_cache(ctx, width, height, layer_count);
-        self.brush_state.session = None;
+        self.recreate_render_cache(width, height);
         self.brush_state.is_drawing = false;
         self.active_tool = Tool::Brush;
         self.selection_manager.clear_selection();
         self.viewport.offset = Vec2::ZERO;
         self.viewport.zoom = 1.0;
         self.viewport.rotation = 0.0;
-        self.workspace.first_frame = true;
+        self.workspace.auto_fit = true;
+        self.workspace.fitted_to = None;
         Ok(())
     }
 }
@@ -415,7 +410,7 @@ impl StoredTileSnapshot {
             y0: snapshot.y0,
             width: snapshot.width,
             height: snapshot.height,
-            rgba_zstd: push_blob(blobs, &colors_to_bytes(&snapshot.data))?,
+            rgba_zstd: push_blob(blobs, &colors_to_bytes(&snapshot.data.to_vec()))?,
         })
     }
 
@@ -438,7 +433,7 @@ impl StoredTileSnapshot {
             y0: self.y0,
             width: self.width,
             height: self.height,
-            data,
+            data: data.into(),
         })
     }
 }
@@ -452,7 +447,8 @@ mod tests {
     fn test_app(canvas: Canvas, histories: Vec<History>) -> PainterApp {
         let layer_count = canvas.layers.len();
         PainterApp {
-            canvas,
+            canvas: std::sync::Arc::new(canvas),
+            stroke_worker: Default::default(),
             brush_state: crate::app::painter_state::BrushState::new(
                 Brush::new(1.0, 100.0, Color32::BLACK, 10.0),
                 Vec::new(),
@@ -460,14 +456,7 @@ mod tests {
                 true,
             ),
             viewport: crate::app::painter_state::ViewportState::new(1.0, Vec2::ZERO),
-            render_cache: crate::app::painter_state::RenderCache::new(
-                Vec::new(),
-                Vec::new(),
-                1,
-                1,
-                layer_count,
-                true,
-            ),
+            render_cache: crate::app::painter_state::RenderCache::new(1, 1),
             layer_state: {
                 let mut state = LayerState::new(layer_count);
                 state.histories = histories;
@@ -485,7 +474,7 @@ mod tests {
             workspace: crate::app::painter_state::WorkspaceState::new(
                 1,
                 1,
-                ThreadPoolBuilder::new().num_threads(1).build().unwrap(),
+                std::sync::Arc::new(ThreadPoolBuilder::new().num_threads(1).build().unwrap()),
                 ColorModel::Rgba,
             ),
             active_tool: Tool::Brush,
@@ -494,6 +483,25 @@ mod tests {
             dock_right: egui_dock::DockState::new(Vec::new()),
             tablet: None,
         }
+    }
+
+    #[test]
+    fn canvas_mut_finishes_the_stroke_and_files_its_undo_step() {
+        let canvas = Canvas::new(64, 64, Color32::WHITE, TILE_SIZE);
+        let mut app = test_app(canvas, vec![History::new(), History::new()]);
+        app.start_stroke(Vec2::new(10.0, 10.0));
+        app.add_stroke_point(Vec2::new(30.0, 20.0), 1.0);
+        assert!(app.brush_state.is_drawing);
+
+        let _ = app.canvas_mut();
+
+        assert!(!app.brush_state.is_drawing);
+        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_ne!(
+            app.canvas.get_layer_tile_data(1, 0, 0),
+            Some(vec![Color32::TRANSPARENT; TILE_SIZE * TILE_SIZE]),
+            "the stroke was painted"
+        );
     }
 
     #[test]
@@ -512,7 +520,7 @@ mod tests {
                 y0: 0,
                 width: TILE_SIZE,
                 height: TILE_SIZE,
-                data: pixels,
+                data: pixels.into(),
             }],
             selection: Some(None),
             transform: None,
