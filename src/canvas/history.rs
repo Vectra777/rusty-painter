@@ -70,6 +70,31 @@ pub struct UndoAction {
     pub layer_action: Option<LayerHistoryOp>,
 }
 
+/// Pixel memory one layer's undo stack may hold before its oldest actions are
+/// dropped. Full-tile snapshots add up fast: a stroke across a 4K canvas saves
+/// about 4000 tiles, roughly 64 MiB.
+const MAX_UNDO_BYTES: usize = 512 * 1024 * 1024;
+
+fn snapshot_bytes(action: &UndoAction) -> usize {
+    action
+        .tiles
+        .iter()
+        .map(|tile| tile.data.len() * std::mem::size_of::<Color32>())
+        .sum()
+}
+
+/// Drop the oldest actions until the stack fits in `max_bytes`, always
+/// keeping the newest one.
+fn trim_oldest(stack: &mut Vec<UndoAction>, max_bytes: usize) {
+    let mut total: usize = stack.iter().map(snapshot_bytes).sum();
+    let mut dropped = 0;
+    while total > max_bytes && dropped + 1 < stack.len() {
+        total -= snapshot_bytes(&stack[dropped]);
+        dropped += 1;
+    }
+    stack.drain(..dropped);
+}
+
 /// Stack-based undo/redo manager that swaps tile buffers in place.
 #[derive(Clone)]
 pub struct History {
@@ -86,10 +111,12 @@ impl History {
         }
     }
 
-    /// Push a new action onto the undo stack and clear redo.
+    /// Push a new action onto the undo stack and clear redo, dropping the
+    /// oldest actions if the stack's tile snapshots exceed [`MAX_UNDO_BYTES`].
     pub fn push_action(&mut self, action: UndoAction) {
         self.undo_stack.push(action);
         self.redo_stack.clear();
+        trim_oldest(&mut self.undo_stack, MAX_UNDO_BYTES);
     }
 
     pub(crate) fn stacks(&self) -> (&[UndoAction], &[UndoAction]) {
@@ -396,6 +423,37 @@ mod tests {
     use super::*;
     use crate::app::tools::Tool;
     use crate::selection::SelectionManager;
+
+    fn action_with_tile_pixels(pixels: usize, tag: i32) -> UndoAction {
+        UndoAction {
+            tiles: vec![TileSnapshot {
+                tx: tag,
+                ty: 0,
+                layer_id: LayerId(1),
+                x0: 0,
+                y0: 0,
+                width: pixels,
+                height: 1,
+                data: vec![Color32::TRANSPARENT; pixels],
+            }],
+            selection: None,
+            transform: None,
+            layer_action: None,
+        }
+    }
+
+    #[test]
+    fn trim_oldest_drops_oldest_actions_past_budget_but_keeps_newest() {
+        // Each action holds 100 pixels = 400 bytes.
+        let mut stack: Vec<UndoAction> = (0..5).map(|i| action_with_tile_pixels(100, i)).collect();
+        trim_oldest(&mut stack, 1000);
+        let kept: Vec<i32> = stack.iter().map(|a| a.tiles[0].tx).collect();
+        assert_eq!(kept, vec![3, 4]);
+
+        let mut huge = vec![action_with_tile_pixels(10_000, 9)];
+        trim_oldest(&mut huge, 1000);
+        assert_eq!(huge.len(), 1, "the newest action is kept even if it alone exceeds the budget");
+    }
 
     #[test]
     fn invalid_snapshot_is_ignored() {

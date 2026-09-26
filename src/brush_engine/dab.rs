@@ -2,6 +2,7 @@ use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
 use rayon::ThreadPool;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TileRegion {
@@ -59,10 +60,64 @@ pub(super) fn calc_dab_bounds(
     })
 }
 
-pub(super) fn build_tile_regions(bounds: &DabBounds) -> Vec<TileRegion> {
-    (bounds.min_ty..=bounds.max_ty)
-        .flat_map(|ty| (bounds.min_tx..=bounds.max_tx).map(move |tx| TileRegion { tx, ty }))
-        .collect()
+/// A dab position resolved against the canvas: clipped bounds plus the
+/// quantized placement the Gaussian mask kernel uses.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PlacedDab {
+    pub center: Vec2,
+    pub bounds: DabBounds,
+    /// Mask origin in canvas pixels (`floor(center) - r_ceil`).
+    pub base_x: i32,
+    pub base_y: i32,
+    /// Sub-pixel center offset, quantized to 1/16 px.
+    pub frac_x: f32,
+    pub frac_y: f32,
+}
+
+impl PlacedDab {
+    pub fn new(center: Vec2, bounds: DabBounds, r_ceil: i32) -> Self {
+        let quantize = |v: f32| ((v - v.floor()) * 16.0).floor().clamp(0.0, 15.0) as u8 as f32 / 16.0;
+        Self {
+            center,
+            bounds,
+            base_x: center.x.floor() as i32 - r_ceil,
+            base_y: center.y.floor() as i32 - r_ceil,
+            frac_x: quantize(center.x),
+            frac_y: quantize(center.y),
+        }
+    }
+}
+
+/// A tile plus the indices (in stroke order) of the dabs that touch it.
+pub(super) type TileBucket = (TileRegion, Vec<usize>);
+
+/// Group dabs by the tiles their bounds touch, like libmypaint's per-tile
+/// operation queue. Each tile keeps its dabs in stroke order, so per-pixel
+/// blending order is unchanged; tiles are listed in first-touch order.
+pub(super) fn bucket_by_tile(dabs: &[PlacedDab]) -> Vec<TileBucket> {
+    let mut slots: FxHashMap<(usize, usize), usize> = FxHashMap::default();
+    let mut buckets: Vec<TileBucket> = Vec::new();
+    for (i, dab) in dabs.iter().enumerate() {
+        let b = &dab.bounds;
+        for ty in b.min_ty..=b.max_ty {
+            for tx in b.min_tx..=b.max_tx {
+                let slot = *slots.entry((tx, ty)).or_insert_with(|| {
+                    buckets.push((TileRegion { tx, ty }, Vec::new()));
+                    buckets.len() - 1
+                });
+                buckets[slot].1.push(i);
+            }
+        }
+    }
+    buckets
+}
+
+/// Whether a dab of radius `r` at `center` can reach the tile at `(x0, y0)`.
+pub(super) fn dab_reaches_tile(center: Vec2, r: f32, x0: usize, y0: usize, tile_size: usize) -> bool {
+    !(center.x < x0 as f32 - r
+        || center.x > (x0 + tile_size) as f32 + r
+        || center.y < y0 as f32 - r
+        || center.y > (y0 + tile_size) as f32 + r)
 }
 
 /// Pixel-range within a tile that a dab's bounds actually overlap.
@@ -91,18 +146,24 @@ pub(super) fn tile_overlap(
     }
 }
 
-/// Run `draw_tile` over every tile, serially for a small/cheap dab and via
-/// the thread pool otherwise. The exact same threshold
-/// (`tiles.len() == 1 || (tiles.len() <= 4 && diameter <= 24.0)`) was
-/// previously duplicated at every dab call site in brush.rs.
-pub(super) fn dispatch_over_tiles<F>(tiles: &[TileRegion], pool: &ThreadPool, diameter: f32, draw_tile: F)
-where
-    F: Fn(&TileRegion) + Sync,
+/// Below this much total pixel work, running tiles serially beats entering
+/// the thread pool.
+const PARALLEL_MIN_PIXELS: usize = 1024;
+
+/// Run `draw_tile` over every bucket: serially for a small batch, otherwise
+/// once through the thread pool (one dispatch per batch, not per dab).
+pub(super) fn dispatch_over_buckets<F>(
+    buckets: &[TileBucket],
+    pool: &ThreadPool,
+    work_pixels: usize,
+    draw_tile: F,
+) where
+    F: Fn(&TileBucket) + Sync,
 {
-    if tiles.len() == 1 || (tiles.len() <= 4 && diameter <= 24.0) {
-        tiles.iter().for_each(&draw_tile);
+    if buckets.len() == 1 || work_pixels <= PARALLEL_MIN_PIXELS {
+        buckets.iter().for_each(&draw_tile);
     } else {
-        pool.install(|| tiles.par_iter().for_each(&draw_tile));
+        pool.install(|| buckets.par_iter().for_each(&draw_tile));
     }
 }
 

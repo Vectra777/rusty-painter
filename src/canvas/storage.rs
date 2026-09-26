@@ -1,9 +1,12 @@
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{Color32, ColorImage, Rgba};
 
-use crate::canvas::blend::{apply_opacity_scale, premultiply, rgba_to_color32_fast};
+use crate::canvas::blend::{
+    apply_opacity_scale, color32_to_linear, color32s_to_linear, premultiply, rgba_to_color32_fast,
+};
 use crate::canvas::history::{LayerMeta, TileSnapshot, UndoAction};
 use crate::selection::SelectionManager;
 use crate::utils::color::{Color, ColorManipulation};
@@ -18,11 +21,13 @@ const MAX_TRANSFORM_SOURCE_PIXELS: usize = 67_108_864;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LayerId(pub u64);
 
-type TileMap = HashMap<(i32, i32), Arc<Mutex<TileCell>>>;
+// Tile lookups happen per dab per tile and per layer per composited tile; FxHash
+// is several times cheaper than the default SipHash for small integer keys.
+type TileMap = FxHashMap<(i32, i32), Arc<Mutex<TileCell>>>;
 type RowTileCache = Vec<Option<(i32, Arc<Mutex<TileCell>>, Option<Vec<Rgba>>, bool)>>;
 
 pub use crate::canvas::blend::{
-    LinearBrushColor, alpha_over, alpha_over_batch, alpha_over_brush, blend_erase,
+    LinearBrushColor, alpha_over_batch, alpha_over_brush, alpha_over_brush_batch, blend_erase,
 };
 
 /// Transform operation parameters
@@ -292,12 +297,12 @@ impl Layer {
             visible: true,
             opacity: 1.0,
             locked: false,
-            tiles: Mutex::new(HashMap::new()),
+            tiles: Mutex::new(TileMap::default()),
         }
     }
 
     fn from_snapshot(snapshot: CanvasLayerSnapshot) -> Self {
-        let mut tiles = HashMap::new();
+        let mut tiles = TileMap::default();
         for tile in snapshot.tiles {
             tiles.insert(
                 (tile.tx, tile.ty),
@@ -336,6 +341,44 @@ pub(crate) struct TileCell {
     pub data: Option<Vec<Color32>>,
     /// True if the tile contains only transparent pixels
     pub is_empty: bool,
+}
+
+/// A precomputed composite of the layers below `first_layer` for one tile.
+#[derive(Clone, Copy)]
+pub struct BelowComposite<'a> {
+    pub first_layer: usize,
+    pub pixels: &'a [Rgba],
+}
+
+/// One visible layer's contribution to a tile, already in linear light.
+struct LayerInput {
+    opacity: f32,
+    /// Used where the tile has no pixel data (background clear color, else transparent).
+    fill: Rgba,
+    linear: Option<Vec<Rgba>>,
+}
+
+/// Source-over composite of `layers` (bottom to top) onto `composite` for one pixel.
+#[inline]
+fn composite_pixel(layers: &[LayerInput], idx: usize, mut composite: Rgba) -> Rgba {
+    for layer in layers {
+        let src = layer.linear.as_ref().map_or(layer.fill, |data| data[idx]);
+        if src.a() == 0.0 {
+            continue;
+        }
+        let src = if layer.opacity < 1.0 { src * layer.opacity } else { src };
+        composite = src + composite * (1.0 - src.a());
+    }
+    composite
+}
+
+fn layer_tile(layer: &Layer, tx: i32, ty: i32) -> Option<Arc<Mutex<TileCell>>> {
+    layer
+        .tiles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(tx, ty))
+        .cloned()
 }
 
 impl Canvas {
@@ -705,6 +748,7 @@ impl Canvas {
                 dst_h,
                 step,
                 out,
+                None,
             );
             return;
         }
@@ -712,9 +756,96 @@ impl Canvas {
         self.write_multi_tile_region(x, y, dst_w, dst_h, step, out);
     }
 
+    /// Composite one whole tile into `out` (downsampled by `step`), optionally
+    /// starting from a precomputed composite of the layers below
+    /// `below.first_layer` instead of compositing them again.
+    pub fn write_tile_to_color_image(
+        &self,
+        tx: usize,
+        ty: usize,
+        out: &mut ColorImage,
+        step: usize,
+        below: Option<BelowComposite<'_>>,
+    ) {
+        let x = tx * self.tile_size;
+        let y = ty * self.tile_size;
+        let w = self.tile_size.min(self.width.saturating_sub(x));
+        let h = self.tile_size.min(self.height.saturating_sub(y));
+        if w == 0 || h == 0 {
+            out.size = [0, 0];
+            out.pixels.clear();
+            return;
+        }
+        let step = step.max(1);
+        let dst_w = w.div_ceil(step);
+        let dst_h = h.div_ceil(step);
+        if out.size != [dst_w, dst_h] {
+            out.size = [dst_w, dst_h];
+            out.pixels.resize(dst_w * dst_h, Color32::TRANSPARENT);
+        }
+        if step == 1
+            && self.try_write_single_tile_fast(tx as i32, ty as i32, x..x + w, y..y + h, out)
+        {
+            return;
+        }
+        self.write_single_tile_region(
+            x, y, w, h, tx as i32, ty as i32, dst_w, dst_h, step, out, below,
+        );
+    }
+
+    /// Linear, premultiplied composite of the visible layers below
+    /// `layer_idx` for every pixel of one tile: exactly the value the
+    /// compositor has accumulated just before reaching `layer_idx`.
+    pub fn composite_below(&self, layer_idx: usize, tx: i32, ty: i32) -> Vec<Rgba> {
+        let layers = self.tile_layer_inputs(tx, ty, 0..layer_idx.min(self.layers.len()));
+        (0..self.tile_size * self.tile_size)
+            .map(|idx| composite_pixel(&layers, idx, Rgba::TRANSPARENT))
+            .collect()
+    }
+
+    /// Cache key for [`Self::composite_below`]: everything besides pixel
+    /// content (which only the active layer's strokes change) it depends on.
+    pub fn composite_below_key(&self, layer_idx: usize) -> (Color32, Vec<(LayerId, bool, u32)>) {
+        let layers = self.layers[..layer_idx.min(self.layers.len())]
+            .iter()
+            .map(|l| (l.id, l.visible, l.opacity.to_bits()))
+            .collect();
+        (self.clear_color, layers)
+    }
+
+    /// The visible, non-empty layers in `range` for one tile, pre-converted to
+    /// linear light.
+    fn tile_layer_inputs(&self, tx: i32, ty: i32, range: std::ops::Range<usize>) -> Vec<LayerInput> {
+        let clear_color_linear = color32_to_linear(self.clear_color);
+        let mut inputs = Vec::new();
+        for i in range {
+            let layer = &self.layers[i];
+            if !(layer.visible && layer.opacity > 0.0) {
+                continue;
+            }
+            let cell = layer_tile(layer, tx, ty);
+            let guard = cell
+                .as_ref()
+                .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()));
+            // A missing background tile shows the clear color; any other missing tile is empty.
+            if guard.as_ref().map_or(i != 0, |g| g.is_empty) {
+                continue;
+            }
+            inputs.push(LayerInput {
+                opacity: layer.opacity,
+                fill: if i == 0 { clear_color_linear } else { Rgba::TRANSPARENT },
+                linear: guard
+                    .as_ref()
+                    .and_then(|g| g.data.as_deref())
+                    .map(color32s_to_linear),
+            });
+        }
+        inputs
+    }
+
     /// Composite a region that lies entirely within one tile. Used when
     /// `try_write_single_tile_fast`'s stricter fast path doesn't apply
-    /// (e.g. `step != 1`, so the region needs downsampling).
+    /// (several layers, partial opacity, or `step != 1` downsampling).
     #[allow(clippy::too_many_arguments)]
     fn write_single_tile_region(
         &self,
@@ -728,180 +859,66 @@ impl Canvas {
         dst_h: usize,
         step: usize,
         out: &mut ColorImage,
+        below: Option<BelowComposite<'_>>,
     ) {
-        {
-            // 1. Get Arcs (Locking the map briefly)
-            let layer_arcs: Vec<Option<Arc<Mutex<TileCell>>>> = self
-                .layers
-                .iter()
-                .map(|layer| {
-                    let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
-                    tiles.get(&(tx, ty)).cloned()
-                })
-                .collect();
+        let first_layer = below.map_or(0, |b| b.first_layer);
+        let layers = self.tile_layer_inputs(tx, ty, first_layer..self.layers.len());
+        let start = |idx: usize| below.map_or(Rgba::TRANSPARENT, |b| b.pixels[idx]);
 
-            // 2. Lock the Tiles (Holding locks for the render duration)
-            let layer_guards: Vec<Option<std::sync::MutexGuard<'_, TileCell>>> = layer_arcs
-                .iter()
-                .map(|opt| {
-                    opt.as_ref()
-                        .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()))
-                })
-                .collect();
+        for dst_y in 0..dst_h {
+            let global_y_start = y + dst_y * step;
+            let row_start = dst_y * dst_w;
 
-            // 3. Pre-convert all tiles to linear space to avoid repeated conversions
-            let tile_pixel_count = self.tile_size * self.tile_size;
-            let mut linear_tiles: Vec<Option<Vec<Rgba>>> = Vec::with_capacity(self.layers.len());
+            for dst_x in 0..dst_w {
+                let global_x_start = x + dst_x * step;
 
-            for opt_guard in layer_guards.iter() {
-                if let Some(guard) = opt_guard {
-                    if let Some(data) = &guard.data {
-                        // Convert entire tile to linear space once
-                        let mut linear_data = Vec::with_capacity(tile_pixel_count);
-                        for &pixel in data.iter() {
-                            linear_data.push(Rgba::from(pixel));
-                        }
-                        linear_tiles.push(Some(linear_data));
-                    } else {
-                        linear_tiles.push(None);
-                    }
+                if step == 1 {
+                    let local_y = global_y_start % self.tile_size;
+                    let local_x = global_x_start % self.tile_size;
+                    let src_idx = local_y * self.tile_size + local_x;
+                    let composite = composite_pixel(&layers, src_idx, start(src_idx));
+                    out.pixels[row_start + dst_x] = rgba_to_color32_fast(composite);
                 } else {
-                    linear_tiles.push(None);
-                }
-            }
+                    // Downsample: average the linear composites of the covered pixels.
+                    let mut r_acc = 0.0;
+                    let mut g_acc = 0.0;
+                    let mut b_acc = 0.0;
+                    let mut a_acc = 0.0;
+                    let mut count = 0.0;
 
-            // 4. Pre-calculate layer visibility and opacity to avoid lookups in the pixel loop
-            // Stores: (is_visible, opacity, has_data_guard_index, is_background, is_empty)
-            let layer_props: Vec<(bool, f32, usize, bool, bool)> = layer_guards
-                .iter()
-                .enumerate()
-                .map(|(i, opt_guard)| {
-                    let is_visible = self.layers[i].visible && self.layers[i].opacity > 0.0;
-                    let is_empty = opt_guard.as_ref().map_or(i != 0, |g| g.is_empty);
-                    (is_visible, self.layers[i].opacity, i, i == 0, is_empty)
-                })
-                .collect();
+                    for sy in 0..step {
+                        let global_y = global_y_start + sy;
+                        if global_y >= y + h {
+                            continue;
+                        }
+                        let local_y = global_y % self.tile_size;
 
-            // Pre-convert clear_color to linear space
-            let clear_color_linear = Rgba::from(self.clear_color);
-
-            for dst_y in 0..dst_h {
-                let global_y_start = y + dst_y * step;
-                let row_start = dst_y * dst_w;
-
-                for dst_x in 0..dst_w {
-                    let global_x_start = x + dst_x * step;
-
-                    if step == 1 {
-                        // --- FAST PATH (1:1 Rendering) ---
-                        let local_y = global_y_start % self.tile_size;
-                        let local_x = global_x_start % self.tile_size;
-                        let src_idx = local_y * self.tile_size + local_x;
-
-                        // Linear Accumulator (starts transparent)
-                        let mut composite = Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
-
-                        for (i, (visible, opacity, _, is_bg, is_empty)) in
-                            layer_props.iter().enumerate()
-                        {
-                            if !visible || *is_empty {
+                        for sx in 0..step {
+                            let global_x = global_x_start + sx;
+                            if global_x >= x + w {
                                 continue;
                             }
+                            let local_x = global_x % self.tile_size;
+                            let src_idx = local_y * self.tile_size + local_x;
+                            let sub_composite = composite_pixel(&layers, src_idx, start(src_idx));
 
-                            // Get pixel in linear space (already converted)
-                            let src = if let Some(linear_data) = &linear_tiles[i] {
-                                linear_data[src_idx]
-                            } else if *is_bg {
-                                clear_color_linear
-                            } else {
-                                Rgba::TRANSPARENT
-                            };
-
-                            if src.a() == 0.0 {
-                                continue;
-                            }
-
-                            // Apply Opacity and Blend (already in linear space)
-                            let src = if *opacity < 1.0 { src * *opacity } else { src };
-
-                            // Linear Blend: Src Over Composite
-                            composite = src + composite * (1.0 - src.a());
+                            r_acc += sub_composite.r();
+                            g_acc += sub_composite.g();
+                            b_acc += sub_composite.b();
+                            a_acc += sub_composite.a();
+                            count += 1.0;
                         }
+                    }
 
-                        // 4. Convert Linear Float -> sRGB (Once at the end) - Fast LUT-based
-                        out.pixels[row_start + dst_x] = rgba_to_color32_fast(composite);
-                    } else {
-                        // --- DOWNSAMPLING PATH (High Quality) ---
-                        let mut r_acc = 0.0;
-                        let mut g_acc = 0.0;
-                        let mut b_acc = 0.0;
-                        let mut a_acc = 0.0;
-                        let mut count = 0.0;
-
-                        for sy in 0..step {
-                            let global_y = global_y_start + sy;
-                            if global_y >= y + h {
-                                continue;
-                            }
-                            let local_y = global_y % self.tile_size;
-
-                            for sx in 0..step {
-                                let global_x = global_x_start + sx;
-                                if global_x >= x + w {
-                                    continue;
-                                }
-                                let local_x = global_x % self.tile_size;
-
-                                let src_idx = local_y * self.tile_size + local_x;
-
-                                // Calculate the color for this sub-pixel using Linear Math
-                                let mut sub_composite =
-                                    Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
-
-                                for (i, (visible, opacity, _, is_bg, is_empty)) in
-                                    layer_props.iter().enumerate()
-                                {
-                                    if !visible || *is_empty {
-                                        continue;
-                                    }
-
-                                    // Get pixel in linear space (already converted)
-                                    let src = if let Some(linear_data) = &linear_tiles[i] {
-                                        linear_data[src_idx]
-                                    } else if *is_bg {
-                                        clear_color_linear
-                                    } else {
-                                        Rgba::TRANSPARENT
-                                    };
-
-                                    if src.a() == 0.0 {
-                                        continue;
-                                    }
-
-                                    // Apply Opacity and Blend (already in linear space)
-                                    let src = if *opacity < 1.0 { src * *opacity } else { src };
-                                    sub_composite = src + sub_composite * (1.0 - src.a());
-                                }
-
-                                r_acc += sub_composite.r();
-                                g_acc += sub_composite.g();
-                                b_acc += sub_composite.b();
-                                a_acc += sub_composite.a();
-                                count += 1.0;
-                            }
-                        }
-
-                        if count > 0.0 {
-                            let inv = 1.0 / count;
-                            // Convert the averaged Linear result back to sRGB - Fast LUT-based
-                            out.pixels[row_start + dst_x] =
-                                rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
-                                    r_acc * inv,
-                                    g_acc * inv,
-                                    b_acc * inv,
-                                    a_acc * inv,
-                                ));
-                        }
+                    if count > 0.0 {
+                        let inv = 1.0 / count;
+                        out.pixels[row_start + dst_x] =
+                            rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
+                                r_acc * inv,
+                                g_acc * inv,
+                                b_acc * inv,
+                                a_acc * inv,
+                            ));
                     }
                 }
             }
@@ -919,6 +936,7 @@ impl Canvas {
         step: usize,
         out: &mut ColorImage,
     ) {
+        let clear_color_linear = color32_to_linear(self.clear_color);
         // Optimization: Cache tiles and pre-convert to linear space
         for dst_y in 0..dst_h {
             let global_y = y + dst_y * step;
@@ -965,15 +983,7 @@ impl Canvas {
                             let is_empty = guard.is_empty;
 
                             // Pre-convert entire tile to linear space for efficiency
-                            let linear_data = if let Some(data) = &guard.data {
-                                let mut linear_tile = Vec::with_capacity(data.len());
-                                for &pixel in data.iter() {
-                                    linear_tile.push(Rgba::from(pixel));
-                                }
-                                Some(linear_tile)
-                            } else {
-                                None
-                            };
+                            let linear_data = guard.data.as_deref().map(color32s_to_linear);
 
                             // Release lock and cache the Arc with converted data
                             drop(guard);
@@ -1000,7 +1010,7 @@ impl Canvas {
                         let src_idx = local_y * self.tile_size + local_x;
                         linear_tile[src_idx]
                     } else if layer_idx == 0 {
-                        Rgba::from(self.clear_color)
+                        clear_color_linear
                     } else {
                         Rgba::TRANSPARENT
                     };
@@ -1090,20 +1100,40 @@ impl Canvas {
         let w = x_range.len();
         let local_x = x_range.start % self.tile_size;
         let local_y = y_range.start % self.tile_size;
+
+        // Blend in fixed-size chunks via the SIMD-batched alpha_over instead of one
+        // call per pixel; alpha_over already returns `src`/`dst` exactly for the
+        // alpha==255/0 cases internally, so no separate fast-path branch is needed.
+        const CHUNK: usize = 64;
+        let mut bg_buf = [Color32::TRANSPARENT; CHUNK];
+
         for row in 0..y_range.len() {
-            for col in 0..w {
-                let src_idx = (local_y + row) * self.tile_size + local_x + col;
-                let bg = if bg_visible {
-                    bg_data.map_or(self.clear_color, |data| data[src_idx])
-                } else {
-                    Color32::TRANSPARENT
-                };
-                let pixel = match paint_data.map(|data| data[src_idx]) {
-                    Some(src) if src.a() == 255 => src,
-                    Some(src) if src.a() > 0 => alpha_over(src, bg),
-                    _ => bg,
-                };
-                out.pixels[row * w + col] = pixel;
+            let src_row = (local_y + row) * self.tile_size + local_x;
+            let dst_row = row * w;
+
+            let mut col = 0;
+            while col < w {
+                let n = CHUNK.min(w - col);
+                for (k, slot) in bg_buf[..n].iter_mut().enumerate() {
+                    *slot = if bg_visible {
+                        bg_data.map_or(self.clear_color, |data| data[src_row + col + k])
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                }
+                match paint_data {
+                    Some(data) => {
+                        alpha_over_batch(
+                            &data[src_row + col..src_row + col + n],
+                            &bg_buf[..n],
+                            &mut out.pixels[dst_row + col..dst_row + col + n],
+                        );
+                    }
+                    None => {
+                        out.pixels[dst_row + col..dst_row + col + n].copy_from_slice(&bg_buf[..n]);
+                    }
+                }
+                col += n;
             }
         }
         true
@@ -1648,4 +1678,44 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         assert!(tiles.keys().all(|(tx, ty)| *tx >= 0 && *ty >= 0));
     }
+
+    #[test]
+    fn tile_composite_from_cached_below_matches_full_composite() {
+        let mut canvas = build_region_test_canvas();
+        canvas.add_layer();
+        canvas.add_layer();
+        for (li, base) in [(2usize, 120u8), (3usize, 200u8)] {
+            for (tx, ty) in [(0i32, 0i32), (1, 1)] {
+                let data = (0..16)
+                    .map(|i| {
+                        let v = base.wrapping_add(i as u8 * 7);
+                        Color32::from_rgba_unmultiplied(v, 255 - v, v / 2, 40 + i as u8 * 12)
+                    })
+                    .collect();
+                canvas.set_layer_tile_data(li, tx, ty, data);
+            }
+        }
+        canvas.layers[1].opacity = 0.6;
+        canvas.layers[3].opacity = 0.8;
+
+        for active in 1..=3 {
+            for step in [1, 2] {
+                for (tx, ty) in [(0usize, 0usize), (1, 0), (0, 1), (1, 1)] {
+                    let mut full = ColorImage::new([1, 1], Color32::TRANSPARENT);
+                    canvas.write_tile_to_color_image(tx, ty, &mut full, step, None);
+
+                    let below = canvas.composite_below(active, tx as i32, ty as i32);
+                    let mut cached = ColorImage::new([1, 1], Color32::TRANSPARENT);
+                    let prefix = BelowComposite {
+                        first_layer: active,
+                        pixels: &below,
+                    };
+                    canvas.write_tile_to_color_image(tx, ty, &mut cached, step, Some(prefix));
+
+                    assert_eq!(full.pixels, cached.pixels, "active={active} step={step} tile=({tx},{ty})");
+                }
+            }
+        }
+    }
 }
+

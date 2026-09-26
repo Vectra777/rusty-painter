@@ -206,6 +206,9 @@ impl eframe::App for PainterApp {
             let view = render_helper::draw_canvas(self, ui);
 
             input_handler::handle_input(self, ctx, &view.response, view.origin, view.canvas_center);
+            // egui applies texture updates before painting the frame, so uploading the
+            // tiles this frame's dabs dirtied shows them now instead of next frame.
+            render_helper::update_dirty_textures(self);
 
             if self.brush_state.is_drawing {
                 needs_repaint = true;

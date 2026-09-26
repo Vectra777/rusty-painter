@@ -16,6 +16,7 @@ env_logger = "0.11"
 log = "0.4"
 rand = "0.9"
 rayon = "1.9"
+rustc-hash = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
 egui_dock = "0.14.0"
 wide = "0.7"

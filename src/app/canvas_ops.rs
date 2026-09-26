@@ -3,6 +3,7 @@ use super::{
     painter_helpers::{AtlasLayout, AtlasPosition},
     state::{ATLAS_SIZE, CanvasTile, ColorModel, TILE_SIZE, TextureAtlas},
 };
+use crate::brush_engine::stroke::StrokeTiles;
 use crate::canvas::Canvas;
 use crate::canvas::history::{History, LayerHistoryOp, UndoAction};
 use eframe::egui::{self, Color32, TextureOptions, Vec2};
@@ -97,10 +98,11 @@ impl PainterApp {
     }
 
     pub(crate) fn mark_modified_tiles_dirty(&mut self) {
-        let tiles: Vec<_> = self.render_cache.modified_tiles.iter().copied().collect();
-        for (tx, ty) in tiles {
+        let mut dirty = std::mem::take(&mut self.render_cache.stroke_tiles.dirty);
+        for (tx, ty) in dirty.drain() {
             self.mark_tile_dirty(tx, ty);
         }
+        self.render_cache.stroke_tiles.dirty = dirty;
     }
 
     pub(crate) fn tile_mut(&mut self, tx: usize, ty: usize) -> Option<&mut CanvasTile> {
@@ -138,7 +140,7 @@ impl PainterApp {
         let layer_count = self.canvas.layers.len();
         self.render_cache.layer_caches = vec![HashMap::new(); layer_count];
         self.render_cache.layer_cache_dirty = vec![HashSet::new(); layer_count];
-        self.render_cache.modified_tiles.clear();
+        self.render_cache.stroke_tiles = StrokeTiles::default();
         self.render_cache.tiles_x = width.div_ceil(TILE_SIZE);
         self.render_cache.tiles_y = height.div_ceil(TILE_SIZE);
         self.brush_state.is_drawing = false;

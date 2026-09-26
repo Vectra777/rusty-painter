@@ -392,7 +392,7 @@ fn add_stroke_point(app: &mut PainterApp, pos: Vec2, pressure: f32) {
             &app.canvas,
             selection,
             &mut session.undo_action,
-            &mut app.render_cache.modified_tiles,
+            &mut app.render_cache.stroke_tiles,
         );
         session
             .stroke

@@ -1,10 +1,9 @@
 use crate::brush_engine::brush::Brush;
-use crate::brush_engine::stroke::{StrokeContext, StrokeState};
+use crate::brush_engine::stroke::{StrokeContext, StrokeState, StrokeTiles};
 use crate::canvas::Canvas;
 use crate::canvas::history::UndoAction;
 use eframe::egui::{Color32, ColorImage, Vec2};
 use rayon::ThreadPool;
-use std::collections::HashSet;
 
 pub fn stroke_preview_image(
     brush: &mut Brush,
@@ -23,7 +22,7 @@ pub fn stroke_preview_image(
         transform: None,
         layer_action: None,
     };
-    let mut modified = HashSet::new();
+    let mut modified = StrokeTiles::default();
 
     let original_diameter = brush.brush_options.diameter;
     let original_opacity = brush.brush_options.opacity;

@@ -34,7 +34,8 @@ impl PainterApp {
             },
         });
         self.brush_state.is_drawing = true;
-        self.render_cache.modified_tiles.clear();
+        self.render_cache.stroke_tiles.snapshotted.clear();
+        self.render_cache.below_cache = None;
     }
 
     fn add_initial_stroke_point(&mut self, pos: Vec2) {
@@ -50,7 +51,7 @@ impl PainterApp {
                 &self.canvas,
                 selection,
                 &mut session.undo_action,
-                &mut self.render_cache.modified_tiles,
+                &mut self.render_cache.stroke_tiles,
             );
             // No pressure sample is available for the synthetic first point
             // of a stroke; 1.0 preserves the pre-existing (unscaled) behavior.
@@ -85,6 +86,7 @@ impl PainterApp {
     fn clear_stroke_state(&mut self) {
         self.brush_state.session = None;
         self.brush_state.is_drawing = false;
+        self.render_cache.below_cache = None;
     }
 
     fn active_history_mut(&mut self) -> Option<&mut History> {

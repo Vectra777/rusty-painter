@@ -186,6 +186,52 @@ impl SelectionManager {
         }
     }
 
+    /// Selection coverage for pixel centers `(x + 0.5, y + 0.5)` with
+    /// `x` in `x0..x0 + out.len()`: identical to calling `contains_coords`
+    /// per pixel, but a lasso's edge crossings are computed once per row
+    /// instead of once per pixel.
+    pub fn row_mask(&self, y: usize, x0: usize, out: &mut [bool]) {
+        let py = y as f32 + 0.5;
+        let Some(SelectionShape::Lasso {
+            points,
+            bbox_min,
+            bbox_max,
+        }) = &self.current_shape
+        else {
+            for (i, slot) in out.iter_mut().enumerate() {
+                *slot = self.contains_coords((x0 + i) as f32 + 0.5, py);
+            }
+            return;
+        };
+        if points.len() < 3 || py < bbox_min.y || py > bbox_max.y {
+            out.fill(false);
+            return;
+        }
+        // Same per-edge crossing expression as `contains_coords`, so the
+        // `x < crossing` comparisons below see bit-identical values.
+        let mut crossings: Vec<f32> = Vec::new();
+        let mut j = points.len() - 1;
+        for i in 0..points.len() {
+            if (points[i].y > py) != (points[j].y > py) {
+                crossings.push(
+                    (points[j].x - points[i].x) * (py - points[i].y) / (points[j].y - points[i].y)
+                        + points[i].x,
+                );
+            }
+            j = i;
+        }
+        crossings.sort_by(f32::total_cmp);
+        // Inside iff an odd number of crossings lie strictly right of x.
+        let mut passed = 0;
+        for (i, slot) in out.iter_mut().enumerate() {
+            let px = (x0 + i) as f32 + 0.5;
+            while passed < crossings.len() && crossings[passed] <= px {
+                passed += 1;
+            }
+            *slot = px >= bbox_min.x && px <= bbox_max.x && (crossings.len() - passed) % 2 == 1;
+        }
+    }
+
     pub fn has_selection(&self) -> bool {
         self.current_shape.is_some()
     }
@@ -424,5 +470,44 @@ mod tests {
         assert!(selection.contains_coords(10.0, 20.0));
         assert!(selection.contains_coords(30.0, 40.0));
         assert!(!selection.contains_coords(30.1, 40.0));
+    }
+
+    #[test]
+    fn row_mask_matches_contains_coords() {
+        // A star-shaped lasso (concave, many crossings per row) plus the
+        // other shapes and "no selection".
+        let star: Vec<Vec2> = (0..23)
+            .map(|i| {
+                let a = i as f32 * std::f32::consts::TAU / 23.0;
+                let r = if i % 2 == 0 { 40.0 } else { 13.7 };
+                Vec2::new(50.3 + a.cos() * r, 48.9 + a.sin() * r)
+            })
+            .collect();
+        let shapes = [
+            None,
+            Some(new_lasso_shape(star)),
+            Some(SelectionShape::Rectangle {
+                start: Vec2::new(10.2, 30.5),
+                end: Vec2::new(70.0, 12.0),
+            }),
+            Some(SelectionShape::Circle {
+                center: Vec2::new(40.0, 40.0),
+                radius: 22.4,
+            }),
+        ];
+        for shape in shapes {
+            let selection = SelectionManager {
+                current_shape: shape,
+                is_dragging: false,
+            };
+            let mut row = [false; 100];
+            for y in 0..100 {
+                selection.row_mask(y, 3, &mut row);
+                for (i, &inside) in row.iter().enumerate() {
+                    let expected = selection.contains_coords((3 + i) as f32 + 0.5, y as f32 + 0.5);
+                    assert_eq!(inside, expected, "x={} y={y}", 3 + i);
+                }
+            }
+        }
     }
 }

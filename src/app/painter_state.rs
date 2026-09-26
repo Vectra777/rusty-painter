@@ -3,12 +3,14 @@ use crate::{
     brush_engine::{
         brush::{Brush, BrushPreset},
         brush_options::PixelBrushShape,
-        stroke::StrokeState,
+        stroke::{StrokeState, StrokeTiles},
     },
     canvas::history::{History, UndoAction},
     ui::{brush_settings::BrushPreviewState, export_modal::ExportProgress},
 };
-use eframe::egui::{self, Color32, Vec2};
+use crate::canvas::storage::LayerId;
+use eframe::egui::{self, Color32, Rgba, Vec2};
+use rustc_hash::FxHashMap;
 use rayon::ThreadPool;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -85,6 +87,12 @@ impl ViewportState {
     }
 }
 
+pub struct BelowCache {
+    /// `Canvas::composite_below_key` for the layers this was built from.
+    pub key: (Color32, Vec<(LayerId, bool, u32)>),
+    pub tiles: FxHashMap<(usize, usize), Vec<Rgba>>,
+}
+
 /// GPU texture atlas and rendering cache
 pub struct RenderCache {
     pub tiles: Vec<CanvasTile>,
@@ -93,7 +101,10 @@ pub struct RenderCache {
     pub tiles_y: usize,
     pub layer_caches: Vec<HashMap<(usize, usize), egui::ColorImage>>,
     pub layer_cache_dirty: Vec<HashSet<(usize, usize)>>,
-    pub modified_tiles: HashSet<(usize, usize)>,
+    pub stroke_tiles: StrokeTiles,
+    /// Composite of the layers below the active one, per tile, valid for the
+    /// current stroke only (nothing but the active layer changes mid-stroke).
+    pub below_cache: Option<BelowCache>,
     pub texture_generation: u64,
     pub disable_lod: bool,
 }
@@ -114,7 +125,8 @@ impl RenderCache {
             tiles_y,
             layer_caches: vec![HashMap::new(); layer_count],
             layer_cache_dirty: vec![HashSet::new(); layer_count],
-            modified_tiles: HashSet::new(),
+            stroke_tiles: StrokeTiles::default(),
+            below_cache: None,
             texture_generation: 0,
             disable_lod,
         }

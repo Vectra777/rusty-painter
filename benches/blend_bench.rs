@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use eframe::egui::Color32;
-use rusty_painter::canvas::storage::{alpha_over, alpha_over_batch};
+use rusty_painter::canvas::blend::{alpha_over, alpha_over_batch};
 
 fn bench_alpha_over_scalar(c: &mut Criterion) {
     let src = Color32::from_rgba_unmultiplied(255, 128, 64, 200);
