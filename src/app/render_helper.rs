@@ -6,7 +6,7 @@ use crate::canvas::blend::{color32_to_linear, rgba_to_color32_fast};
 use crate::canvas::storage::BelowComposite;
 use eframe::egui::{self, Color32};
 use eframe::egui_wgpu;
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 pub struct CanvasView {
     pub origin: egui::Pos2,
@@ -55,11 +55,17 @@ fn refresh_below_cache(app: &mut PainterApp, visible: &impl Fn(&CanvasTile) -> b
 /// Mip level to upload strokes at: while painting zoomed out, only the level
 /// on screen (and coarser) is updated, like Krita's Instant Preview; full
 /// resolution follows when the stroke ends or the view zooms in.
-fn preview_level(app: &PainterApp) -> u32 {
-    if !app.brush_state.is_drawing || app.viewport.zoom >= 1.0 {
+///
+/// The GPU picks mip levels per *physical* pixel, so the display scale must
+/// be included: at 1.5x a 0.5 zoom shows ~0.75 texels per pixel, i.e. level 0,
+/// and uploading level 1 would leave the (stale) finer level visible. Half a
+/// level of margin keeps rounding in the hardware's LOD estimate safe.
+fn preview_level(drawing: bool, zoom: f32, pixels_per_point: f32) -> u32 {
+    if !drawing {
         return 0;
     }
-    ((1.0 / app.viewport.zoom).log2().floor() as u32).min(MIP_LEVELS - 1)
+    let texels_per_pixel_log2 = (1.0 / (zoom * pixels_per_point)).log2();
+    ((texels_per_pixel_log2 - 0.5).floor().max(0.0) as u32).min(MIP_LEVELS - 1)
 }
 
 /// `img` shrunk by `2^level`, each pixel the average of its block in linear
@@ -199,11 +205,26 @@ fn visible_tile_range(
     (span(bounds.min.x, bounds.max.x, tiles_x), span(bounds.min.y, bounds.max.y, tiles_y))
 }
 
+/// Most tiles composited and uploaded per frame (16 MiB at full resolution),
+/// so a full refresh of a huge canvas fills in over a few frames instead of
+/// stalling one.
+const MAX_TILES_PER_FRAME: usize = 1024;
+
 /// Composite the dirty tiles visible in `clip` (off-screen ones stay dirty
-/// until scrolled into view) and hand them back as atlas uploads: at full
-/// resolution normally, or at [`preview_level`] mid-stroke when zoomed out.
-pub fn update_dirty_textures(app: &mut PainterApp, view: &CanvasView, clip: egui::Rect) -> Vec<TileUpload> {
-    let level = preview_level(app);
+/// until scrolled into view), at most [`MAX_TILES_PER_FRAME`] of them, and hand
+/// them back as atlas uploads: at full resolution normally, or at
+/// [`preview_level`] mid-stroke when zoomed out. Also returns whether visible
+/// dirty tiles remain for the next frame.
+pub fn update_dirty_textures(
+    app: &mut PainterApp,
+    view: &CanvasView,
+    clip: egui::Rect,
+) -> (Vec<TileUpload>, bool) {
+    let level = preview_level(
+        app.brush_state.is_drawing,
+        app.viewport.zoom,
+        view.response.ctx.pixels_per_point(),
+    );
     // Tiles last uploaded at a coarser level than we now need go again.
     let stale: Vec<(usize, usize)> = app
         .render_cache
@@ -233,13 +254,19 @@ pub fn update_dirty_textures(app: &mut PainterApp, view: &CanvasView, clip: egui
     let cache = &app.render_cache;
     let active = canvas.active_layer_idx;
     let below_cache = cache.below_cache.as_ref();
+    let mut candidates = cache
+        .tiles
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.dirty && visible(t))
+        .map(|(idx, _)| idx);
+    let chosen: Vec<usize> = candidates.by_ref().take(MAX_TILES_PER_FRAME).collect();
+    let more = candidates.next().is_some();
     let uploads: Vec<(usize, Vec<TileUpload>)> = app.workspace.pool.install(|| {
-        cache
-            .tiles
+        chosen
             .par_iter()
-            .enumerate()
-            .filter(|(_, t)| t.dirty && visible(t))
-            .map(|(idx, tile)| {
+            .map(|&idx| {
+                let tile = &cache.tiles[idx];
                 let below = below_cache
                     .and_then(|below| below.tiles.get(&(tile.tx, tile.ty)))
                     .map(|pixels| BelowComposite {
@@ -265,7 +292,7 @@ pub fn update_dirty_textures(app: &mut PainterApp, view: &CanvasView, clip: egui
             cache.preview_tiles.remove(&(tile.tx, tile.ty));
         }
     }
-    uploads.into_iter().flat_map(|(_, u)| u).collect()
+    (uploads.into_iter().flat_map(|(_, u)| u).collect(), more)
 }
 
 /// Screen position of the canvas's top-left corner and of its center (the
@@ -487,5 +514,23 @@ mod tests {
 
         let whole = egui::Rect::from_min_max(egui::pos2(-1e4, -1e4), egui::pos2(1e4, 1e4));
         assert_eq!(visible_tile_range(whole, identity, 4, 3), (0..4, 0..3));
+    }
+
+    #[test]
+    fn preview_level_never_exceeds_the_level_the_gpu_samples() {
+        assert_eq!(preview_level(false, 0.1, 1.0), 0, "full resolution when not drawing");
+        assert_eq!(preview_level(true, 1.0, 1.0), 0);
+        assert_eq!(preview_level(true, 0.5, 1.0), 0, "exactly 2 texels/pixel keeps a margin");
+        assert_eq!(preview_level(true, 0.3, 1.0), 1);
+        // The user's case: a 1.375x display at 0.1 zoom samples ~log2(7.3) = 2.9,
+        // so level 3 would leave level 2 stale.
+        assert_eq!(preview_level(true, 0.1, 1.375), 2);
+        assert_eq!(preview_level(true, 0.02, 1.0), MIP_LEVELS - 1);
+        for zoom in [0.05f32, 0.1, 0.2, 0.33, 0.5, 0.7] {
+            for ppp in [1.0f32, 1.25, 1.5, 2.0] {
+                let sampled = (1.0 / (zoom * ppp)).log2().max(0.0);
+                assert!(preview_level(true, zoom, ppp) as f32 <= sampled.floor(), "zoom {zoom} ppp {ppp}");
+            }
+        }
     }
 }

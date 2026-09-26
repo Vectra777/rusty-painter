@@ -197,6 +197,19 @@ fn merge_uploads(mut uploads: Vec<TileUpload>) -> Vec<TileUpload> {
     merged
 }
 
+/// Upper bound per staging buffer. One buffer for a whole 8K canvas
+/// (256 MiB+) exceeds wgpu's default `max_buffer_size`.
+const MAX_STAGING_BYTES: u64 = 32 << 20;
+
+fn row_pitch(width: u32) -> u32 {
+    (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+}
+
+/// Bytes an upload takes in a staging buffer (rows padded for copying).
+fn staged_bytes(upload: &TileUpload) -> u64 {
+    u64::from(row_pitch(upload.width)) * u64::from(upload.height)
+}
+
 struct Atlas {
     texture: wgpu::Texture,
     /// All mip levels, for display.
@@ -399,14 +412,37 @@ impl GpuCanvas {
             .collect();
     }
 
-    /// Copy every upload into its mip level through one mapped staging buffer
+    /// Copy every upload into its mip level through mapped staging buffers
     /// and per-upload copy commands.
     fn copy_uploads(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, uploads: &[TileUpload]) {
-        let row_pitch = |width: u32| (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let size: u64 = uploads
-            .iter()
-            .map(|u| u64::from(row_pitch(u.width) * u.height))
-            .sum();
+        self.copy_uploads_chunked(device, encoder, uploads, MAX_STAGING_BYTES);
+    }
+
+    /// [`Self::copy_uploads`] with staging buffers of at most `max_bytes`
+    /// each (a single upload never exceeds one atlas, ~17 MiB).
+    fn copy_uploads_chunked(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uploads: &[TileUpload],
+        max_bytes: u64,
+    ) {
+        let mut start = 0;
+        let mut size = 0;
+        for (i, upload) in uploads.iter().enumerate() {
+            let bytes = staged_bytes(upload);
+            if i > start && size + bytes > max_bytes {
+                self.copy_chunk(device, encoder, &uploads[start..i]);
+                start = i;
+                size = 0;
+            }
+            size += bytes;
+        }
+        self.copy_chunk(device, encoder, &uploads[start..]);
+    }
+
+    fn copy_chunk(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, uploads: &[TileUpload]) {
+        let size: u64 = uploads.iter().map(staged_bytes).sum();
         if size == 0 {
             return;
         }
@@ -861,5 +897,36 @@ mod tests {
             }
         }
         assert_eq!((merged[1].atlas, merged[1].width, merged[1].height), (1, 2, 2));
+    }
+
+    #[test]
+    fn uploads_split_across_small_staging_buffers_land_intact() {
+        let Some((device, queue)) = gpu() else {
+            eprintln!("no GPU adapter available; skipping");
+            return;
+        };
+        let mut canvas = GpuCanvas::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        canvas.ensure_atlases(&device, 0, 1);
+        let tile = |x: u32, shade: u8| TileUpload {
+            atlas: 0,
+            level: 0,
+            x,
+            y: 0,
+            width: 64,
+            height: 64,
+            pixels: (0..64 * 64).flat_map(|i| [shade, i as u8, (i / 64) as u8, 255]).collect(),
+        };
+        let uploads = vec![tile(0, 10), tile(64, 20), tile(128, 30)];
+        let mut encoder = device.create_command_encoder(&Default::default());
+        // One 64x64 tile (16 KiB) per staging buffer.
+        canvas.copy_uploads_chunked(&device, &mut encoder, &uploads, 20 << 10);
+        queue.submit([encoder.finish()]);
+        let got = read_texture(&device, &queue, &canvas.atlases[0].texture, 0, 192, 64);
+        for (n, upload) in uploads.iter().enumerate() {
+            for row in 0..64usize {
+                let got_row = &got[(row * 192 + n * 64) * 4..(row * 192 + n * 64 + 64) * 4];
+                assert_eq!(got_row, &upload.pixels[row * 256..(row + 1) * 256], "tile {n} row {row}");
+            }
+        }
     }
 }

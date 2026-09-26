@@ -232,7 +232,11 @@ impl eframe::App for PainterApp {
             }
             // Composite and paint after input, so this frame's dabs and any
             // pan/zoom show up in this frame.
-            let uploads = render_helper::update_dirty_textures(self, &view, ui.clip_rect());
+            let (uploads, more_tiles) =
+                render_helper::update_dirty_textures(self, &view, ui.clip_rect());
+            if more_tiles {
+                needs_repaint = true;
+            }
             render_helper::paint_canvas(self, ui, &view, uploads);
 
             if self.brush_state.is_drawing {
