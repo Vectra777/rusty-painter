@@ -217,6 +217,17 @@ pub struct StrokeState {
     dir: Option<f32>,
     /// How the pen leans at the current sample (set before each one).
     pub tilt: Option<PenTilt>,
+    /// When the lean was last smoothed.
+    last_lean_time: Option<f64>,
+    /// The lean, smoothed over time (tablet readings are noisy), as a
+    /// vector (direction × lean), now and at the previous sample; dabs in
+    /// between blend from one to the other.
+    lean: Option<Vec2>,
+    prev_lean: Option<Vec2>,
+    /// The direction of travel smoothed over distance, as a vector: a mouse
+    /// moving in whole pixels gives short segments pointing only 0°, 45°,
+    /// 90°…, so each segment's own direction would make a nib wobble.
+    heading: Vec2,
     rng: SmallRng,
     /// The last dabs (at least an end taper's length of the pen), drawn
     /// redrawably until the stroke goes on past them or ends.
@@ -227,6 +238,13 @@ pub struct StrokeState {
     newer_slot: usize,
     /// A follow-the-stroke tip's first dab, held until the direction is known.
     held: Option<Plan>,
+    /// The current sample's time, and the previous one's (for the
+    /// stabiliser).
+    sample_time: Option<f64>,
+    prev_sample_time: Option<f64>,
+    /// Every dab's variation as painted, for tests.
+    #[cfg(test)]
+    pub(crate) painted: Vec<DabVar>,
 }
 
 impl StrokeState {
@@ -252,11 +270,19 @@ impl StrokeState {
             view_scale: 1.0,
             dir: None,
             tilt: None,
+            last_lean_time: None,
+            lean: None,
+            prev_lean: None,
+            heading: Vec2::ZERO,
             rng: SmallRng::seed_from_u64(seed),
             tail: Vec::new(),
             newer_from: 0,
             newer_slot: 0,
             held: None,
+            sample_time: None,
+            prev_sample_time: None,
+            #[cfg(test)]
+            painted: Vec::new(),
         }
     }
 
@@ -294,9 +320,12 @@ impl StrokeState {
         let original = (o.diameter, o.opacity, o.flow);
         let p = pressure.clamp(0.0, 1.0);
         let from = self.last_pressure.unwrap_or(p);
+        self.prev_sample_time = self.sample_time;
+        self.sample_time = time;
         let dynamic = brush.dynamics.is_active();
         if dynamic {
             self.update_speed(raw_pos, time);
+            self.update_lean(time);
         }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -368,7 +397,7 @@ impl StrokeState {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let Some(mut held) = self.held.take() {
                 // A tap: no direction ever came.
-                held.var = self.orient(brush, held.var, None);
+                held.var = self.orient(brush, held.var, None, 1.0);
                 self.tail.push(held);
             }
             if self.tail.is_empty() {
@@ -395,6 +424,42 @@ impl StrokeState {
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
         }
+    }
+
+    /// Smooth the pen's lean with this sample's (by time; see [`LEAN_SMOOTHING`]).
+    fn update_lean(&mut self, time: Option<f64>) {
+        self.prev_lean = self.lean;
+        let Some(tilt) = self.tilt else {
+            self.lean = None;
+            return;
+        };
+        let raw = Vec2::new(tilt.direction.cos(), -tilt.direction.sin()) * tilt.lean;
+        self.lean = Some(match (self.lean, time, self.last_lean_time) {
+            (Some(prev), Some(t1), Some(t0)) => {
+                let dt = (t1 - t0).max(0.0) as f32;
+                let blend = 1.0 - (-dt / LEAN_SMOOTHING).exp();
+                prev + (raw - prev) * blend
+            }
+            _ => raw,
+        });
+        if time.is_some() {
+            self.last_lean_time = time;
+        }
+    }
+
+    /// The pen's lean at a dab a share `t` of the way from the previous
+    /// sample to this one.
+    fn tilt_at(&self, t: f32) -> Option<PenTilt> {
+        let now = self.lean?;
+        let v = match self.prev_lean {
+            Some(prev) => prev + (now - prev) * t,
+            None => now,
+        };
+        let lean = v.length().min(1.0);
+        Some(PenTilt {
+            lean,
+            direction: if lean > 1e-6 { (-v.y).atan2(v.x) } else { 0.0 },
+        })
     }
 
     /// Update the smoothed screen speed with this sample.
@@ -453,7 +518,7 @@ impl StrokeState {
             v.strength *= (1.0 + d.speed.opacity * s).max(0.0);
         }
         if d.tilt.is_active()
-            && let Some(tilt) = self.tilt
+            && let Some(tilt) = self.tilt_at(dab.t)
         {
             v.scale *= (1.0 + d.tilt.size * tilt.lean).max(0.05);
             v.strength *= (1.0 + d.tilt.opacity * tilt.lean).max(0.0);
@@ -469,11 +534,11 @@ impl StrokeState {
             let mut spread = |amount: f32| (self.rng.random::<f32>() * 2.0 - 1.0) * amount;
             v.hsv = [spread(r.hue), spread(r.saturation), spread(r.value)];
         }
-        self.orient(brush, v, dab.dir)
+        self.orient(brush, v, dab.dir, dab.t)
     }
 
     /// The tip's turn and squash for a dab going in direction `dir`.
-    fn orient(&mut self, brush: &Brush, mut v: DabVar, dir: Option<f32>) -> DabVar {
+    fn orient(&mut self, brush: &Brush, mut v: DabVar, dir: Option<f32>, t: f32) -> DabVar {
         let tip = &brush.dynamics.tip;
         if tip.is_active() {
             let mut angle = tip.angle.to_radians();
@@ -481,7 +546,7 @@ impl StrokeState {
                 angle += dir.or(self.dir).unwrap_or(0.0);
             }
             if tip.follow_tilt
-                && let Some(tilt) = self.tilt
+                && let Some(tilt) = self.tilt_at(t)
             {
                 angle += tilt.direction;
             }
@@ -503,6 +568,8 @@ impl StrokeState {
         mut plans: Vec<Plan>,
         context: &mut StrokeContext<'_>,
     ) {
+        #[cfg(test)]
+        self.painted.extend(plans.iter().map(|p| p.var));
         let follow = brush.dynamics.tip.follow_stroke;
         if follow {
             if self.held.is_some() {
@@ -512,7 +579,7 @@ impl StrokeState {
                 };
                 // The direction is known now: the first dab faces it.
                 if let Some(mut held) = self.held.take() {
-                    held.var = self.orient(brush, held.var, Some(dir));
+                    held.var = self.orient(brush, held.var, Some(dir), 1.0);
                     plans.insert(0, held);
                 }
             } else if self.travel == 0.0 && self.tail.is_empty() && plans.len() == 1 {
@@ -561,9 +628,13 @@ impl StrokeState {
             return;
         }
 
-        let pos = self
-            .stabilizer
-            .step(&brush.stabilizer_settings(), self.last_pos, raw_pos);
+        let dt = match (self.prev_sample_time, self.sample_time) {
+            (Some(t0), Some(t1)) => Some((t1 - t0) as f32),
+            _ => None,
+        };
+        let pos =
+            self.stabilizer
+                .step_timed(&brush.stabilizer_settings(), self.last_pos, raw_pos, dt);
 
         let spacing_dist = (brush.brush_options.spacing / 100.0) * brush.brush_options.diameter;
         let spacing_dist = spacing_dist.max(0.5); // Avoid infinite loops
@@ -577,15 +648,22 @@ impl StrokeState {
             if dist_left == 0.0 {
                 return;
             }
-            // Very short moves don't have a reliable direction.
-            if length >= 1.0
-                && let Some(dir) = direction(prev, pos)
-            {
-                self.dir = Some(dir);
-            }
-            let dir = self.dir;
-
+            // The heading, smoothed over the distance travelled: each dab
+            // gets it at its own point along the segment.
             let unit_step = delta / dist_left;
+            let reach = (brush.brush_options.diameter * 0.5).max(6.0);
+            let start_heading = if self.heading == Vec2::ZERO {
+                unit_step
+            } else {
+                self.heading
+            };
+            let heading_at = |walked: f32| {
+                let keep = (-walked / reach).exp();
+                start_heading * keep + unit_step * (1.0 - keep)
+            };
+            let angle = |v: Vec2| (v.length_sq() > 1e-12).then(|| (-v.y).atan2(v.x));
+            self.heading = heading_at(length);
+            self.dir = angle(self.heading).or(self.dir);
             let mut cur_pos = prev;
 
             while dist_left >= self.dist_until_next_blit {
@@ -595,6 +673,7 @@ impl StrokeState {
 
                 // Blit.
                 let along = self.travel + (length - dist_left);
+                let dir = angle(heading_at(length - dist_left)).or(self.dir);
                 for _ in 0..count {
                     let p = self.scatter(brush, cur_pos);
                     self.pending.push(Pending {
@@ -733,6 +812,8 @@ fn paint_plans(
 const SPEED_WINDOW: f32 = 0.008;
 /// Time constant of the speed's smoothing (seconds).
 const SPEED_SMOOTHING: f32 = 0.06;
+/// Time constant of the pen lean's smoothing (seconds).
+const LEAN_SMOOTHING: f32 = 0.04;
 
 /// Pressure steps dabs are grouped by; finer than any visible change.
 const PRESSURE_LEVELS: f32 = 64.0;

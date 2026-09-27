@@ -34,31 +34,64 @@ impl StabilizerSettings {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stabilizer {
     velocity: Vec2,
+    /// Dynamic: time not yet stepped (less than one [`STEP`]).
+    carry: f32,
 }
+
+/// The input rate the settings are tuned for (a typical pen, 200 Hz): with
+/// times, smoothing goes by elapsed time in steps of this, so a 1000 Hz
+/// mouse and a 200 Hz pen are smoothed the same.
+pub const STEP: f32 = 0.005;
 
 impl Stabilizer {
     /// The smoothed position for input `raw`, following on from `prev` (the
     /// previous smoothed position; `None` at the start of the path).
     pub fn step(&mut self, settings: &StabilizerSettings, prev: Option<Vec2>, raw: Vec2) -> Vec2 {
+        self.step_timed(settings, prev, raw, None)
+    }
+
+    /// [`Self::step`] with the time since the previous input (seconds): the
+    /// smoothing then doesn't depend on how often input comes. Without a
+    /// time, each input counts as one [`STEP`].
+    pub fn step_timed(
+        &mut self,
+        settings: &StabilizerSettings,
+        prev: Option<Vec2>,
+        raw: Vec2,
+        dt: Option<f32>,
+    ) -> Vec2 {
         let Some(prev) = prev else {
             return raw;
         };
+        let steps = dt.map_or(1.0, |dt| dt.max(0.0) / STEP);
         match settings.algorithm {
             StabilizerAlgorithm::None => raw,
             StabilizerAlgorithm::Simple => {
                 if settings.strength > 0.0 {
-                    prev + (raw - prev) * (1.0 - settings.strength * 0.95)
+                    // The share left behind per step, compounded over the
+                    // elapsed steps.
+                    let keep = (settings.strength * 0.95).powf(steps);
+                    prev + (raw - prev) * (1.0 - keep)
                 } else {
                     raw
                 }
             }
             // The input pulls the pen on a spring: force = target - current,
-            // acceleration = force / mass, velocity damped by the drag.
+            // acceleration = force / mass, velocity damped by the drag;
+            // stepped at a fixed rate, the target moving along from the last
+            // input to this one.
             StabilizerAlgorithm::Dynamic => {
                 let mass = settings.mass.max(0.01) * 50.0;
-                self.velocity += (raw - prev) / mass;
-                self.velocity *= 1.0 - settings.drag;
-                prev + self.velocity
+                self.carry += steps;
+                let n = self.carry.floor() as u32;
+                self.carry -= n as f32;
+                let mut pos = prev;
+                for _ in 0..n.min(400) {
+                    self.velocity += (raw - pos) / mass;
+                    self.velocity *= 1.0 - settings.drag;
+                    pos += self.velocity;
+                }
+                pos
             }
         }
     }

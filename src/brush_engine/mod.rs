@@ -8,6 +8,8 @@ mod dynamics_tests;
 pub mod hardness;
 pub(crate) mod masks;
 pub mod preview;
+#[cfg(test)]
+mod smoothness_tests;
 pub mod stabilizer;
 pub mod stroke;
 pub mod stroke_worker;

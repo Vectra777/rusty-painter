@@ -53,6 +53,8 @@ pub struct BlendStroke {
     /// Tiles as they were before the stroke first changed them.
     before: HashMap<(i32, i32), Vec<Color32>>,
     last: Option<Vec2>,
+    /// The previous sample's pressure: dabs between samples blend from it.
+    last_pressure: f32,
     /// Distance travelled since the last dab.
     travelled: f32,
     /// Smudge: the paint each mirror copy carries (copy 0 is the stroke
@@ -164,6 +166,7 @@ impl PainterApp {
             smudge: matches!(self.active_tool, Tool::Smudge),
             before: HashMap::new(),
             last: Some(pos),
+            last_pressure: pressure,
             travelled: 0.0,
             carries: Vec::new(),
             symmetry: self.workspace.symmetry,
@@ -190,14 +193,18 @@ impl PainterApp {
         let dir = travel / length;
         let mut t = spacing - stroke.travelled;
         let mut dabs = Vec::new();
+        // Pressure blends along the segment, so a pen's change shows no
+        // steps between samples.
+        let from = stroke.last_pressure;
         while t <= length {
-            dabs.push(last + dir * t);
+            dabs.push((last + dir * t, from + (pressure - from) * (t / length)));
             t += spacing;
         }
         stroke.travelled = length - (t - spacing);
         stroke.last = Some(pos);
-        for p in dabs {
-            self.blend_mirrored(p, pressure);
+        stroke.last_pressure = pressure;
+        for (p, pr) in dabs {
+            self.blend_mirrored(p, pr);
         }
     }
 
@@ -514,6 +521,63 @@ mod mix_tests {
             .max()
             .unwrap();
         assert!(diff <= 40, "{dense:?} vs {sparse:?}");
+    }
+
+    #[test]
+    fn pressure_blends_along_a_blur_stroke() {
+        // Hard stripes, blurred by a pen whose pressure rises from light to
+        // full over one long segment: the blurred band widens gradually.
+        let mut app = app(None);
+        let stripes: Vec<Color32> = (0..64 * 64)
+            .map(|i| {
+                if (i % 64) % 4 < 2 {
+                    Color32::BLACK
+                } else {
+                    Color32::WHITE
+                }
+            })
+            .collect();
+        for tx in 0..2 {
+            app.canvas_mut()
+                .set_layer_tile_data(1, tx, 0, stripes.clone());
+        }
+        let before: Vec<Color32> = (0..128)
+            .flat_map(|x| (0..64).map(move |y| (x, y)))
+            .map(|(x, y)| px(&app, x, y))
+            .collect();
+        app.active_tool = crate::app::tools::Tool::Blur;
+        let o = &mut app.brush_state.brush.brush_options;
+        o.diameter = 40.0;
+        o.pressure_size = true;
+        o.pressure_min_size = 0.1;
+        o.spacing = 5.0;
+        app.blend_press(Vec2::new(10.0, 32.0), 0.1);
+        app.blend_drag(Vec2::new(118.0, 32.0), 1.0);
+        app.blend_release();
+        let band = |x: i32| {
+            (0..64)
+                .filter(|&y| px(&app, x, y) != before[(x * 64 + y) as usize])
+                .count() as i32
+        };
+        let widths: Vec<i32> = (20..100).step_by(4).map(band).collect();
+        let jump = widths
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .max()
+            .unwrap();
+        assert!(
+            widths[widths.len() - 1] > widths[0] + 10,
+            "widens: {widths:?}"
+        );
+        assert!(jump <= 4, "no steps: {widths:?}");
+    }
+
+    fn px(app: &crate::PainterApp, x: i32, y: i32) -> Color32 {
+        app.canvas
+            .get_layer_tile_data(1, x / 64, y / 64)
+            .map_or(Color32::TRANSPARENT, |t| {
+                t[((y % 64) * 64 + x % 64) as usize]
+            })
     }
 
     #[test]
