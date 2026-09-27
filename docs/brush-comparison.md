@@ -15,8 +15,8 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 |---|---|---|---|---|
 | Round tip, hardness / softness curve | ✅ | ✅ | ✅ | ✅ Gaussian or curve |
 | Image tips (custom shapes) | ✅ PNG, GBR, ABR import | ✅ | ✅ brush patterns | ✅ PNGs in `brushes/` |
-| Image tips sampled cleanly when small (mipmaps) | ✅ | ✅ | ✅ | ❌ |
-| Image tips keep their proportions | ✅ | ✅ | ✅ | ❌ stretched to a square |
+| Image tips sampled cleanly when small (mipmaps) | ✅ | ✅ | ✅ | ✅ trilinear |
+| Image tips keep their proportions | ✅ | ✅ | ✅ | ✅ |
 | Several tips per brush (random or in sequence) | ✅ animated GIH | ✅ | ⚠️ | ❌ |
 | Tip squash (ratio) and fixed angle | ✅ | ✅ | ✅ | ✅ |
 | Tip turns with the stroke direction | ✅ | ✅ | ✅ start/end angle | ✅ |
@@ -89,8 +89,9 @@ below.
 - [ ] **7. Per-setting curves, then pen tilt.** A pressure curve for each
   of size, opacity and flow; tilt driving angle and size where the tablet
   reports it.
-- [ ] **Better tip masks.** Mipmapped, bilinear image tips; proportions kept;
-  luminance or alpha as the mask; invert.
+- [x] **Better tip masks.** Mipmapped, bilinear image tips; proportions kept;
+  luminance or alpha as the mask; invert. (An image-tip stroke costs about
+  3× a round one: two blended mip levels read per pixel.)
 - [ ] **Texture brushes.** Presets built on the above (charcoal, pencil
   grain, chalk, spray, foliage, calligraphy, glow, oil mix).
 - [ ] Later: dual brush, airbrush, several tips per brush, decoration

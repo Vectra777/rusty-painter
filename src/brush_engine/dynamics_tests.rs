@@ -290,3 +290,43 @@ fn undo_puts_back_a_tapered_stroke_exactly() {
     history.undo(&mut canvas, &mut selection, &mut tool);
     assert_eq!(pixels(&canvas), before);
 }
+
+#[test]
+fn an_image_tip_keeps_its_proportions_and_turns() {
+    use crate::brush_engine::brush_options::PixelBrushShape;
+    use crate::brush_engine::tip::TipMask;
+    let bar = TipMask::from_mask(80, 20, vec![255; 1600]);
+    let extent = |angle: f32| {
+        let mut b = brush(BrushDynamics {
+            tip: TipShape {
+                angle,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        b.brush_options.pixel_shape = PixelBrushShape::Custom(bar.clone());
+        b.brush_options.diameter = 40.0;
+        let (canvas, _) = paint(&mut b, &[(Vec2::new(128.0, 64.0), 0.0)], 1, true);
+        let painted: Vec<(usize, usize)> = (0..H)
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .filter(|&(x, y)| alpha(&canvas, x, y) > 127)
+            .collect();
+        let w = painted.iter().map(|p| p.0).max().unwrap()
+            - painted.iter().map(|p| p.0).min().unwrap()
+            + 1;
+        let h = painted.iter().map(|p| p.1).max().unwrap()
+            - painted.iter().map(|p| p.1).min().unwrap()
+            + 1;
+        (w, h)
+    };
+    let (w, h) = extent(0.0);
+    assert!(
+        (39..=41).contains(&w) && (9..=11).contains(&h),
+        "a 4:1 bar: {w}×{h}"
+    );
+    let (w, h) = extent(90.0);
+    assert!(
+        (9..=11).contains(&w) && (39..=41).contains(&h),
+        "turned: {w}×{h}"
+    );
+}

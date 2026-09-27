@@ -199,10 +199,17 @@ fn brush_settings_contents(
                         let Some(texture) = texture_opt else { continue };
                         let selected = &*shape == tip_shape;
                         let texture_id = texture.id();
+                        let (fw, fh) = match tip_shape {
+                            PixelBrushShape::Custom(tip) => tip.extent(),
+                            _ => (1.0, 1.0),
+                        };
                         if tip_swatch(ui, size, selected, name, |painter, rect| {
+                            // At the tip's own proportions.
+                            let inner = rect.shrink(3.0);
+                            let fit = egui::vec2(inner.width() * fw, inner.height() * fh);
                             painter.image(
                                 texture_id,
-                                rect.shrink(3.0),
+                                egui::Rect::from_center_size(inner.center(), fit),
                                 egui::Rect::from_min_max(
                                     egui::pos2(0.0, 0.0),
                                     egui::pos2(1.0, 1.0),
@@ -218,6 +225,15 @@ fn brush_settings_contents(
                     }
                 });
             });
+        if let PixelBrushShape::Custom(tip) = &brush.brush_options.pixel_shape
+            && ui
+                .button("Invert tip")
+                .on_hover_text("Paint with what the picture leaves empty, and the other way round.")
+                .clicked()
+        {
+            brush.brush_options.pixel_shape = PixelBrushShape::Custom(tip.inverted());
+            mask_changed = true;
+        }
         ui.add_space(4.0);
 
         // The preview is drawn at a fixed size, so Size only rebuilds the mask.

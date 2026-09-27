@@ -391,6 +391,35 @@ fn bench_dynamic_strokes(c: &mut Criterion) {
         ),
     ];
     let mut group = c.benchmark_group("dynamic_stroke_60_samples");
+    // An image tip (a 256 px speckled picture used at 60 px: mipmapped).
+    {
+        use rusty_painter::brush_engine::brush_options::PixelBrushShape;
+        use rusty_painter::brush_engine::tip::TipMask;
+        let pixels = (0..256 * 256u32)
+            .map(|i| ((i.wrapping_mul(2654435761) >> 24) as u8).saturating_sub(40))
+            .collect();
+        let mut brush = Brush::new(60.0, 40.0, Color32::from_rgb(30, 60, 200), 10.0);
+        brush.brush_options.pixel_shape =
+            PixelBrushShape::Custom(TipMask::from_mask(256, 256, pixels));
+        group.bench_function("image_tip", |b| {
+            b.iter(|| {
+                let mut undo_action = UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                };
+                let mut stroke_tiles = StrokeTiles::default();
+                let mut stroke = StrokeState::with_seed(1);
+                let mut context =
+                    StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut stroke_tiles);
+                for &(pos, pressure, time) in &points {
+                    stroke.add_sample(&mut brush, pos, pressure, Some(time), &mut context);
+                }
+                stroke.finish(&mut brush, &mut context);
+            });
+        });
+    }
     for (name, dynamics) in cases {
         let mut brush = Brush::new(
             60.0,

@@ -48,10 +48,14 @@ impl PainterApp {
             log::warn!("Skipping oversized brush tip: {}", path.display());
             return None;
         }
-        let img = image::open(&path).ok()?.to_luma8();
-        let brush_data = Self::extract_brush_data(&img);
-        let texture = Self::create_brush_texture(&brush_data, ctx);
-        Some(brush_data.into_brush_tip(texture))
+        let img = image::open(&path).ok()?;
+        let tip = crate::brush_engine::tip::TipMask::from_image(&img);
+        let texture = Self::create_brush_texture(&tip, ctx);
+        let name = path.file_stem().map_or_else(
+            || format!("{}×{}", tip.width, tip.height),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        Some((name, PixelBrushShape::Custom(tip), Some(texture)))
     }
 
     fn is_valid_image_extension(path: &std::path::Path) -> bool {
@@ -61,57 +65,25 @@ impl PainterApp {
             .unwrap_or(false)
     }
 
-    fn extract_brush_data(img: &image::GrayImage) -> BrushData {
-        BrushData {
-            width: img.width() as usize,
-            height: img.height() as usize,
-            data: img.clone().into_raw(),
-        }
-    }
-
-    fn create_brush_texture(brush_data: &BrushData, ctx: &egui::Context) -> egui::TextureHandle {
-        let pixels: Vec<Color32> = brush_data
-            .data
+    fn create_brush_texture(
+        tip: &crate::brush_engine::tip::TipMask,
+        ctx: &egui::Context,
+    ) -> egui::TextureHandle {
+        let pixels: Vec<Color32> = tip
+            .pixels
             .iter()
             .map(|&alpha| Color32::from_white_alpha(alpha))
             .collect();
         let texture_img = egui::ColorImage {
-            size: [brush_data.width, brush_data.height],
+            size: [tip.width, tip.height],
             pixels,
         };
-        ctx.load_texture(
-            format!("brush_tip_{}", brush_data.width),
-            texture_img,
-            TextureOptions::NEAREST,
-        )
+        ctx.load_texture("brush_tip", texture_img, TextureOptions::LINEAR)
     }
 
     fn sort_loaded_brushes(&mut self) {
         self.brush_state
             .loaded_brush_tips
             .sort_by(|a, b| a.0.cmp(&b.0));
-    }
-}
-
-/// Brush tip data extracted from image
-struct BrushData {
-    pub width: usize,
-    pub height: usize,
-    pub data: Vec<u8>,
-}
-
-impl BrushData {
-    /// Convert brush data into a loadable brush tip tuple
-    pub fn into_brush_tip(
-        self,
-        texture: egui::TextureHandle,
-    ) -> (String, PixelBrushShape, Option<egui::TextureHandle>) {
-        let name = format!("{}x{}", self.width, self.height);
-        let shape = PixelBrushShape::Custom {
-            width: self.width,
-            height: self.height,
-            data: self.data,
-        };
-        (name, shape, Some(texture))
     }
 }

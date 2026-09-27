@@ -1,86 +1,10 @@
-//! Sampling brush tip masks (custom images and the Gaussian falloff).
+//! Tip alpha for round and square tips (Gaussian or curve falloff); image
+//! tips sample their [`crate::brush_engine::tip::TipMask`].
 
 use super::{
     brush_options::PixelBrushShape,
     hardness::{SoftnessCurve, SoftnessSelector},
 };
-
-#[inline]
-pub(super) fn sample_custom_mask_nn(
-    dx: f32,
-    dy: f32,
-    diameter: f32,
-    width: usize,
-    height: usize,
-    mask: &[u8],
-) -> (bool, f32) {
-    if width == 0 || height == 0 || mask.is_empty() || diameter <= 0.0 {
-        return (false, 0.0);
-    }
-    let r = diameter / 2.0;
-    let nx = (dx + r) / diameter;
-    let ny = (dy + r) / diameter;
-
-    if (0.0..1.0).contains(&nx) && (0.0..1.0).contains(&ny) {
-        let ix = (nx * width as f32).floor() as usize;
-        let iy = (ny * height as f32).floor() as usize;
-        let idx = iy * width + ix;
-        if idx < mask.len() {
-            let val = mask[idx];
-            return (val > 0, val as f32 / 255.0);
-        }
-    }
-    (false, 0.0)
-}
-
-#[inline]
-fn sample_custom_mask_bilinear(
-    dx: f32,
-    dy: f32,
-    radius: f32,
-    width: usize,
-    height: usize,
-    data: &[u8],
-) -> f32 {
-    if width == 0 || height == 0 || data.is_empty() || radius <= 0.0 {
-        return 0.0;
-    }
-    let nx = (dx + radius) / (radius * 2.0);
-    let ny = (dy + radius) / (radius * 2.0);
-
-    if (0.0..1.0).contains(&nx) && (0.0..1.0).contains(&ny) {
-        let tx = nx * (width as f32);
-        let ty = ny * (height as f32);
-
-        let x0 = tx.floor() as usize;
-        let y0 = ty.floor() as usize;
-        let x1 = (x0 + 1).min(width - 1);
-        let y1 = (y0 + 1).min(height - 1);
-
-        let fx = tx - x0 as f32;
-        let fy = ty - y0 as f32;
-
-        let get_pixel = |x: usize, y: usize| -> f32 {
-            if x < width && y < height {
-                data[y * width + x] as f32 / 255.0
-            } else {
-                0.0
-            }
-        };
-
-        let c00 = get_pixel(x0, y0);
-        let c10 = get_pixel(x1, y0);
-        let c01 = get_pixel(x0, y1);
-        let c11 = get_pixel(x1, y1);
-
-        c00 * (1.0 - fx) * (1.0 - fy)
-            + c10 * fx * (1.0 - fy)
-            + c01 * (1.0 - fx) * fy
-            + c11 * fx * fy
-    } else {
-        0.0
-    }
-}
 
 /// Smoothstep falloff used by the Gaussian softness curve: 1.0 inside the
 /// hardness radius, smoothly falling to 0.0 at the brush edge.
@@ -137,14 +61,6 @@ pub(super) fn calc_soft_brush_alpha(
                 (alpha, dist_sq)
             }
         }
-        PixelBrushShape::Custom {
-            width,
-            height,
-            data,
-        } => {
-            let alpha = sample_custom_mask_bilinear(dx, dy, radius, *width, *height, data);
-            let dist_sq = dx * dx + dy * dy;
-            (alpha, dist_sq)
-        }
+        PixelBrushShape::Custom(tip) => (tip.sample(dx, dy, radius), dx * dx + dy * dy),
     }
 }

@@ -6,15 +6,23 @@ use eframe::egui::Color32;
 use crate::brush_engine::hardness::SoftnessCurve;
 use crate::brush_engine::hardness::SoftnessSelector;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum PixelBrushShape {
     Circle,
     Square,
-    Custom {
-        width: usize,
-        height: usize,
-        data: Vec<u8>, // 0-255 mask
-    },
+    /// An image tip (see [`crate::brush_engine::tip`]).
+    Custom(std::sync::Arc<crate::brush_engine::tip::TipMask>),
+}
+
+impl PartialEq for PixelBrushShape {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Circle, Self::Circle) | (Self::Square, Self::Square) => true,
+            // The same shared tip, or an identical one.
+            (Self::Custom(a), Self::Custom(b)) => std::sync::Arc::ptr_eq(a, b) || a == b,
+            _ => false,
+        }
+    }
 }
 
 /// Blending strategy for how source color affects the destination.

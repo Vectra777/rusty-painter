@@ -10,7 +10,7 @@ use crate::{
             dispatch_over_buckets, tile_overlap, tile_overlaps_selection,
         },
         hardness::SoftnessSelector,
-        masks::{calc_soft_brush_alpha, sample_custom_mask_nn},
+        masks::calc_soft_brush_alpha,
         stroke::{StrokeBuffer, StrokeTiles},
     },
     canvas::{
@@ -595,10 +595,7 @@ impl Brush {
         let corner_reach = match &self.brush_options.pixel_shape {
             PixelBrushShape::Circle => 1.0,
             PixelBrushShape::Square => std::f32::consts::SQRT_2,
-            PixelBrushShape::Custom { width, height, .. } => {
-                let (w, h) = (*width as f32, *height as f32);
-                (w * w + h * h).sqrt() / w.max(h).max(1.0)
-            }
+            PixelBrushShape::Custom(tip) => tip.corner_reach(),
         };
         let dabs: Vec<PlacedDab> = centers
             .iter()
@@ -851,7 +848,6 @@ impl Brush {
         let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
             let r = dab.r;
             let r_sq = r * r;
-            let diameter = 2.0 * r;
             let strength = (strength * dab.strength).min(1.0);
             let upright = dab.upright();
             let dy = gy as f32 + 0.5 - dab.center.y;
@@ -865,13 +861,10 @@ impl Brush {
                 let (in_shape, alpha_mod) = match pixel_shape {
                     PixelBrushShape::Circle => (tx * tx + ty * ty <= r_sq, 1.0),
                     PixelBrushShape::Square => (tx.abs() <= r && ty.abs() <= r, 1.0),
-                    PixelBrushShape::Custom {
-                        width,
-                        height,
-                        data,
-                    } => {
+                    PixelBrushShape::Custom(tip) => {
                         let (tx, ty) = dab.tip_offset(dx, dy);
-                        sample_custom_mask_nn(tx, ty, diameter, *width, *height, data)
+                        let v = tip.sample_nearest(tx, ty, r);
+                        (v > 0.0, v)
                     }
                 };
                 *slot = if in_shape {
@@ -900,13 +893,12 @@ impl Brush {
         let softness_curve = &o.softness_curve;
         let pixel_shape = &o.pixel_shape;
         let anti_aliasing = self.anti_aliasing;
-        let custom = matches!(pixel_shape, PixelBrushShape::Custom { .. });
+        let custom = matches!(pixel_shape, PixelBrushShape::Custom(_));
 
         // Any tip, any dab: per pixel, in the tip's (turned, squashed) frame.
         let general = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
             let r = dab.r;
             let r_sq = r * r;
-            let diameter = 2.0 * r;
             // 1.5 pixel outer anti-aliasing fade
             let fade_start = (r - 1.5).max(0.0);
             let fade_width = 1.5_f32.min(r);
@@ -942,9 +934,10 @@ impl Brush {
                     } else {
                         let dist_for_aa = match pixel_shape {
                             PixelBrushShape::Circle => dist_sq.sqrt(),
-                            PixelBrushShape::Square | PixelBrushShape::Custom { .. } => {
-                                pdx.abs().max(pdy.abs())
-                            }
+                            PixelBrushShape::Square => pdx.abs().max(pdy.abs()),
+                            // The mask's own edges are smooth already
+                            // (sampled, not clipped).
+                            PixelBrushShape::Custom(_) => 0.0,
                         };
                         if dist_for_aa >= r {
                             0.0
@@ -959,11 +952,10 @@ impl Brush {
                     let (in_shape, alpha_mod) = match pixel_shape {
                         PixelBrushShape::Circle => ((pdx * pdx + pdy * pdy) <= r_sq, 1.0),
                         PixelBrushShape::Square => (pdx.abs() <= r && pdy.abs() <= r, 1.0),
-                        PixelBrushShape::Custom {
-                            width,
-                            height,
-                            data,
-                        } => sample_custom_mask_nn(pdx, pdy, diameter, *width, *height, data),
+                        PixelBrushShape::Custom(tip) => {
+                            let v = tip.sample_nearest(pdx, pdy, r);
+                            (v > 0.0, v)
+                        }
                     };
                     if in_shape { alpha_mod } else { 0.0 }
                 };
@@ -975,6 +967,30 @@ impl Brush {
             }
             nonzero_span(out)
         };
+
+        // Smooth image tips: a whole row at a time, the mip levels chosen
+        // once per row rather than per pixel.
+        if anti_aliasing && let PixelBrushShape::Custom(tip) = pixel_shape {
+            let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+                let sampler = tip.sampler(dab.r);
+                let strength = (strength * dab.strength).min(1.0);
+                let pdy = gy as f32 + 0.5 - dab.center.y;
+                let pdx = x0 as f32 + 0.5 - dab.center.x;
+                let [a, b, c, d] = dab.orient;
+                tip.row(
+                    &sampler,
+                    (a * pdx + b * pdy, c * pdx + d * pdy),
+                    (a, c),
+                    out,
+                );
+                for v in out.iter_mut() {
+                    *v *= strength;
+                }
+                nonzero_span(out)
+            };
+            paint_batch(pool, ctx, buckets, work_pixels, &stamp);
+            return;
+        }
 
         if anti_aliasing
             && softness_selector == SoftnessSelector::Gaussian

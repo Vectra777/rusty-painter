@@ -12,3 +12,4 @@ pub mod stabilizer;
 pub mod stroke;
 pub mod stroke_worker;
 pub mod symmetry;
+pub mod tip;
