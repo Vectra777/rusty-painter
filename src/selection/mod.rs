@@ -53,7 +53,7 @@ pub enum SelectionShape {
     Mask(Arc<SelectionMask>),
 }
 
-pub(crate) fn new_lasso_shape(points: Vec<Vec2>) -> SelectionShape {
+pub fn new_lasso_shape(points: Vec<Vec2>) -> SelectionShape {
     let (bbox_min, bbox_max) = compute_lasso_bbox(&points);
     SelectionShape::Lasso {
         points,

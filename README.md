@@ -57,6 +57,15 @@ scripts/build-android.sh aarch64-linux-android release   # -> target/release/apk
 
 (The commented-out `[package.metadata.android.signing.release]` block in `Cargo.toml` works too, but must never be committed.)
 
+## Benchmarks
+```bash
+cargo bench --bench tools_bench                              # tools: mirror painting, shapes, selections, gradients, smart patch
+cargo bench --bench brush_bench                              # brush stamping and compositing
+cargo bench --bench tools_bench -- --save-baseline before    # save a run...
+cargo bench --bench tools_bench -- --baseline before         # ...and compare a later one against it
+```
+Heavier single-shot timings live in ignored tests: `cargo test --release -- --ignored --nocapture`.
+
 ## Profiling
 ```bash
 scripts/flamegraph.sh            # use the app, close the window -> flamegraph.svg

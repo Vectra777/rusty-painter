@@ -740,8 +740,21 @@ pub fn select_color(
         .for_each(|(i, strip)| {
             let rows = strip.len() / width;
             let pixels = reference.render(0, (i * BLOCK) as i32, width, rows);
+            // Pictures repeat colours (runs, flat areas, palettes): a small
+            // cache of recent answers skips most colour conversions.
+            const SLOTS: usize = 1024;
+            let mut cache = vec![(Color32::TRANSPARENT, 0u8, false); SLOTS];
             for (out, &px) in strip.iter_mut().zip(&pixels) {
-                *out = coverage(px);
+                let key = u32::from_le_bytes(px.to_array());
+                let slot = (key.wrapping_mul(0x9E37_79B1) >> 22) as usize % SLOTS;
+                let entry = &mut cache[slot];
+                *out = if entry.2 && entry.0 == px {
+                    entry.1
+                } else {
+                    let v = coverage(px);
+                    *entry = (px, v, true);
+                    v
+                };
             }
         });
     SelectionMask::new(0, 0, width, height, data).cropped()

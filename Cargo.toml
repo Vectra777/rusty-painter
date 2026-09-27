@@ -95,3 +95,7 @@ harness = false
 [[bench]]
 name = "blend_bench"
 harness = false
+
+[[bench]]
+name = "tools_bench"
+harness = false

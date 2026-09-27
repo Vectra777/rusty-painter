@@ -57,10 +57,21 @@ impl Gradient {
                     t += step;
                 }
             }
-            GradientShape::Radial | GradientShape::Angle => {
+            GradientShape::Radial => {
                 let py = y as f32 + 0.5;
                 for (i, o) in out.iter_mut().enumerate() {
                     *o = self.position(Vec2::new((x0 + i as i32) as f32 + 0.5, py));
+                }
+            }
+            GradientShape::Angle => {
+                // The end's direction is the same for the whole row.
+                let base = d.y.atan2(d.x);
+                let vy = y as f32 + 0.5 - self.start.y;
+                let mut vx = x0 as f32 + 0.5 - self.start.x;
+                for o in out.iter_mut() {
+                    let a = fast_atan2(vy, vx) - base;
+                    *o = self.finish((a * (1.0 / std::f32::consts::TAU)).rem_euclid(1.0));
+                    vx += 1.0;
                 }
             }
         }
@@ -89,12 +100,40 @@ impl Gradient {
             GradientShape::Reflected => (v.dot(d) / len2).abs(),
             GradientShape::Radial => (v.length_sq() / len2).sqrt(),
             GradientShape::Angle => {
-                let a = v.y.atan2(v.x) - d.y.atan2(d.x);
+                let a = fast_atan2(v.y, v.x) - d.y.atan2(d.x);
                 (a / std::f32::consts::TAU).rem_euclid(1.0)
             }
         };
         self.finish(t)
     }
+}
+
+/// `atan2` to within about 1e-4 rad (a thousandth of one step of the
+/// colour ramp around a full turn), several times faster.
+#[inline]
+fn fast_atan2(y: f32, x: f32) -> f32 {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let (ax, ay) = (x.abs(), y.abs());
+    if ax == 0.0 && ay == 0.0 {
+        return 0.0;
+    }
+    // atan on [0, 1], then unfolded by octant.
+    let (t, swap) = if ay > ax {
+        (ax / ay, true)
+    } else {
+        (ay / ax, false)
+    };
+    let t2 = t * t;
+    let mut a = t
+        * (0.999_866
+            + t2 * (-0.330_299_5 + t2 * (0.180_141 + t2 * (-0.085_133 + t2 * 0.020_835_1))));
+    if swap {
+        a = FRAC_PI_2 - a;
+    }
+    if x < 0.0 {
+        a = PI - a;
+    }
+    if y < 0.0 { -a } else { a }
 }
 
 /// Number of precomputed colours along a gradient.
@@ -341,6 +380,15 @@ mod tests {
                 let one = g.position(Vec2::new((-10 + i as i32) as f32 + 0.5, 33.5));
                 assert!((t - one).abs() < 1e-4, "{shape:?} at {i}: {t} vs {one}");
             }
+        }
+    }
+
+    #[test]
+    fn fast_atan2_is_close() {
+        for i in 0..1000 {
+            let a = i as f32 / 1000.0 * std::f32::consts::TAU;
+            let (y, x) = (a.sin() * 3.7, a.cos() * 3.7);
+            assert!((fast_atan2(y, x) - y.atan2(x)).abs() < 2e-4, "at {a}");
         }
     }
 }

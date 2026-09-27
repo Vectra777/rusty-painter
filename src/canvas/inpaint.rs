@@ -214,6 +214,25 @@ impl Rng {
 /// over the pixels inside the image; stops early past `limit`.
 fn patch_distance(level: &Level, a: (i32, i32), b: (i32, i32), limit: f32) -> f32 {
     let (w, h) = (level.w as i32, level.h as i32);
+    // Almost every patch is wholly inside the image (sources always are):
+    // compare row slices, which the compiler vectorizes.
+    if a.0 >= R && a.1 >= R && a.0 < w - R && a.1 < h - R {
+        let side = (2 * R + 1) as usize;
+        let mut d = 0.0;
+        for dy in -R..=R {
+            let ra = ((a.1 + dy) * w + a.0 - R) as usize;
+            let rb = ((b.1 + dy) * w + b.0 - R) as usize;
+            let (pa, pb) = (&level.px[ra..ra + side], &level.px[rb..rb + side]);
+            for (p, q) in pa.iter().zip(pb) {
+                let e = [p[0] - q[0], p[1] - q[1], p[2] - q[2], p[3] - q[3]];
+                d += e[0] * e[0] + e[1] * e[1] + e[2] * e[2] + e[3] * e[3];
+            }
+            if d > limit {
+                return d;
+            }
+        }
+        return d;
+    }
     let mut d = 0.0;
     for dy in -R..=R {
         let (ay, by) = (a.1 + dy, b.1 + dy);
@@ -371,10 +390,13 @@ impl Field {
                 .enumerate()
                 .map(|(band, part)| {
                     let mut rng = Rng::new(seed ^ ((round as u64) << 32) ^ band as u64);
-                    let mut local: std::collections::HashMap<usize, ((i32, i32), f32)> =
-                        std::collections::HashMap::with_capacity(part.len());
+                    let mut local: rustc_hash::FxHashMap<usize, ((i32, i32), f32)> =
+                        rustc_hash::FxHashMap::with_capacity_and_hasher(
+                            part.len(),
+                            Default::default(),
+                        );
                     let current =
-                        |i: usize, local: &std::collections::HashMap<usize, ((i32, i32), f32)>| {
+                        |i: usize, local: &rustc_hash::FxHashMap<usize, ((i32, i32), f32)>| {
                             local.get(&i).copied().unwrap_or((matches[i], dist[i]))
                         };
                     for &i in part {
@@ -443,7 +465,8 @@ impl Field {
     }
 
     /// Set each hole pixel to the weighted vote of every match covering it
-    /// (better matches count more).
+    /// (better matches count more). Each pixel gathers its own votes, so
+    /// rows run in parallel.
     fn vote(&self, level: &mut Level) {
         let (w, h) = (level.w as i32, level.h as i32);
         let mut sorted = self.dist.clone();
@@ -454,39 +477,63 @@ impl Field {
             .copied()
             .unwrap_or(1.0)
             .max(1e-6);
-        let mut acc = vec![[0.0f32; 5]; level.w * level.h];
-        for (&(tx, ty), (&(mx, my), &d)) in
-            self.targets.iter().zip(self.matches.iter().zip(&self.dist))
-        {
-            let weight = (-d / (2.0 * sigma2)).exp().max(1e-8);
-            for dy in -R..=R {
-                let y = ty + dy;
-                if y < 0 || y >= h {
-                    continue;
+        // Which match (if any) is centred on each pixel, and its weight.
+        let mut at = vec![u32::MAX; level.w * level.h];
+        for (i, &(x, y)) in self.targets.iter().enumerate() {
+            at[(y * w + x) as usize] = i as u32;
+        }
+        let weights: Vec<f32> = self
+            .dist
+            .iter()
+            .map(|&d| (-d / (2.0 * sigma2)).exp().max(1e-8))
+            .collect();
+        let px = &level.px;
+        let hole = &level.hole;
+        let voted: Vec<Pixel> = (0..level.w * level.h)
+            .into_par_iter()
+            .map(|i| {
+                if !hole[i] {
+                    return px[i];
                 }
-                for dx in -R..=R {
-                    let x = tx + dx;
-                    if x < 0 || x >= w {
+                let (x, y) = ((i % level.w) as i32, (i / level.w) as i32);
+                let mut acc = [0.0f32; 5];
+                // Every patch covering (x, y) is centred within R of it.
+                for dy in -R..=R {
+                    let ty = y - dy;
+                    if ty < 0 || ty >= h {
                         continue;
                     }
-                    let i = (y * w + x) as usize;
-                    if !level.hole[i] {
-                        continue;
+                    for dx in -R..=R {
+                        let tx = x - dx;
+                        if tx < 0 || tx >= w {
+                            continue;
+                        }
+                        let t = at[(ty * w + tx) as usize];
+                        if t == u32::MAX {
+                            continue;
+                        }
+                        let (mx, my) = self.matches[t as usize];
+                        let s = px[((my + dy) * w + mx + dx) as usize];
+                        let weight = weights[t as usize];
+                        for k in 0..4 {
+                            acc[k] += s[k] * weight;
+                        }
+                        acc[4] += weight;
                     }
-                    let s = level.px[((my + dy) * w + mx + dx) as usize];
-                    let a = &mut acc[i];
-                    for k in 0..4 {
-                        a[k] += s[k] * weight;
-                    }
-                    a[4] += weight;
                 }
-            }
-        }
-        for (i, a) in acc.iter().enumerate() {
-            if level.hole[i] && a[4] > 0.0 {
-                level.px[i] = [a[0] / a[4], a[1] / a[4], a[2] / a[4], a[3] / a[4]];
-            }
-        }
+                if acc[4] > 0.0 {
+                    [
+                        acc[0] / acc[4],
+                        acc[1] / acc[4],
+                        acc[2] / acc[4],
+                        acc[3] / acc[4],
+                    ]
+                } else {
+                    px[i]
+                }
+            })
+            .collect();
+        level.px = voted;
     }
 }
 

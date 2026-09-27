@@ -498,9 +498,8 @@ impl PainterApp {
             mask.x0 + mask.w as i32,
             mask.y0 + mask.h as i32,
         ];
-        let selection = SelectionMask::rasterize(bounds, |y, x0, out| {
-            self.selection_manager.row_coverage(y, x0, out)
-        });
+        let sel = &self.selection_manager;
+        let selection = SelectionMask::rasterize(bounds, |y, x0, out| sel.row_coverage(y, x0, out));
         mask.combine(&selection, SelectionMode::Intersect).cropped()
     }
 }

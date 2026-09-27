@@ -120,17 +120,24 @@ impl SelectionMask {
 
     /// Rasterize `coverage(y, x0, out)` (anti-aliased row coverage, as
     /// `SelectionManager::row_coverage` gives) over `[x0, y0, x1, y1)`.
-    pub fn rasterize(bounds: [i32; 4], coverage: impl Fn(usize, usize, &mut [f32])) -> Self {
+    pub fn rasterize(bounds: [i32; 4], coverage: impl Fn(usize, usize, &mut [f32]) + Sync) -> Self {
         let [x0, y0, x1, y1] = bounds;
         let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
         let mut data = vec![0; w * h];
-        let mut row = vec![0.0f32; w];
-        for y in 0..h {
-            coverage((y0 + y as i32) as usize, x0 as usize, &mut row);
-            for (dst, &c) in data[y * w..(y + 1) * w].iter_mut().zip(&row) {
-                *dst = (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            }
-        }
+        use rayon::prelude::*;
+        // Rows in parallel, in strips so each thread reuses its buffer.
+        data.par_chunks_mut((w * 16).max(1))
+            .enumerate()
+            .for_each(|(strip, rows)| {
+                let mut row = vec![0.0f32; w];
+                for (r, dst_row) in rows.chunks_mut(w.max(1)).enumerate() {
+                    let y = strip * 16 + r;
+                    coverage((y0 + y as i32) as usize, x0 as usize, &mut row);
+                    for (dst, &c) in dst_row.iter_mut().zip(&row) {
+                        *dst = (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    }
+                }
+            });
         Self::new(x0, y0, w, h, data)
     }
 
@@ -180,67 +187,34 @@ impl SelectionMask {
     }
 
     /// The selection grown (`radius` > 0) or shrunk (< 0) by `radius`
-    /// pixels, with a soft one-pixel edge. Distances are chamfer (3-4)
-    /// approximations of round ones.
+    /// pixels (exact round distances), with a soft one-pixel edge.
     pub fn grown(&self, radius: i32) -> Option<Self> {
         if radius == 0 {
             return Some(self.clone());
         }
+        use rayon::prelude::*;
         let pad = radius.max(0) + 1;
         let (w, h) = (self.w + 2 * pad as usize, self.h + 2 * pad as usize);
         let (x0, y0) = (self.x0 - pad, self.y0 - pad);
-        // Distance (chamfer units, 3 per pixel) to the nearest pixel on the
-        // other side: selected when growing, unselected when shrinking.
+        // Squared distance to the nearest pixel on the other side: selected
+        // when growing, unselected when shrinking.
         let grow = radius > 0;
-        let inside = |x: usize, y: usize| self.value(x0 + x as i32, y0 + y as i32) >= 128;
-        const FAR: u32 = u32::MAX / 2;
-        let mut dist: Vec<u32> = (0..w * h)
-            .map(|i| if inside(i % w, i / w) == grow { 0 } else { FAR })
+        let far = ((w * w + h * h) as f32) * 4.0;
+        let mut dist: Vec<f32> = (0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                let inside = self.value(x0 + (i % w) as i32, y0 + (i / w) as i32) >= 128;
+                if inside == grow { 0.0 } else { far }
+            })
             .collect();
-        for y in 0..h {
-            for x in 0..w {
-                let mut d = dist[y * w + x];
-                if x > 0 {
-                    d = d.min(dist[y * w + x - 1] + 3);
-                }
-                if y > 0 {
-                    d = d.min(dist[(y - 1) * w + x] + 3);
-                    if x > 0 {
-                        d = d.min(dist[(y - 1) * w + x - 1] + 4);
-                    }
-                    if x + 1 < w {
-                        d = d.min(dist[(y - 1) * w + x + 1] + 4);
-                    }
-                }
-                dist[y * w + x] = d;
-            }
-        }
-        for y in (0..h).rev() {
-            for x in (0..w).rev() {
-                let mut d = dist[y * w + x];
-                if x + 1 < w {
-                    d = d.min(dist[y * w + x + 1] + 3);
-                }
-                if y + 1 < h {
-                    d = d.min(dist[(y + 1) * w + x] + 3);
-                    if x + 1 < w {
-                        d = d.min(dist[(y + 1) * w + x + 1] + 4);
-                    }
-                    if x > 0 {
-                        d = d.min(dist[(y + 1) * w + x - 1] + 4);
-                    }
-                }
-                dist[y * w + x] = d;
-            }
-        }
-        let reach = 3 * radius.unsigned_abs();
+        squared_distance_transform(&mut dist, w, h);
+        let reach = (radius as f32).powi(2);
         let selected: Vec<bool> = dist
-            .iter()
+            .par_iter()
             .map(|&d| if grow { d <= reach } else { d > reach })
             .collect();
         // Soft edge: unselected pixels next to selected ones get partial
         // coverage.
-        use rayon::prelude::*;
         let data: Vec<u8> = (0..w * h)
             .into_par_iter()
             .map(|i| {
@@ -397,9 +371,90 @@ fn trace_outline(mask: &SelectionMask) -> Vec<Vec<Vec2>> {
     loops
 }
 
+/// Exact squared Euclidean distance transform of `f` (0 at the feature
+/// pixels, large elsewhere), in place: Felzenszwalb & Huttenlocher's
+/// lower envelope of parabolas, columns then rows, each in parallel.
+fn squared_distance_transform(f: &mut [f32], w: usize, h: usize) {
+    use rayon::prelude::*;
+    // Columns, through a transposed copy so each is contiguous.
+    let mut t = vec![0.0f32; w * h];
+    t.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
+        for (y, v) in col.iter_mut().enumerate() {
+            *v = f[y * w + x];
+        }
+        transform_1d(col);
+    });
+    f.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            *v = t[x * h + y];
+        }
+        transform_1d(row);
+    });
+}
+
+/// One-dimensional squared distance transform, in place.
+fn transform_1d(f: &mut [f32]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let src = f.to_vec();
+    // Parabola vertices and the boundaries between them.
+    let mut v = vec![0usize; n];
+    let mut z = vec![0.0f32; n + 1];
+    let mut k = 0;
+    z[0] = f32::NEG_INFINITY;
+    z[1] = f32::INFINITY;
+    for q in 1..n {
+        let intersect = |p: usize| {
+            ((src[q] + (q * q) as f32) - (src[p] + (p * p) as f32))
+                / (2.0 * q as f32 - 2.0 * p as f32)
+        };
+        let mut s = intersect(v[k]);
+        while s <= z[k] {
+            k -= 1;
+            s = intersect(v[k]);
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f32::INFINITY;
+    }
+    k = 0;
+    for (q, out) in f.iter_mut().enumerate() {
+        while z[k + 1] < q as f32 {
+            k += 1;
+        }
+        let d = q as f32 - v[k] as f32;
+        *out = d * d + src[v[k]];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distance_transform_is_exact() {
+        let (w, h) = (23, 17);
+        let features = [(3usize, 4usize), (18, 12), (10, 0)];
+        let mut f = vec![1e9f32; w * h];
+        for &(x, y) in &features {
+            f[y * w + x] = 0.0;
+        }
+        squared_distance_transform(&mut f, w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let want = features
+                    .iter()
+                    .map(|&(fx, fy)| {
+                        (x as f32 - fx as f32).powi(2) + (y as f32 - fy as f32).powi(2)
+                    })
+                    .fold(f32::INFINITY, f32::min);
+                assert_eq!(f[y * w + x], want, "at ({x}, {y})");
+            }
+        }
+    }
 
     #[test]
     fn grow_and_shrink_move_the_edge() {
