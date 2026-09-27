@@ -16,6 +16,11 @@ pub struct PaletteToolState {
     pub dither: bool,
     /// The last extracted palette.
     pub extracted: Vec<Color32>,
+    /// The picture it came from, when it wasn't the canvas.
+    pub source_image: Option<String>,
+    /// Where the window was last frame: a file dropped on it gives the
+    /// palette instead of a new layer.
+    pub window_rect: Option<eframe::egui::Rect>,
 }
 
 impl Default for PaletteToolState {
@@ -26,12 +31,35 @@ impl Default for PaletteToolState {
             count: 8,
             dither: false,
             extracted: Vec::new(),
+            source_image: None,
+            window_rect: None,
         }
     }
 }
 
 /// Roughly how many pixels to cluster; more adds time, not quality.
 const SAMPLE_PIXELS: usize = 250_000;
+
+/// About [`SAMPLE_PIXELS`] of `img`'s pixels (area-averaged when it's
+/// bigger), premultiplied like the canvas.
+fn image_samples(img: &image::RgbaImage) -> Vec<Color32> {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let k = ((w * h) as f32 / SAMPLE_PIXELS as f32).sqrt();
+    let small;
+    let img = if k > 1.0 {
+        small = crate::app::import::downscale(
+            img,
+            ((w as f32 / k) as u32).max(1),
+            ((h as f32 / k) as u32).max(1),
+        );
+        &small
+    } else {
+        img
+    };
+    img.pixels()
+        .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+        .collect()
+}
 
 impl PainterApp {
     /// A spread-out sample of the pixels the palette is taken from.
@@ -75,6 +103,32 @@ impl PainterApp {
         self.release_canvas();
         let samples = self.palette_samples();
         self.workspace.palette.extracted = extract_palette(&samples, self.workspace.palette.count);
+        self.workspace.palette.source_image = None;
+    }
+
+    /// Take the palette from a picture file instead of the canvas.
+    pub(crate) fn extract_palette_from_image(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let img = image::load_from_memory(bytes)
+            .map_err(|e| format!("Couldn't open the image: {e}"))?
+            .to_rgba8();
+        self.workspace.palette.extracted =
+            extract_palette(&image_samples(&img), self.workspace.palette.count);
+        self.workspace.palette.source_image = Some(name.to_string());
+        Ok(())
+    }
+
+    /// Whether a drop at the pointer lands on the Palette window.
+    pub(crate) fn drop_is_on_palette(&self, ctx: &eframe::egui::Context) -> bool {
+        let palette = &self.workspace.palette;
+        palette.open
+            && palette.window_rect.is_some_and(|rect| {
+                ctx.input(|i| i.pointer.latest_pos())
+                    .is_some_and(|p| rect.contains(p))
+            })
     }
 
     /// Add colours to the swatches, skipping ones already there.
@@ -123,5 +177,43 @@ impl PainterApp {
             self.mark_tiles_in_bounds_dirty(rect);
             self.layer_state.thumbnails_dirty = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canvas::Canvas;
+
+    #[test]
+    fn a_picture_gives_its_colours() {
+        let img = image::RgbaImage::from_fn(900, 700, |x, _| {
+            if x < 450 {
+                image::Rgba([230, 20, 20, 255])
+            } else {
+                image::Rgba([20, 20, 230, 255])
+            }
+        });
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(
+            64,
+            64,
+            Color32::WHITE,
+            crate::app::document::TILE_SIZE,
+        ));
+        app.workspace.palette.count = 2;
+        app.extract_palette_from_image("pic", &png).unwrap();
+        let mut got = app.workspace.palette.extracted.clone();
+        got.sort_by_key(|c| c.r());
+        let near = |c: Color32, r: u8, b: u8| c.r().abs_diff(r) < 8 && c.b().abs_diff(b) < 8;
+        assert_eq!(got.len(), 2);
+        assert!(near(got[0], 20, 230) && near(got[1], 230, 20), "{got:?}");
+        assert_eq!(app.workspace.palette.source_image.as_deref(), Some("pic"));
+        assert!(
+            app.extract_palette_from_image("bad", b"not an image")
+                .is_err()
+        );
     }
 }

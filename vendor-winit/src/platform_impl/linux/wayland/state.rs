@@ -12,6 +12,8 @@ use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Connection, Proxy, QueueHandle};
 
 use sctk::compositor::{CompositorHandler, CompositorState};
+use sctk::data_device_manager::data_device::DataDevice;
+use sctk::data_device_manager::DataDeviceManagerState;
 use sctk::output::{OutputHandler, OutputState};
 use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::seat::pointer::ThemedPointer;
@@ -77,6 +79,12 @@ pub struct WinitState {
 
     /// Currently handled seats.
     pub seats: AHashMap<ObjectId, WinitSeatState>,
+
+    /// Drag and drop, when the compositor has it.
+    pub data_device_manager: Option<DataDeviceManagerState>,
+
+    /// Each seat's data device (drops onto our windows), by seat.
+    pub data_devices: AHashMap<ObjectId, DataDevice>,
 
     /// Currently present cursor surfaces.
     pub pointer_surfaces: AHashMap<ObjectId, Arc<ThemedPointer<WinitPointerData>>>,
@@ -148,6 +156,16 @@ impl WinitState {
             seats.insert(seat.id(), WinitSeatState::new());
         }
 
+        let data_device_manager = DataDeviceManagerState::bind(globals, queue_handle).ok();
+        let data_devices = seat_state
+            .seats()
+            .filter_map(|seat| {
+                let device =
+                    super::dnd::data_device(data_device_manager.as_ref(), queue_handle, &seat)?;
+                Some((seat.id(), device))
+            })
+            .collect();
+
         let (viewporter_state, fractional_scaling_manager) =
             if let Ok(fsm) = FractionalScalingManager::new(globals, queue_handle) {
                 (ViewporterState::new(globals, queue_handle).ok(), Some(fsm))
@@ -179,6 +197,8 @@ impl WinitState {
             kwin_blur_manager: KWinBlurManager::new(globals, queue_handle).ok(),
 
             seats,
+            data_device_manager,
+            data_devices,
             text_input_state: TextInputState::new(globals, queue_handle).ok(),
 
             relative_pointer: RelativePointerState::new(globals, queue_handle).ok(),

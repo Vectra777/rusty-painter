@@ -56,24 +56,37 @@ impl PainterApp {
         self.layer_state.thumbnails_dirty = true;
     }
 
-    /// Import every image file dropped on the window this frame.
+    /// Import every image file dropped on the window this frame. Dropped on
+    /// the open Palette window, a picture gives its colours instead.
     pub(crate) fn import_dropped_files(&mut self, ctx: &eframe::egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        let to_palette = self.drop_is_on_palette(ctx);
         for file in dropped {
-            let result = if let Some(bytes) = &file.bytes {
-                let name = std::path::Path::new(&file.name)
-                    .file_stem()
-                    .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
-                self.import_image_bytes(&name, bytes)
-            } else if let Some(path) = &file.path {
-                // Projects open; everything else is imported as a picture.
-                if path.extension().is_some_and(|e| e == "rpainter") {
-                    self.load_project_from_path(path)
-                } else {
-                    self.import_image_path(path)
-                }
+            let path = file.path.as_deref();
+            let name = path
+                .map_or_else(|| std::path::Path::new(&file.name), |p| p)
+                .file_stem()
+                .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
+            let result = if path.is_some_and(|p| p.extension().is_some_and(|e| e == "rpainter")) {
+                // Projects open.
+                self.load_project_from_path(path.unwrap())
             } else {
-                continue;
+                let bytes = match (&file.bytes, path) {
+                    (Some(bytes), _) => Ok(bytes.to_vec()),
+                    (None, Some(path)) => std::fs::read(path)
+                        .map_err(|e| format!("Couldn't read {}: {e}", path.display())),
+                    (None, None) => continue,
+                };
+                bytes.and_then(|bytes| {
+                    if to_palette {
+                        self.extract_palette_from_image(&name, &bytes)
+                    } else {
+                        self.import_image_bytes(&name, &bytes)
+                    }
+                })
             };
             if let Err(err) = result {
                 log::error!("{err}");

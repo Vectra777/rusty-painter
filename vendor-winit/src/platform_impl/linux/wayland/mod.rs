@@ -14,6 +14,7 @@ pub use event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 pub use output::{MonitorHandle, VideoModeHandle};
 pub use window::Window;
 
+mod dnd;
 mod event_loop;
 mod output;
 mod seat;

@@ -13,7 +13,7 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
     }
     let touch = metrics(ctx).touch;
     let swatch = if touch { 34.0 } else { 24.0 };
-    egui::Window::new("Palette")
+    let response = egui::Window::new("Palette")
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
@@ -26,9 +26,24 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
                 ui.label(RichText::new("Colours").color(TEXT_DIM));
                 ui.add(crate::ui::widgets::reset(&mut p.count, |v| egui::Slider::new(v, 2..=64)));
             });
-            if ui.button("Extract palette").clicked() {
-                app.extract_palette();
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Extract palette").clicked() {
+                    app.extract_palette();
+                }
+                #[cfg(not(target_os = "android"))]
+                if ui
+                    .button("From an image…")
+                    .on_hover_text("Take the colours of a picture file")
+                    .clicked()
+                {
+                    palette_from_image_dialog(app);
+                }
+            });
+            let hint = match &app.workspace.palette.source_image {
+                Some(name) => format!("Colours of {name}"),
+                None => "Or drop a picture on this window".to_string(),
+            };
+            ui.label(RichText::new(hint).small().color(TEXT_DIM));
 
             let extracted = app.workspace.palette.extracted.clone();
             if !extracted.is_empty() {
@@ -72,7 +87,27 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
                 app.recolor_layer(&palette);
             }
         });
+    app.workspace.palette.window_rect = response.map(|r| r.response.rect);
     app.workspace.palette.open = open;
+}
+
+#[cfg(not(target_os = "android"))]
+fn palette_from_image_dialog(app: &mut PainterApp) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
+        .pick_file()
+    else {
+        return;
+    };
+    let name = path
+        .file_stem()
+        .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
+    let result = std::fs::read(&path)
+        .map_err(|e| format!("Couldn't read {}: {e}", path.display()))
+        .and_then(|bytes| app.extract_palette_from_image(&name, &bytes));
+    if let Err(err) = result {
+        app.export_state.message = Some(err);
+    }
 }
 
 /// Swatches in the colour panel: click to pick, right-click or long-press
