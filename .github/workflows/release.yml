@@ -48,9 +48,25 @@ jobs:
     with:
       audit: false
 
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must be new
+        # A dispatch reusing an existing tag would silently attach the new
+        # builds to that old release (and keep the old tag's commit).
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        run: |
+          TAG="v${VERSION#v}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null; then
+            echo "::error::Tag ${TAG} already exists; pick a new version."
+            exit 1
+          fi
+
   linux:
     name: Linux build
-    needs: ci
+    needs: [ci, version]
     if: ${{ github.event_name == 'push' || inputs.linux }}
     runs-on: ubuntu-latest
     steps:
@@ -77,7 +93,7 @@ jobs:
 
   windows:
     name: Windows build
-    needs: ci
+    needs: [ci, version]
     if: ${{ github.event_name == 'push' || inputs.windows }}
     runs-on: windows-latest
     steps:
@@ -104,7 +120,7 @@ jobs:
 
   android:
     name: Android build
-    needs: ci
+    needs: [ci, version]
     if: ${{ github.event_name == 'push' || inputs.android }}
     runs-on: ubuntu-latest
     env:
