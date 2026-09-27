@@ -203,8 +203,12 @@ pub struct StrokeState {
     run: Vec<Vec2>,
     /// Distance travelled along the stroke to `last_pos`, canvas pixels.
     travel: f32,
-    /// Stroke speed in screen points per second, smoothed.
+    /// Stroke speed in screen points per second, smoothed; and what it was
+    /// at the previous sample, so dabs between samples blend from it.
     speed: f32,
+    prev_speed: f32,
+    /// Distance moved (screen points) since the speed was last measured.
+    speed_distance: f32,
     /// The last raw sample and when it came, for the speed.
     last_sample: Option<(Vec2, f64)>,
     /// Canvas pixels → screen points (the view zoom), for the speed.
@@ -242,6 +246,8 @@ impl StrokeState {
             run: Vec::new(),
             travel: 0.0,
             speed: 0.0,
+            prev_speed: 0.0,
+            speed_distance: 0.0,
             last_sample: None,
             view_scale: 1.0,
             dir: None,
@@ -391,22 +397,38 @@ impl StrokeState {
         }
     }
 
-    /// Smoothed screen speed from this sample and the last.
+    /// Update the smoothed screen speed with this sample.
+    ///
+    /// Input arrives unevenly: a mouse sends several moves per frame, stamped
+    /// microseconds apart, then nothing until the next frame. So distance is
+    /// gathered until at least [`SPEED_WINDOW`] has passed before measuring,
+    /// and the smoothing goes by time (not per sample), so the speed is the
+    /// same however the samples are bunched.
     fn update_speed(&mut self, raw: Vec2, time: Option<f64>) {
-        if let (Some((prev, t0)), Some(t1)) = (self.last_sample, time) {
-            let dt = (t1 - t0) as f32;
-            if dt > 1e-4 {
-                let v = (raw - prev).length() * self.view_scale / dt;
-                self.speed = if self.speed == 0.0 {
-                    v
-                } else {
-                    self.speed * 0.7 + v * 0.3
-                };
-            }
+        self.prev_speed = self.speed;
+        let Some(t1) = time else {
+            return;
+        };
+        let Some((prev, t0)) = self.last_sample else {
+            self.last_sample = Some((raw, t1));
+            return;
+        };
+        self.speed_distance += (raw - prev).length() * self.view_scale;
+        let dt = (t1 - t0) as f32;
+        // Keep the older time: the distance keeps adding up against it.
+        self.last_sample = Some((raw, t0));
+        if dt < SPEED_WINDOW {
+            return;
         }
-        if let Some(t) = time {
-            self.last_sample = Some((raw, t));
-        }
+        let v = self.speed_distance / dt;
+        let blend = 1.0 - (-dt / SPEED_SMOOTHING).exp();
+        self.speed = if self.speed == 0.0 && self.prev_speed == 0.0 {
+            v
+        } else {
+            self.speed + (v - self.speed) * blend
+        };
+        self.speed_distance = 0.0;
+        self.last_sample = Some((raw, t1));
     }
 
     /// One dab's variation: start taper, speed, randomness, tip.
@@ -423,7 +445,10 @@ impl StrokeState {
             }
         }
         if d.speed.is_active() {
-            let s = (self.speed / FAST_SPEED).clamp(0.0, 1.0);
+            // Blended along the segment from the previous sample's speed, so
+            // a change doesn't step the width between samples.
+            let speed = self.prev_speed + (self.speed - self.prev_speed) * dab.t;
+            let s = (speed / FAST_SPEED).clamp(0.0, 1.0);
             v.scale *= (1.0 + d.speed.size * s).max(0.05);
             v.strength *= (1.0 + d.speed.opacity * s).max(0.0);
         }
@@ -703,6 +728,11 @@ fn paint_plans(
         start = end;
     }
 }
+
+/// Shortest time a speed is measured over (seconds).
+const SPEED_WINDOW: f32 = 0.008;
+/// Time constant of the speed's smoothing (seconds).
+const SPEED_SMOOTHING: f32 = 0.06;
 
 /// Pressure steps dabs are grouped by; finer than any visible change.
 const PRESSURE_LEVELS: f32 = 64.0;

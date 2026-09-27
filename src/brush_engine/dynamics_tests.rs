@@ -778,3 +778,44 @@ fn preset_stroke_times() {
         );
     }
 }
+
+#[test]
+fn speed_stays_smooth_when_samples_come_in_bursts() {
+    // A mouse at a steady speed: four moves per frame stamped microseconds
+    // apart, a frame every 4 ms. The width must stay steady, and match
+    // evenly timed samples at the same speed.
+    let dynamics = BrushDynamics {
+        speed: SpeedDynamics {
+            size: -0.8,
+            opacity: 0.0,
+        },
+        ..Default::default()
+    };
+    let speed = 1200.0; // points per second
+    let bursty: Vec<(Vec2, f64)> = (0..240)
+        .map(|i| {
+            let frame = (i / 4) as f64 * 0.004;
+            let t = frame + (i % 4) as f64 * 1e-6;
+            // Positions move on at the real hand speed between events.
+            let x = 20.0 + (frame + (i % 4) as f64 * 0.001) * speed;
+            (Vec2::new(x as f32, 64.0), t)
+        })
+        .collect();
+    let even: Vec<(Vec2, f64)> = (0..240)
+        .map(|i| {
+            let t = i as f64 * 0.001;
+            (Vec2::new((20.0 + t * speed) as f32, 64.0), t)
+        })
+        .collect();
+    let (bursty, _) = paint(&mut brush(dynamics), &bursty, 1, true);
+    let (even, _) = paint(&mut brush(dynamics), &even, 1, true);
+    let widths: Vec<usize> = (80..220).map(|x| thickness(&bursty, x)).collect();
+    let (lo, hi) = (*widths.iter().min().unwrap(), *widths.iter().max().unwrap());
+    assert!(hi - lo <= 2, "steady width: {lo}..{hi}");
+    let reference = thickness(&even, 150) as i32;
+    assert!(
+        (thickness(&bursty, 150) as i32 - reference).abs() <= 1,
+        "same as evenly timed: {} vs {reference}",
+        thickness(&bursty, 150)
+    );
+}
