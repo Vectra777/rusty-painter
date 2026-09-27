@@ -95,7 +95,7 @@ pub fn save_image_to_media_store(
             .map_err(|e| e.to_string())?;
         put_string(env, &values, "_display_name", file_name)?;
         put_string(env, &values, "mime_type", mime)?;
-        put_string(env, &values, "relative_path", "Pictures/Rust Dab Painter")?;
+        put_string(env, &values, "relative_path", "Pictures/Rusty Painter")?;
 
         let collection = env
             .get_static_field(
@@ -150,7 +150,7 @@ pub fn save_image_to_media_store(
 
         let uri_string = uri_to_string(env, &uri)?;
         Ok(AndroidExport {
-            message: format!("Saved to Pictures/Rust Dab Painter/{file_name}"),
+            message: format!("Saved to Pictures/Rusty Painter/{file_name}"),
             share_uri: Some(uri_string),
             share_mime: Some(mime.to_string()),
         })

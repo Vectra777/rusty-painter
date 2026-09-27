@@ -49,7 +49,7 @@ package = "io.vectra.rustypainter"
 build_targets = ["aarch64-linux-android"]
 
 [package.metadata.android.application]
-label = "Rust Dab Painter"
+label = "Rusty Painter"
 theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
 
 # Photo library access, to import images (Android has no file dialog
