@@ -1,5 +1,8 @@
+//! Android platform glue: JNI calls for the media store, sharing and
+//! file access.
+
 #[cfg(target_os = "android")]
-use crate::utils::exporter::{ExportFormat, encode_color_image};
+use crate::project::export::{ExportFormat, encode_color_image};
 #[cfg(target_os = "android")]
 use eframe::egui::ColorImage;
 #[cfg(target_os = "android")]
@@ -262,7 +265,7 @@ pub fn share_uri(uri: &str, mime: &str, title: &str) -> Result<(), String> {
 pub fn save_image_to_media_store(
     _img: eframe::egui::ColorImage,
     _file_name: &str,
-    _format: crate::utils::exporter::ExportFormat,
+    _format: crate::project::export::ExportFormat,
 ) -> Result<AndroidExport, String> {
     Err("Android export backend is unavailable on this platform".to_string())
 }

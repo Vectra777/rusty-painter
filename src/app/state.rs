@@ -283,7 +283,7 @@ pub struct ModalState {
     /// Touch mode: the File / Edit / View / Help sheet is slid up.
     pub menu_sheet_open: bool,
     /// Section the menu sheet shows when it is too narrow for all of them.
-    pub menu_sheet_section: crate::ui::top_bar::MenuSection,
+    pub menu_sheet_section: crate::ui::menus::MenuSection,
 }
 
 impl ModalState {

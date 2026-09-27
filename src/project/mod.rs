@@ -17,6 +17,7 @@ use std::{fs, path::Path};
 
 mod blobs;
 mod convert;
+pub(crate) mod export;
 mod preview;
 
 use blobs::{StoredBlob, push_blobs, read_blob};
@@ -1553,7 +1554,7 @@ mod perf {
             assert!(reference.pixels == img.pixels, "parallel flatten matches");
         }
         let rgba = time("export: to rgba", || {
-            crate::utils::exporter::to_rgba_image(img.clone()).unwrap()
+            crate::project::export::to_rgba_image(img.clone()).unwrap()
         });
         time("export: encode png", || {
             let mut out = Vec::new();
@@ -1591,11 +1592,11 @@ mod perf {
             });
         }
         for f in [
-            crate::utils::exporter::ExportFormat::Jpeg,
-            crate::utils::exporter::ExportFormat::Tiff,
+            crate::project::export::ExportFormat::Jpeg,
+            crate::project::export::ExportFormat::Tiff,
         ] {
             time(&format!("export: {}", f.label()), || {
-                let r = crate::utils::exporter::encode_color_image(img.clone(), f);
+                let r = crate::project::export::encode_color_image(img.clone(), f);
                 eprintln!(
                     "  {:?}",
                     r.as_ref().map(|b| b.len() / 1024).map_err(|e| e.clone())
@@ -1603,9 +1604,9 @@ mod perf {
             });
         }
         time("export: whole (encode_color_image png)", || {
-            crate::utils::exporter::encode_color_image(
+            crate::project::export::encode_color_image(
                 img,
-                crate::utils::exporter::ExportFormat::Png,
+                crate::project::export::ExportFormat::Png,
             )
             .unwrap()
         });
@@ -1816,10 +1817,10 @@ mod soft_brush_look {
         app.stroke_worker.wait_idle();
         let img = app.canvas.flatten();
         let out = std::env::var("SOFT_OUT").unwrap_or_else(|_| "soft.png".into());
-        crate::utils::exporter::save_color_image(
+        crate::project::export::save_color_image(
             img,
             out,
-            crate::utils::exporter::ExportFormat::Png,
+            crate::project::export::ExportFormat::Png,
         )
         .unwrap();
     }

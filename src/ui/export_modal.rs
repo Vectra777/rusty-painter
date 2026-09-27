@@ -1,7 +1,7 @@
 use crate::{
     PainterApp,
     app::document::validate_canvas_size,
-    utils::exporter::{ExportFormat, save_color_image},
+    project::export::{ExportFormat, save_color_image},
 };
 use eframe::egui;
 use std::path::{Path, PathBuf};

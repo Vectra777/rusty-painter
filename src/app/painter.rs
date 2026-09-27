@@ -53,7 +53,7 @@ impl eframe::App for PainterApp {
         let touch = self.workspace.touch_mode;
         if self.workspace.applied_touch_mode != Some(touch) {
             let first_frame = self.workspace.applied_touch_mode.is_none();
-            crate::styling::apply_style(ctx, touch);
+            crate::ui::theme::apply_style(ctx, touch);
             // Small touch screens start with the brush panel tucked away,
             // and phone-sized ones with both panels.
             let width = ctx.screen_rect().width();
@@ -120,12 +120,12 @@ impl eframe::App for PainterApp {
         // Tablets have the menus in a sheet over the bottom bar, and adjust
         // size/opacity with the canvas faders instead of the options bar.
         if !touch {
-            ui::top_bar::menu_bar(self, ctx);
-            ui::top_bar::options_bar(self, ctx);
+            ui::menus::menu_bar(self, ctx);
+            ui::tool_options::options_bar(self, ctx);
         }
         ui::status_bar::status_bar(self, ctx);
         if touch {
-            ui::top_bar::menu_sheet(self, ctx);
+            ui::menus::menu_sheet(self, ctx);
         }
         ui::toolbar::toolbar(self, ctx);
 

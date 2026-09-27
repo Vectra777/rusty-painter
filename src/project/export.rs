@@ -1,3 +1,6 @@
+//! Image export: encoding the flattened canvas as PNG, JPEG or TIFF and
+//! writing it to disk.
+
 use eframe::egui::ColorImage;
 use image::ImageFormat;
 use std::path::PathBuf;

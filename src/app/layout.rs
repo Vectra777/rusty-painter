@@ -61,7 +61,7 @@ impl<'a> TabViewer for ToolTabViewer<'a> {
             {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.label(egui::RichText::new("FILL").small().strong());
-                    ui::top_bar::fill_options(self.app, ui, false);
+                    ui::tool_options::fill_options(self.app, ui, false);
                 });
             }
             ToolTab::BrushSettings
@@ -69,7 +69,7 @@ impl<'a> TabViewer for ToolTabViewer<'a> {
             {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.label(egui::RichText::new("LIQUIFY").small().strong());
-                    ui::top_bar::liquify_options(self.app, ui, false);
+                    ui::tool_options::liquify_options(self.app, ui, false);
                 });
             }
             ToolTab::BrushSettings => ui::brush_settings::brush_settings_panel(
@@ -123,7 +123,7 @@ pub(crate) fn fit_panels_to_screen(app: &mut PainterApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn show_tool_docks(app: &mut PainterApp, ctx: &egui::Context) {
-    let dock_style = crate::styling::dock_style(&ctx.style());
+    let dock_style = crate::ui::theme::dock_style(&ctx.style());
     let panel_frame = egui::Frame::none().fill(BG_CANVAS);
     // A panel never covers the whole canvas on a small screen.
     let max_width = (ctx.available_rect().width() - MIN_CANVAS_WIDTH).max(160.0);

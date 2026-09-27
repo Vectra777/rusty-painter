@@ -171,21 +171,21 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         repaint = true;
     }
     if new_canvas {
-        ui::top_bar::open_new_canvas_dialog(app);
+        ui::menus::open_new_canvas_dialog(app);
     }
     if import {
         crate::app::import::import_image_dialog(app);
         repaint = true;
     }
     if open {
-        ui::top_bar::open_project(app);
+        ui::menus::open_project(app);
         repaint = true;
     }
     if save {
-        ui::top_bar::save_project(app);
+        ui::menus::save_project(app);
     }
     if export {
-        ui::top_bar::open_export_dialog(app);
+        ui::menus::open_export_dialog(app);
     }
     if fit {
         app.fit_view();
@@ -268,7 +268,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         repaint = true;
     }
     if panels {
-        ui::top_bar::toggle_panels(app);
+        ui::menus::toggle_panels(app);
         repaint = true;
     }
     if swap {

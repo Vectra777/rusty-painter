@@ -1,9 +1,9 @@
 use crate::ColorModel;
 use crate::app::state::BrushState;
+use crate::canvas::color::ColorManipulation;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use crate::ui::widgets::{color_swatch, draw_checkerboard, paint_swatch, section};
-use crate::utils::color::ColorManipulation;
 use eframe::egui::{self, Color32, Pos2, RichText, Sense, Stroke};
 use std::f32::consts::TAU;
 

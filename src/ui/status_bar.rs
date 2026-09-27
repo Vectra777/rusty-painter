@@ -68,7 +68,7 @@ pub fn status_bar(app: &mut PainterApp, ctx: &egui::Context) {
                     .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if m.touch {
                             let size = m.status_height - 4.0;
-                            crate::ui::top_bar::panel_toggles(app, ui, size);
+                            crate::ui::menus::panel_toggles(app, ui, size);
                             vdivider(ui);
                         }
                         view_controls(app, ui, compact);

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 #[cfg(target_os = "android")]
-use crate::utils::android as photos;
+use crate::android as photos;
 
 /// Desktop builds import through the file dialog; these keep the gallery
 /// compiling (and checked) there.

@@ -6,6 +6,13 @@ use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use eframe::egui::{self, Color32, Rect, Response, RichText, Sense, Stroke};
 
+/// A bar's frame: flat `fill`, 8 px side padding.
+pub(crate) fn bar_frame(fill: Color32) -> egui::Frame {
+    egui::Frame::none()
+        .fill(fill)
+        .inner_margin(egui::Margin::symmetric(8.0, 0.0))
+}
+
 /// Paints a transparency checkerboard into `rect`.
 pub(crate) fn draw_checkerboard(painter: &egui::Painter, rect: Rect, cell: f32) {
     painter.rect_filled(rect, 0.0, CHECKERBOARD_LIGHT);

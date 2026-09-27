@@ -128,7 +128,7 @@ fn faders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
 fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
     match app.active_tool {
         Tool::Transform(_) => context_bar(ctx, area, |ui| {
-            crate::ui::top_bar::transform_controls(app, ui)
+            crate::ui::tool_options::transform_controls(app, ui)
         }),
         // No Shift/Alt on a touch screen: the modes and actions as buttons.
         Tool::Select(kind) => context_bar(ctx, area, |ui| {
@@ -171,7 +171,7 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
             }
         }),
         Tool::Gradient => context_bar(ctx, area, |ui| {
-            crate::ui::top_bar::gradient_options(app, ui, true);
+            crate::ui::tool_options::gradient_options(app, ui, true);
         }),
         Tool::Shape(_) => context_bar(ctx, area, |ui| {
             crate::ui::shape_menu::shape_controls(app, ui, true);

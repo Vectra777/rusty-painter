@@ -1,3 +1,5 @@
+#[cfg(target_os = "android")]
+mod android;
 mod app;
 #[cfg(feature = "bench")]
 #[doc(hidden)]
@@ -6,10 +8,8 @@ pub mod brush_engine;
 pub mod canvas;
 pub(crate) mod project;
 pub mod selection;
-mod styling;
 mod tablet;
 mod ui;
-mod utils;
 
 pub use app::PainterApp;
 pub use app::document::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation};
@@ -36,7 +36,7 @@ pub fn run() -> eframe::Result<()> {
         APP_NAME,
         options,
         Box::new(|cc| {
-            styling::apply_global_style(&cc.egui_ctx);
+            ui::theme::apply_global_style(&cc.egui_ctx);
             Ok(Box::new(PainterApp::new(cc)))
         }),
     )
@@ -67,7 +67,7 @@ pub fn android_main(app: AndroidApp) {
         APP_NAME,
         options,
         Box::new(|cc| {
-            styling::apply_global_style(&cc.egui_ctx);
+            ui::theme::apply_global_style(&cc.egui_ctx);
             Ok(Box::new(PainterApp::new(cc)))
         }),
     );

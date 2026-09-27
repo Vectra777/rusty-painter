@@ -1,3 +1,6 @@
+//! HSV and grey conversions on `Color32`, used by the colour picker and
+//! layer clears.
+
 use eframe::egui::Color32;
 
 pub type Color = Color32;

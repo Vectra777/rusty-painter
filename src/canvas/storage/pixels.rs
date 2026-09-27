@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::Color32;
 
 use super::{Canvas, SharedCell, TileCell, TileKey};
+use crate::canvas::color::{Color, ColorManipulation};
 use crate::canvas::history::{TileSnapshot, UndoAction};
 use crate::selection::SelectionManager;
-use crate::utils::color::{Color, ColorManipulation};
 
 /// Some of a layer's tiles as they were, for [`Canvas::paint_over_region`].
 pub struct Region {

@@ -1,3 +1,6 @@
+//! Applies the tokens from [`crate::ui::style`] to egui and the dock: the
+//! one place the app theme is built (desktop or touch).
+
 use crate::ui::style::*;
 use eframe::egui::{self, Color32, FontId, Margin, Rounding, Shadow, Stroke, TextStyle};
 

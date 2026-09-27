@@ -312,7 +312,7 @@ pub fn load_project(bytes: &[u8]) -> usize {
 /// Flatten and encode as PNG (as Export does).
 pub fn export_png(app: &mut PainterApp) -> Vec<u8> {
     let img = app.canvas.flatten();
-    crate::utils::exporter::encode_color_image(img, crate::utils::exporter::ExportFormat::Png)
+    crate::project::export::encode_color_image(img, crate::project::export::ExportFormat::Png)
         .expect("encode")
 }
 
