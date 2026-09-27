@@ -207,6 +207,41 @@ pub fn compose(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// `color` (unmultiplied sRGB) with its hue turned by `hsv[0]` degrees and
+/// its saturation and value moved by `hsv[1]`, `hsv[2]`; sRGB 0..1.
+pub fn shift_hsv(color: eframe::egui::Color32, hsv: [f32; 3]) -> [f32; 3] {
+    let [r, g, b, _] = color.to_srgba_unmultiplied().map(|v| v as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let mut h = if d <= 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let mut s = if max <= 0.0 { 0.0 } else { d / max };
+    let mut v = max;
+    h = (h + hsv[0]).rem_euclid(360.0);
+    s = (s + hsv[1]).clamp(0.0, 1.0);
+    v = (v + hsv[2]).clamp(0.0, 1.0);
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [r + m, g + m, b + m]
+}
+
 /// Direction of travel from `from` to `to`, in radians on screen
 /// (counter-clockwise, y down), or `None` if they're the same point.
 pub fn direction(from: Vec2, to: Vec2) -> Option<f32> {

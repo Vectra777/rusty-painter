@@ -37,6 +37,11 @@ pub(crate) struct StrokeBuffer {
     pub tail: [Option<Vec<f32>>; 2],
     /// Where each tail segment has coverage, tile-local `[x0, y0, x1, y1)`.
     pub tail_rect: [Option<[usize; 4]>; 2],
+    /// For strokes whose dabs differ in colour: the colour laid down so far
+    /// (premultiplied by coverage, in the document's blend space), and each
+    /// tail segment's. `None` for single-colour strokes.
+    pub colors: Option<Vec<[f32; 3]>>,
+    pub tail_colors: [Option<Vec<[f32; 3]>>; 2],
 }
 
 /// Tiles touched by the current stroke.
@@ -50,6 +55,8 @@ pub struct StrokeTiles {
     pub(crate) buffers: FxHashMap<(usize, usize), Mutex<StrokeBuffer>>,
     /// Tiles each tail segment has touched.
     pub(crate) tail_tiles: [HashSet<(usize, usize)>; 2],
+    /// Which tail segment is the newer (painted over the other).
+    pub(crate) tail_newer: usize,
 }
 
 /// Shared drawing dependencies for adding points to a stroke.
@@ -503,6 +510,7 @@ impl StrokeState {
             context.merge_tail(brush, older);
             self.tail.drain(..self.newer_from);
             self.newer_slot = older;
+            context.stroke_tiles.tail_newer = older;
             self.newer_from = self.tail.len();
         }
     }

@@ -396,6 +396,47 @@ fn bench_dynamic_strokes(c: &mut Criterion) {
         let mut brush = Brush::new(60.0, 40.0, Color32::from_rgb(30, 60, 200), 10.0);
         brush.texture = Some(BrushTexture::new(builtin()[0].clone()));
         let mut group = c.benchmark_group("textured_stroke_60_samples");
+        for (name, colour_random, mode) in [
+            (
+                "multiply",
+                false,
+                rusty_painter::canvas::blend_modes::LayerBlend::Multiply,
+            ),
+            (
+                "hue_random",
+                true,
+                rusty_painter::canvas::blend_modes::LayerBlend::Normal,
+            ),
+        ] {
+            let mut brush = Brush::new(60.0, 40.0, Color32::from_rgb(30, 60, 200), 10.0);
+            brush.paint_blend = mode;
+            if colour_random {
+                brush.dynamics.random.hue = 60.0;
+            }
+            group.bench_function(name, |b| {
+                b.iter(|| {
+                    let mut undo_action = UndoAction {
+                        tiles: Vec::new(),
+                        selection: None,
+                        transform: None,
+                        layer_action: None,
+                    };
+                    let mut stroke_tiles = StrokeTiles::default();
+                    let mut stroke = StrokeState::with_seed(1);
+                    let mut context = StrokeContext::new(
+                        &pool,
+                        &canvas,
+                        None,
+                        &mut undo_action,
+                        &mut stroke_tiles,
+                    );
+                    for &(pos, pressure, time) in &points {
+                        stroke.add_sample(&mut brush, pos, pressure, Some(time), &mut context);
+                    }
+                    stroke.finish(&mut brush, &mut context);
+                });
+            });
+        }
         group.bench_function("paper", |b| {
             b.iter(|| {
                 let mut undo_action = UndoAction {

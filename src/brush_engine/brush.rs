@@ -16,10 +16,10 @@ use crate::{
     canvas::{
         Canvas,
         blend::{
-            StrokeColor, resolve_stroke_erase, resolve_stroke_normal, resolve_stroke_normal_gamma,
-            resolve_stroke_normal_simd,
+            StrokeColor, resolve_stroke_erase, resolve_stroke_general, resolve_stroke_normal,
+            resolve_stroke_normal_gamma, resolve_stroke_normal_simd,
         },
-        blend_modes::BlendSpace,
+        blend_modes::{BlendSpace, LayerBlend},
         history::{TileSnapshot, UndoAction},
     },
     selection::SelectionManager,
@@ -162,6 +162,9 @@ pub struct Brush {
     pub dynamics: crate::brush_engine::dynamics::BrushDynamics,
     /// Paper grain taking paint away from each dab; `None` for none.
     pub texture: Option<crate::brush_engine::texture::BrushTexture>,
+    /// How the paint blends onto the layer (multiply, screen, add…), like a
+    /// layer's blend mode but per stroke.
+    pub paint_blend: LayerBlend,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -186,6 +189,15 @@ struct BatchCtx<'a> {
     target: Target,
     /// The brush's texture, applied to every dab.
     texture: Option<&'a crate::brush_engine::texture::BrushTexture>,
+    /// The dabs differ in colour: their colours are accumulated per pixel.
+    colored: bool,
+    /// How the stroke blends onto the layer.
+    mode: LayerBlend,
+    /// Resolve with [`resolve_stroke_general`] (a blend mode or per-pixel
+    /// colours) rather than the fast single-colour resolves.
+    general: bool,
+    /// Which tail segment is the newer.
+    tail_newer: usize,
 }
 
 /// Where a batch of dabs accumulates.
@@ -220,6 +232,15 @@ fn tile_selection_coverage(
         }
     }
     coverage
+}
+
+/// An sRGB value (0..1) in linear light.
+fn srgb_to_linear(v: f32) -> f32 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Whether `m` only turns or mirrors (keeps a circle a circle).
@@ -280,12 +301,20 @@ fn paint_batch(
             coverage,
             selection: selection_coverage,
             tail,
+            colors,
+            tail_colors,
             ..
         } = &mut *buffer;
-        let coverage = match ctx.target {
-            Target::Stroke => coverage,
-            Target::Tail(k) => tail[k].get_or_insert_with(|| vec![0.0; tile_size * tile_size]),
+        let (coverage, colors) = match ctx.target {
+            Target::Stroke => (coverage, colors),
+            Target::Tail(k) => (
+                tail[k].get_or_insert_with(|| vec![0.0; tile_size * tile_size]),
+                &mut tail_colors[k],
+            ),
         };
+        let mut colors = ctx
+            .colored
+            .then(|| colors.get_or_insert_with(|| vec![[0.0; 3]; tile_size * tile_size]));
         let mut alpha_row = vec![0.0f32; tile_size];
         // Per tile row, the columns [min, max] any dab of this batch actually
         // reached (non-zero alpha). Resolving only those, rather than the
@@ -320,6 +349,21 @@ fn paint_batch(
                         .zip(&sel[start + first..=start + last])
                     {
                         *alpha *= s;
+                    }
+                }
+                if let Some(colors) = colors.as_deref_mut() {
+                    // Each dab's colour laid over what's there, like paint.
+                    let c = dab.color;
+                    for (dst, &alpha) in colors[start + first..=start + last]
+                        .iter_mut()
+                        .zip(&alphas[span.clone()])
+                    {
+                        let keep = 1.0 - alpha;
+                        *dst = [
+                            c[0] * alpha + dst[0] * keep,
+                            c[1] * alpha + dst[1] * keep,
+                            c[2] * alpha + dst[2] * keep,
+                        ];
                     }
                 }
                 for (cov, &alpha) in coverage[start + first..=start + last]
@@ -365,6 +409,33 @@ fn grow_rect(rect: &mut Option<[usize; 4]>, r: [usize; 4]) {
     });
 }
 
+/// The unmultiplied colour of each pixel of `range` in a stroke whose dabs
+/// differ in colour: the stroke's, then the older and the newer tail
+/// segment's laid over it, in painting order.
+fn stroke_colors(
+    buffer: &StrokeBuffer,
+    range: Range<usize>,
+    tail_newer: usize,
+    out: &mut Vec<[f32; 3]>,
+) {
+    out.clear();
+    for i in range {
+        let mut a = buffer.coverage[i];
+        let mut c = buffer.colors.as_ref().map_or([0.0; 3], |c| c[i]);
+        for k in [1 - tail_newer, tail_newer] {
+            let (Some(tail), Some(tc)) = (&buffer.tail[k], &buffer.tail_colors[k]) else {
+                continue;
+            };
+            let (ta, t) = (tail[i], tc[i]);
+            let keep = 1.0 - ta;
+            c = [t[0] + c[0] * keep, t[1] + c[1] * keep, t[2] + c[2] * keep];
+            a = ta + a * keep;
+        }
+        let inv = if a > 0.0 { 1.0 / a } else { 0.0 };
+        out.push(c.map(|v| (v * inv).clamp(0.0, 1.0)));
+    }
+}
+
 /// Re-resolve a tile's pixels on `spans` (per row, the columns `[min,
 /// max]`; `min > max` for none) from its original pixels and the stroke's
 /// coverage (with the tail's, if there is one), and record the damage.
@@ -385,6 +456,7 @@ fn resolve_spans(
     };
     // The stroke and its tail together: dabs combine the same in any order.
     let mut combined = Vec::new();
+    let mut combined_colors: Vec<[f32; 3]> = Vec::new();
     for (row, &(min_x, max_x)) in spans.iter().enumerate() {
         if min_x > max_x {
             continue;
@@ -405,6 +477,29 @@ fn resolve_spans(
         };
         // Canvas position of the span, for the alpha dither.
         let origin = [(tile_x0 + min_x) as u32, (tile_y0 + row) as u32];
+        if ctx.general && ctx.blend_mode == BlendMode::Normal {
+            let colors = ctx.colored.then(|| {
+                stroke_colors(buffer, range.clone(), ctx.tail_newer, &mut combined_colors);
+                &combined_colors[..]
+            });
+            resolve_stroke_general(
+                original,
+                coverage,
+                colors,
+                &mut data[range.clone()],
+                ctx.color,
+                ctx.cap,
+                ctx.mode,
+                ctx.space,
+                origin,
+            );
+            if ctx.alpha_lock {
+                for (out, orig) in data[range].iter_mut().zip(original) {
+                    *out = crate::canvas::blend::with_alpha_of(*out, orig.a());
+                }
+            }
+            continue;
+        }
         match ctx.blend_mode {
             BlendMode::Normal if ctx.space == BlendSpace::Gamma => resolve_stroke_normal_gamma(
                 original,
@@ -493,6 +588,7 @@ impl Brush {
             is_changed: false,
             dynamics: Default::default(),
             texture: None,
+            paint_blend: LayerBlend::Normal,
         }
     }
 
@@ -511,6 +607,7 @@ impl Brush {
             is_changed: false,
             dynamics: Default::default(),
             texture: None,
+            paint_blend: LayerBlend::Normal,
         }
     }
 
@@ -599,6 +696,8 @@ impl Brush {
         let base_r = self.brush_options.diameter / 2.0;
         let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
         let tile_size = canvas.tile_size();
+        let colored = self.dynamics.random.has_color();
+        let linear = canvas.blend_space == BlendSpace::Linear;
         // How far past its radius a turned tip reaches: a square's (or an
         // image's) corners.
         let corner_reach = match &self.brush_options.pixel_shape {
@@ -627,6 +726,15 @@ impl Brush {
                 dab.orient = orient;
                 dab.reach = reach;
                 dab.strength = var.strength;
+                if colored {
+                    let srgb =
+                        crate::brush_engine::dynamics::shift_hsv(self.brush_options.color, var.hsv);
+                    dab.color = if linear {
+                        srgb.map(srgb_to_linear)
+                    } else {
+                        srgb
+                    };
+                }
                 Some(dab)
             })
             .collect();
@@ -655,8 +763,22 @@ impl Brush {
             else {
                 continue;
             };
+            let tail_colors = buffer.tail_colors[k].take();
+            let buffer = &mut *buffer;
+            if tail_colors.is_some() && buffer.colors.is_none() {
+                // All the stroke's paint here came through the tail so far.
+                buffer.colors = Some(vec![[0.0; 3]; tile_size * tile_size]);
+            }
             for row in y0..y1 {
                 let range = row * tile_size + x0..row * tile_size + x1;
+                if let (Some(tc), Some(colors)) = (&tail_colors, buffer.colors.as_mut()) {
+                    // The segment was painted over the stroke.
+                    for i in range.clone() {
+                        let keep = 1.0 - tail[i];
+                        let (t, c) = (tc[i], &mut colors[i]);
+                        *c = [t[0] + c[0] * keep, t[1] + c[1] * keep, t[2] + c[2] * keep];
+                    }
+                }
                 for (c, &t) in buffer.coverage[range.clone()].iter_mut().zip(&tail[range]) {
                     *c += t * (1.0 - *c);
                 }
@@ -674,7 +796,14 @@ impl Brush {
         if keys.is_empty() {
             return;
         }
-        let ctx = self.batch_ctx(canvas, None, &[], &stroke_tiles.buffers, Target::Stroke);
+        let ctx = self.batch_ctx(
+            canvas,
+            None,
+            &[],
+            &stroke_tiles.buffers,
+            Target::Stroke,
+            stroke_tiles.tail_newer,
+        );
         let tile_size = canvas.tile_size();
         for key in keys {
             let Some(buffer) = stroke_tiles.buffers.get(&key) else {
@@ -688,6 +817,7 @@ impl Brush {
                 }
             }
             buffer.tail = [None, None];
+            buffer.tail_colors = [None, None];
             let Some([x0, y0, x1, y1]) = rect else {
                 continue;
             };
@@ -728,8 +858,10 @@ impl Brush {
         dabs: &'a [PlacedDab],
         buffers: &'a FxHashMap<(usize, usize), Mutex<StrokeBuffer>>,
         target: Target,
+        tail_newer: usize,
     ) -> BatchCtx<'a> {
         let o = &self.brush_options;
+        let colored = self.dynamics.random.has_color();
         let wash = o.painting_mode == PaintingMode::Wash;
         BatchCtx {
             canvas,
@@ -748,6 +880,10 @@ impl Brush {
                 .is_some_and(|l| l.alpha_locked),
             target,
             texture: self.texture.as_ref(),
+            colored,
+            mode: self.paint_blend,
+            general: colored || self.paint_blend != LayerBlend::Normal,
+            tail_newer,
         }
     }
 
@@ -780,7 +916,14 @@ impl Brush {
         if let Target::Tail(k) = target {
             stroke_tiles.tail_tiles[k].extend(regions.iter().map(|r| (r.tx, r.ty)));
         }
-        let ctx = self.batch_ctx(canvas, selection, &dabs, &stroke_tiles.buffers, target);
+        let ctx = self.batch_ctx(
+            canvas,
+            selection,
+            &dabs,
+            &stroke_tiles.buffers,
+            target,
+            stroke_tiles.tail_newer,
+        );
         let work_pixels: usize = dabs
             .iter()
             .map(|d| {
@@ -840,6 +983,8 @@ impl Brush {
                     damage: None,
                     tail: [None, None],
                     tail_rect: [None, None],
+                    colors: None,
+                    tail_colors: [None, None],
                 }),
             );
         }

@@ -36,14 +36,14 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Random size / opacity | ✅ | ✅ | ✅ Jitter tab | ✅ |
 | Scatter (random position) | ✅ | ✅ spray | ✅ | ✅ position jitter only |
 | Particles / several dabs per step | ✅ spray engine | ✅ | ✅ particle density | ✅ up to 16 per step |
-| Colour randomness (hue / saturation / value) | ✅ | ✅ | ✅ | ❌ |
+| Colour randomness (hue / saturation / value) | ✅ | ✅ | ✅ | ✅ per dab |
 
 ## How the paint behaves
 
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Build-up vs wash | ✅ | ✅ | ⚠️ "Constant Opacity" | ✅ |
-| Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ❌ normal + erase only |
+| Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ✅ all 27 layer modes |
 | Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ⚠️ separate smudge tool only |
 | Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height |
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ❌ |
@@ -76,13 +76,12 @@ below.
   driving size and opacity.
 - [x] **2. Tip rotation and shape.** Fixed angle, follow the stroke
   direction, random rotation, squash ratio; for round and image tips.
-- [ ] **3. Randomness per dab.** Size, opacity and flow randomness; several
-  dabs per step (spray) — *done*; hue, saturation and value randomness —
-  *to do* (needs the coloured stroke buffer, with 5).
+- [x] **3. Randomness per dab.** Size, opacity and flow randomness; several
+  dabs per step (spray); hue, saturation and value randomness.
 - [x] **4. Texture.** Paper grain on the brush (built-in grains and your own
   images), with scale, strength and how it combines (multiply, subtract,
   height).
-- [ ] **5. Brush blend modes.** Multiply, screen, add (glow), overlay,
+- [x] **5. Brush blend modes.** Multiply, screen, add (glow), overlay,
   darken, lighten, colour dodge / burn, and the rest of the layer modes.
 - [ ] **6. Wet mixing brush.** Picks up the colour under it and carries it
   (colour rate, smudge length, wetness), like Krita's Color Smudge.

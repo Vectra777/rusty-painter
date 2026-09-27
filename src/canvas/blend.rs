@@ -345,6 +345,62 @@ pub(crate) fn resolve_stroke_normal(
     }
 }
 
+/// Any stroke over the pixels the tile had before it: its colour
+/// (`colors[i]`, unmultiplied in the document's blend space, or `color`'s
+/// everywhere) blended onto them with `mode` at each pixel's `coverage` ×
+/// `cap`. Slower than [`resolve_stroke_normal`]; for brushes with a blend
+/// mode or colour randomness. Pixels with no coverage are left untouched.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_stroke_general(
+    original: &[Color32],
+    coverage: &[f32],
+    colors: Option<&[[f32; 3]]>,
+    out: &mut [Color32],
+    color: StrokeColor,
+    cap: f32,
+    mode: crate::canvas::blend_modes::LayerBlend,
+    space: crate::canvas::blend_modes::BlendSpace,
+    origin: [u32; 2],
+) {
+    use crate::canvas::blend_modes::{BlendSpace, composite, pixel_noise};
+    let luts = Luts::get();
+    let dither = dither_table();
+    let linear = space == BlendSpace::Linear;
+    let base = if linear { color.linear } else { color.gamma };
+    for (i, ((dst, &src), &cov)) in out.iter_mut().zip(original).zip(coverage).enumerate() {
+        if cov <= 0.0 {
+            continue;
+        }
+        let a = (cov * cap).min(1.0);
+        let c = colors.map_or(base, |c| c[i]);
+        let stroke = Rgba::from_rgba_premultiplied(c[0] * a, c[1] * a, c[2] * a, a);
+        let below = if linear {
+            color32_to_linear(src)
+        } else {
+            gamma_color32_to_rgba(src)
+        };
+        let x = origin[0] + i as u32;
+        let mixed = composite(mode, stroke, below, pixel_noise(x, origin[1]));
+        *dst = if linear {
+            // Opaque stays exactly opaque; soft alpha is dithered (see
+            // `dither_at`).
+            let noise = if mixed.a() >= 1.0 {
+                0.0
+            } else {
+                dither_at(dither, x, origin[1])
+            };
+            Color32::from_rgba_premultiplied(
+                luts.srgb(mixed.r()),
+                luts.srgb(mixed.g()),
+                luts.srgb(mixed.b()),
+                alpha_to_u8_dithered(mixed.a(), noise),
+            )
+        } else {
+            gamma_rgba_to_color32(mixed)
+        };
+    }
+}
+
 /// [`resolve_stroke_normal`] for gamma-space documents: the brush colour
 /// and the pixel below are mixed as stored sRGB values, like Photoshop and
 /// Krita's 8-bit documents, instead of in linear light.

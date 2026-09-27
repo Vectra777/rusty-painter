@@ -315,6 +315,28 @@ fn brush_settings_contents(
         )
         .on_hover_text("Random dab offset, as a percentage of the brush size.")
         .changed();
+        property_row(ui, "Blend", |ui| {
+            use crate::canvas::blend_modes::LayerBlend;
+            egui::ComboBox::from_id_salt("brush_paint_blend")
+                .selected_text(brush.paint_blend.label())
+                .show_ui(ui, |ui| {
+                    for (i, group) in LayerBlend::GROUPS.iter().enumerate() {
+                        if i > 0 {
+                            ui.separator();
+                        }
+                        for &mode in *group {
+                            changed |= ui
+                                .selectable_value(&mut brush.paint_blend, mode, mode.label())
+                                .changed();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "How the paint mixes with what's already on the layer: Multiply darkens, \
+                     Screen and Add (Linear Dodge) lighten and glow, Overlay adds contrast.",
+                );
+        });
     });
 
     changed |= dynamics_sections(ui, &mut brush.dynamics);
@@ -509,6 +531,28 @@ fn dynamics_sections(
             percent_of_unit(egui::Slider::new(&mut r.opacity, 0.0..=1.0)),
         )
         .on_hover_text("Each dab is randomly lighter, by up to this much.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Hue",
+            egui::Slider::new(&mut r.hue, 0.0..=180.0)
+                .max_decimals(0)
+                .suffix("°"),
+        )
+        .on_hover_text("Each dab's hue turns randomly by up to this much either way.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Saturation",
+            percent_of_unit(egui::Slider::new(&mut r.saturation, 0.0..=1.0)),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Value",
+            percent_of_unit(egui::Slider::new(&mut r.value, 0.0..=1.0)),
+        )
+        .on_hover_text("Each dab is randomly lighter or darker by up to this much.")
         .changed();
         let mut count = r.count.max(1);
         if slider_row(ui, "Dabs per step", egui::Slider::new(&mut count, 1..=16))

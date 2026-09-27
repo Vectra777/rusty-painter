@@ -363,3 +363,193 @@ fn a_texture_leaves_grain_and_does_nothing_at_no_strength() {
         "the plain stroke is even"
     );
 }
+
+/// A canvas whose paint layer is solid `color`.
+fn painted(color: Color32) -> Canvas {
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    for ty in 0..(H / 64) as i32 {
+        for tx in 0..(W / 64) as i32 {
+            canvas.set_layer_tile_data(1, tx, ty, vec![color; 64 * 64]);
+        }
+    }
+    canvas
+}
+
+/// One stroke on `canvas`.
+fn paint_on(canvas: &Canvas, brush: &mut Brush, points: &[(Vec2, f64)], seed: u64) -> UndoAction {
+    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(seed);
+    let mut ctx = StrokeContext::new(&pool, canvas, None, &mut undo, &mut tiles);
+    for &(p, t) in points {
+        stroke.add_sample(brush, p, 1.0, Some(t), &mut ctx);
+    }
+    stroke.finish(brush, &mut ctx);
+    undo
+}
+
+fn pixel(canvas: &Canvas, x: usize, y: usize) -> Color32 {
+    canvas
+        .get_layer_tile_data(1, (x / 64) as i32, (y / 64) as i32)
+        .unwrap()[(y % 64) * 64 + x % 64]
+}
+
+#[test]
+fn the_general_resolve_matches_the_fast_one_in_normal_mode() {
+    use crate::canvas::blend::{StrokeColor, resolve_stroke_general, resolve_stroke_normal};
+    use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
+    let mut rng = 12345u32;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        rng
+    };
+    let original: Vec<Color32> = (0..4096)
+        .map(|_| {
+            let a = (next() % 256) as u8;
+            let c = |v: u32| ((v % 256) as u16 * a as u16 / 255) as u8;
+            Color32::from_rgba_premultiplied(c(next()), c(next()), c(next()), a)
+        })
+        .collect();
+    let coverage: Vec<f32> = (0..4096).map(|_| (next() % 1000) as f32 / 999.0).collect();
+    let color = StrokeColor::new(Color32::from_rgb(200, 60, 30));
+    let mut fast = original.clone();
+    let mut general = original.clone();
+    resolve_stroke_normal(&original, &coverage, &mut fast, color, 0.8, [3, 7]);
+    resolve_stroke_general(
+        &original,
+        &coverage,
+        None,
+        &mut general,
+        color,
+        0.8,
+        LayerBlend::Normal,
+        BlendSpace::Linear,
+        [3, 7],
+    );
+    for (i, (f, g)) in fast.iter().zip(&general).enumerate() {
+        let diff = f
+            .to_array()
+            .iter()
+            .zip(g.to_array())
+            .map(|(a, b)| a.abs_diff(b))
+            .max()
+            .unwrap();
+        assert!(diff <= 1, "pixel {i}: fast {f:?} general {g:?}");
+    }
+}
+
+#[test]
+fn blend_mode_strokes_follow_their_formulas() {
+    use crate::canvas::blend::{color32_to_linear, gamma_color32_to_rgba, gamma_rgba_to_color32};
+    use crate::canvas::blend_modes::{BlendSpace, LayerBlend, composite};
+    let below = Color32::from_rgb(200, 120, 40);
+    let ink = Color32::from_rgb(100, 180, 220);
+    for space in [BlendSpace::Gamma, BlendSpace::Linear] {
+        for mode in [
+            LayerBlend::Multiply,
+            LayerBlend::Screen,
+            LayerBlend::LinearDodge,
+        ] {
+            let mut canvas = painted(below);
+            canvas.blend_space = space;
+            let mut b = Brush::new(30.0, 100.0, ink, 5.0);
+            b.brush_options.pressure_size = false;
+            b.paint_blend = mode;
+            paint_on(&canvas, &mut b, &line(64.0, 0.5), 1);
+            let got = pixel(&canvas, 128, 64);
+            let expected = if space == BlendSpace::Gamma {
+                let r = composite(
+                    mode,
+                    gamma_color32_to_rgba(ink),
+                    gamma_color32_to_rgba(below),
+                    0.0,
+                );
+                gamma_rgba_to_color32(r)
+            } else {
+                let r = composite(mode, color32_to_linear(ink), color32_to_linear(below), 0.0);
+                crate::canvas::blend::rgba_to_color32_fast(r)
+            };
+            let diff = got
+                .to_array()
+                .iter()
+                .zip(expected.to_array())
+                .map(|(a, b)| a.abs_diff(b))
+                .max()
+                .unwrap();
+            assert!(diff <= 1, "{mode:?} {space:?}: {got:?} vs {expected:?}");
+        }
+    }
+}
+
+fn hue_random() -> BrushDynamics {
+    BrushDynamics {
+        random: Randomness {
+            hue: 120.0,
+            value: 0.2,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn colour_randomness_varies_the_colour_and_repeats_with_its_seed() {
+    let run = |seed: u64| {
+        let canvas = painted(Color32::TRANSPARENT);
+        let mut b = brush(hue_random());
+        b.brush_options.color = Color32::from_rgb(220, 40, 40);
+        b.brush_options.spacing = 60.0;
+        paint_on(&canvas, &mut b, &line(64.0, 0.5), seed);
+        (40..220).map(|x| pixel(&canvas, x, 64)).collect::<Vec<_>>()
+    };
+    let (a, b, c) = (run(4), run(4), run(5));
+    assert_eq!(a, b, "same seed, same colours");
+    assert_ne!(a, c, "another seed, other colours");
+    let greens = a.iter().filter(|p| p.g() > p.r()).count();
+    assert!(greens > 5, "some dabs turned towards green: {greens}");
+}
+
+#[test]
+fn a_coloured_tail_leaves_nothing_behind() {
+    let run = |end: f32| {
+        let canvas = painted(Color32::TRANSPARENT);
+        let mut d = hue_random();
+        d.taper = Taper {
+            end,
+            ..Default::default()
+        };
+        let mut b = brush(d);
+        b.brush_options.color = Color32::from_rgb(220, 40, 40);
+        paint_on(&canvas, &mut b, &line(64.0, 0.5), 9);
+        canvas
+    };
+    let (tapered, plain) = (run(60.0), run(0.0));
+    for y in 40..90 {
+        for x in 0..150 {
+            assert_eq!(pixel(&tapered, x, y), pixel(&plain, x, y), "({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn undo_puts_back_a_blend_mode_stroke_exactly() {
+    use crate::canvas::blend_modes::LayerBlend;
+    let below = Color32::from_rgb(90, 160, 30);
+    let mut canvas = painted(below);
+    let mut b = brush(hue_random());
+    b.paint_blend = LayerBlend::Overlay;
+    let undo = paint_on(&canvas, &mut b, &line(64.0, 0.5), 3);
+    assert_ne!(pixel(&canvas, 128, 64), below);
+    let mut history = History::new();
+    history.push_action(undo);
+    let mut selection = crate::selection::SelectionManager::new();
+    let mut tool = crate::app::tools::Tool::Brush;
+    history.undo(&mut canvas, &mut selection, &mut tool);
+    for x in (0..W).step_by(7) {
+        assert_eq!(pixel(&canvas, x, 64), below);
+    }
+}
