@@ -63,6 +63,36 @@ pub struct BrushOptions {
     pub pressure_opacity: bool,
     /// Pen pressure scales the flow.
     pub pressure_flow: bool,
+    /// How pressure maps to each of size, opacity and flow (`None`:
+    /// straight through).
+    pub pressure_curves: PressureCurves,
+}
+
+/// A pressure response per setting it drives.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PressureCurves {
+    pub size: Option<SoftnessCurve>,
+    pub opacity: Option<SoftnessCurve>,
+    pub flow: Option<SoftnessCurve>,
+}
+
+impl PressureCurves {
+    #[inline]
+    fn map(curve: &Option<SoftnessCurve>, p: f32) -> f32 {
+        curve.as_ref().map_or(p, |c| c.eval(p).clamp(0.0, 1.0))
+    }
+
+    pub fn size(&self, p: f32) -> f32 {
+        Self::map(&self.size, p)
+    }
+
+    pub fn opacity(&self, p: f32) -> f32 {
+        Self::map(&self.opacity, p)
+    }
+
+    pub fn flow(&self, p: f32) -> f32 {
+        Self::map(&self.flow, p)
+    }
 }
 
 impl BrushOptions {
@@ -84,6 +114,7 @@ impl BrushOptions {
             pressure_min_size: 0.0,
             pressure_opacity: false,
             pressure_flow: false,
+            pressure_curves: PressureCurves::default(),
         }
     }
 }

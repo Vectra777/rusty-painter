@@ -48,6 +48,7 @@ enum Job {
         pos: Vec2,
         pressure: f32,
         time: f64,
+        tilt: Option<crate::brush_engine::dynamics::PenTilt>,
     },
     End,
 }
@@ -126,11 +127,22 @@ impl StrokeWorker {
     }
 
     pub fn sample(&self, pos: Vec2, pressure: f32) {
+        self.sample_tilted(pos, pressure, None);
+    }
+
+    /// [`Self::sample`] with how the pen leans.
+    pub fn sample_tilted(
+        &self,
+        pos: Vec2,
+        pressure: f32,
+        tilt: Option<crate::brush_engine::dynamics::PenTilt>,
+    ) {
         let time = self.epoch.elapsed().as_secs_f64();
         self.send(Job::Sample {
             pos,
             pressure,
             time,
+            tilt,
         });
     }
 
@@ -235,11 +247,13 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
             pos,
             pressure,
             time,
+            tilt,
         } => {
             let Some(session) = session else {
                 return;
             };
             session.paint(shared, |stroke, brush, context| {
+                stroke.tilt = tilt;
                 stroke.add_sample(brush, pos, pressure, Some(time), context);
             });
         }

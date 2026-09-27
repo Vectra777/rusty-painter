@@ -49,6 +49,9 @@ pub struct TouchState {
     /// events (Android) or touches (Windows), which the canvas ignores in
     /// favor of the pen's own samples.
     pub(crate) pen_active: bool,
+    /// How the pen leans at the latest sample (canvas terms); `None` for
+    /// the mouse, fingers and tablets without tilt.
+    pub(crate) pen_tilt: Option<crate::brush_engine::dynamics::PenTilt>,
     /// The current pen contact started on the canvas.
     pub(crate) pen_on_canvas: bool,
     /// Where the active layer's history stood when the current stroke began

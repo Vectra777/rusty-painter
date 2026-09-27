@@ -22,6 +22,9 @@ pub struct TipShape {
     pub random_angle: f32,
     /// Squash: height over width (1 = round, 0.1 = a thin nib).
     pub ratio: f32,
+    /// Turn the tip the way the pen leans (tablets that report tilt), on
+    /// top of `angle`.
+    pub follow_tilt: bool,
 }
 
 impl Default for TipShape {
@@ -31,13 +34,18 @@ impl Default for TipShape {
             follow_stroke: false,
             random_angle: 0.0,
             ratio: 1.0,
+            follow_tilt: false,
         }
     }
 }
 
 impl TipShape {
     pub fn is_active(&self) -> bool {
-        self.angle != 0.0 || self.follow_stroke || self.random_angle > 0.0 || self.ratio < 1.0
+        self.angle != 0.0
+            || self.follow_stroke
+            || self.follow_tilt
+            || self.random_angle > 0.0
+            || self.ratio < 1.0
     }
 }
 
@@ -104,6 +112,32 @@ impl SpeedDynamics {
     }
 }
 
+/// What pen tilt changes (tablets that report it).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct TiltDynamics {
+    /// -1..1: positive widens the stroke as the pen leans (pencil on its
+    /// side), negative narrows it.
+    pub size: f32,
+    /// -1..1: positive strengthens the paint as the pen leans, negative
+    /// fades it.
+    pub opacity: f32,
+}
+
+impl TiltDynamics {
+    pub fn is_active(&self) -> bool {
+        self.size != 0.0 || self.opacity != 0.0
+    }
+}
+
+/// How the pen leans, in canvas terms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenTilt {
+    /// 0 upright .. 1 flat.
+    pub lean: f32,
+    /// The way it leans, radians on the canvas (counter-clockwise, y down).
+    pub direction: f32,
+}
+
 /// Screen speed (points per second) counted as "fast": the full effect.
 pub const FAST_SPEED: f32 = 2500.0;
 
@@ -146,6 +180,7 @@ pub struct BrushDynamics {
     pub taper: Taper,
     pub speed: SpeedDynamics,
     pub random: Randomness,
+    pub tilt: TiltDynamics,
 }
 
 impl BrushDynamics {
@@ -156,6 +191,7 @@ impl BrushDynamics {
             || self.taper.is_active()
             || self.speed.is_active()
             || self.random.is_active()
+            || self.tilt.is_active()
     }
 }
 

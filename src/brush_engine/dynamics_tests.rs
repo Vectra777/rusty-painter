@@ -553,3 +553,131 @@ fn undo_puts_back_a_blend_mode_stroke_exactly() {
         assert_eq!(pixel(&canvas, x, 64), below);
     }
 }
+
+/// One stroke with the pen at `pressure` and leaning as `tilt` throughout.
+fn paint_pen(
+    brush: &mut Brush,
+    points: &[(Vec2, f64)],
+    pressure: f32,
+    tilt: Option<crate::brush_engine::dynamics::PenTilt>,
+) -> Canvas {
+    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(1);
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        for &(p, t) in points {
+            stroke.tilt = tilt;
+            stroke.add_sample(brush, p, pressure, Some(t), &mut ctx);
+        }
+        stroke.finish(brush, &mut ctx);
+    }
+    canvas
+}
+
+#[test]
+fn a_leaning_pen_widens_the_stroke_when_tilt_drives_size() {
+    use crate::brush_engine::dynamics::{PenTilt, TiltDynamics};
+    let mut b = brush(BrushDynamics {
+        tilt: TiltDynamics {
+            size: 1.0,
+            opacity: 0.0,
+        },
+        ..Default::default()
+    });
+    b.brush_options.diameter = 12.0;
+    let upright = paint_pen(
+        &mut b,
+        &line(64.0, 0.5),
+        1.0,
+        Some(PenTilt {
+            lean: 0.0,
+            direction: 0.0,
+        }),
+    );
+    let flat = paint_pen(
+        &mut b,
+        &line(64.0, 0.5),
+        1.0,
+        Some(PenTilt {
+            lean: 1.0,
+            direction: 0.0,
+        }),
+    );
+    let none = paint_pen(&mut b, &line(64.0, 0.5), 1.0, None);
+    let (u, f, n) = (
+        thickness(&upright, 128),
+        thickness(&flat, 128),
+        thickness(&none, 128),
+    );
+    assert!(f >= u + 8, "flat {f} vs upright {u}");
+    assert_eq!(u, n, "no tilt reported: as upright");
+}
+
+#[test]
+fn a_nib_that_follows_the_pen_turns_with_its_lean() {
+    use crate::brush_engine::dynamics::PenTilt;
+    let mut b = brush(BrushDynamics {
+        tip: TipShape {
+            ratio: 0.2,
+            follow_tilt: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    b.brush_options.diameter = 40.0;
+    let extent = |direction: f32| {
+        let canvas = paint_pen(
+            &mut b.clone(),
+            &[(Vec2::new(128.0, 64.0), 0.0)],
+            1.0,
+            Some(PenTilt {
+                lean: 0.5,
+                direction,
+            }),
+        );
+        let painted: Vec<(usize, usize)> = (0..H)
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .filter(|&(x, y)| alpha(&canvas, x, y) > 127)
+            .collect();
+        let w =
+            painted.iter().map(|p| p.0).max().unwrap() - painted.iter().map(|p| p.0).min().unwrap();
+        let h =
+            painted.iter().map(|p| p.1).max().unwrap() - painted.iter().map(|p| p.1).min().unwrap();
+        (w, h)
+    };
+    let (w, h) = extent(0.0);
+    assert!(w > h * 3, "leaning right: long across, {w}×{h}");
+    let (w, h) = extent(std::f32::consts::FRAC_PI_2);
+    assert!(h > w * 3, "leaning up: long up and down, {w}×{h}");
+}
+
+#[test]
+fn pressure_curves_shape_the_response() {
+    use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
+    let at = |curve: Option<SoftnessCurve>| {
+        let mut b = brush(BrushDynamics::default());
+        b.brush_options.pressure_size = true;
+        b.brush_options.pressure_curves.size = curve;
+        paint_pen(&mut b, &line(64.0, 0.5), 0.3, None)
+    };
+    let points = |p: &[(f32, f32)]| SoftnessCurve {
+        points: p.iter().map(|&(x, y)| CurvePoint::new(x, y)).collect(),
+    };
+    let straight = at(None);
+    assert_eq!(
+        pixels(&at(Some(points(&[(0.0, 0.0), (1.0, 1.0)])))),
+        pixels(&straight),
+        "a linear curve is no curve"
+    );
+    let firm = at(Some(points(&[(0.0, 0.0), (0.3, 0.8), (1.0, 1.0)])));
+    assert!(
+        thickness(&firm, 128) > thickness(&straight, 128) + 6,
+        "firm: {} vs {}",
+        thickness(&firm, 128),
+        thickness(&straight, 128)
+    );
+}

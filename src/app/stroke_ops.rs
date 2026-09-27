@@ -46,14 +46,16 @@ impl PainterApp {
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;
-        self.stroke_worker.sample(pos, pressure);
+        self.stroke_worker
+            .sample_tilted(pos, pressure, self.viewport.touch.pen_tilt);
         self.viewport.touch.stroke_started = Some(std::time::Instant::now());
     }
 
     pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
         let pos = self.ruler_snap(pos);
         if self.brush_state.is_drawing {
-            self.stroke_worker.sample(pos, pressure);
+            self.stroke_worker
+                .sample_tilted(pos, pressure, self.viewport.touch.pen_tilt);
         }
     }
 

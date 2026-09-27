@@ -342,7 +342,7 @@ fn brush_settings_contents(
     changed |= dynamics_sections(ui, &mut brush.dynamics);
     changed |= texture_section(ui, &mut brush.texture, textures);
 
-    section(ui, "Pen pressure", true, |ui| {
+    section(ui, "Pen pressure & tilt", true, |ui| {
         let o = &mut brush.brush_options;
         property_row(ui, "Controls", |ui| {
             changed |= ui.toggle_value(&mut o.pressure_size, "Size").changed();
@@ -359,6 +359,32 @@ fn brush_settings_contents(
             )
             .on_hover_text("Brush size at the lightest pressure, as a share of the full size.")
             .changed();
+        }
+        let tilt = &mut brush.dynamics.tilt;
+        changed |= slider_row(
+            ui,
+            "Tilt → size",
+            percent_of_unit(egui::Slider::new(&mut tilt.size, -1.0..=1.0)),
+        )
+        .on_hover_text("Above 0: the stroke widens as the pen leans, like a pencil on its side.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Tilt → opacity",
+            percent_of_unit(egui::Slider::new(&mut tilt.opacity, -1.0..=1.0)),
+        )
+        .on_hover_text("Above 0: stronger as the pen leans; below 0: lighter.")
+        .changed();
+        let o = &mut brush.brush_options;
+        let curves = &mut o.pressure_curves;
+        for (on, name, curve) in [
+            (o.pressure_size, "Size", &mut curves.size),
+            (o.pressure_opacity, "Opacity", &mut curves.opacity),
+            (o.pressure_flow, "Flow", &mut curves.flow),
+        ] {
+            if on {
+                changed |= pressure_curve_row(ui, name, curve);
+            }
         }
     });
 
@@ -462,6 +488,10 @@ fn dynamics_sections(
         changed |= ui
             .checkbox(&mut t.follow_stroke, "Follow stroke")
             .on_hover_text("Turn the tip with the direction the stroke is going (calligraphy).")
+            .changed();
+        changed |= ui
+            .checkbox(&mut t.follow_tilt, "Follow pen tilt")
+            .on_hover_text("Turn the tip the way the pen leans (tablets that report tilt).")
             .changed();
     });
     section(ui, "Taper & speed", false, |ui| {
@@ -639,5 +669,37 @@ fn texture_section(
             .color(TEXT_DIM),
         );
     });
+    changed
+}
+
+/// A setting's pressure curve: off (pressure straight through) or an
+/// editable response.
+fn pressure_curve_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    curve: &mut Option<crate::brush_engine::hardness::SoftnessCurve>,
+) -> bool {
+    use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
+    let mut changed = false;
+    let mut custom = curve.is_some();
+    property_row(ui, &format!("{name} curve"), |ui| {
+        if ui
+            .checkbox(&mut custom, "Custom")
+            .on_hover_text("Shape how pen pressure drives this setting (off: straight through).")
+            .changed()
+        {
+            *curve = custom.then(|| SoftnessCurve {
+                points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
+            });
+            changed = true;
+        }
+    });
+    if let Some(c) = curve {
+        changed |= crate::ui::curve_editor::curve_editor_with(
+            ui,
+            c,
+            &crate::ui::curve_editor::PRESSURE_PRESETS,
+        );
+    }
     changed
 }

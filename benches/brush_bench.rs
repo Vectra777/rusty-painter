@@ -387,6 +387,7 @@ fn bench_dynamic_strokes(c: &mut Criterion) {
                 taper,
                 speed,
                 random,
+                ..Default::default()
             },
         ),
     ];

@@ -18,8 +18,11 @@ const DELETE_DISTANCE: f32 = 36.0;
 /// Closest two points may get horizontally.
 const MIN_GAP: f32 = 0.002;
 
-/// Quick shapes offered under the editor.
-const PRESETS: [(&str, &[(f32, f32)]); 4] = [
+/// A named quick shape offered under the editor.
+pub(crate) type CurvePreset = (&'static str, &'static [(f32, f32)]);
+
+/// Quick falloff shapes (centre to edge).
+const PRESETS: [CurvePreset; 4] = [
     ("Linear", &[(0.0, 1.0), (1.0, 0.0)]),
     ("Soft", &[(0.0, 1.0), (0.25, 0.5), (0.6, 0.12), (1.0, 0.0)]),
     (
@@ -35,7 +38,28 @@ struct DragState {
     point: Option<usize>,
 }
 
+/// Pressure responses (pen pressure in, effect out).
+pub(crate) const PRESSURE_PRESETS: [CurvePreset; 4] = [
+    ("Linear", &[(0.0, 0.0), (1.0, 1.0)]),
+    ("Soft", &[(0.0, 0.0), (0.55, 0.2), (1.0, 1.0)]),
+    ("Firm", &[(0.0, 0.0), (0.3, 0.65), (1.0, 1.0)]),
+    (
+        "S-curve",
+        &[(0.0, 0.0), (0.3, 0.12), (0.7, 0.88), (1.0, 1.0)],
+    ),
+];
+
+/// The falloff editor (centre to edge).
 pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool {
+    curve_editor_with(ui, curve, &PRESETS)
+}
+
+/// A curve editor with `presets` as its quick shapes.
+pub(crate) fn curve_editor_with(
+    ui: &mut egui::Ui,
+    curve: &mut SoftnessCurve,
+    presets: &[CurvePreset],
+) -> bool {
     let touch = metrics(ui.ctx()).touch;
     let hit_radius = if touch { 24.0 } else { 12.0 };
     let mut changed = false;
@@ -254,7 +278,7 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool
     // Quick shapes.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        for (name, shape) in PRESETS {
+        for &(name, shape) in presets {
             if ui.small_button(name).clicked() {
                 curve.points = shape.iter().map(|&(x, y)| CurvePoint::new(x, y)).collect();
                 changed = true;

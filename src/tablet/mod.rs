@@ -32,8 +32,24 @@ pub struct TabletSample {
     pub pos: [f32; 2],
     /// Raw pressure, 0..=1.
     pub pressure: f32,
+    /// The pen's lean projected on the screen (y down): its direction is the
+    /// way the pen leans, its length how far (0 upright, 1 flat). `None`
+    /// when the tablet doesn't report tilt.
+    pub tilt: Option<[f32; 2]>,
     pub is_eraser: bool,
     pub phase: TabletPhase,
+}
+
+/// A lean vector from angles from perpendicular along x and y (radians).
+#[cfg_attr(target_os = "android", allow(dead_code))]
+fn lean_from_xy([ax, ay]: [f32; 2]) -> [f32; 2] {
+    let (x, y) = (ax.sin(), ay.sin());
+    let len = (x * x + y * y).sqrt();
+    if len > 1.0 {
+        [x / len, y / len]
+    } else {
+        [x, y]
+    }
 }
 
 /// Per-tool contact tracking.
@@ -43,6 +59,7 @@ struct ToolState {
     /// Last pose, in egui points.
     pos: Option<[f32; 2]>,
     pressure: f32,
+    tilt: Option<[f32; 2]>,
     /// Touching, and its `Down` sample has been sent.
     down: bool,
     /// Touched, but no pose has arrived since: the `Down` sample waits for
@@ -66,6 +83,7 @@ impl ToolState {
                 out.push(TabletSample {
                     pos,
                     pressure: state.pressure,
+                    tilt: state.tilt,
                     is_eraser,
                     phase,
                 });
@@ -77,6 +95,7 @@ impl ToolState {
             ToolEvent::Pose(pose) => {
                 self.pos = Some([pose.position[0] / zoom, pose.position[1] / zoom]);
                 self.pressure = pose.pressure.get().unwrap_or(1.0);
+                self.tilt = pose.tilt.map(lean_from_xy);
                 if self.pending_down {
                     self.pending_down = false;
                     self.down = true;
@@ -200,6 +219,12 @@ impl TabletInput {
             .map(|s| TabletSample {
                 pos: [s.x / scale, s.y / scale],
                 pressure: s.pressure,
+                // Android: angle from perpendicular, and the direction the
+                // pen points (0 up, clockwise).
+                tilt: Some({
+                    let lean = s.tilt.clamp(0.0, std::f32::consts::FRAC_PI_2).sin();
+                    [s.orientation.sin() * lean, -s.orientation.cos() * lean]
+                }),
                 is_eraser: s.is_eraser,
                 phase: match s.phase {
                     PenPhase::Down => TabletPhase::Down,
@@ -248,6 +273,18 @@ mod tests {
     #[test]
     fn hovering_sends_nothing() {
         assert!(run(&[pose(10.0, 10.0, 0.0), pose(20.0, 10.0, 0.0)]).is_empty());
+    }
+
+    #[test]
+    fn tilt_angles_become_a_lean_on_the_screen() {
+        let upright = lean_from_xy([0.0, 0.0]);
+        assert_eq!(upright, [0.0, 0.0]);
+        // Leaning 30° to the right: half way to flat, pointing right.
+        let [x, y] = lean_from_xy([std::f32::consts::FRAC_PI_6, 0.0]);
+        assert!((x - 0.5).abs() < 1e-5 && y.abs() < 1e-6, "{x} {y}");
+        // Readings past flat stay no longer than flat.
+        let [x, y] = lean_from_xy([1.4, 1.4]);
+        assert!(((x * x + y * y).sqrt() - 1.0).abs() < 1e-5);
     }
 
     #[test]

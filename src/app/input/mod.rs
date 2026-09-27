@@ -56,6 +56,15 @@ fn handle_pen(
         // The brush works off the canvas too (dabs are clipped to it).
         let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
         let pressure = app.map_pressure(sample.pressure);
+        // The lean in canvas terms: a short screen vector mapped through the
+        // view (zoom, rotation, flip), like the pen's position.
+        app.viewport.touch.pen_tilt = sample.tilt.map(|[x, y]| {
+            let lean = (x * x + y * y).sqrt().min(1.0);
+            let tip = pos + egui::vec2(x, y) * (20.0 / lean.max(1e-3));
+            let to = app.screen_to_canvas_raw(tip, placement.origin, placement.center);
+            let direction = crate::brush_engine::dynamics::direction(raw, to).unwrap_or(0.0);
+            crate::brush_engine::dynamics::PenTilt { lean, direction }
+        });
         app.viewport.cursor_canvas = inside.then_some(clamped);
         let touch = &mut app.viewport.touch;
         match sample.phase {
@@ -457,6 +466,7 @@ fn handle_tool_move(
 /// `pos` is unclamped: off-canvas points keep the stroke's real path.
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2) {
     // Mouse and finger input paint at full pressure (the pen has its own path).
+    app.viewport.touch.pen_tilt = None;
     if app.brush_state.is_drawing {
         app.add_stroke_point(pos, 1.0);
     } else if app.viewport.is_primary_down && !app.viewport.is_panning && response.hovered() {

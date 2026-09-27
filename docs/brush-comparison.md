@@ -29,8 +29,8 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Pressure → size / opacity / flow | ✅ | ✅ | ✅ | ✅ |
-| Own pressure curve per setting | ✅ | ✅ | ⚠️ | ⚠️ one global curve + minimum size |
-| Pen tilt / barrel rotation | ✅ | ✅ | ⚠️ barrel roll (Apple Pencil Pro) | ❌ |
+| Own pressure curve per setting | ✅ | ✅ | ⚠️ | ✅ size, opacity, flow |
+| Pen tilt / barrel rotation | ✅ | ✅ | ⚠️ barrel roll (Apple Pencil Pro) | ✅ tilt → size, opacity, tip angle (no barrel roll) |
 | Stroke speed | ✅ | ✅ | ✅ Dynamic tab | ✅ size and opacity |
 | Taper at the start / end of a stroke | ✅ fade | ✅ | ✅ Fade tab | ✅ size and/or opacity, no lag |
 | Random size / opacity | ✅ | ✅ | ✅ Jitter tab | ✅ |
@@ -85,7 +85,7 @@ below.
   darken, lighten, colour dodge / burn, and the rest of the layer modes.
 - [x] **6. Wet mixing brush.** Picks up the colour under it and carries it
   (colour rate, smudge length, wetness), like Krita's Color Smudge.
-- [ ] **7. Per-setting curves, then pen tilt.** A pressure curve for each
+- [x] **7. Per-setting curves, then pen tilt.** A pressure curve for each
   of size, opacity and flow; tilt driving angle and size where the tablet
   reports it.
 - [x] **Better tip masks.** Mipmapped, bilinear image tips; proportions kept;

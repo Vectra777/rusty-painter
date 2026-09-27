@@ -99,6 +99,11 @@ pub struct PenSample {
     pub y: f32,
     /// Normalized pressure (0..=1).
     pub pressure: f32,
+    /// Angle from perpendicular in radians (0 = upright, π/2 = flat), and
+    /// the direction the pen points in radians (0 = up the screen,
+    /// positive clockwise), as Android reports them.
+    pub tilt: f32,
+    pub orientation: f32,
     /// The pen's eraser end is in use.
     pub is_eraser: bool,
     pub phase: PenPhase,

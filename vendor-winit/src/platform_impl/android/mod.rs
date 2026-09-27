@@ -39,7 +39,16 @@ const MAX_PEN_SAMPLES: usize = 4096;
 /// system rejected, such as a palm.
 const FLAG_CANCELED: u32 = 0x20;
 
-fn push_pen(x: f32, y: f32, pressure: f32, tool: ToolType, phase: PenPhase) {
+/// A pen sample's pose: position, pressure, tilt and orientation.
+struct PenPose {
+    x: f32,
+    y: f32,
+    pressure: f32,
+    tilt: f32,
+    orientation: f32,
+}
+
+fn push_pen(pose: PenPose, tool: ToolType, phase: PenPhase) {
     let Ok(mut queue) = PEN_SAMPLES.lock() else {
         return;
     };
@@ -47,9 +56,11 @@ fn push_pen(x: f32, y: f32, pressure: f32, tool: ToolType, phase: PenPhase) {
         queue.pop_front();
     }
     queue.push_back(PenSample {
-        x,
-        y,
-        pressure,
+        x: pose.x,
+        y: pose.y,
+        pressure: pose.pressure,
+        tilt: pose.tilt,
+        orientation: pose.orientation,
         is_eraser: matches!(tool, ToolType::Eraser),
         phase,
     });
@@ -62,7 +73,18 @@ fn is_pen(tool: ToolType) -> bool {
 fn push_pen_pointer(pointer: &android_activity::input::Pointer<'_>, phase: PenPhase) {
     let tool = pointer.tool_type();
     if is_pen(tool) {
-        push_pen(pointer.x(), pointer.y(), pointer.pressure(), tool, phase);
+        push_pen(pointer_pose(pointer), tool, phase);
+    }
+}
+
+fn pointer_pose(p: &android_activity::input::Pointer<'_>) -> PenPose {
+    use android_activity::input::Axis;
+    PenPose {
+        x: p.x(),
+        y: p.y(),
+        pressure: p.pressure(),
+        tilt: p.axis_value(Axis::Tilt),
+        orientation: p.axis_value(Axis::Orientation),
     }
 }
 
@@ -79,11 +101,19 @@ fn push_pen_move(
         let index = pointer.pointer_index();
         for historical in ndk_event.history() {
             if let Some(p) = historical.pointers().find(|p| p.pointer_index() == index) {
-                push_pen(p.x(), p.y(), p.pressure(), tool, PenPhase::Move);
+                use ndk::event::Axis;
+                let pose = PenPose {
+                    x: p.x(),
+                    y: p.y(),
+                    pressure: p.pressure(),
+                    tilt: p.axis_value(Axis::Tilt),
+                    orientation: p.axis_value(Axis::Orientation),
+                };
+                push_pen(pose, tool, PenPhase::Move);
             }
         }
     }
-    push_pen(pointer.x(), pointer.y(), pointer.pressure(), tool, PenPhase::Move);
+    push_pen(pointer_pose(pointer), tool, PenPhase::Move);
 }
 
 /// The NDK event behind android-activity's wrapper, which doesn't expose the

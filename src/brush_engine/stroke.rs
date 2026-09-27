@@ -3,7 +3,7 @@
 //! onto the layer.
 
 use crate::brush_engine::brush::{Brush, Target};
-use crate::brush_engine::dynamics::{DabVar, FAST_SPEED, direction, tip_orientation};
+use crate::brush_engine::dynamics::{DabVar, FAST_SPEED, PenTilt, direction, tip_orientation};
 use crate::brush_engine::stabilizer::Stabilizer;
 use crate::brush_engine::symmetry::{Copy2, Symmetry};
 use crate::canvas::Canvas;
@@ -211,6 +211,8 @@ pub struct StrokeState {
     pub view_scale: f32,
     /// Direction of travel, for tips that follow the stroke.
     dir: Option<f32>,
+    /// How the pen leans at the current sample (set before each one).
+    pub tilt: Option<PenTilt>,
     rng: SmallRng,
     /// The last dabs (at least an end taper's length of the pen), drawn
     /// redrawably until the stroke goes on past them or ends.
@@ -243,6 +245,7 @@ impl StrokeState {
             last_sample: None,
             view_scale: 1.0,
             dir: None,
+            tilt: None,
             rng: SmallRng::seed_from_u64(seed),
             tail: Vec::new(),
             newer_from: 0,
@@ -424,6 +427,12 @@ impl StrokeState {
             v.scale *= (1.0 + d.speed.size * s).max(0.05);
             v.strength *= (1.0 + d.speed.opacity * s).max(0.0);
         }
+        if d.tilt.is_active()
+            && let Some(tilt) = self.tilt
+        {
+            v.scale *= (1.0 + d.tilt.size * tilt.lean).max(0.05);
+            v.strength *= (1.0 + d.tilt.opacity * tilt.lean).max(0.0);
+        }
         let r = &d.random;
         if r.size > 0.0 {
             v.scale *= 1.0 - r.size.min(1.0) * self.rng.random::<f32>();
@@ -445,6 +454,11 @@ impl StrokeState {
             let mut angle = tip.angle.to_radians();
             if tip.follow_stroke {
                 angle += dir.or(self.dir).unwrap_or(0.0);
+            }
+            if tip.follow_tilt
+                && let Some(tilt) = self.tilt
+            {
+                angle += tilt.direction;
             }
             if tip.random_angle > 0.0 {
                 angle += (self.rng.random::<f32>() * 2.0 - 1.0) * tip.random_angle.to_radians();
@@ -704,11 +718,13 @@ fn pressure_level(p: f32) -> u32 {
 fn apply_pressure(brush: &mut Brush, (diameter, opacity, flow): (f32, f32, f32), p: f32) {
     let o = &mut brush.brush_options;
     (o.diameter, o.opacity, o.flow) = (diameter, opacity, flow);
+    let curves = &o.pressure_curves;
     if o.pressure_size {
-        let factor = o.pressure_min_size + (1.0 - o.pressure_min_size) * p;
+        let factor = o.pressure_min_size + (1.0 - o.pressure_min_size) * curves.size(p);
         o.diameter = (diameter * factor).max(1.0);
     }
     if o.pressure_opacity {
+        let p = curves.opacity(p);
         if o.painting_mode == crate::brush_engine::brush_options::PaintingMode::Wash {
             o.flow *= p;
         } else {
@@ -716,7 +732,7 @@ fn apply_pressure(brush: &mut Brush, (diameter, opacity, flow): (f32, f32, f32),
         }
     }
     if o.pressure_flow {
-        o.flow *= p;
+        o.flow *= curves.flow(p);
     }
 }
 

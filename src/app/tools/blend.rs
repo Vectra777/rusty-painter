@@ -239,7 +239,7 @@ impl PainterApp {
     fn blend_diameter(&self, pressure: f32) -> f32 {
         let o = &self.brush_state.brush.brush_options;
         let k = if o.pressure_size {
-            o.pressure_min_size + (1.0 - o.pressure_min_size) * pressure
+            o.pressure_min_size + (1.0 - o.pressure_min_size) * o.pressure_curves.size(pressure)
         } else {
             1.0
         };
@@ -264,10 +264,10 @@ impl PainterApp {
         let r = diameter * 0.5;
         let mut strength = o.flow / 100.0 * o.opacity;
         if o.pressure_opacity {
-            strength *= pressure;
+            strength *= o.pressure_curves.opacity(pressure);
         }
         if o.pressure_flow {
-            strength *= pressure;
+            strength *= o.pressure_curves.flow(pressure);
         }
         let hardness = (o.hardness / 100.0).clamp(0.0, 1.0);
         let (length, blur_size) = (
