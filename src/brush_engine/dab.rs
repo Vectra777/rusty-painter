@@ -87,6 +87,9 @@ pub(super) struct PlacedDab {
     pub reach: f32,
     /// Strength factor on top of the brush's (dynamics), 0..1.
     pub strength: f32,
+    /// `orient` only turns or mirrors (a round tip stays round), worked out
+    /// once when placed rather than per row.
+    pub rigid: bool,
     /// The dab's colour, unmultiplied in the document's blend space (only
     /// read for strokes whose dabs differ in colour).
     pub color: [f32; 3],
@@ -108,6 +111,7 @@ impl PlacedDab {
             r,
             reach: r,
             strength: 1.0,
+            rigid: true,
             color: [0.0; 3],
         }
     }

@@ -439,6 +439,7 @@ fn stroke_colors(
 /// Re-resolve a tile's pixels on `spans` (per row, the columns `[min,
 /// max]`; `min > max` for none) from its original pixels and the stroke's
 /// coverage (with the tail's, if there is one), and record the damage.
+#[inline]
 fn resolve_spans(
     ctx: &BatchCtx<'_>,
     region: TileRegion,
@@ -457,13 +458,16 @@ fn resolve_spans(
     // The stroke and its tail together: dabs combine the same in any order.
     let mut combined = Vec::new();
     let mut combined_colors: Vec<[f32; 3]> = Vec::new();
+    // The same for the whole tile: decided once, not per row.
+    let has_tail = buffer.tail.iter().any(Option::is_some);
+    let general = ctx.general && ctx.blend_mode == BlendMode::Normal;
     for (row, &(min_x, max_x)) in spans.iter().enumerate() {
         if min_x > max_x {
             continue;
         }
         let range = row * tile_size + min_x..row * tile_size + max_x + 1;
         let original = &buffer.original[range.clone()];
-        let coverage = if buffer.tail.iter().any(Option::is_some) {
+        let coverage = if has_tail {
             combined.clear();
             combined.extend_from_slice(&buffer.coverage[range.clone()]);
             for tail in buffer.tail.iter().flatten() {
@@ -477,7 +481,7 @@ fn resolve_spans(
         };
         // Canvas position of the span, for the alpha dither.
         let origin = [(tile_x0 + min_x) as u32, (tile_y0 + row) as u32];
-        if ctx.general && ctx.blend_mode == BlendMode::Normal {
+        if general {
             let colors = ctx.colored.then(|| {
                 stroke_colors(buffer, range.clone(), ctx.tail_newer, &mut combined_colors);
                 &combined_colors[..]
@@ -661,6 +665,7 @@ impl Brush {
                 let mut dab = PlacedDab::new(center, bounds, r);
                 if let Some(o) = orients.and_then(|o| o.get(i)) {
                     dab.orient = *o;
+                    dab.rigid = is_rigid(*o);
                 }
                 Some(dab)
             })
@@ -724,6 +729,7 @@ impl Brush {
                 let bounds = calc_dab_bounds(center, reach, canvas_w, canvas_h, tile_size)?;
                 let mut dab = PlacedDab::new(center, bounds, r);
                 dab.orient = orient;
+                dab.rigid = is_rigid(orient);
                 dab.reach = reach;
                 dab.strength = var.strength;
                 if colored {
@@ -1169,7 +1175,7 @@ impl Brush {
             let batch_tip = tip_for(ctx.r);
             let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
                 // Turning a round tip changes nothing; squashing it does.
-                if !is_rigid(dab.orient) {
+                if !dab.rigid {
                     return general(dab, gy, x0, out);
                 }
                 let own;

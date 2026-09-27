@@ -63,7 +63,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Symmetry / radial mirror | ✅ | ✅ | ✅ | ✅ incl. kaleidoscope |
 | Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ❌ |
 | Pen eraser end switches to eraser | ✅ | ✅ | ✅ | ✅ |
-| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ⚠️ built-in + save your own |
+| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ⚠️ 16 built-in + save your own (no sharing yet) |
 
 ## Roadmap
 
@@ -91,8 +91,11 @@ below.
 - [x] **Better tip masks.** Mipmapped, bilinear image tips; proportions kept;
   luminance or alpha as the mask; invert. (An image-tip stroke costs about
   3× a round one: two blended mip levels read per pixel.)
-- [ ] **Texture brushes.** Presets built on the above (charcoal, pencil
-  grain, chalk, spray, foliage, calligraphy, glow, oil mix).
+- [x] **Texture brushes.** Presets built on the above: pencil (paper
+  grain, tapers, tilt), ink pen, calligraphy, multiply marker, glow, chalk,
+  charcoal, dry bristles, spray, foliage, spatter; and four generated tips
+  (bristles, rough disc, spatter, leaf). For oil-like mixing, the Smudge tool
+  with a Colour rate. Every preset is tested to paint and undo exactly.
 - [ ] Later: dual brush, airbrush, several tips per brush, decoration
   brushes, more rulers.
 
@@ -111,6 +114,19 @@ below.
   benchmark cases.
 - **The full CI list passes** (fmt, clippy, tests, bench build, docs,
   Android build).
+
+### Measured results
+
+- **Plain brushes, same output:** a 60-sample pressure stroke paints the
+  same pixels as before this work (identical checksum and undo tiles). It
+  runs about 1.5% more instructions (counted with `perf stat` on a fixed
+  workload); wall-clock timings differ by less than this machine's run-to-run
+  noise.
+- **Cost of each feature**, on a 60-sample stroke of a 60 px brush (plain:
+  about 4.4 ms): speed 2.0 ms (it thins the stroke), random size/opacity
+  3.8 ms, taper 5.3 ms, turned and squashed tip 5–6 ms, paper texture
+  6.9 ms, hue randomness 8.5 ms, multiply blend 9.1 ms, image tip 14 ms.
+- **Every built-in brush:** under 5 ms for an 80-sample stroke.
 
 ## Sources
 

@@ -681,3 +681,100 @@ fn pressure_curves_shape_the_response() {
         thickness(&straight, 128)
     );
 }
+
+/// A wavy stroke with changing pressure and a leaning pen, like real input.
+fn wavy() -> Vec<(Vec2, f32, f64)> {
+    (0..=80)
+        .map(|i| {
+            let t = i as f32 / 80.0;
+            let pos = Vec2::new(24.0 + t * 208.0, 64.0 + (t * 9.0).sin() * 30.0);
+            (
+                pos,
+                0.3 + 0.7 * (t * std::f32::consts::PI).sin(),
+                t as f64 * 0.8,
+            )
+        })
+        .collect()
+}
+
+fn paint_preset(brush: &mut Brush, below: Color32) -> (Canvas, UndoAction) {
+    use crate::brush_engine::dynamics::PenTilt;
+    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let canvas = painted(below);
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(3);
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        for (p, pressure, t) in wavy() {
+            stroke.tilt = Some(PenTilt {
+                lean: 0.4,
+                direction: 0.7,
+            });
+            stroke.add_sample(brush, p, pressure, Some(t), &mut ctx);
+        }
+        stroke.finish(brush, &mut ctx);
+    }
+    (canvas, undo)
+}
+
+#[test]
+fn every_preset_paints_and_undoes_exactly() {
+    use crate::brush_engine::brush_options::BlendMode;
+    let presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+    assert!(presets.len() >= 14);
+    for preset in presets {
+        let mut brush = preset.brush.clone();
+        let eraser = brush.brush_options.blend_mode == BlendMode::Eraser;
+        // Erasers need paint to erase; the rest paint on a light layer.
+        let below = if eraser {
+            Color32::from_rgb(40, 90, 160)
+        } else {
+            Color32::from_rgb(235, 230, 220)
+        };
+        let before = pixels_rgba(&painted(below));
+        let (mut canvas, undo) = paint_preset(&mut brush, below);
+        let after = pixels_rgba(&canvas);
+        let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+        // A 1 px pixel-art line changes about as many pixels as it's long.
+        assert!(
+            changed > 150,
+            "{}: only {changed} pixels changed",
+            preset.name
+        );
+        let mut history = History::new();
+        history.push_action(undo);
+        let mut selection = crate::selection::SelectionManager::new();
+        let mut tool = crate::app::tools::Tool::Brush;
+        history.undo(&mut canvas, &mut selection, &mut tool);
+        assert!(
+            pixels_rgba(&canvas) == before,
+            "{}: undo isn't exact",
+            preset.name
+        );
+    }
+}
+
+fn pixels_rgba(canvas: &Canvas) -> Vec<Color32> {
+    (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .map(|(x, y)| pixel(canvas, x, y))
+        .collect()
+}
+
+#[test]
+#[ignore = "timing; run with --release --ignored --nocapture"]
+fn preset_stroke_times() {
+    for preset in crate::PainterApp::create_default_brush_presets(Color32::BLACK) {
+        let mut brush = preset.brush.clone();
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            paint_preset(&mut brush, Color32::WHITE);
+        }
+        eprintln!(
+            "{:<18} {:>7.2} ms",
+            preset.name,
+            start.elapsed().as_secs_f64() * 200.0
+        );
+    }
+}

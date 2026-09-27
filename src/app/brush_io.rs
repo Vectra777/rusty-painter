@@ -11,8 +11,21 @@ impl PainterApp {
     pub fn load_brush_tips(&mut self, ctx: egui::Context) {
         self.ensure_brushes_directory_exists();
         self.brush_state.loaded_brush_tips.clear();
-        self.scan_and_load_brush_images(ctx);
+        self.scan_and_load_brush_images(ctx.clone());
         self.sort_loaded_brushes();
+        // The built-in tips first, then the folder's.
+        let builtin: Vec<_> = crate::brush_engine::tip::builtin()
+            .iter()
+            .map(|(name, tip)| {
+                let texture = Self::create_brush_texture(tip, &ctx);
+                (
+                    name.to_string(),
+                    PixelBrushShape::Custom(tip.clone()),
+                    Some(texture),
+                )
+            })
+            .collect();
+        self.brush_state.loaded_brush_tips.splice(0..0, builtin);
         self.load_textures();
     }
 

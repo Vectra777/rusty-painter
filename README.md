@@ -5,8 +5,8 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 ![](/imgs/2025-12-1118-06-17-ezgif.com-video-to-gif-converter.gif)
 
 ## Features
-- **Brush Engine**: Soft, hard, and pixel brushes with spacing, flow, jitter, and stabilizer options.
-- **Tablet Support**: Pen pressure and the eraser end on Windows (Windows Ink, via `octotablet`) and Android (every stylus sample, with a resting palm ignored while the pen is down). On Linux, Wayland tablets work with `RUSTY_PAINTER_ENABLE_WAYLAND_TABLET=1`; X11 has no pressure yet.
+- **Brush Engine**: Soft, hard, pixel and image-tip brushes (mipmapped, any picture) with spacing, flow, scatter and stabilizer. Dynamics: tapers in and out (no lag), stroke speed, tip angle / squash / follow the stroke or the pen's tilt, size, opacity, spray and colour randomness, a pressure curve per setting, tilt → size and opacity. Paper textures (multiply, subtract, height), all 27 blend modes per brush, and a wet mixing smudge. 16 ready-made brushes (pencil, ink, calligraphy, charcoal, chalk, bristles, spray, foliage, glow…). See [docs/brush-comparison.md](docs/brush-comparison.md) for how it compares with Krita, Clip Studio and ibisPaint.
+- **Tablet Support**: Pen pressure, tilt and the eraser end on Windows (Windows Ink, via `octotablet`) and Android (every stylus sample, with a resting palm ignored while the pen is down). On Linux, Wayland tablets work with `RUSTY_PAINTER_ENABLE_WAYLAND_TABLET=1`; X11 has no pressure yet.
 - **Layers**: Full layer support with visibility, opacity, and blending.
 - **Selection Tools**: Rectangle, ellipse, lasso (with smoothing), magnetic lasso, magic wand, colour range and selection brush; replace, add, erase and intersect; invert; every change undoable.
 - **Mirror Painting**: Left/right, top/bottom, four-way or radial (mandala, optionally kaleidoscope) around a centre and angle you drag on the canvas; flip the view with H.
@@ -14,7 +14,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **Gradients**: Linear, radial, reflected and angle gradients, previewed live, dithered, clipped to the selection.
 - **Smart Patch**: Content-aware fill of the selection from its surroundings (PatchMatch), or paint over something with the selection brush to remove it.
 - **Transform Tools**: Move, rotate, and scale selections with non-destructive preview.
-- **History**: Robust Undo/redo system for pixels, selections, transformations, and layer add/remove/reorder/merge.
+- **History**: One undo history for the whole document (pixels, selections, transforms, layer add/remove/reorder/merge), undone in the order things were done whichever layer is selected.
 - **Canvas**: Large canvas support (default 4000x4000) backed by tiled storage and GPU texture atlases.
 - **Project Files**: Save/open your work as a `.rpainter` project (compressed, includes undo history) via the Open/Save buttons in the top bar.
 - **Export**: Save your work as PNG, JPEG, or TIFF.

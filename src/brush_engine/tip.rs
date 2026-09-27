@@ -264,6 +264,98 @@ impl TipMask {
     }
 }
 
+/// Tips that come with the app, generated once: bristles, a rough chalk
+/// disc, spatter and a leaf.
+pub fn builtin() -> &'static [(&'static str, Arc<TipMask>)] {
+    static TIPS: std::sync::OnceLock<Vec<(&'static str, Arc<TipMask>)>> =
+        std::sync::OnceLock::new();
+    TIPS.get_or_init(|| {
+        const N: usize = 128;
+        let make = |f: &dyn Fn(f32, f32) -> f32| {
+            // f gets coordinates in -1..1 (y down) and returns 0..1.
+            let pixels = (0..N * N)
+                .map(|i| {
+                    let x = ((i % N) as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+                    let y = ((i / N) as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+                    (f(x, y).clamp(0.0, 1.0) * 255.0) as u8
+                })
+                .collect();
+            TipMask::from_mask(N, N, pixels)
+        };
+        let dots = |count: u32, seed: u32, spread: f32, size: (f32, f32)| {
+            (0..count)
+                .map(|i| {
+                    let (a, b, c) = (rand01(i, seed), rand01(i, seed + 1), rand01(i, seed + 2));
+                    let (angle, dist) = (a * std::f32::consts::TAU, b.sqrt() * spread);
+                    (
+                        angle.cos() * dist,
+                        angle.sin() * dist,
+                        size.0 + (size.1 - size.0) * c,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let bristles = dots(26, 11, 0.8, (0.08, 0.16));
+        let spatter = dots(40, 23, 0.9, (0.02, 0.1));
+        let soft_dot = |x: f32, y: f32, (cx, cy, r): (f32, f32, f32)| {
+            let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() / r;
+            (1.0 - d).clamp(0.0, 1.0).powf(0.6)
+        };
+        vec![
+            (
+                "Bristles",
+                make(&|x, y| {
+                    bristles
+                        .iter()
+                        .map(|&d| soft_dot(x, y, d))
+                        .fold(0.0, f32::max)
+                }),
+            ),
+            (
+                "Rough disc",
+                make(&|x, y| {
+                    let r = (x * x + y * y).sqrt();
+                    let edge = 0.85
+                        + 0.12
+                            * (rand01((x * 20.0) as u32 * 97 + (y * 20.0 + 40.0) as u32, 5) - 0.5);
+                    let grain = rand01(
+                        ((x + 1.0) * 60.0) as u32 * 211 + ((y + 1.0) * 60.0) as u32,
+                        7,
+                    );
+                    if r > edge { 0.0 } else { 0.55 + 0.45 * grain }
+                }),
+            ),
+            (
+                "Spatter",
+                make(&|x, y| {
+                    spatter
+                        .iter()
+                        .map(|&d| soft_dot(x, y, d))
+                        .fold(0.0, f32::max)
+                }),
+            ),
+            (
+                "Leaf",
+                make(&|x, y| {
+                    // Pointed at both ends: an eye shape along x, soft rim.
+                    let half = (1.0 - x * x).max(0.0) * 0.42;
+                    let v = 1.0 - (y.abs() / half.max(1e-3));
+                    (v * 6.0).clamp(0.0, 1.0)
+                }),
+            ),
+        ]
+    })
+}
+
+/// A repeatable pseudo-random value in 0..1.
+fn rand01(i: u32, seed: u32) -> f32 {
+    let mut h = i.wrapping_mul(0x9E37_79B9) ^ seed.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB_352D);
+    h ^= h >> 15;
+    (h & 0xFFFF) as f32 / 65535.0
+}
+
 /// One row's samples: pixel `i` at full-size texel `start + i × step`.
 struct RowRun<'a> {
     lo: &'a Level,
@@ -354,6 +446,17 @@ mod tests {
             })
             .collect();
         TipMask::from_mask(size, size, pixels)
+    }
+
+    #[test]
+    fn built_in_tips_have_paint_and_hold_steady() {
+        for (name, tip) in builtin() {
+            let painted = tip.pixels.iter().filter(|&&v| v > 40).count();
+            assert!(painted > 100, "{name}: {painted}");
+            assert!(tip.width > 20 && tip.height > 20, "{name}");
+        }
+        // Generated once: the same tip every time.
+        assert!(Arc::ptr_eq(&builtin()[0].1, &builtin()[0].1));
     }
 
     #[test]
