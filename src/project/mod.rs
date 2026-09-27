@@ -584,7 +584,7 @@ pub(crate) mod tests {
     fn canvas_mut_finishes_the_stroke_and_files_its_undo_step() {
         let canvas = Canvas::new(64, 64, Color32::WHITE, TILE_SIZE);
         let mut app = test_app(canvas, vec![History::new(), History::new()]);
-        app.start_stroke(Vec2::new(10.0, 10.0));
+        app.start_stroke_with_pressure(Vec2::new(10.0, 10.0), 1.0);
         app.add_stroke_point(Vec2::new(30.0, 20.0), 1.0);
         assert!(app.brush_state.is_drawing);
 
@@ -1341,7 +1341,7 @@ pub(crate) mod tests {
                 };
                 app.brush_state.brush.is_changed = true;
                 let mut pos = Vec2::new(-50.0, 100.0);
-                app.start_stroke(pos);
+                app.start_stroke_with_pressure(pos, 1.0);
                 for _ in 0..60 {
                     pos.x += (next() % 160) as f32 - 70.0;
                     pos.y += (next() % 160) as f32 - 80.0;

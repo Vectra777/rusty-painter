@@ -7,15 +7,15 @@ use eframe::egui::Vec2;
 use std::sync::Arc;
 
 impl PainterApp {
-    pub(crate) fn start_stroke(&mut self, pos: Vec2) {
-        self.start_stroke_with_pressure(pos, 1.0);
-    }
-
     /// Start a stroke whose first dab uses `pressure` (a size factor).
     pub(crate) fn start_stroke_with_pressure(&mut self, pos: Vec2, pressure: f32) {
         if self.is_active_layer_locked() || self.is_active_layer_folder() {
             return;
         }
+        // A stroke still running (a second press without a release) is
+        // ended first: replacing it would lose its undo step.
+        self.finish_stroke();
+        self.mark_action();
         if self.brush_state.brush.brush_options.blend_mode != BlendMode::Eraser {
             let color = self.brush_state.brush.brush_options.color;
             self.brush_state.remember_color(color);
@@ -33,8 +33,6 @@ impl PainterApp {
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;
-        // No pressure sample is available for the synthetic first point
-        // of a stroke; 1.0 preserves the pre-existing (unscaled) behavior.
         self.stroke_worker.sample(pos, pressure);
         self.viewport.touch.stroke_started = Some(std::time::Instant::now());
     }

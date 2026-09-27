@@ -217,6 +217,9 @@ fn trim_oldest(stack: &mut Vec<UndoAction>, max_bytes: usize) {
 pub struct History {
     undo_stack: Vec<UndoAction>,
     redo_stack: Vec<UndoAction>,
+    /// Actions pushed so far, so callers can tell whether a given action was
+    /// recorded (the stack itself drops its oldest entries).
+    pushed: u64,
 }
 
 impl History {
@@ -225,7 +228,13 @@ impl History {
         Self {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            pushed: 0,
         }
+    }
+
+    /// How many actions have been pushed (see [`History::push_action`]).
+    pub fn push_count(&self) -> u64 {
+        self.pushed
     }
 
     /// Forget everything that could be redone (e.g. a cancelled stroke that
@@ -238,6 +247,7 @@ impl History {
     /// oldest actions if the stack's tile snapshots exceed [`MAX_UNDO_BYTES`].
     pub fn push_action(&mut self, action: UndoAction) {
         self.undo_stack.push(action);
+        self.pushed += 1;
         self.redo_stack.clear();
         compress_older_actions(&mut self.undo_stack);
         trim_oldest(&mut self.undo_stack, MAX_UNDO_BYTES);
@@ -251,6 +261,7 @@ impl History {
         Self {
             undo_stack,
             redo_stack,
+            pushed: 0,
         }
     }
 

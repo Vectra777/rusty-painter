@@ -2,7 +2,7 @@ use crate::PainterApp;
 use crate::app::tools::Tool;
 use crate::app::transform;
 use crate::selection::SelectionMode;
-use crate::tablet::TabletPhase;
+use crate::tablet::{TabletPhase, TabletSample};
 use eframe::egui;
 use eframe::egui::Vec2;
 
@@ -18,106 +18,102 @@ pub fn handle_input(
     response: &egui::Response,
     origin: egui::Pos2,
     canvas_center: egui::Pos2,
+    pen: &[TabletSample],
 ) {
-    handle_tablet(app, ctx, response, origin, canvas_center);
     let placement = CanvasPlacement {
         origin,
         center: canvas_center,
     };
-    handle_events(app, ctx, response, placement);
+    handle_pen(app, ctx, response, placement, pen);
+    handle_events(app, ctx, response, placement, !pen.is_empty());
 }
 
-fn handle_tablet(
+/// Pen contact samples (with pressure), in order.
+fn handle_pen(
     app: &mut PainterApp,
     ctx: &egui::Context,
     response: &egui::Response,
-    origin: egui::Pos2,
-    canvas_center: egui::Pos2,
+    placement: CanvasPlacement,
+    samples: &[TabletSample],
 ) {
-    if let Some(tablet) = &mut app.tablet {
-        let scale = ctx.input(|i| i.pixels_per_point());
-        for sample in tablet.poll(scale) {
-            let pos = egui::Pos2::new(sample.pos[0], sample.pos[1]);
-            let (clamped, inside) = app.screen_to_canvas(pos, origin, canvas_center);
-            // The brush works off the canvas too (dabs are clipped to it): it
-            // keeps drawing when the pen leaves, and a stroke may start
-            // anywhere on the canvas panel. Other tools stay on the canvas.
-            let brush = matches!(app.active_tool, Tool::Brush);
-            let on_panel = response.rect.contains(pos);
-            let allowed = inside
-                || (brush
-                    && (app.brush_state.is_drawing
-                        || (on_panel && sample.phase == TabletPhase::Down)));
-            if !allowed {
-                continue;
-            }
-            let canvas_pos = if brush {
-                app.screen_to_canvas_raw(pos, origin, canvas_center)
-            } else {
-                clamped
-            };
-            match sample.phase {
-                TabletPhase::Down => {
-                    if matches!(app.active_tool, Tool::Brush) {
-                        app.sync_pen_eraser(sample.is_eraser);
-                    }
-                    handle_tablet_down(app, canvas_pos)
+    // The pen's lift got lost (focus change, app paused): end its contact
+    // rather than keep ignoring every other input.
+    let touch = &mut app.viewport.touch;
+    if touch.pen_on_canvas && samples.is_empty() && !touch.pen_active {
+        touch.pen_on_canvas = false;
+        handle_primary_release(app);
+    }
+    for sample in samples {
+        let pos = egui::Pos2::new(sample.pos[0], sample.pos[1]);
+        let (clamped, inside) = app.screen_to_canvas(pos, placement.origin, placement.center);
+        // The brush works off the canvas too (dabs are clipped to it).
+        let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+        let pressure = app.map_pressure(sample.pressure);
+        app.viewport.cursor_canvas = inside.then_some(clamped);
+        let touch = &mut app.viewport.touch;
+        match sample.phase {
+            TabletPhase::Down => {
+                // Only a pen landing on the canvas panel acts on it (not on a
+                // window, menu or fader over it); dragging in from the UI
+                // doesn't paint.
+                let over =
+                    response.rect.contains(pos) && ctx.layer_id_at(pos) == Some(response.layer_id);
+                touch.pen_on_canvas = over;
+                if !over {
+                    continue;
                 }
-                TabletPhase::Move => {
-                    let pressure = app.map_pressure(sample.pressure);
-                    handle_tablet_move(app, canvas_pos, pressure)
+                // Flipping a pen to its eraser end switches to the eraser.
+                if matches!(app.active_tool, Tool::Brush) {
+                    app.sync_pen_eraser(sample.is_eraser);
                 }
-                TabletPhase::Up => handle_tablet_up(app),
+                handle_primary_press(app, response, true, (clamped, inside), raw, pressure);
             }
+            TabletPhase::Move if touch.pen_on_canvas => {
+                handle_pen_drag(app, ctx, clamped, inside, raw, pressure);
+            }
+            TabletPhase::Up if touch.pen_on_canvas => {
+                touch.pen_on_canvas = false;
+                handle_primary_release(app);
+            }
+            TabletPhase::Cancel if touch.pen_on_canvas => {
+                touch.pen_on_canvas = false;
+                // Not intended input (a palm, a system gesture).
+                app.discard_current_action();
+                handle_primary_release(app);
+            }
+            _ => {}
         }
+        ctx.request_repaint();
     }
 }
 
-fn handle_tablet_down(app: &mut PainterApp, pos: Vec2) {
+fn handle_pen_drag(
+    app: &mut PainterApp,
+    ctx: &egui::Context,
+    pos: Vec2,
+    inside: bool,
+    raw: Vec2,
+    pressure: f32,
+) {
     match app.active_tool {
-        Tool::Brush => app.start_stroke(pos),
-        Tool::Select(t) => app.selection_manager.start_selection(pos, t),
-        Tool::Transform(_) => transform::transform_press(app, pos),
-        Tool::Eyedropper => app.pick_color(pos),
-        Tool::Fill => app.fill_press(pos),
-        Tool::Liquify => app.liquify_press(pos),
-        Tool::Smudge | Tool::Blur => app.blend_press(pos, 1.0),
-    }
-}
-
-fn handle_tablet_move(app: &mut PainterApp, pos: Vec2, pressure: f32) {
-    match app.active_tool {
-        Tool::Brush => {
-            if app.brush_state.is_drawing {
-                app.add_stroke_point(pos, pressure);
-            } else {
-                app.start_stroke_with_pressure(pos, pressure);
-            }
-        }
+        Tool::Brush => app.add_stroke_point(raw, pressure),
         Tool::Select(_) => {
-            app.selection_manager.update_selection(pos);
+            if app.selection_manager.is_dragging {
+                app.selection_manager.update_selection(pos);
+            }
         }
-        Tool::Transform(_) => transform::transform_drag(app, pos, false),
+        Tool::Transform(_) => {
+            let keep_aspect = ctx.input(|i| i.modifiers.shift);
+            transform::transform_drag(app, pos, keep_aspect);
+        }
         Tool::Fill => app.fill_drag(pos),
         Tool::Liquify => app.liquify_drag(pos),
         Tool::Smudge | Tool::Blur => app.blend_drag(pos, pressure),
         Tool::Eyedropper => {
-            if pressure > 0.0 {
+            if inside {
                 app.pick_color(pos);
             }
         }
-    }
-}
-
-fn handle_tablet_up(app: &mut PainterApp) {
-    match app.active_tool {
-        Tool::Brush => app.finish_stroke(),
-        Tool::Select(_) => app.selection_manager.end_selection(),
-        Tool::Transform(_) => transform::transform_release(app),
-        Tool::Eyedropper => {}
-        Tool::Fill => app.fill_release(),
-        Tool::Liquify => app.liquify_release(),
-        Tool::Smudge | Tool::Blur => app.blend_release(),
     }
 }
 
@@ -126,20 +122,37 @@ fn handle_events(
     ctx: &egui::Context,
     response: &egui::Response,
     placement: CanvasPlacement,
+    pen_samples: bool,
 ) {
     let events = ctx.input(|i| i.events.clone());
     // Fingers that belong to a gesture (or that may not paint) also arrive
     // as pointer events; leave those to the touch handler.
     let suppress = app.viewport.touch.suppress_pointer;
+    // The pen's own samples drive the canvas; the pointer events the same
+    // pen produces are ignored. On Android the pen is the mouse pointer; on
+    // Windows it arrives as touches, which egui turns into pointer events
+    // right after each touch event.
+    let pen_active = app.viewport.touch.pen_active || pen_samples;
+    // Nothing else joins a pen stroke in progress (a mouse moved meanwhile).
+    let pen_stroke = app.viewport.touch.pen_on_canvas;
+    let mut from_touch = false;
 
     for event in events {
-        match event {
+        let is_pointer = matches!(
+            event,
             egui::Event::PointerButton {
                 button: egui::PointerButton::Primary,
                 ..
-            }
-            | egui::Event::PointerMoved(_)
-                if suppress => {}
+            } | egui::Event::PointerMoved(_)
+        );
+        match event {
+            egui::Event::Touch { .. } => from_touch = true,
+            egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } => {}
+            _ => from_touch = false,
+        }
+        let pen_pointer = pen_stroke || (pen_active && (cfg!(target_os = "android") || from_touch));
+        match event {
+            _ if is_pointer && (suppress || pen_pointer) => {}
             egui::Event::PointerButton {
                 pos,
                 button,
@@ -219,22 +232,27 @@ fn handle_primary_button(
     }
 
     if pressed {
-        handle_primary_press(app, response, canvas_pos, raw);
+        // Mouse and finger input paint at full pressure.
+        handle_primary_press(app, response, response.hovered(), canvas_pos, raw, 1.0);
     } else {
         handle_primary_release(app);
     }
 }
 
+/// A mouse, finger or pen press. `over` is whether it landed on the canvas
+/// panel; `pressure` is already curved.
 fn handle_primary_press(
     app: &mut PainterApp,
     response: &egui::Response,
+    over: bool,
     canvas_pos: (Vec2, bool),
     raw: Vec2,
+    pressure: f32,
 ) {
     // The brush may start a stroke off the canvas (on the canvas panel);
     // other tools need a press on the canvas itself.
     let brush = matches!(app.active_tool, Tool::Brush);
-    if app.viewport.is_panning || !response.hovered() || !(canvas_pos.1 || brush) {
+    if app.viewport.is_panning || !over || !(canvas_pos.1 || brush) {
         return;
     }
 
@@ -247,20 +265,8 @@ fn handle_primary_press(
         return;
     }
 
-    // Flipping a pen to its eraser end switches to the eraser.
-    if matches!(app.active_tool, Tool::Brush)
-        && let Some(pen) = crate::tablet::pen_state()
-        && pen.is_stylus
-        && !app.viewport.touch.finger_down()
-    {
-        app.sync_pen_eraser(pen.is_eraser);
-    }
-
     match app.active_tool {
-        Tool::Brush => {
-            let pressure = app.pointer_pressure();
-            app.start_stroke_with_pressure(raw, pressure);
-        }
+        Tool::Brush => app.start_stroke_with_pressure(raw, pressure),
         Tool::Select(t) => {
             // Shift adds to the selection, Alt subtracts, for this drag.
             let mods = response.ctx.input(|i| i.modifiers);
@@ -278,10 +284,7 @@ fn handle_primary_press(
         Tool::Eyedropper => app.pick_color(canvas_pos.0),
         Tool::Fill => app.fill_press(canvas_pos.0),
         Tool::Liquify => app.liquify_press(canvas_pos.0),
-        Tool::Smudge | Tool::Blur => {
-            let pressure = app.pointer_pressure();
-            app.blend_press(raw, pressure);
-        }
+        Tool::Smudge | Tool::Blur => app.blend_press(raw, pressure),
     }
 }
 
@@ -370,8 +373,7 @@ fn handle_tool_move(
         }
         Tool::Smudge | Tool::Blur => {
             if app.viewport.is_primary_down {
-                let pressure = app.pointer_pressure();
-                app.blend_drag(pos, pressure);
+                app.blend_drag(pos, 1.0);
                 ctx.request_repaint();
             }
         }
@@ -390,13 +392,11 @@ fn handle_tool_move(
 
 /// `pos` is unclamped: off-canvas points keep the stroke's real path.
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2) {
-    // Pen pressure where the platform provides it out of band (Android
-    // stylus); mouse and finger input paint at full size.
-    let pressure = app.pointer_pressure();
+    // Mouse and finger input paint at full pressure (the pen has its own path).
     if app.brush_state.is_drawing {
-        app.add_stroke_point(pos, pressure);
+        app.add_stroke_point(pos, 1.0);
     } else if app.viewport.is_primary_down && !app.viewport.is_panning && response.hovered() {
-        app.start_stroke_with_pressure(pos, pressure);
+        app.start_stroke_with_pressure(pos, 1.0);
     }
 }
 

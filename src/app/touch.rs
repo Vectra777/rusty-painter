@@ -9,12 +9,16 @@
 //! egui also turns the first finger into pointer events, which the regular
 //! input handler would paint with; [`TouchState::suppress_pointer`] tells it
 //! when those events belong to a gesture instead.
+//!
+//! While the pen is in use, touches are the hand holding it (a resting palm)
+//! and are ignored until they lift; whatever they started just before the
+//! pen landed is taken back.
 
 use super::PainterApp;
 use super::tools::Tool;
 use crate::selection::transform::TransformState;
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// A multi-finger touch shorter than this, that barely moved, is a tap.
@@ -39,6 +43,17 @@ pub struct TouchState {
     /// Eraser-tip state of the pen at its last press, so flipping the pen
     /// switches brush/eraser once without overriding manual choices.
     pen_was_eraser: Option<bool>,
+    /// Touches from the hand holding the pen, ignored until they lift.
+    ignored: HashSet<u64>,
+    /// The pen is in use this frame: its input also arrives as pointer
+    /// events (Android) or touches (Windows), which the canvas ignores in
+    /// favor of the pen's own samples.
+    pub(crate) pen_active: bool,
+    /// The current pen contact started on the canvas.
+    pub(crate) pen_on_canvas: bool,
+    /// Where the active layer's history stood when the current stroke began
+    /// (layer index, push count), to take the stroke back if it's cancelled.
+    pub(crate) action_mark: Option<(usize, u64)>,
 }
 
 struct Gesture {
@@ -61,17 +76,6 @@ impl PainterApp {
         raw.clamp(0.0, 1.0).powf(self.workspace.pressure_curve)
     }
 
-    /// Pressure for the current pointer: curved pen pressure when a stylus
-    /// is drawing, otherwise 1.0 (mouse, finger).
-    pub(crate) fn pointer_pressure(&self) -> f32 {
-        match crate::tablet::pen_state() {
-            Some(pen) if pen.is_stylus && !self.viewport.touch.finger_down() => {
-                self.map_pressure(pen.pressure)
-            }
-            _ => 1.0,
-        }
-    }
-
     /// Switch brush/eraser when the pen's eraser end starts or stops being used.
     pub(crate) fn sync_pen_eraser(&mut self, is_eraser: bool) {
         let touch = &mut self.viewport.touch;
@@ -86,33 +90,72 @@ impl PainterApp {
         }
     }
 
-    /// End the in-progress stroke; undo it (without leaving a redo entry)
-    /// if it only just started.
-    fn cancel_recent_stroke(&mut self) {
-        if !self.brush_state.is_drawing {
+    /// Remember where the active layer's history stands, as a stroke begins.
+    pub(crate) fn mark_action(&mut self) {
+        // File the previous stroke first, so it can't land after the mark
+        // and be mistaken for this one.
+        self.settle_strokes();
+        let layer = self.canvas.active_layer_idx;
+        self.viewport.touch.action_mark = self
+            .layer_state
+            .histories
+            .get(layer)
+            .map(|h| (layer, h.push_count()));
+    }
+
+    /// End the stroke in progress (brush or smudge/blur) and take it back,
+    /// without leaving a redo entry. Only what it recorded is undone: a
+    /// stroke that painted nothing leaves the history alone.
+    pub(crate) fn discard_current_action(&mut self) {
+        // The mark belongs to the last stroke begun; once that has ended
+        // there is nothing in progress to take back.
+        let in_progress = self.brush_state.is_drawing || self.brush_state.blend_stroke.is_some();
+        let mark = self.viewport.touch.action_mark.take();
+        self.release_canvas();
+        self.blend_release();
+        let Some((layer, count)) = mark.filter(|_| in_progress) else {
             return;
+        };
+        let recorded = self
+            .layer_state
+            .histories
+            .get(layer)
+            .is_some_and(|h| h.push_count() > count);
+        if recorded && layer == self.canvas.active_layer_idx {
+            self.apply_history(false);
+            if let Some(history) = self.layer_state.histories.get_mut(layer) {
+                history.discard_redo();
+            }
         }
+    }
+
+    /// End the in-progress stroke; take it back if it only just started.
+    fn cancel_recent_stroke(&mut self) {
         let young = self
             .viewport
             .touch
             .stroke_started
             .is_some_and(|t| t.elapsed() < STROKE_CANCEL_WINDOW);
-        self.release_canvas();
         if young {
-            self.apply_history(false);
-            let active = self.canvas.active_layer_idx;
-            if let Some(history) = self.layer_state.histories.get_mut(active) {
-                history.discard_redo();
-            }
+            self.discard_current_action();
+        } else {
+            self.release_canvas();
+            self.blend_release();
         }
     }
 }
 
 impl PainterApp {
-    /// A second finger landed: whatever the first finger started (stroke,
-    /// selection drag, transform drag) was the start of a gesture.
-    fn cancel_gesture_start(&mut self) {
-        self.cancel_recent_stroke();
+    /// Whatever the first finger started (stroke, selection drag, transform
+    /// drag) wasn't meant: a second finger landed (`discard` false: only a
+    /// young stroke is taken back), or the touch was cancelled or turned out
+    /// to be the hand holding the pen (`discard` true).
+    fn cancel_finger_action(&mut self, discard: bool) {
+        if discard {
+            self.discard_current_action();
+        } else {
+            self.cancel_recent_stroke();
+        }
         match self.active_tool {
             Tool::Select(_) if self.selection_manager.is_dragging => {
                 self.selection_manager.clear_selection();
@@ -138,6 +181,16 @@ pub(crate) fn handle_touch(
     let area = canvas.rect;
     let events = ctx.input(|i| i.events.clone());
     let mut repaint = false;
+
+    // The pen landed while fingers were down: they're the hand holding it.
+    let touch = &mut app.viewport.touch;
+    if touch.pen_active && !touch.touches.is_empty() {
+        let fingers: Vec<u64> = touch.touches.drain().map(|(id, _)| id).collect();
+        touch.ignored.extend(fingers);
+        touch.gesture = None;
+        app.cancel_finger_action(true);
+        repaint = true;
+    }
     let mut gesture_this_frame = app.viewport.touch.gesture.is_some();
     let mut tap: Option<usize> = None;
 
@@ -146,6 +199,16 @@ pub(crate) fn handle_touch(
             continue;
         };
         let touch = &mut app.viewport.touch;
+        if touch.ignored.contains(&id.0) {
+            if matches!(phase, egui::TouchPhase::End | egui::TouchPhase::Cancel) {
+                touch.ignored.remove(&id.0);
+            }
+            continue;
+        }
+        if touch.pen_active && phase == egui::TouchPhase::Start {
+            touch.ignored.insert(id.0);
+            continue;
+        }
         match phase {
             egui::TouchPhase::Start => {
                 // Fingers landing on panels, menus or the canvas faders are
@@ -163,7 +226,7 @@ pub(crate) fn handle_touch(
                             travel: 0.0,
                         });
                         gesture_this_frame = true;
-                        app.cancel_gesture_start();
+                        app.cancel_finger_action(false);
                     }
                     if let Some(g) = &mut app.viewport.touch.gesture {
                         g.max_touches = g.max_touches.max(app.viewport.touch.touches.len());
@@ -186,6 +249,17 @@ pub(crate) fn handle_touch(
             }
             egui::TouchPhase::End | egui::TouchPhase::Cancel => {
                 if touch.touches.remove(&id.0).is_none() {
+                    continue;
+                }
+                // A cancelled single finger (palm rejection, a system
+                // gesture) takes back what it drew; egui ends its pointer
+                // without a release, which would leave the stroke running.
+                if phase == egui::TouchPhase::Cancel
+                    && touch.touches.is_empty()
+                    && touch.gesture.is_none()
+                {
+                    app.cancel_finger_action(true);
+                    repaint = true;
                     continue;
                 }
                 if touch.touches.is_empty()
@@ -239,8 +313,118 @@ pub(crate) fn handle_touch(
     }
 
     let touch = &mut app.viewport.touch;
+    // egui's pointer follows the first finger, which may be an ignored palm.
     touch.suppress_pointer = gesture_this_frame
         || touch.gesture.is_some()
+        || !touch.ignored.is_empty()
         || (touch.finger_down() && !app.workspace.finger_painting);
     repaint || tap.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::canvas::Canvas;
+    use crate::project::tests::test_app_pub;
+    use eframe::egui::{Color32, Vec2};
+
+    const TILE: usize = 64;
+
+    fn app() -> crate::PainterApp {
+        let mut app = test_app_pub(Canvas::new(128, 128, Color32::WHITE, TILE));
+        app.canvas_mut().active_layer_idx = 1;
+        app.brush_state.brush.brush_options.diameter = 8.0;
+        app
+    }
+
+    fn stroke(app: &mut crate::PainterApp, from: Vec2, to: Vec2) {
+        app.start_stroke_with_pressure(from, 1.0);
+        app.add_stroke_point(to, 1.0);
+    }
+
+    fn undo_len(app: &crate::PainterApp) -> usize {
+        app.layer_state.histories[1].stacks().0.len()
+    }
+
+    #[test]
+    fn a_discarded_stroke_leaves_no_paint_and_no_undo_step() {
+        let mut app = app();
+        stroke(&mut app, Vec2::new(10.0, 10.0), Vec2::new(40.0, 20.0));
+        app.discard_current_action();
+        assert_eq!(undo_len(&app), 0);
+        assert_eq!(app.layer_state.histories[1].stacks().1.len(), 0, "no redo");
+        let tile = app.canvas.get_layer_tile_data(1, 0, 0).unwrap_or_default();
+        assert!(
+            tile.iter().all(|&c| c == Color32::TRANSPARENT),
+            "paint removed"
+        );
+    }
+
+    #[test]
+    fn discarding_with_no_stroke_running_keeps_the_last_one() {
+        let mut app = app();
+        stroke(&mut app, Vec2::new(10.0, 10.0), Vec2::new(40.0, 20.0));
+        app.release_canvas();
+        assert_eq!(undo_len(&app), 1);
+        app.discard_current_action();
+        assert_eq!(undo_len(&app), 1, "the finished stroke stays");
+    }
+
+    #[test]
+    fn discarding_a_stroke_that_painted_nothing_keeps_the_previous_one() {
+        let mut app = app();
+        stroke(&mut app, Vec2::new(10.0, 10.0), Vec2::new(40.0, 20.0));
+        // Off the canvas: no tile touched, nothing recorded.
+        stroke(
+            &mut app,
+            Vec2::new(-500.0, -500.0),
+            Vec2::new(-400.0, -500.0),
+        );
+        app.discard_current_action();
+        assert_eq!(undo_len(&app), 1, "the earlier stroke stays");
+    }
+
+    #[test]
+    fn a_second_press_keeps_the_first_strokes_undo_step() {
+        let mut app = app();
+        stroke(&mut app, Vec2::new(10.0, 10.0), Vec2::new(40.0, 20.0));
+        // Pressed again without a release (a duplicate press from another
+        // input path): the first stroke must stay undoable.
+        stroke(&mut app, Vec2::new(80.0, 80.0), Vec2::new(100.0, 90.0));
+        app.release_canvas();
+        assert_eq!(undo_len(&app), 2);
+        let blank = vec![Color32::TRANSPARENT; TILE * TILE];
+        app.apply_history(false);
+        app.apply_history(false);
+        assert_eq!(app.canvas.get_layer_tile_data(1, 0, 0), Some(blank));
+    }
+
+    /// Painted pixels in column `x` of layer 1 (tiles are `TILE` wide).
+    fn column_coverage(app: &crate::PainterApp, x: usize) -> usize {
+        (0..2)
+            .filter_map(|ty| app.canvas.get_layer_tile_data(1, (x / TILE) as i32, ty))
+            .flat_map(|tile| (0..TILE).map(move |y| tile[y * TILE + x % TILE]))
+            .filter(|c| c.a() > 0)
+            .count()
+    }
+
+    #[test]
+    fn pressure_blends_along_a_segment() {
+        let mut app = app();
+        let o = &mut app.brush_state.brush.brush_options;
+        o.diameter = 24.0;
+        o.pressure_size = true;
+        o.pressure_min_size = 0.0;
+        app.start_stroke_with_pressure(Vec2::new(10.0, 64.0), 0.05);
+        app.add_stroke_point(Vec2::new(118.0, 64.0), 1.0);
+        app.release_canvas();
+        let (near_start, middle, near_end) = (
+            column_coverage(&app, 20),
+            column_coverage(&app, 64),
+            column_coverage(&app, 110),
+        );
+        assert!(
+            near_start < middle && middle < near_end,
+            "thickness should grow along the stroke: {near_start} {middle} {near_end}"
+        );
+    }
 }

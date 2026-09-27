@@ -1,3 +1,9 @@
+//! Pen input with pressure, as a stream of contact samples: from octotablet
+//! on desktop (Windows Ink, Wayland) and from the patched winit on Android.
+//!
+//! The same pen also reaches egui as pointer (or touch) events, which the
+//! canvas must then ignore: see [`TabletInput::pen_active`].
+
 #[cfg(not(target_os = "android"))]
 use octotablet::{
     builder::Builder,
@@ -14,48 +20,96 @@ pub enum TabletPhase {
     Down,
     Move,
     Up,
+    /// The system cancelled the contact (palm rejection, a system gesture):
+    /// whatever it drew should be taken back. Only Android reports it.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    Cancel,
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct TabletSample {
+    /// Position in egui points.
     pub pos: [f32; 2],
+    /// Raw pressure, 0..=1.
     pub pressure: f32,
     pub is_eraser: bool,
     pub phase: TabletPhase,
 }
 
-/// Latest pen sample from the platform, where the OS delivers a stylus as
-/// plain pointer events (Android): pressure and tool arrive out of band.
-#[derive(Copy, Clone, Debug)]
-pub struct PenState {
-    pub pressure: f32,
-    pub is_eraser: bool,
-    /// False when the last pointer was a real mouse.
-    pub is_stylus: bool,
-}
-
-#[cfg(target_os = "android")]
-pub fn pen_state() -> Option<PenState> {
-    let pen = winit::platform::android::pen_state();
-    Some(PenState {
-        pressure: pen.pressure,
-        is_eraser: pen.is_eraser,
-        is_stylus: pen.is_stylus,
-    })
-}
-
-/// Desktop pens go through [`TabletInput`] instead.
+/// Per-tool contact tracking.
 #[cfg(not(target_os = "android"))]
-pub fn pen_state() -> Option<PenState> {
-    None
+#[derive(Default)]
+struct ToolState {
+    /// Last pose, in egui points.
+    pos: Option<[f32; 2]>,
+    pressure: f32,
+    /// Touching, and its `Down` sample has been sent.
+    down: bool,
+    /// Touched, but no pose has arrived since: the `Down` sample waits for
+    /// one so it carries the contact's real position and pressure.
+    pending_down: bool,
+    in_range: bool,
 }
 
-/// Minimal tablet bridge: pumps octotablet events and emits normalized samples.
+#[cfg(not(target_os = "android"))]
+impl ToolState {
+    /// Track one tool event, adding the contact samples it produces.
+    fn apply(
+        &mut self,
+        event: &ToolEvent<'_>,
+        zoom: f32,
+        is_eraser: bool,
+        out: &mut Vec<TabletSample>,
+    ) {
+        let mut emit = |state: &Self, phase| {
+            if let Some(pos) = state.pos {
+                out.push(TabletSample {
+                    pos,
+                    pressure: state.pressure,
+                    is_eraser,
+                    phase,
+                });
+            }
+        };
+        match event {
+            ToolEvent::In { .. } => self.in_range = true,
+            ToolEvent::Down => self.pending_down = true,
+            ToolEvent::Pose(pose) => {
+                self.pos = Some([pose.position[0] / zoom, pose.position[1] / zoom]);
+                self.pressure = pose.pressure.get().unwrap_or(1.0);
+                if self.pending_down {
+                    self.pending_down = false;
+                    self.down = true;
+                    emit(self, TabletPhase::Down);
+                } else if self.down {
+                    emit(self, TabletPhase::Move);
+                }
+            }
+            ToolEvent::Up | ToolEvent::Out | ToolEvent::Removed => {
+                // A tap too quick for a pose still paints a dot.
+                if self.pending_down {
+                    self.pending_down = false;
+                    self.down = true;
+                    emit(self, TabletPhase::Down);
+                }
+                if self.down {
+                    self.down = false;
+                    emit(self, TabletPhase::Up);
+                }
+                if !matches!(event, ToolEvent::Up) {
+                    self.in_range = false;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Pumps octotablet events into contact samples.
 #[cfg(not(target_os = "android"))]
 pub struct TabletInput {
     manager: octotablet::Manager,
-    tool_types: HashMap<tool::ID, bool>, // is eraser
-    tool_positions: HashMap<tool::ID, [f32; 2]>,
+    tools: HashMap<tool::ID, ToolState>,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -71,7 +125,8 @@ impl TabletInput {
             return None;
         }
 
-        let builder = Builder::new().emulate_tool_from_mouse(true);
+        // The mouse stays a plain egui pointer; only real pens come through here.
+        let builder = Builder::new().emulate_tool_from_mouse(false);
 
         // Wrap the unsafe and potentially panicking call (octotablet can panic on Windows/Wine if COM is missing)
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -82,8 +137,7 @@ impl TabletInput {
         match result {
             Ok(Ok(manager)) => Some(Self {
                 manager,
-                tool_types: HashMap::new(),
-                tool_positions: HashMap::new(),
+                tools: HashMap::new(),
             }),
             Ok(Err(e)) => {
                 log::error!("Failed to initialize tablet: {:?}", e);
@@ -96,69 +150,143 @@ impl TabletInput {
         }
     }
 
-    /// Pump events and return a list of samples in logical egui points.
-    pub fn poll(&mut self, scale: f32) -> Vec<TabletSample> {
+    /// Pump events and return this frame's contact samples. Hovering sends
+    /// none: only a touching pen paints.
+    pub fn poll(&mut self, ctx: &eframe::egui::Context) -> Vec<TabletSample> {
+        // octotablet reports logical window pixels; egui points differ from
+        // those only by the UI zoom factor.
+        let zoom = ctx.zoom_factor();
         let mut out = Vec::new();
-        let events = match self.manager.pump() {
-            Ok(evts) => evts,
-            Err(_) => return out,
+        let Ok(events) = self.manager.pump() else {
+            return out;
         };
         for event in events {
-            if let Event::Tool { tool, event } = event {
-                let is_eraser = matches!(tool.tool_type, Some(tool::Type::Eraser));
-                let tool_id = tool.id();
-                self.tool_types.entry(tool_id.clone()).or_insert(is_eraser);
-                match event {
-                    ToolEvent::Down => {
-                        if let Some(pos) = self.tool_positions.get(&tool_id).copied() {
-                            out.push(TabletSample {
-                                pos,
-                                pressure: 1.0,
-                                is_eraser,
-                                phase: TabletPhase::Down,
-                            });
-                        }
-                    }
-                    ToolEvent::Up | ToolEvent::Out | ToolEvent::Removed => {
-                        if let Some(pos) = self.tool_positions.get(&tool_id).copied() {
-                            out.push(TabletSample {
-                                pos,
-                                pressure: 0.0,
-                                is_eraser,
-                                phase: TabletPhase::Up,
-                            });
-                        }
-                    }
-                    ToolEvent::Pose(mut pose) => {
-                        pose.position = [pose.position[0] * scale, pose.position[1] * scale];
-                        let pressure = pose.pressure.get().unwrap_or(1.0);
-                        self.tool_positions.insert(tool_id, pose.position);
-                        // Emit Move with real position; Down/Up already signaled separately.
-                        out.push(TabletSample {
-                            pos: pose.position,
-                            pressure,
-                            is_eraser,
-                            phase: TabletPhase::Move,
-                        });
-                    }
-                    _ => {}
-                }
-            }
+            let Event::Tool { tool, event } = event else {
+                continue;
+            };
+            let is_eraser = matches!(tool.tool_type, Some(tool::Type::Eraser));
+            let state = self.tools.entry(tool.id()).or_default();
+            state.apply(&event, zoom, is_eraser, &mut out);
         }
         out
     }
+
+    /// Whether a pen is near or on the tablet. Its input may then also
+    /// arrive as pointer or touch events (Windows reports a pen as touches),
+    /// which the canvas ignores in favor of these samples.
+    pub fn pen_active(&self) -> bool {
+        self.tools.values().any(|t| t.in_range || t.down)
+    }
 }
 
+/// Drains the stylus samples the patched winit queues (every batched sample,
+/// with its pressure).
 #[cfg(target_os = "android")]
-pub struct TabletInput;
+pub struct TabletInput {
+    down: bool,
+}
 
 #[cfg(target_os = "android")]
 impl TabletInput {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Option<Self> {
-        None
+        Some(Self { down: false })
     }
 
-    pub fn poll(&mut self, _scale: f32) -> Vec<TabletSample> {
-        Vec::new()
+    pub fn poll(&mut self, ctx: &eframe::egui::Context) -> Vec<TabletSample> {
+        use winit::platform::android::PenPhase;
+        let scale = ctx.pixels_per_point();
+        let samples: Vec<TabletSample> = winit::platform::android::take_pen_samples()
+            .into_iter()
+            .map(|s| TabletSample {
+                pos: [s.x / scale, s.y / scale],
+                pressure: s.pressure,
+                is_eraser: s.is_eraser,
+                phase: match s.phase {
+                    PenPhase::Down => TabletPhase::Down,
+                    PenPhase::Move => TabletPhase::Move,
+                    PenPhase::Up => TabletPhase::Up,
+                    PenPhase::Cancel => TabletPhase::Cancel,
+                },
+            })
+            .collect();
+        if let Some(last) = samples.last() {
+            self.down = matches!(last.phase, TabletPhase::Down | TabletPhase::Move);
+        }
+        samples
+    }
+
+    /// Whether the pen is touching: its mouse events are then the pen's, and
+    /// any finger touching the screen is the hand holding it. Hovering
+    /// doesn't count, so fingers can still pinch with the pen nearby.
+    pub fn pen_active(&self) -> bool {
+        self.down
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod tests {
+    use super::*;
+
+    fn pose(x: f32, y: f32, pressure: f32) -> ToolEvent<'static> {
+        let mut pose = octotablet::axis::Pose {
+            position: [x, y],
+            ..Default::default()
+        };
+        pose.pressure = octotablet::util::NicheF32::new_some(pressure).unwrap();
+        ToolEvent::Pose(pose)
+    }
+
+    fn run(events: &[ToolEvent<'static>]) -> Vec<(TabletPhase, [f32; 2], f32)> {
+        let mut state = ToolState::default();
+        let mut out = Vec::new();
+        for event in events {
+            state.apply(event, 2.0, false, &mut out);
+        }
+        out.iter().map(|s| (s.phase, s.pos, s.pressure)).collect()
+    }
+
+    #[test]
+    fn hovering_sends_nothing() {
+        assert!(run(&[pose(10.0, 10.0, 0.0), pose(20.0, 10.0, 0.0)]).is_empty());
+    }
+
+    #[test]
+    fn a_contact_starts_at_its_first_pose_with_its_pressure() {
+        let samples = run(&[
+            pose(10.0, 10.0, 0.0),
+            ToolEvent::Down,
+            pose(12.0, 10.0, 0.25),
+            pose(14.0, 10.0, 0.5),
+            ToolEvent::Up,
+            pose(30.0, 30.0, 0.0),
+        ]);
+        // Positions are logical pixels over the UI zoom (2.0 here).
+        assert_eq!(
+            samples,
+            vec![
+                (TabletPhase::Down, [6.0, 5.0], 0.25),
+                (TabletPhase::Move, [7.0, 5.0], 0.5),
+                (TabletPhase::Up, [7.0, 5.0], 0.5),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quick_tap_still_paints_a_dot() {
+        let samples = run(&[pose(10.0, 10.0, 0.4), ToolEvent::Down, ToolEvent::Up]);
+        let phases: Vec<_> = samples.iter().map(|s| s.0).collect();
+        assert_eq!(phases, vec![TabletPhase::Down, TabletPhase::Up]);
+    }
+
+    #[test]
+    fn leaving_while_touching_ends_the_contact() {
+        let samples = run(&[
+            ToolEvent::Down,
+            pose(10.0, 10.0, 0.4),
+            ToolEvent::Out,
+            pose(12.0, 10.0, 0.4),
+        ]);
+        let phases: Vec<_> = samples.iter().map(|s| s.0).collect();
+        assert_eq!(phases, vec![TabletPhase::Down, TabletPhase::Up]);
     }
 }

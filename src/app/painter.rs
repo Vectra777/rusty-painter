@@ -171,6 +171,15 @@ impl eframe::App for PainterApp {
 
                 let view = render_helper::draw_canvas(self, ui);
                 self.viewport.canvas_area = Some(view.response.rect);
+                // Pen samples first: touch handling needs to know the pen is
+                // down to tell a resting palm from a finger.
+                let pen = self
+                    .tablet
+                    .as_mut()
+                    .map(|t| t.poll(ctx))
+                    .unwrap_or_default();
+                self.viewport.touch.pen_active =
+                    !pen.is_empty() || self.tablet.as_ref().is_some_and(|t| t.pen_active());
                 if super::touch::handle_touch(self, ctx, &view.response) {
                     needs_repaint = true;
                 }
@@ -224,6 +233,7 @@ impl eframe::App for PainterApp {
                     &view.response,
                     view.origin,
                     view.canvas_center,
+                    &pen,
                 );
                 // Overlay first: on a drag's first frame it takes over at once,
                 // so the layer isn't CPU-rendered even once while dragging.

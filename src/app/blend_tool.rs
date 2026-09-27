@@ -143,6 +143,9 @@ impl PainterApp {
         }
         let layer_id = layer.id;
         self.release_canvas();
+        // Like a brush stroke: a second press ends the running one first.
+        self.blend_release();
+        self.mark_action();
         self.brush_state.blend_stroke = Some(BlendStroke {
             layer_id,
             smudge: matches!(self.active_tool, Tool::Smudge),

@@ -6,7 +6,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 
 ## Features
 - **Brush Engine**: Soft, hard, and pixel brushes with spacing, flow, jitter, and stabilizer options.
-- **Tablet Support**: Pressure sensitivity and eraser support via `octotablet`.
+- **Tablet Support**: Pen pressure and the eraser end on Windows (Windows Ink, via `octotablet`) and Android (every stylus sample, with a resting palm ignored while the pen is down). On Linux, Wayland tablets work with `RUSTY_PAINTER_ENABLE_WAYLAND_TABLET=1`; X11 has no pressure yet.
 - **Layers**: Full layer support with visibility, opacity, and blending.
 - **Selection Tools**: Rectangle, Circle, and Lasso selection modes.
 - **Transform Tools**: Move, rotate, and scale selections with non-destructive preview.
