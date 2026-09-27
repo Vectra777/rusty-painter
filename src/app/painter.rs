@@ -201,6 +201,9 @@ impl eframe::App for PainterApp {
         // 6. Modals and floating windows.
         self.show_windows(ctx);
         self.workspace.frame_stats.mark(Stage::Windows);
+        if std::mem::take(&mut self.brush_state.swatches_dirty) {
+            self.save_swatches();
+        }
 
         // Single consolidated repaint request
         if needs_repaint {

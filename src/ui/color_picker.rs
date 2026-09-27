@@ -503,11 +503,12 @@ pub fn color_picker_panel(
                 new_color = Some((c, true));
             }
             ui.add_space(4.0);
-            if let Some(c) =
-                crate::ui::palette_window::swatches(&mut brush_state.swatches, color, ui)
-            {
+            let (picked, changed) =
+                crate::ui::palette_window::swatches(&mut brush_state.swatches, color, ui);
+            if let Some(c) = picked {
                 new_color = Some((c, true));
             }
+            brush_state.swatches_dirty |= changed;
         });
 
     if let Some((c, external)) = new_color {

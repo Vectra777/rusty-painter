@@ -31,7 +31,11 @@ pub(crate) fn symmetry_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     };
     ui.label(RichText::new(mode_name).small().color(TEXT_DIM));
     if s.mode == SymmetryMode::Radial {
-        slider_row(ui, "Copies", egui::Slider::new(&mut s.count, 2..=MAX_COUNT));
+        slider_row(
+            ui,
+            "Copies",
+            crate::ui::widgets::reset(&mut s.count, |v| egui::Slider::new(v, 2..=MAX_COUNT)),
+        );
         ui.checkbox(&mut s.mirrored, "Mirror each copy (kaleidoscope)");
     }
     if s.mode != SymmetryMode::Off {
@@ -39,9 +43,11 @@ pub(crate) fn symmetry_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
         if slider_row(
             ui,
             "Angle",
-            egui::Slider::new(&mut degrees, -180.0..=180.0)
-                .suffix("°")
-                .max_decimals(1),
+            crate::ui::widgets::reset(&mut degrees, |v| {
+                egui::Slider::new(v, -180.0..=180.0)
+                    .suffix("°")
+                    .max_decimals(1)
+            }),
         )
         .changed()
         {

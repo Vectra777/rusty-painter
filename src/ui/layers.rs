@@ -417,7 +417,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                             ui.spacing_mut().interact_size.y = 16.0;
                         }
                         ui.spacing_mut().slider_width = (width - 44.0).max(40.0);
-                        let response = ui.add(percent_of_unit(egui::Slider::new(opacity, 0.0..=1.0)));
+                        let response = ui.add(crate::ui::widgets::reset(&mut *opacity, |v| percent_of_unit(egui::Slider::new(v, 0.0..=1.0))));
                         opacity_released =
                             response.drag_stopped() || (response.changed() && !response.dragged());
                     });

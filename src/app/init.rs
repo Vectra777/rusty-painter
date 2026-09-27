@@ -79,6 +79,7 @@ impl PainterApp {
             .with_file_name("gradients.json");
         app.workspace.gradient.library =
             crate::app::tools::gradient::GradientLibrary::load(gradients);
+        app.load_swatches();
         app
     }
 

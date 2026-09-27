@@ -75,8 +75,11 @@ impl TouchState {
 impl PainterApp {
     /// Apply the pen's pressure curve (a device setting) to raw pressure
     /// (0..=1). What pressure then drives (size, opacity, flow) is per brush.
-    pub(crate) fn map_pressure(&self, raw: f32) -> f32 {
-        raw.clamp(0.0, 1.0).powf(self.workspace.pressure_curve)
+    pub(crate) fn map_pressure(&mut self, raw: f32) -> f32 {
+        let raw = raw.clamp(0.0, 1.0);
+        let mapped = self.workspace.pressure_curve.eval(raw).clamp(0.0, 1.0);
+        self.workspace.last_pressure = Some((raw, mapped));
+        mapped
     }
 
     /// Switch brush/eraser when the pen's eraser end starts or stops being used.

@@ -40,6 +40,8 @@ pub struct BrushState {
     pub recent_colors: Vec<Color32>,
     /// Colours kept on purpose (the palette), in order.
     pub swatches: Vec<Color32>,
+    /// The swatches changed: saved at the end of the frame.
+    pub swatches_dirty: bool,
     /// Brush and eraser keep separate settings: `brush` is the active tool's,
     /// this is the other one's, swapped in when the tool changes.
     pub stashed_brush: Brush,
@@ -86,6 +88,7 @@ impl BrushState {
             secondary_color: Color32::WHITE,
             recent_colors: Vec::new(),
             swatches: vec![Color32::BLACK, Color32::WHITE],
+            swatches_dirty: false,
             stashed_brush: eraser_brush,
             eraser_active: false,
             active_preset: None,
@@ -356,9 +359,13 @@ pub struct WorkspaceState {
     /// Let a single finger paint; when off, one finger pans and only a
     /// stylus paints.
     pub finger_painting: bool,
-    /// Exponent applied to pen pressure (<1 soft, >1 firm). What pressure
-    /// drives (size, opacity, flow) is set per brush.
-    pub pressure_curve: f32,
+    /// How the pen's raw pressure maps to the pressure every brush sees (a
+    /// soft or firm pen, a heavy or light hand). What pressure drives (size,
+    /// opacity, flow) is set per brush, with its own curves on top.
+    pub pressure_curve: crate::brush_engine::hardness::SoftnessCurve,
+    /// The pen's last raw pressure and what the curve made of it, for the
+    /// live readout in Settings.
+    pub last_pressure: Option<(f32, f32)>,
     pub show_left_panel: bool,
     pub show_right_panel: bool,
     /// Panel visibility last frame, to tell which one was just opened.
@@ -424,7 +431,13 @@ impl WorkspaceState {
                 || std::env::var_os("RUSTY_PAINTER_TOUCH").is_some(),
             applied_touch_mode: None,
             finger_painting: true,
-            pressure_curve: 1.0,
+            pressure_curve: crate::brush_engine::hardness::SoftnessCurve {
+                points: vec![
+                    crate::brush_engine::hardness::CurvePoint::new(0.0, 0.0),
+                    crate::brush_engine::hardness::CurvePoint::new(1.0, 1.0),
+                ],
+            },
+            last_pressure: None,
             show_left_panel: true,
             show_right_panel: true,
             panels_last_frame: (true, true),

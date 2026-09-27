@@ -242,10 +242,12 @@ fn brush_settings_contents(
         size_changed |= slider_row(
             ui,
             "Size",
-            egui::Slider::new(&mut brush.brush_options.diameter, 1.0..=3000.0)
-                .logarithmic(true)
-                .max_decimals(0)
-                .suffix(" px"),
+            crate::ui::widgets::reset(&mut brush.brush_options.diameter, |v| {
+                egui::Slider::new(v, 1.0..=3000.0)
+                    .logarithmic(true)
+                    .max_decimals(0)
+                    .suffix(" px")
+            }),
         )
         .changed();
 
@@ -266,9 +268,11 @@ fn brush_settings_contents(
                     mask_changed |= slider_row(
                         ui,
                         "Hardness",
-                        egui::Slider::new(&mut brush.brush_options.hardness, 0.0..=100.0)
-                            .max_decimals(0)
-                            .suffix("%"),
+                        crate::ui::widgets::reset(&mut brush.brush_options.hardness, |v| {
+                            egui::Slider::new(v, 0.0..=100.0)
+                                .max_decimals(0)
+                                .suffix("%")
+                        }),
                     )
                     .changed();
                 }
@@ -283,35 +287,38 @@ fn brush_settings_contents(
         changed |= slider_row(
             ui,
             "Opacity",
-            percent_of_unit(egui::Slider::new(
-                &mut brush.brush_options.opacity,
-                0.0..=1.0,
-            )),
+            crate::ui::widgets::reset(&mut brush.brush_options.opacity, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
         )
         .changed();
         changed |= slider_row(
             ui,
             "Flow",
-            egui::Slider::new(&mut brush.brush_options.flow, 0.0..=100.0)
-                .max_decimals(0)
-                .suffix("%"),
+            crate::ui::widgets::reset(&mut brush.brush_options.flow, |v| {
+                egui::Slider::new(v, 0.0..=100.0)
+                    .max_decimals(0)
+                    .suffix("%")
+            }),
         )
         .changed();
         changed |= slider_row(
             ui,
             "Spacing",
-            egui::Slider::new(&mut brush.brush_options.spacing, 1.0..=200.0)
-                .max_decimals(0)
-                .suffix("%"),
+            crate::ui::widgets::reset(&mut brush.brush_options.spacing, |v| {
+                egui::Slider::new(v, 1.0..=200.0)
+                    .max_decimals(0)
+                    .suffix("%")
+            }),
         )
         .on_hover_text("Distance between dabs, as a percentage of the brush size.")
         .changed();
         changed |= slider_row(
             ui,
             "Jitter",
-            egui::Slider::new(&mut brush.jitter, 0.0..=50.0)
-                .max_decimals(0)
-                .suffix("%"),
+            crate::ui::widgets::reset(&mut brush.jitter, |v| {
+                egui::Slider::new(v, 0.0..=50.0).max_decimals(0).suffix("%")
+            }),
         )
         .on_hover_text("Random dab offset, as a percentage of the brush size.")
         .changed();
@@ -355,7 +362,9 @@ fn brush_settings_contents(
             mask_changed |= slider_row(
                 ui,
                 "Min size",
-                percent_of_unit(egui::Slider::new(&mut o.pressure_min_size, 0.0..=1.0)),
+                crate::ui::widgets::reset(&mut o.pressure_min_size, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                }),
             )
             .on_hover_text("Brush size at the lightest pressure, as a share of the full size.")
             .changed();
@@ -364,14 +373,18 @@ fn brush_settings_contents(
         changed |= slider_row(
             ui,
             "Tilt → size",
-            percent_of_unit(egui::Slider::new(&mut tilt.size, -1.0..=1.0)),
+            crate::ui::widgets::reset(&mut tilt.size, |v| {
+                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+            }),
         )
         .on_hover_text("Above 0: the stroke widens as the pen leans, like a pencil on its side.")
         .changed();
         changed |= slider_row(
             ui,
             "Tilt → opacity",
-            percent_of_unit(egui::Slider::new(&mut tilt.opacity, -1.0..=1.0)),
+            crate::ui::widgets::reset(&mut tilt.opacity, |v| {
+                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+            }),
         )
         .on_hover_text("Above 0: stronger as the pen leans; below 0: lighter.")
         .changed();
@@ -407,7 +420,9 @@ fn brush_settings_contents(
                 changed |= slider_row(
                     ui,
                     "Strength",
-                    percent_of_unit(egui::Slider::new(&mut brush.stabilizer, 0.0..=1.0)),
+                    crate::ui::widgets::reset(&mut brush.stabilizer, |v| {
+                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    }),
                 )
                 .changed();
             }
@@ -415,13 +430,17 @@ fn brush_settings_contents(
                 changed |= slider_row(
                     ui,
                     "Mass",
-                    egui::Slider::new(&mut brush.stabilizer_mass, 0.01..=1.0),
+                    crate::ui::widgets::reset(&mut brush.stabilizer_mass, |v| {
+                        egui::Slider::new(v, 0.01..=1.0)
+                    }),
                 )
                 .changed();
                 changed |= slider_row(
                     ui,
                     "Drag",
-                    egui::Slider::new(&mut brush.stabilizer_drag, 0.0..=1.0),
+                    crate::ui::widgets::reset(&mut brush.stabilizer_drag, |v| {
+                        egui::Slider::new(v, 0.0..=1.0)
+                    }),
                 )
                 .changed();
             }
@@ -463,25 +482,31 @@ fn dynamics_sections(
         changed |= slider_row(
             ui,
             "Angle",
-            egui::Slider::new(&mut t.angle, -180.0..=180.0)
-                .max_decimals(0)
-                .suffix("°"),
+            crate::ui::widgets::reset(&mut t.angle, |v| {
+                egui::Slider::new(v, -180.0..=180.0)
+                    .max_decimals(0)
+                    .suffix("°")
+            }),
         )
         .on_hover_text("Turn of the tip; with Follow stroke, relative to the stroke's direction.")
         .changed();
         changed |= slider_row(
             ui,
             "Squash",
-            percent_of_unit(egui::Slider::new(&mut t.ratio, 0.05..=1.0)),
+            crate::ui::widgets::reset(&mut t.ratio, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.05..=1.0))
+            }),
         )
         .on_hover_text("Tip height as a share of its width: low values make a flat nib.")
         .changed();
         changed |= slider_row(
             ui,
             "Random angle",
-            egui::Slider::new(&mut t.random_angle, 0.0..=180.0)
-                .max_decimals(0)
-                .suffix("°"),
+            crate::ui::widgets::reset(&mut t.random_angle, |v| {
+                egui::Slider::new(v, 0.0..=180.0)
+                    .max_decimals(0)
+                    .suffix("°")
+            }),
         )
         .on_hover_text("Each dab turns randomly by up to this much either way.")
         .changed();
@@ -499,18 +524,22 @@ fn dynamics_sections(
         changed |= slider_row(
             ui,
             "Taper in",
-            egui::Slider::new(&mut t.start, 0.0..=400.0)
-                .max_decimals(0)
-                .suffix(" px"),
+            crate::ui::widgets::reset(&mut t.start, |v| {
+                egui::Slider::new(v, 0.0..=400.0)
+                    .max_decimals(0)
+                    .suffix(" px")
+            }),
         )
         .on_hover_text("Length over which the stroke's start grows to full.")
         .changed();
         changed |= slider_row(
             ui,
             "Taper out",
-            egui::Slider::new(&mut t.end, 0.0..=400.0)
-                .max_decimals(0)
-                .suffix(" px"),
+            crate::ui::widgets::reset(&mut t.end, |v| {
+                egui::Slider::new(v, 0.0..=400.0)
+                    .max_decimals(0)
+                    .suffix(" px")
+            }),
         )
         .on_hover_text(
             "Length over which the stroke's end thins out when the pen lifts. The line \
@@ -525,7 +554,9 @@ fn dynamics_sections(
             changed |= slider_row(
                 ui,
                 "Tip",
-                percent_of_unit(egui::Slider::new(&mut t.min, 0.0..=1.0)),
+                crate::ui::widgets::reset(&mut t.min, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                }),
             )
             .on_hover_text("Size / opacity at the very end of a taper.")
             .changed();
@@ -534,14 +565,18 @@ fn dynamics_sections(
         changed |= slider_row(
             ui,
             "Speed → size",
-            percent_of_unit(egui::Slider::new(&mut s.size, -1.0..=1.0)),
+            crate::ui::widgets::reset(&mut s.size, |v| {
+                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+            }),
         )
         .on_hover_text("Below 0: fast strokes get thinner (ink). Above 0: thicker.")
         .changed();
         changed |= slider_row(
             ui,
             "Speed → opacity",
-            percent_of_unit(egui::Slider::new(&mut s.opacity, -1.0..=1.0)),
+            crate::ui::widgets::reset(&mut s.opacity, |v| {
+                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+            }),
         )
         .on_hover_text("Below 0: fast strokes get lighter (dry brush). Above 0: stronger.")
         .changed();
@@ -551,43 +586,57 @@ fn dynamics_sections(
         changed |= slider_row(
             ui,
             "Size",
-            percent_of_unit(egui::Slider::new(&mut r.size, 0.0..=1.0)),
+            crate::ui::widgets::reset(&mut r.size, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
         )
         .on_hover_text("Each dab is randomly smaller, by up to this much.")
         .changed();
         changed |= slider_row(
             ui,
             "Opacity",
-            percent_of_unit(egui::Slider::new(&mut r.opacity, 0.0..=1.0)),
+            crate::ui::widgets::reset(&mut r.opacity, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
         )
         .on_hover_text("Each dab is randomly lighter, by up to this much.")
         .changed();
         changed |= slider_row(
             ui,
             "Hue",
-            egui::Slider::new(&mut r.hue, 0.0..=180.0)
-                .max_decimals(0)
-                .suffix("°"),
+            crate::ui::widgets::reset(&mut r.hue, |v| {
+                egui::Slider::new(v, 0.0..=180.0)
+                    .max_decimals(0)
+                    .suffix("°")
+            }),
         )
         .on_hover_text("Each dab's hue turns randomly by up to this much either way.")
         .changed();
         changed |= slider_row(
             ui,
             "Saturation",
-            percent_of_unit(egui::Slider::new(&mut r.saturation, 0.0..=1.0)),
+            crate::ui::widgets::reset(&mut r.saturation, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
         )
         .changed();
         changed |= slider_row(
             ui,
             "Value",
-            percent_of_unit(egui::Slider::new(&mut r.value, 0.0..=1.0)),
+            crate::ui::widgets::reset(&mut r.value, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
         )
         .on_hover_text("Each dab is randomly lighter or darker by up to this much.")
         .changed();
         let mut count = r.count.max(1);
-        if slider_row(ui, "Dabs per step", egui::Slider::new(&mut count, 1..=16))
-            .on_hover_text("Several dabs at each step, spread by Jitter: spray, foliage, grain.")
-            .changed()
+        if slider_row(
+            ui,
+            "Dabs per step",
+            crate::ui::widgets::reset(&mut count, |v| egui::Slider::new(v, 1..=16)),
+        )
+        .on_hover_text("Several dabs at each step, spread by Jitter: spray, foliage, grain.")
+        .changed()
         {
             r.count = count;
             changed = true;
@@ -644,16 +693,20 @@ fn texture_section(
         changed |= slider_row(
             ui,
             "Strength",
-            percent_of_unit(egui::Slider::new(&mut t.strength, 0.0..=1.0)),
+            crate::ui::widgets::reset(&mut t.strength, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
         )
         .changed();
         changed |= slider_row(
             ui,
             "Scale",
-            egui::Slider::new(&mut t.scale, 0.25..=4.0)
-                .logarithmic(true)
-                .max_decimals(2)
-                .suffix("×"),
+            crate::ui::widgets::reset(&mut t.scale, |v| {
+                egui::Slider::new(v, 0.25..=4.0)
+                    .logarithmic(true)
+                    .max_decimals(2)
+                    .suffix("×")
+            }),
         )
         .changed();
         changed |= ui.checkbox(&mut t.invert, "Invert").changed();

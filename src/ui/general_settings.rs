@@ -13,13 +13,10 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
         "Use masked brush (fast)",
     );
     let threads_changed = ui
-        .add(
-            egui::Slider::new(
-                &mut app.workspace.thread_count,
-                1..=app.workspace.max_threads,
-            )
-            .text("Brush threads"),
-        )
+        .add(crate::ui::widgets::reset(
+            &mut app.workspace.thread_count,
+            |v| egui::Slider::new(v, 1..=app.workspace.max_threads).text("Brush threads"),
+        ))
         .changed();
     if threads_changed
         && let Ok(pool) = ThreadPoolBuilder::new()
@@ -87,14 +84,40 @@ fn touch_and_pen_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
     );
     ui.checkbox(&mut ws.finger_painting, "Paint with one finger")
         .on_hover_text("When off, only a stylus paints and one finger pans the canvas.");
-    ui.add(
-        egui::Slider::new(&mut ws.pressure_curve, 0.3..=3.0)
-            .logarithmic(true)
-            .text("Pen pressure curve"),
-    )
-    .on_hover_text(
-        "Below 1: light touches count more (soft pen). Above 1: needs more force (firm pen).",
+    ui.label("Pen pressure").on_hover_text(
+        "How hard you press (across) to the pressure every brush gets (up). \
+             Bowed up (Firm): light touches count more. Bowed down (Soft): needs \
+             more force.",
     );
+    crate::ui::curve_editor::curve_editor_with(
+        ui,
+        &mut ws.pressure_curve,
+        &crate::ui::curve_editor::PRESSURE_PRESETS,
+    );
+    // Live readout: press with the pen to see what it sends.
+    let (raw, mapped) = ws.last_pressure.unwrap_or((0.0, 0.0));
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Pen")
+                .small()
+                .color(crate::ui::style::TEXT_DIM),
+        );
+        ui.add(
+            egui::ProgressBar::new(raw)
+                .desired_width(90.0)
+                .text(format!("{:.0}%", raw * 100.0)),
+        );
+        ui.label(
+            egui::RichText::new("→ brush")
+                .small()
+                .color(crate::ui::style::TEXT_DIM),
+        );
+        ui.add(
+            egui::ProgressBar::new(mapped)
+                .desired_width(90.0)
+                .text(format!("{:.0}%", mapped * 100.0)),
+        );
+    });
     ui.label(
         egui::RichText::new(
             "What pressure controls (size, opacity, flow) is set per brush in the Brush panel.",

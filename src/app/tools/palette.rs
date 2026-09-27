@@ -85,6 +85,7 @@ impl PainterApp {
                 swatches.push(c);
             }
         }
+        self.save_swatches();
     }
 
     /// Recolour the selected layer (inside the selection) to `palette`.

@@ -1,6 +1,7 @@
 /target
 /brushes
 /gradients.json
+/swatches.json
 perf.data
 perf.data.old
 flamegraph.svg

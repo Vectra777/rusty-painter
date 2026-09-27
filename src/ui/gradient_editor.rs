@@ -288,16 +288,17 @@ fn selected_stop(
     ui.horizontal(|ui| {
         ui.label(RichText::new("Opacity").color(TEXT_DIM));
         changed |= ui
-            .add(percent_of_unit(egui::Slider::new(
-                &mut stop.opacity,
-                0.0..=1.0,
-            )))
+            .add(crate::ui::widgets::reset(&mut stop.opacity, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }))
             .changed();
     });
     ui.horizontal(|ui| {
         ui.label(RichText::new("Position").color(TEXT_DIM));
         let moved = ui
-            .add(percent_of_unit(egui::Slider::new(&mut stop.pos, 0.0..=1.0)))
+            .add(crate::ui::widgets::reset(&mut stop.pos, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }))
             .changed();
         changed |= moved;
     });

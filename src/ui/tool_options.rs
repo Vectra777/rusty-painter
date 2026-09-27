@@ -65,7 +65,7 @@ fn tool_title(ui: &mut egui::Ui, title: &str) {
     vdivider(ui);
 }
 
-fn bar_slider(ui: &mut egui::Ui, label: &str, width: f32, slider: egui::Slider) -> bool {
+fn bar_slider(ui: &mut egui::Ui, label: &str, width: f32, slider: impl egui::Widget) -> bool {
     ui.label(RichText::new(label).color(TEXT_DIM));
     let scale = if metrics(ui.ctx()).touch { 1.4 } else { 1.0 };
     ui.spacing_mut().slider_width = width * scale;
@@ -82,29 +82,32 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
         ui,
         "Size",
         140.0,
-        egui::Slider::new(&mut brush.brush_options.diameter, 1.0..=3000.0)
-            .logarithmic(true)
-            .max_decimals(0)
-            .suffix(" px"),
+        crate::ui::widgets::reset(&mut brush.brush_options.diameter, |v| {
+            egui::Slider::new(v, 1.0..=3000.0)
+                .logarithmic(true)
+                .max_decimals(0)
+                .suffix(" px")
+        }),
     );
     ui.add_space(6.0);
     changed |= bar_slider(
         ui,
         "Opacity",
         100.0,
-        percent_of_unit(egui::Slider::new(
-            &mut brush.brush_options.opacity,
-            0.0..=1.0,
-        )),
+        crate::ui::widgets::reset(&mut brush.brush_options.opacity, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        }),
     );
     ui.add_space(6.0);
     changed |= bar_slider(
         ui,
         "Flow",
         100.0,
-        egui::Slider::new(&mut brush.brush_options.flow, 0.0..=100.0)
-            .max_decimals(0)
-            .suffix("%"),
+        crate::ui::widgets::reset(&mut brush.brush_options.flow, |v| {
+            egui::Slider::new(v, 0.0..=100.0)
+                .max_decimals(0)
+                .suffix("%")
+        }),
     );
 
     if size_changed {
@@ -130,28 +133,34 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
         ui,
         "Size",
         140.0,
-        egui::Slider::new(&mut o.diameter, 1.0..=3000.0)
-            .logarithmic(true)
-            .max_decimals(0)
-            .suffix(" px"),
+        crate::ui::widgets::reset(&mut o.diameter, |v| {
+            egui::Slider::new(v, 1.0..=3000.0)
+                .logarithmic(true)
+                .max_decimals(0)
+                .suffix(" px")
+        }),
     );
     ui.add_space(6.0);
     bar_slider(
         ui,
         "Strength",
         100.0,
-        egui::Slider::new(&mut o.flow, 0.0..=100.0)
-            .max_decimals(0)
-            .suffix("%"),
+        crate::ui::widgets::reset(&mut o.flow, |v| {
+            egui::Slider::new(v, 0.0..=100.0)
+                .max_decimals(0)
+                .suffix("%")
+        }),
     );
     ui.add_space(6.0);
     bar_slider(
         ui,
         "Hardness",
         100.0,
-        egui::Slider::new(&mut o.hardness, 0.0..=100.0)
-            .max_decimals(0)
-            .suffix("%"),
+        crate::ui::widgets::reset(&mut o.hardness, |v| {
+            egui::Slider::new(v, 0.0..=100.0)
+                .max_decimals(0)
+                .suffix("%")
+        }),
     );
     vdivider(ui);
     let b = &mut app.workspace.blend;
@@ -160,21 +169,27 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
             ui,
             "Length",
             100.0,
-            percent_of_unit(egui::Slider::new(&mut b.smudge_length, 0.0..=1.0)),
+            crate::ui::widgets::reset(&mut b.smudge_length, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
         );
         ui.add_space(6.0);
         bar_slider(
             ui,
             "Colour",
             80.0,
-            percent_of_unit(egui::Slider::new(&mut b.color_rate, 0.0..=1.0)),
+            crate::ui::widgets::reset(&mut b.color_rate, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
         );
     } else {
         bar_slider(
             ui,
             "Blur size",
             100.0,
-            percent_of_unit(egui::Slider::new(&mut b.blur_size, 0.05..=1.0)),
+            crate::ui::widgets::reset(&mut b.blur_size, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.05..=1.0))
+            }),
         );
     }
     if size_changed {
@@ -244,7 +259,9 @@ pub(crate) fn gradient_options(
         ui,
         "Opacity",
         90.0,
-        percent_of_unit(egui::Slider::new(&mut s.opacity, 0.0..=1.0)),
+        crate::ui::widgets::reset(&mut s.opacity, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        }),
     );
     changed |= ui
         .checkbox(&mut s.dither, "Dither")
@@ -565,11 +582,17 @@ pub(crate) fn fill_options(app: &mut PainterApp, ui: &mut egui::Ui, compact: boo
             vdivider(ui);
             ui.label(RichText::new(label).color(TEXT_DIM))
                 .on_hover_text(tip);
-            ui.add(egui::Slider::new(value, range).show_value(true))
-                .on_hover_text(tip);
+            ui.add(crate::ui::widgets::reset(&mut *value, |v| {
+                egui::Slider::new(v, range).show_value(true)
+            }))
+            .on_hover_text(tip);
         } else {
-            crate::ui::widgets::slider_row(ui, label, egui::Slider::new(value, range))
-                .on_hover_text(tip);
+            crate::ui::widgets::slider_row(
+                ui,
+                label,
+                crate::ui::widgets::reset(&mut *value, |v| egui::Slider::new(v, range)),
+            )
+            .on_hover_text(tip);
         }
     }
     if compact {
@@ -609,17 +632,16 @@ pub(crate) fn liquify_options(
             });
         vdivider(ui);
         ui.label(RichText::new("Size").color(TEXT_DIM));
-        ui.add(
-            egui::Slider::new(&mut s.radius, 4.0..=600.0)
+        ui.add(crate::ui::widgets::reset(&mut s.radius, |v| {
+            egui::Slider::new(v, 4.0..=600.0)
                 .logarithmic(true)
                 .max_decimals(0)
-                .suffix(" px"),
-        );
+                .suffix(" px")
+        }));
         ui.label(RichText::new("Strength").color(TEXT_DIM));
-        ui.add(percent_of_unit(egui::Slider::new(
-            &mut s.strength,
-            0.02..=1.0,
-        )));
+        ui.add(crate::ui::widgets::reset(&mut s.strength, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.02..=1.0))
+        }));
         vdivider(ui);
     } else {
         ui.horizontal_wrapped(|ui| {
@@ -630,15 +652,19 @@ pub(crate) fn liquify_options(
         crate::ui::widgets::slider_row(
             ui,
             "Size",
-            egui::Slider::new(&mut s.radius, 4.0..=600.0)
-                .logarithmic(true)
-                .max_decimals(0)
-                .suffix(" px"),
+            crate::ui::widgets::reset(&mut s.radius, |v| {
+                egui::Slider::new(v, 4.0..=600.0)
+                    .logarithmic(true)
+                    .max_decimals(0)
+                    .suffix(" px")
+            }),
         );
         crate::ui::widgets::slider_row(
             ui,
             "Strength",
-            percent_of_unit(egui::Slider::new(&mut s.strength, 0.02..=1.0)),
+            crate::ui::widgets::reset(&mut s.strength, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.02..=1.0))
+            }),
         );
     }
     let active = app.layer_state.liquify.is_some();

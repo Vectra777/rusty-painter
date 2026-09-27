@@ -49,7 +49,7 @@ fn has_settings(kind: SelectionType) -> bool {
 }
 
 /// A labelled slider: inline in the options bar, a property row in panels.
-fn setting(ui: &mut egui::Ui, compact: bool, label: &str, slider: egui::Slider) -> bool {
+fn setting(ui: &mut egui::Ui, compact: bool, label: &str, slider: impl egui::Widget) -> bool {
     if compact {
         ui.label(RichText::new(label).color(TEXT_DIM));
         ui.add(slider).changed()
@@ -101,16 +101,20 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 ui,
                 compact,
                 "Size",
-                egui::Slider::new(&mut sel.brush_radius, 1.0..=500.0)
-                    .logarithmic(true)
-                    .max_decimals(0)
-                    .suffix(" px"),
+                crate::ui::widgets::reset(&mut sel.brush_radius, |v| {
+                    egui::Slider::new(v, 1.0..=500.0)
+                        .logarithmic(true)
+                        .max_decimals(0)
+                        .suffix(" px")
+                }),
             );
             setting(
                 ui,
                 compact,
                 "Hardness",
-                egui::Slider::new(&mut sel.brush_hardness, 0.0..=1.0),
+                crate::ui::widgets::reset(&mut sel.brush_hardness, |v| {
+                    egui::Slider::new(v, 0.0..=1.0)
+                }),
             );
             smoothing(app, ui, compact);
             ui.checkbox(&mut app.workspace.patch.smart_patch, "Smart patch")
@@ -126,7 +130,7 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 ui,
                 compact,
                 "Tolerance",
-                egui::Slider::new(&mut w.tolerance, 0..=255),
+                crate::ui::widgets::reset(&mut w.tolerance, |v| egui::Slider::new(v, 0..=255)),
             );
             rerun |= ui
                 .checkbox(&mut w.contiguous, "Contiguous")
@@ -137,13 +141,17 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 ui,
                 compact,
                 "Close gaps",
-                egui::Slider::new(&mut w.gap, 0..=40).suffix(" px"),
+                crate::ui::widgets::reset(&mut w.gap, |v| {
+                    egui::Slider::new(v, 0..=40).suffix(" px")
+                }),
             );
             rerun |= setting(
                 ui,
                 compact,
                 "Grow",
-                egui::Slider::new(&mut w.grow, -40..=40).suffix(" px"),
+                crate::ui::widgets::reset(&mut w.grow, |v| {
+                    egui::Slider::new(v, -40..=40).suffix(" px")
+                }),
             );
             rerun |= ui.checkbox(&mut w.antialias, "Smooth edge").changed();
         }
@@ -153,13 +161,17 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 ui,
                 compact,
                 "Tolerance",
-                egui::Slider::new(&mut c.tolerance, 0.0..=60.0).max_decimals(1),
+                crate::ui::widgets::reset(&mut c.tolerance, |v| {
+                    egui::Slider::new(v, 0.0..=60.0).max_decimals(1)
+                }),
             );
             rerun |= setting(
                 ui,
                 compact,
                 "Softness",
-                egui::Slider::new(&mut c.softness, 0.0..=40.0).max_decimals(1),
+                crate::ui::widgets::reset(&mut c.softness, |v| {
+                    egui::Slider::new(v, 0.0..=40.0).max_decimals(1)
+                }),
             );
             rerun |= source_picker(ui, &mut c.source, compact);
         }
@@ -202,7 +214,9 @@ fn smoothing(app: &mut PainterApp, ui: &mut egui::Ui, compact: bool) {
         ui,
         compact,
         "Smoothing",
-        egui::Slider::new(&mut app.selection_manager.smoothing, 0.0..=1.0),
+        crate::ui::widgets::reset(&mut app.selection_manager.smoothing, |v| {
+            egui::Slider::new(v, 0.0..=1.0)
+        }),
     );
 }
 

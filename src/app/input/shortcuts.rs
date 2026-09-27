@@ -28,9 +28,26 @@ impl PainterApp {
         let bs = &mut self.brush_state;
         if bs.eraser_active != eraser {
             let color = bs.brush.brush_options.color;
+            // The stabiliser is the artist's: it stays with the hand, not
+            // with the brush or eraser.
+            let b = &bs.brush;
+            let stabilizer = (
+                b.stabilizer_algorithm,
+                b.stabilizer,
+                b.stabilizer_mass,
+                b.stabilizer_drag,
+            );
             std::mem::swap(&mut bs.brush, &mut bs.stashed_brush);
             std::mem::swap(&mut bs.active_preset, &mut bs.stashed_preset);
             bs.brush.brush_options.color = color;
+            let b = &mut bs.brush;
+            (
+                b.stabilizer_algorithm,
+                b.stabilizer,
+                b.stabilizer_mass,
+                b.stabilizer_drag,
+            ) = stabilizer;
+            crate::ui::widgets::new_slider_defaults();
             bs.eraser_active = eraser;
             bs.brush.is_changed = true;
             bs.brush_preview.dirty = true;
@@ -77,6 +94,8 @@ impl PainterApp {
         bs.brush.is_changed = true;
         bs.brush_preview.dirty = true;
         bs.active_preset = Some(preset.name);
+        // Double-clicking a slider now returns it to this preset's value.
+        crate::ui::widgets::new_slider_defaults();
     }
 
     pub(crate) fn set_select_tool(&mut self, kind: SelectionType) {

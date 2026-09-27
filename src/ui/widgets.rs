@@ -203,7 +203,7 @@ fn row_label(ui: &mut egui::Ui, label: &str) {
 
 /// `label  [slider ----------] [value]` on one line, the slider filling
 /// the space left by the label and value box.
-pub(crate) fn slider_row(ui: &mut egui::Ui, label: &str, slider: egui::Slider) -> Response {
+pub(crate) fn slider_row(ui: &mut egui::Ui, label: &str, slider: impl egui::Widget) -> Response {
     ui.horizontal(|ui| {
         row_label(ui, label);
         let spacing = ui.spacing().item_spacing.x;
@@ -345,5 +345,150 @@ pub(crate) fn flyout(
             .is_some_and(|p| !response.rect.contains(p) && !anchor.contains(p));
     if *open && clicked_outside {
         *open = false;
+    }
+}
+
+/// Sliders reset to this "default" epoch's first value; bumped when a preset
+/// is chosen, so their defaults become the preset's.
+static DEFAULTS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The brush changed wholesale (a preset): sliders take their current
+/// values as the ones a double-click returns to.
+pub(crate) fn new_slider_defaults() {
+    DEFAULTS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A slider that a double-click (or double-tap) resets: to its value when
+/// first shown since the last [`new_slider_defaults`] (the preset's, for
+/// brush settings; the default, for tools).
+pub(crate) fn reset<'a, T, F>(value: &'a mut T, build: F) -> Reset<'a, T, F>
+where
+    T: egui::emath::Numeric + Send + Sync + 'static,
+    F: for<'b> FnOnce(&'b mut T) -> egui::Slider<'b>,
+{
+    Reset { value, build }
+}
+
+pub(crate) struct Reset<'a, T, F> {
+    value: &'a mut T,
+    build: F,
+}
+
+impl<T, F> egui::Widget for Reset<'_, T, F>
+where
+    T: egui::emath::Numeric + Send + Sync + 'static,
+    F: for<'b> FnOnce(&'b mut T) -> egui::Slider<'b>,
+{
+    fn ui(self, ui: &mut egui::Ui) -> Response {
+        let before = *self.value;
+        let mut response = ui.add((self.build)(self.value));
+        let epoch = DEFAULTS_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+        let key = response.id.with(("slider_default", epoch));
+        let default = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(key, || before));
+        // The second click of a double-click is also a press the slider acts
+        // on (it jumps to the pointer): the reset holds until the button is
+        // let go.
+        let holding = response.id.with("slider_resetting");
+        // A slider senses drags, not clicks, so its response never reports
+        // a double-click: read it off the pointer (a finger's double-tap
+        // comes the same way).
+        let double = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| response.rect.contains(p))
+        });
+        if double {
+            ui.data_mut(|d| d.insert_temp(holding, true));
+        }
+        if ui.data(|d| d.get_temp::<bool>(holding)).unwrap_or(false) {
+            if *self.value != default {
+                *self.value = default;
+                response.mark_changed();
+            }
+            if !ui.input(|i| i.pointer.any_down()) {
+                ui.data_mut(|d| d.remove::<bool>(holding));
+            }
+        }
+        response
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+
+    /// Runs one frame showing a slider on `value`; `events` are this frame's
+    /// input. Returns the slider's rect.
+    fn frame(ctx: &egui::Context, value: &mut f32, events: Vec<egui::Event>, t: f64) -> Rect {
+        let mut rect = Rect::NOTHING;
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                time: Some(t),
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    rect = ui
+                        .add(reset(value, |v| egui::Slider::new(v, 0.0..=1.0)))
+                        .rect;
+                });
+            },
+        );
+        rect
+    }
+
+    fn click(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// Two clicks in quick succession, each press and release in its own
+    /// frame as real input comes.
+    fn double_click(ctx: &egui::Context, value: &mut f32, at: egui::Pos2, t: f64) {
+        frame(ctx, value, vec![egui::Event::PointerMoved(at)], t);
+        for (i, pressed) in [true, false, true, false].into_iter().enumerate() {
+            frame(
+                ctx,
+                value,
+                vec![click(at, pressed)],
+                t + 0.05 * (i + 1) as f64,
+            );
+        }
+        frame(ctx, value, vec![], t + 0.3);
+    }
+
+    #[test]
+    fn a_double_click_returns_a_slider_to_its_default() {
+        let ctx = egui::Context::default();
+        let mut value = 0.5;
+        let rect = frame(&ctx, &mut value, vec![], 0.0);
+        value = 0.8;
+        frame(&ctx, &mut value, vec![], 0.1);
+        // On the track, away from where a click would move it much.
+        let at = rect.left_center() + egui::vec2(20.0, 0.0);
+        double_click(&ctx, &mut value, at, 1.0);
+        assert!((value - 0.5).abs() < 1e-6, "reset to 0.5, got {value}");
+
+        // New defaults (a preset chosen): the current value becomes it.
+        value = 0.3;
+        new_slider_defaults();
+        frame(&ctx, &mut value, vec![], 2.0);
+        value = 0.9;
+        double_click(&ctx, &mut value, at, 3.0);
+        assert!(
+            (value - 0.3).abs() < 1e-6,
+            "reset to the new default, got {value}"
+        );
     }
 }
