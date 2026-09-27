@@ -1,7 +1,12 @@
-//! On-canvas guides with draggable handles: the mirror-painting axes.
+//! On-canvas guides with draggable handles: the mirror-painting axes and the
+//! ruler.
 //!
 //! A press on a handle is the guide's, not the active tool's: it moves the
-//! symmetry centre or turns its axes.
+//! symmetry centre, turns its axes, or moves the ruler.
+//!
+//! The ruler straightens freehand strokes: a stroke starting near it runs
+//! along it, one starting elsewhere runs parallel to it (like sliding a pen
+//! along a real ruler).
 
 use super::PainterApp;
 use super::render_helper::ScreenMap;
@@ -23,13 +28,45 @@ const GUIDE_COLOR: Color32 = Color32::from_rgb(90, 200, 250);
 enum Drag {
     SymmetryCenter { grab: Vec2 },
     SymmetryAngle,
+    RulerEnd(usize),
+    RulerMove { last: Vec2 },
 }
+
+/// A straight ruler between two points (canvas coordinates).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ruler {
+    pub a: Vec2,
+    pub b: Vec2,
+    /// Shown, and straightening strokes.
+    pub enabled: bool,
+    /// Strokes starting away from the ruler run parallel to it (otherwise
+    /// they're left alone).
+    pub parallel: bool,
+}
+
+impl Default for Ruler {
+    fn default() -> Self {
+        Self {
+            a: Vec2::ZERO,
+            b: Vec2::ZERO,
+            enabled: false,
+            parallel: true,
+        }
+    }
+}
+
+/// Within this distance of the ruler (screen points), a stroke runs along
+/// the ruler itself.
+const RULER_SNAP: f32 = 28.0;
 
 #[derive(Default)]
 pub struct GuideState {
     drag: Option<Drag>,
     /// Show the mirror axes (and their handles) while mirror painting.
     pub hide_symmetry: bool,
+    pub ruler: Ruler,
+    /// The line the current stroke follows: a point on it and its direction.
+    ruler_line: Option<(Vec2, Vec2)>,
 }
 
 impl PainterApp {
@@ -59,12 +96,68 @@ impl PainterApp {
         }
     }
 
+    /// Show or hide the ruler, placing it across the middle of the canvas
+    /// the first time.
+    pub(crate) fn set_ruler(&mut self, enabled: bool) {
+        let ruler = &mut self.workspace.guides.ruler;
+        ruler.enabled = enabled;
+        if enabled && ruler.a == ruler.b {
+            let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
+            ruler.a = Vec2::new(w * 0.2, h * 0.5);
+            ruler.b = Vec2::new(w * 0.8, h * 0.5);
+        }
+    }
+
+    /// The start of a freehand stroke at `pos`: pick the line it follows
+    /// (the ruler, or a parallel one) and put `pos` on it.
+    pub(crate) fn ruler_begin_stroke(&mut self, pos: Vec2) -> Vec2 {
+        let zoom = self.viewport.zoom.max(0.01);
+        let guides = &mut self.workspace.guides;
+        guides.ruler_line = None;
+        let ruler = guides.ruler;
+        let d = ruler.b - ruler.a;
+        if !ruler.enabled || d.length() < 1e-3 {
+            return pos;
+        }
+        let dir = d.normalized();
+        let off = pos - ruler.a;
+        let distance = (off.x * dir.y - off.y * dir.x).abs();
+        guides.ruler_line = if distance * zoom <= RULER_SNAP {
+            Some((ruler.a, dir))
+        } else if ruler.parallel {
+            Some((pos, dir))
+        } else {
+            None
+        };
+        self.ruler_snap(pos)
+    }
+
+    /// `pos` put on the line the current stroke follows, if any.
+    pub(crate) fn ruler_snap(&self, pos: Vec2) -> Vec2 {
+        match self.workspace.guides.ruler_line {
+            Some((origin, dir)) => origin + dir * (pos - origin).dot(dir),
+            None => pos,
+        }
+    }
+
     /// Which handle (if any) is under canvas point `pos`.
     fn guide_hit(&self, pos: Vec2) -> Option<Drag> {
+        let hit = HANDLE_HIT / self.viewport.zoom.max(0.01);
+        let ruler = self.workspace.guides.ruler;
+        if ruler.enabled {
+            for (i, end) in [ruler.a, ruler.b].into_iter().enumerate() {
+                if (pos - end).length() <= hit {
+                    return Some(Drag::RulerEnd(i));
+                }
+            }
+            // The middle handle moves it (strokes start along its body).
+            if (pos - (ruler.a + ruler.b) * 0.5).length() <= hit {
+                return Some(Drag::RulerMove { last: pos });
+            }
+        }
         if !self.symmetry_guides_shown() {
             return None;
         }
-        let hit = HANDLE_HIT / self.viewport.zoom.max(0.01);
         let center = self.workspace.symmetry.center;
         if (pos - center).length() <= hit {
             return Some(Drag::SymmetryCenter { grab: pos - center });
@@ -107,6 +200,28 @@ impl PainterApp {
                     c.y = mid.y;
                 }
                 self.workspace.symmetry.center = c;
+            }
+            Drag::RulerEnd(i) => {
+                let ruler = &mut self.workspace.guides.ruler;
+                let other = if i == 0 { ruler.b } else { ruler.a };
+                let end = if snap {
+                    let d = pos - other;
+                    let a = (d.y.atan2(d.x) / ANGLE_STEP).round() * ANGLE_STEP;
+                    other + Vec2::new(a.cos(), a.sin()) * d.length()
+                } else {
+                    pos
+                };
+                if i == 0 {
+                    ruler.a = end;
+                } else {
+                    ruler.b = end;
+                }
+            }
+            Drag::RulerMove { last } => {
+                let ruler = &mut self.workspace.guides.ruler;
+                ruler.a += pos - last;
+                ruler.b += pos - last;
+                self.workspace.guides.drag = Some(Drag::RulerMove { last: pos });
             }
             Drag::SymmetryAngle => {
                 let s = &mut self.workspace.symmetry;
@@ -161,6 +276,7 @@ fn clip_to_canvas(p: Vec2, dir: Vec2, t0: f32, t1: f32, w: f32, h: f32) -> Optio
 
 /// Draw the guides over the canvas.
 pub(crate) fn draw_guides(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
+    draw_ruler(app, painter, map);
     if !app.symmetry_guides_shown() {
         return;
     }
@@ -196,6 +312,62 @@ pub(crate) fn draw_guides(app: &PainterApp, painter: &egui::Painter, map: &Scree
     );
     handle(center, true);
     handle(rotate, false);
+}
+
+fn draw_ruler(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
+    let ruler = app.workspace.guides.ruler;
+    if !ruler.enabled || (ruler.b - ruler.a).length() < 1e-3 {
+        return;
+    }
+    let (w, h) = (app.canvas.width() as f32, app.canvas.height() as f32);
+    let dir = (ruler.b - ruler.a).normalized();
+    // Where strokes are straightened: the whole line, faintly.
+    let far = w.hypot(h) * 2.0;
+    if let Some((a, b)) = clip_to_canvas(ruler.a, dir, -far, far, w, h) {
+        painter.line_segment(
+            [map.to_screen(a), map.to_screen(b)],
+            Stroke::new(1.0_f32, GUIDE_COLOR.gamma_multiply(0.35)),
+        );
+    }
+    let (a, b) = (map.to_screen(ruler.a), map.to_screen(ruler.b));
+    // The ruler's body: a band with tick marks.
+    let normal = {
+        let d = (b - a).normalized();
+        egui::vec2(-d.y, d.x)
+    };
+    let band = 6.0;
+    let quad = vec![
+        a + normal * band,
+        b + normal * band,
+        b - normal * band,
+        a - normal * band,
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        quad,
+        GUIDE_COLOR.gamma_multiply(0.18),
+        Stroke::new(1.0_f32, Color32::from_black_alpha(120)),
+    ));
+    painter.line_segment([a, b], Stroke::new(3.0_f32, Color32::from_black_alpha(140)));
+    painter.line_segment([a, b], Stroke::new(1.0_f32, GUIDE_COLOR));
+    let length = (b - a).length();
+    let ticks = (length / 16.0).floor() as usize;
+    for i in 1..ticks {
+        let t = i as f32 / ticks as f32;
+        let p = a + (b - a) * t;
+        let size = if i % 4 == 0 { band } else { band * 0.5 };
+        painter.line_segment([p, p + normal * size], Stroke::new(1.0_f32, GUIDE_COLOR));
+    }
+    for end in [a, b] {
+        painter.circle_filled(end, HANDLE_RADIUS + 1.5, Color32::BLACK);
+        painter.circle_filled(end, HANDLE_RADIUS, GUIDE_COLOR);
+    }
+    // The move handle: a square in the middle.
+    let mid = egui::Rect::from_center_size(
+        a + (b - a) * 0.5,
+        egui::vec2(HANDLE_RADIUS, HANDLE_RADIUS) * 2.0,
+    );
+    painter.rect_filled(mid.expand(1.5), 0.0, Color32::BLACK);
+    painter.rect_filled(mid, 0.0, GUIDE_COLOR);
 }
 
 #[cfg(test)]
@@ -291,5 +463,35 @@ mod tests {
         );
         app.apply_history(false);
         assert!(!painted(&app, 20, 20) && !painted(&app, 108, 20));
+    }
+
+    #[test]
+    fn the_ruler_straightens_strokes() {
+        use crate::canvas::Canvas;
+        let mut app =
+            crate::project::tests::test_app_pub(Canvas::new(200, 200, Color32::WHITE, 64));
+        app.set_ruler(true);
+        app.workspace.guides.ruler.a = Vec2::new(20.0, 100.0);
+        app.workspace.guides.ruler.b = Vec2::new(180.0, 100.0);
+        // Starting next to the ruler: along the ruler itself.
+        let start = app.ruler_begin_stroke(Vec2::new(50.0, 110.0));
+        assert_eq!(start, Vec2::new(50.0, 100.0));
+        assert_eq!(
+            app.ruler_snap(Vec2::new(120.0, 90.0)),
+            Vec2::new(120.0, 100.0)
+        );
+        // Starting away from it: parallel to it, through the start.
+        app.ruler_begin_stroke(Vec2::new(50.0, 40.0));
+        assert_eq!(
+            app.ruler_snap(Vec2::new(120.0, 60.0)),
+            Vec2::new(120.0, 40.0)
+        );
+        // Not parallel: left alone.
+        app.workspace.guides.ruler.parallel = false;
+        app.ruler_begin_stroke(Vec2::new(50.0, 40.0));
+        assert_eq!(
+            app.ruler_snap(Vec2::new(120.0, 60.0)),
+            Vec2::new(120.0, 60.0)
+        );
     }
 }

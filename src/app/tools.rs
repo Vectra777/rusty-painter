@@ -16,4 +16,6 @@ pub enum Tool {
     Smudge,
     /// Soften the paint under the brush, with the brush's settings.
     Blur,
+    /// Line, rectangle, ellipse or polygon, drawn with the brush.
+    Shape(crate::app::shape_tool::ShapeKind),
 }

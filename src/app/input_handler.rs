@@ -114,6 +114,16 @@ fn handle_pen_drag(
                 app.pick_color(pos);
             }
         }
+        Tool::Shape(_) => app.shape_move(raw, shape_mods(ctx)),
+    }
+}
+
+/// Shift keeps a shape's proportions, Alt draws it from the centre.
+fn shape_mods(ctx: &egui::Context) -> crate::app::shape_tool::ShapeMods {
+    let m = ctx.input(|i| i.modifiers);
+    crate::app::shape_tool::ShapeMods {
+        constrain: m.shift,
+        from_center: m.alt,
     }
 }
 
@@ -251,7 +261,7 @@ fn handle_primary_press(
 ) {
     // The brush may start a stroke off the canvas (on the canvas panel);
     // other tools need a press on the canvas itself.
-    let brush = matches!(app.active_tool, Tool::Brush);
+    let brush = matches!(app.active_tool, Tool::Brush | Tool::Shape(_));
     if app.viewport.is_panning || !over {
         return;
     }
@@ -265,7 +275,7 @@ fn handle_primary_press(
 
     // Alt+click samples a color with any painting tool.
     let alt_held = response.ctx.input(|i| i.modifiers.alt);
-    if alt_held && brush {
+    if alt_held && matches!(app.active_tool, Tool::Brush) {
         if canvas_pos.1 {
             app.pick_color(canvas_pos.0);
         }
@@ -291,6 +301,7 @@ fn handle_primary_press(
         Tool::Fill => app.fill_press(canvas_pos.0),
         Tool::Liquify => app.liquify_press(canvas_pos.0),
         Tool::Smudge | Tool::Blur => app.blend_press(raw, pressure),
+        Tool::Shape(kind) => app.shape_press(kind, raw),
     }
 }
 
@@ -309,6 +320,7 @@ fn handle_primary_release(app: &mut PainterApp) {
         Tool::Liquify => app.liquify_release(),
         Tool::Smudge | Tool::Blur => app.blend_release(),
         Tool::Transform(_) => transform::transform_release(app),
+        Tool::Shape(_) => app.shape_release(),
     }
 }
 
@@ -317,6 +329,18 @@ fn handle_keyboard(app: &mut PainterApp, key: egui::Key, pressed: bool) {
         transform::commit_floating_layer(app);
         app.liquify_commit();
         app.magnetic_close();
+        // Enter finishes a polygon being built, then applies the shape.
+        if app
+            .workspace
+            .shapes
+            .session
+            .as_ref()
+            .is_some_and(|s| s.building)
+        {
+            app.shape_finish_polygon();
+        } else {
+            app.shape_commit();
+        }
     }
 }
 
@@ -357,6 +381,11 @@ fn handle_pointer_move(
         if matches!(app.active_tool, Tool::Brush) {
             let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
             handle_brush_move(app, response, raw);
+        } else if matches!(app.active_tool, Tool::Shape(_)) {
+            // Shapes may reach off the canvas, like strokes.
+            let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+            app.shape_move(raw, shape_mods(ctx));
+            ctx.request_repaint();
         } else {
             handle_tool_move(app, ctx, response, clamped, is_inside);
         }
@@ -401,6 +430,7 @@ fn handle_tool_move(
             transform::transform_drag(app, pos, keep_aspect);
             ctx.request_repaint();
         }
+        Tool::Shape(_) => {}
     }
 }
 

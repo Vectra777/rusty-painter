@@ -40,6 +40,11 @@ pub(crate) enum Icon {
     Magnetic,
     Symmetry,
     Flip,
+    ShapeLine,
+    ShapeRect,
+    ShapeEllipse,
+    ShapePolygon,
+    Ruler,
 }
 
 /// Maps 16×16 icon-grid coordinates into a square centered in `rect`.
@@ -157,6 +162,48 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
             let tail = quad_bezier(g.p(4.5, 9.0), g.p(3.0, 12.0), g.p(6.0, 14.0), 12);
             painter.add(Shape::line(tail, thin));
             painter.circle_filled(g.p(6.0, 14.0), g.w(1.2), color);
+        }
+        Icon::ShapeLine => {
+            line((2.5, 13.5), (13.5, 2.5), 1.6);
+            painter.circle_filled(g.p(2.5, 13.5), g.w(1.4), color);
+            painter.circle_filled(g.p(13.5, 2.5), g.w(1.4), color);
+        }
+        Icon::ShapeRect => {
+            painter.rect_stroke(
+                Rect::from_min_max(g.p(2.0, 3.5), g.p(14.0, 12.5)),
+                0.0,
+                Stroke::new(g.w(1.5), color),
+            );
+        }
+        Icon::ShapeEllipse => {
+            let pts = ellipse_points(g.p(8.0, 8.0), g.w(6.5), g.w(5.0), 48);
+            painter.add(Shape::line(pts, Stroke::new(g.w(1.5), color)));
+        }
+        Icon::ShapePolygon => {
+            let pts = vec![
+                g.p(8.0, 1.5),
+                g.p(14.5, 6.5),
+                g.p(12.0, 14.0),
+                g.p(4.0, 14.0),
+                g.p(1.5, 6.5),
+            ];
+            painter.add(Shape::closed_line(pts, Stroke::new(g.w(1.5), color)));
+        }
+        Icon::Ruler => {
+            // A slanted ruler with ticks.
+            let quad = vec![
+                g.p(1.5, 11.0),
+                g.p(11.0, 1.5),
+                g.p(14.5, 5.0),
+                g.p(5.0, 14.5),
+            ];
+            painter.add(Shape::closed_line(quad, thin));
+            for i in 1..6 {
+                let t = i as f32 / 6.0;
+                let (x, y) = (1.5 + 9.5 * t, 11.0 - 9.5 * t);
+                let len = if i % 2 == 0 { 2.4 } else { 1.4 };
+                line((x, y), (x + len, y + len), 1.0);
+            }
         }
         Icon::Symmetry => {
             // A dashed axis with a stroke and its mirror image.

@@ -261,3 +261,49 @@ pub(crate) fn vdivider(ui: &mut egui::Ui) {
         Stroke::new(1.0_f32, BORDER_LIGHT),
     );
 }
+
+/// A menu sliding out from a toolbar button (`anchor`) while `*open`;
+/// scrolls when taller than the screen, and closes on a click elsewhere.
+pub(crate) fn flyout(
+    ctx: &egui::Context,
+    id: &str,
+    open: &mut bool,
+    anchor: Rect,
+    width: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let t = ctx.animate_bool_with_time(egui::Id::new((id, "anim")), *open, 0.12);
+    if t <= 0.0 {
+        return;
+    }
+    let x = anchor.right() + 4.0 - (1.0 - t) * width;
+    let screen = ctx.screen_rect();
+    // Low buttons open upward enough to fit.
+    let top = anchor
+        .top()
+        .min((screen.bottom() - 260.0).max(screen.top()));
+    let response = egui::Area::new(egui::Id::new(id))
+        .fixed_pos(egui::pos2(x, top))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_opacity(t);
+            egui::Frame::none()
+                .fill(BG_PANEL)
+                .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.set_width(width - 16.0);
+                    egui::ScrollArea::vertical()
+                        .max_height((screen.bottom() - top - 24.0).max(120.0))
+                        .show(ui, add_contents);
+                });
+        })
+        .response;
+    let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
+        && ctx
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| !response.rect.contains(p) && !anchor.contains(p));
+    if *open && clicked_outside {
+        *open = false;
+    }
+}

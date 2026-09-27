@@ -222,6 +222,18 @@ impl eframe::App for PainterApp {
                 {
                     super::transform::commit_floating_layer(self);
                 }
+                // Leaving the Shape tool applies the shape; a double-click
+                // finishes a polygon.
+                if !matches!(self.active_tool, super::tools::Tool::Shape(_)) {
+                    self.shape_commit();
+                } else if view.response.hovered()
+                    && ctx.input(|i| {
+                        i.pointer
+                            .button_double_clicked(egui::PointerButton::Primary)
+                    })
+                {
+                    self.shape_finish_polygon();
+                }
                 // A magnetic outline in progress belongs to its tool; a
                 // double-click closes it.
                 let magnetic = matches!(
@@ -296,6 +308,7 @@ impl eframe::App for PainterApp {
                 }
                 super::select_tool::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
                 super::guides::draw_guides(self, ui.painter(), &map);
+                super::shape_tool::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
                 // A hand over the guide handles: they can be dragged.
                 if let Some(canvas) = self.viewport.cursor_canvas
                     && (self.guides_dragging() || self.over_guide_handle(canvas))

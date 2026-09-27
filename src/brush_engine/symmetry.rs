@@ -153,6 +153,11 @@ impl Symmetry {
         (out, orients)
     }
 
+    /// `p` mapped by one of the copies.
+    pub fn map(&self, copy: &Copy2, p: Vec2) -> Vec2 {
+        self.center + copy.apply(p - self.center)
+    }
+
     /// Where one dab at `p` is repeated: `(copy number, position)`, the
     /// original being copy 0. Copy numbers stay the same along a stroke
     /// (copies merged at an axis are skipped, not renumbered), for tools

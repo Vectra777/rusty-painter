@@ -184,6 +184,18 @@ fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui, compact: bool) {
     {
         app.viewport.flip_x = !flipped;
     }
+    let ruler = app.workspace.guides.ruler.enabled;
+    if icon_button(
+        ui,
+        Icon::Ruler,
+        size,
+        ruler,
+        "Ruler (R): strokes run along it, or parallel to it",
+    )
+    .clicked()
+    {
+        app.set_ruler(!ruler);
+    }
     if !compact && small_button(ui, "1:1", "Actual pixels (Ctrl+1)") {
         app.set_zoom_from_center(1.0);
     }

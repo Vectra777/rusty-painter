@@ -278,6 +278,8 @@ pub struct ModalState {
     pub select_menu_open: bool,
     /// The mirror painting menu is open.
     pub symmetry_menu_open: bool,
+    /// The shape menu is open.
+    pub shape_menu_open: bool,
     /// Touch mode: the File / Edit / View / Help sheet is slid up.
     pub menu_sheet_open: bool,
     /// Section the menu sheet shows when it is too narrow for all of them.
@@ -293,6 +295,7 @@ impl ModalState {
             show_shortcuts: false,
             select_menu_open: false,
             symmetry_menu_open: false,
+            shape_menu_open: false,
             menu_sheet_open: false,
             menu_sheet_section: Default::default(),
         }
@@ -375,6 +378,8 @@ pub struct WorkspaceState {
     pub symmetry: crate::brush_engine::symmetry::Symmetry,
     /// On-canvas guides and their handles.
     pub guides: crate::app::guides::GuideState,
+    /// Shape tool settings and the shape being edited.
+    pub shapes: crate::app::shape_tool::ShapeToolState,
     /// Android's image picker (the photo library).
     pub gallery: crate::ui::image_gallery::GalleryState,
 }
@@ -413,6 +418,7 @@ impl WorkspaceState {
             select: Default::default(),
             symmetry: Default::default(),
             guides: Default::default(),
+            shapes: Default::default(),
         }
     }
 }

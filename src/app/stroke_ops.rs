@@ -24,6 +24,7 @@ impl PainterApp {
             .selection_manager
             .has_selection()
             .then(|| SelectionManager::with_shape(self.selection_manager.current_shape.clone()));
+        let pos = self.ruler_begin_stroke(pos);
         let mut symmetry = self.workspace.symmetry;
         // Pixel-perfect dabs sit on pixel centres; so do their mirror
         // images when the axes do (on a half-pixel grid).
@@ -45,6 +46,7 @@ impl PainterApp {
     }
 
     pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
+        let pos = self.ruler_snap(pos);
         if self.brush_state.is_drawing {
             self.stroke_worker.sample(pos, pressure);
         }

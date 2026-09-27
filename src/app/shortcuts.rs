@@ -139,6 +139,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let lasso = pressed(none, Key::L);
     let wand = pressed(none, Key::Q);
     let flip = pressed(none, Key::H);
+    let shapes = pressed(none, Key::U);
+    let ruler = pressed(none, Key::R);
     let remove_anchor = pressed(none, Key::Backspace);
     let transform = pressed(none, Key::V) || pressed(none, Key::T);
     let eyedropper = pressed(none, Key::I);
@@ -205,6 +207,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             crate::app::transform::cancel_floating_layer(app);
         } else if app.layer_state.liquify.is_some() {
             app.liquify_cancel();
+        } else if app.workspace.shapes.session.is_some() {
+            app.shape_cancel();
         } else if app.selection_manager.is_dragging || app.workspace.select.magnetic.is_some() {
             app.select_cancel();
         } else {
@@ -220,6 +224,14 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     if remove_anchor && app.workspace.select.magnetic.is_some() {
         app.magnetic_undo_anchor();
+        repaint = true;
+    } else if remove_anchor && app.workspace.shapes.session.is_some() {
+        app.shape_undo_point();
+        repaint = true;
+    }
+    if ruler {
+        let on = !app.workspace.guides.ruler.enabled;
+        app.set_ruler(on);
         repaint = true;
     }
     if select_all {
@@ -286,6 +298,14 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
                 _ => SelectionType::Lasso,
             };
             app.set_select_tool(kind);
+        }
+        if shapes {
+            // Pressing U again goes to the next shape.
+            let kind = match app.active_tool {
+                Tool::Shape(kind) => kind.next(),
+                _ => app.workspace.shapes.last_kind,
+            };
+            app.set_shape_tool(kind);
         }
         if wand {
             // Pressing Q again toggles magic wand / colour range.

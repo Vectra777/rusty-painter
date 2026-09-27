@@ -139,6 +139,7 @@ impl PainterApp {
     }
 
     pub(crate) fn blend_press(&mut self, pos: Vec2, pressure: f32) {
+        let pos = self.ruler_begin_stroke(pos);
         let idx = self.canvas.active_layer_idx;
         let Some(layer) = self.canvas.layers.get(idx) else {
             return;
@@ -165,6 +166,7 @@ impl PainterApp {
     }
 
     pub(crate) fn blend_drag(&mut self, pos: Vec2, pressure: f32) {
+        let pos = self.ruler_snap(pos);
         let diameter = self.blend_diameter(pressure);
         let spacing = (diameter * self.brush_state.brush.brush_options.spacing / 100.0).max(1.0);
         let Some(stroke) = self.brush_state.blend_stroke.as_mut() else {

@@ -17,7 +17,7 @@ const MARGIN_Y: f32 = 6.0;
 
 /// Button side that fits every tool (and the colors) in `height`, if any.
 fn fitting_button_size(height: f32, touch: bool, preferred: f32) -> Option<f32> {
-    let buttons = if touch { 14.0 } else { 12.0 };
+    let buttons = if touch { 15.0 } else { 13.0 };
     let separators = if touch { 4.0 } else { 3.0 };
     // The color pair is about 1.22 buttons tall.
     let fixed = 2.0 * MARGIN_Y
@@ -76,6 +76,9 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
     if let Some(anchor) = anchors.symmetry {
         crate::ui::symmetry_menu::show(app, ctx, anchor);
     }
+    if let Some(anchor) = anchors.shape {
+        crate::ui::shape_menu::show(app, ctx, anchor);
+    }
 }
 
 /// Buttons that menus slide out from.
@@ -83,6 +86,7 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
 struct Anchors {
     select: Option<egui::Rect>,
     symmetry: Option<egui::Rect>,
+    shape: Option<egui::Rect>,
 }
 
 /// The tool buttons, top to bottom.
@@ -172,6 +176,25 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     ) {
         app.active_tool = Tool::Fill;
     }
+    // One Shape button: it shows the current shape; clicking it picks the
+    // tool, and again opens the menu of shapes.
+    let shape_active = matches!(app.active_tool, Tool::Shape(_));
+    let kind = app.workspace.shapes.last_kind;
+    let response = icon_button(
+        ui,
+        crate::ui::shape_menu::icon_for(kind),
+        size,
+        shape_active,
+        "Shapes (U): line, rectangle, ellipse, polygon — click again for options",
+    );
+    if response.clicked() {
+        if shape_active {
+            app.modal_state.shape_menu_open = !app.modal_state.shape_menu_open;
+        } else {
+            app.set_shape_tool(kind);
+        }
+    }
+    let shape_anchor = Some(response.rect);
     let liquify_active = matches!(app.active_tool, Tool::Liquify);
     if tool_button(ui, app, Icon::Liquify, liquify_active, "Liquify (W)") {
         app.active_tool = Tool::Liquify;
@@ -219,6 +242,7 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     Anchors {
         select: select_anchor,
         symmetry: symmetry_anchor,
+        shape: shape_anchor,
     }
 }
 

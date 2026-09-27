@@ -197,6 +197,7 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ui.menu_button("Mirror Painting", |ui| {
         crate::ui::symmetry_menu::symmetry_controls(app, ui);
     });
+    crate::ui::shape_menu::ruler_controls(app, ui);
     ui.separator();
     if menu_item(ui, "Show / Hide Panels", Some("Tab".into())) {
         toggle_all_panels(app);
@@ -356,6 +357,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Fill => fill_options(app, ui, true),
         Tool::Liquify => liquify_options(app, ui, true),
         Tool::Smudge | Tool::Blur => blend_options(app, ui),
+        Tool::Shape(kind) => shape_options(app, ui, kind),
     };
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // Hints are optional: drop them rather than overlap the options.
@@ -435,6 +437,8 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     if changed {
         app.brush_state.brush_preview.dirty = true;
     }
+    vdivider(ui);
+    crate::ui::shape_menu::ruler_controls(app, ui);
 
     "[ ] size  ·  Alt+click pick color  ·  Space drag to pan"
 }
@@ -496,6 +500,29 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
         "Drag to smear the paint  ·  Length: how far colour is carried  ·  uses the brush's spacing & pressure"
     } else {
         "Paint over edges to soften them  ·  uses the brush's spacing & pressure"
+    }
+}
+
+fn shape_options(
+    app: &mut PainterApp,
+    ui: &mut egui::Ui,
+    kind: crate::app::shape_tool::ShapeKind,
+) -> &'static str {
+    tool_title(ui, "Shape");
+    crate::ui::shape_menu::shape_controls(app, ui, true);
+    vdivider(ui);
+    crate::ui::shape_menu::shape_actions(app, ui);
+    use crate::app::shape_tool::ShapeKind;
+    match kind {
+        ShapeKind::Polygon => {
+            "Click to add points  ·  click the first point or double-click to finish  ·  Backspace removes a point  ·  Enter apply"
+        }
+        ShapeKind::Line => {
+            "Drag to draw  ·  Shift: 15° steps  ·  drag the ends to adjust  ·  Enter apply  ·  Esc cancel"
+        }
+        _ => {
+            "Drag to draw  ·  Shift: square / circle  ·  Alt: from the centre  ·  Enter apply  ·  Esc cancel"
+        }
     }
 }
 

@@ -13,6 +13,7 @@ pub(crate) mod image_gallery;
 pub(crate) mod layers;
 pub(crate) mod palette_window;
 pub(crate) mod select_menu;
+pub(crate) mod shape_menu;
 pub(crate) mod status_bar;
 pub(crate) mod style;
 pub(crate) mod symmetry_menu;

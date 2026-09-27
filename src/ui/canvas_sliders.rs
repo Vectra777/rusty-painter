@@ -161,6 +161,11 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
                 app.deselect();
             }
         }),
+        Tool::Shape(_) => context_bar(ctx, area, |ui| {
+            crate::ui::shape_menu::shape_controls(app, ui, true);
+            crate::ui::widgets::vdivider(ui);
+            crate::ui::shape_menu::shape_actions(app, ui);
+        }),
         _ => {}
     }
 }
@@ -191,6 +196,7 @@ pub fn canvas_sliders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
     let covered = m.menu_sheet_open
         || m.select_menu_open
         || m.symmetry_menu_open
+        || m.shape_menu_open
         || m.show_new_canvas_modal
         || m.show_general_settings
         || m.show_shortcuts
