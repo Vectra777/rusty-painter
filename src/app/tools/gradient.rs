@@ -3,7 +3,7 @@
 //! adjustable (drag its ends) until it's applied: Enter, a press away from
 //! it, or another tool. Esc cancels.
 
-use super::PainterApp;
+use crate::app::PainterApp;
 use crate::canvas::gradient::{Gradient, GradientRepeat, GradientShape, Ramp};
 use crate::canvas::history::UndoAction;
 use crate::canvas::storage::LayerKind;

@@ -1,7 +1,7 @@
-use super::{
+use crate::app::{
     PainterApp,
-    painter_state::{LayerState, RenderCache},
-    state::{CanvasTile, ColorModel, TILE_SIZE},
+    document::{CanvasTile, ColorModel, TILE_SIZE},
+    state::{LayerState, RenderCache},
 };
 use crate::canvas::Canvas;
 use crate::canvas::history::{History, LayerHistoryOp, RemovedLayer, UndoAction};
@@ -36,7 +36,7 @@ impl PainterApp {
         &mut self,
         tx: usize,
         ty: usize,
-        rect: crate::app::state::TileRect,
+        rect: crate::app::document::TileRect,
     ) {
         if let Some(tile) = self.tile_mut(tx, ty) {
             tile.mark_rect(rect);
@@ -177,7 +177,7 @@ impl PainterApp {
     pub(crate) fn convert_color_for_model(color: Color32, model: ColorModel) -> Color32 {
         match model {
             ColorModel::Rgba => color,
-            ColorModel::Grayscale => super::state::to_grayscale(color),
+            ColorModel::Grayscale => crate::app::document::to_grayscale(color),
         }
     }
 
@@ -609,7 +609,7 @@ mod document_tests {
     fn new_canvas(app: &mut crate::PainterApp) {
         app.modal_state.new_canvas.width = 128.0;
         app.modal_state.new_canvas.height = 128.0;
-        app.modal_state.new_canvas.unit = crate::app::state::CanvasUnit::Pixels;
+        app.modal_state.new_canvas.unit = crate::app::document::CanvasUnit::Pixels;
         app.apply_new_canvas();
     }
 
@@ -621,7 +621,7 @@ mod document_tests {
         app.gradient_drag(Vec2::new(200.0, 0.0), false);
         app.gradient_update();
         app.shape_press(
-            crate::app::shape_tool::ShapeKind::Line,
+            crate::app::tools::shape::ShapeKind::Line,
             Vec2::new(10.0, 10.0),
         );
         new_canvas(&mut app);
@@ -642,14 +642,14 @@ mod document_tests {
         app.canvas_mut()
             .set_layer_tile_data(1, 0, 0, vec![Color32::RED; 64 * 64]);
         app.active_tool = crate::app::tools::Tool::Transform(Default::default());
-        crate::app::transform::transform_press(&mut app, Vec2::new(10.0, 10.0));
-        crate::app::transform::transform_release(&mut app);
+        crate::app::tools::transform::transform_press(&mut app, Vec2::new(10.0, 10.0));
+        crate::app::tools::transform::transform_release(&mut app);
         assert!(app.layer_state.floating_layer_idx.is_some());
         new_canvas(&mut app);
         assert!(app.layer_state.floating_layer_idx.is_none());
         assert_eq!(app.canvas.layers.len(), 2, "no stray floating layer");
         // Leaving the tool (which applies a float) is harmless now.
-        crate::app::transform::commit_floating_layer(&mut app);
+        crate::app::tools::transform::commit_floating_layer(&mut app);
         assert_eq!(app.canvas.layers.len(), 2);
     }
 

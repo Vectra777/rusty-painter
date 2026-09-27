@@ -1,3 +1,17 @@
+//! The tools, one module each: what a press, drag and release do, their
+//! settings, and any session that lasts between presses (a shape being
+//! edited, a gradient being placed). `Tool` is the active tool.
+pub(crate) mod blend;
+pub(crate) mod fill;
+pub(crate) mod gradient;
+pub(crate) mod guides;
+pub(crate) mod liquify;
+pub(crate) mod palette;
+pub(crate) mod patch;
+pub(crate) mod select;
+pub(crate) mod shape;
+pub(crate) mod transform;
+
 use crate::selection::SelectionType;
 use crate::selection::transform::TransformInfo;
 
@@ -17,7 +31,7 @@ pub enum Tool {
     /// Soften the paint under the brush, with the brush's settings.
     Blur,
     /// Line, rectangle, ellipse or polygon, drawn with the brush.
-    Shape(crate::app::shape_tool::ShapeKind),
+    Shape(crate::app::tools::shape::ShapeKind),
     /// Linear, radial, reflected or angle gradient.
     Gradient,
 }

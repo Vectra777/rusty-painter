@@ -1,4 +1,4 @@
-use super::PainterApp;
+use crate::app::PainterApp;
 use crate::brush_engine::brush_options::BlendMode;
 use crate::brush_engine::stroke_worker::StrokeSetup;
 use crate::canvas::Canvas;

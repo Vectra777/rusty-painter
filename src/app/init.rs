@@ -1,11 +1,11 @@
-use super::{
+use crate::app::{
     PainterApp,
-    gpu_canvas::GpuCanvas,
+    document::{ColorModel, NewCanvasSettings, TILE_SIZE},
     layout,
-    painter_state::{
+    state::{
         BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState, WorkspaceState,
     },
-    state::{ColorModel, NewCanvasSettings, TILE_SIZE},
+    view::gpu_canvas::GpuCanvas,
 };
 use crate::brush_engine::{
     brush::{Brush, BrushPreset},
@@ -58,7 +58,7 @@ impl PainterApp {
             modal_state,
             export_state,
             workspace,
-            active_tool: super::tools::Tool::Brush,
+            active_tool: crate::app::tools::Tool::Brush,
             selection_manager: crate::selection::SelectionManager::new(),
             dock_left,
             dock_right,

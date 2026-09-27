@@ -1,13 +1,13 @@
-use super::{
+use crate::app::input;
+use crate::app::stroke_ops::exclusive;
+use crate::app::view::render;
+use crate::app::{
     layout,
     layout::ToolTab,
-    painter_state::{
+    state::{
         BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState, WorkspaceState,
     },
 };
-use crate::app::input_handler;
-use crate::app::render_helper;
-use crate::app::stroke_ops::exclusive;
 use crate::brush_engine::stroke_worker::StrokeWorker;
 use crate::{canvas::Canvas, tablet::TabletInput, ui};
 use eframe::egui;
@@ -37,7 +37,7 @@ pub struct PainterApp {
     pub(crate) workspace: WorkspaceState,
 
     // Standalone components
-    pub(crate) active_tool: super::tools::Tool,
+    pub(crate) active_tool: crate::app::tools::Tool,
     pub(crate) selection_manager: SelectionManager,
     pub(crate) dock_left: DockState<ToolTab>,
     pub(crate) dock_right: DockState<ToolTab>,
@@ -77,7 +77,7 @@ impl eframe::App for PainterApp {
         self.selection_manager.canvas_size = [self.canvas.width(), self.canvas.height()];
         self.keep_guides_on_canvas();
 
-        if super::shortcuts::handle_shortcuts(self, ctx) {
+        if crate::app::input::shortcuts::handle_shortcuts(self, ctx) {
             needs_repaint = true;
         }
 
@@ -170,7 +170,7 @@ impl eframe::App for PainterApp {
                     }
                 }
 
-                let view = render_helper::draw_canvas(self, ui);
+                let view = render::draw_canvas(self, ui);
                 self.viewport.canvas_area = Some(view.response.rect);
                 // Pen samples first: touch handling needs to know the pen is
                 // down to tell a resting palm from a finger.
@@ -181,7 +181,7 @@ impl eframe::App for PainterApp {
                     .unwrap_or_default();
                 self.viewport.touch.pen_active =
                     !pen.is_empty() || self.tablet.as_ref().is_some_and(|t| t.pen_active());
-                if super::touch::handle_touch(self, ctx, &view.response) {
+                if crate::app::input::touch::handle_touch(self, ctx, &view.response) {
                     needs_repaint = true;
                 }
                 if !view.response.hovered() {
@@ -189,19 +189,19 @@ impl eframe::App for PainterApp {
                 }
                 let picking = matches!(
                     self.active_tool,
-                    super::tools::Tool::Eyedropper | super::tools::Tool::Fill
-                ) || (matches!(self.active_tool, super::tools::Tool::Brush)
+                    crate::app::tools::Tool::Eyedropper | crate::app::tools::Tool::Fill
+                ) || (matches!(self.active_tool, crate::app::tools::Tool::Brush)
                     && ctx.input(|i| i.modifiers.alt));
                 if picking && view.response.hovered() {
                     ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
                 }
                 // Selection and liquify brushes: show their size under the pointer.
                 let ring = match self.active_tool {
-                    super::tools::Tool::Select(crate::selection::SelectionType::Brush) => {
+                    crate::app::tools::Tool::Select(crate::selection::SelectionType::Brush) => {
                         Some(self.selection_manager.brush_radius)
                     }
-                    super::tools::Tool::Liquify => Some(self.workspace.liquify.radius),
-                    super::tools::Tool::Smudge | super::tools::Tool::Blur => {
+                    crate::app::tools::Tool::Liquify => Some(self.workspace.liquify.radius),
+                    crate::app::tools::Tool::Smudge | crate::app::tools::Tool::Blur => {
                         Some(self.brush_state.brush.brush_options.diameter * 0.5)
                     }
                     _ => None,
@@ -218,17 +218,17 @@ impl eframe::App for PainterApp {
                 self.import_dropped_files(ctx);
                 // Leaving the Transform tool applies the running transform.
                 if self.layer_state.floating_layer_idx.is_some()
-                    && !matches!(self.active_tool, super::tools::Tool::Transform(_))
+                    && !matches!(self.active_tool, crate::app::tools::Tool::Transform(_))
                 {
-                    super::transform::commit_floating_layer(self);
+                    crate::app::tools::transform::commit_floating_layer(self);
                 }
                 // Leaving the Gradient tool keeps the gradient.
-                if !matches!(self.active_tool, super::tools::Tool::Gradient) {
+                if !matches!(self.active_tool, crate::app::tools::Tool::Gradient) {
                     self.gradient_commit();
                 }
                 // Leaving the Shape tool applies the shape; a double-click
                 // finishes a polygon.
-                if !matches!(self.active_tool, super::tools::Tool::Shape(_)) {
+                if !matches!(self.active_tool, crate::app::tools::Tool::Shape(_)) {
                     self.shape_commit();
                 } else if view.response.hovered()
                     && ctx.input(|i| {
@@ -242,7 +242,7 @@ impl eframe::App for PainterApp {
                 // double-click closes it.
                 let magnetic = matches!(
                     self.active_tool,
-                    super::tools::Tool::Select(crate::selection::SelectionType::Magnetic)
+                    crate::app::tools::Tool::Select(crate::selection::SelectionType::Magnetic)
                 );
                 if !magnetic {
                     self.workspace.select.magnetic = None;
@@ -256,7 +256,7 @@ impl eframe::App for PainterApp {
                 }
                 // Likewise for liquify.
                 if self.layer_state.liquify.is_some()
-                    && !matches!(self.active_tool, super::tools::Tool::Liquify)
+                    && !matches!(self.active_tool, crate::app::tools::Tool::Liquify)
                 {
                     self.liquify_commit();
                 }
@@ -265,7 +265,7 @@ impl eframe::App for PainterApp {
                     ctx.set_cursor_icon(egui::CursorIcon::Progress);
                     needs_repaint = true;
                 } else {
-                    input_handler::handle_input(
+                    input::handle_input(
                         self,
                         ctx,
                         &view.response,
@@ -276,8 +276,8 @@ impl eframe::App for PainterApp {
                 }
                 // Overlay first: on a drag's first frame it takes over at once,
                 // so the layer isn't CPU-rendered even once while dragging.
-                super::transform::update_float_overlay(self, ctx);
-                super::transform::flush_transform_preview(self);
+                crate::app::tools::transform::update_float_overlay(self, ctx);
+                crate::app::tools::transform::flush_transform_preview(self);
                 // The gradient repaints at most once a frame while dragged.
                 self.gradient_update();
                 // Twirl / pinch / bloat keep working while the brush is held.
@@ -301,27 +301,29 @@ impl eframe::App for PainterApp {
                 // Composite and paint after input, so this frame's dabs and any
                 // pan/zoom show up in this frame.
                 let (uploads, more_tiles) =
-                    render_helper::update_dirty_textures(self, &view, ui.clip_rect());
+                    render::update_dirty_textures(self, &view, ui.clip_rect());
                 if more_tiles {
                     needs_repaint = true;
                 }
-                super::transform::float_overlay_uploaded(self, more_tiles);
-                render_helper::paint_canvas(self, ui, &view, uploads);
+                crate::app::tools::transform::float_overlay_uploaded(self, more_tiles);
+                render::paint_canvas(self, ui, &view, uploads);
 
                 if self.brush_state.is_drawing {
                     needs_repaint = true;
                 }
 
                 // Overlays follow the canvas exactly (zoom, pan and rotation).
-                let map = render_helper::screen_map(self, &view);
-                if !matches!(self.active_tool, super::tools::Tool::Transform(_)) {
+                let map = render::screen_map(self, &view);
+                if !matches!(self.active_tool, crate::app::tools::Tool::Transform(_)) {
                     self.selection_manager
                         .draw_overlay(ui.painter(), map.zoom(), &|p| map.to_screen(p));
                 }
-                super::select_tool::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
-                super::guides::draw_guides(self, ui.painter(), &map);
-                super::shape_tool::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
-                super::gradient_tool::draw_gradient(self, ui.painter(), &|p| map.to_screen(p));
+                crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
+                crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
+                crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
+                crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| {
+                    map.to_screen(p)
+                });
                 // A hand over the guide handles: they can be dragged.
                 if let Some(canvas) = self.viewport.cursor_canvas
                     && (self.guides_dragging() || self.over_guide_handle(canvas))
@@ -333,10 +335,10 @@ impl eframe::App for PainterApp {
                     });
                 }
 
-                super::transform::draw_float_overlay(self, ui.painter(), &map);
+                crate::app::tools::transform::draw_float_overlay(self, ui.painter(), &map);
                 self.draw_transform_overlay(ui.painter(), &map);
                 // Enclose-and-fill lasso in progress.
-                if matches!(self.active_tool, super::tools::Tool::Fill)
+                if matches!(self.active_tool, crate::app::tools::Tool::Fill)
                     && self.workspace.fill.path.len() > 1
                 {
                     let pts: Vec<egui::Pos2> = self
@@ -405,7 +407,7 @@ impl PainterApp {
             self.liquify_commit();
         }
         if self.layer_state.floating_layer_idx.is_some() {
-            super::transform::commit_floating_layer(self);
+            crate::app::tools::transform::commit_floating_layer(self);
         }
         // Finish any stroke first so it is in the history (and undoable).
         self.release_canvas();
@@ -504,7 +506,7 @@ impl PainterApp {
 
             // Reset transform tool state if active so it recalculates bounds
             // Only reset if the undo action didn't restore a transform state
-            if let super::tools::Tool::Transform(ref mut info) = self.active_tool
+            if let crate::app::tools::Tool::Transform(ref mut info) = self.active_tool
                 && info.bounds.is_none()
                 && info.rotation == 0.0
                 && info.offset.x == 0.0

@@ -1,6 +1,12 @@
+//! Input: this frame's pointer, pen and keyboard events, routed to the
+//! active tool. Touch gestures are in [`touch`], shortcuts in
+//! [`shortcuts`].
+pub(crate) mod shortcuts;
+pub(crate) mod touch;
+
 use crate::PainterApp;
 use crate::app::tools::Tool;
-use crate::app::transform;
+use crate::app::tools::transform;
 use crate::selection::SelectionMode;
 use crate::tablet::{TabletPhase, TabletSample};
 use eframe::egui;
@@ -120,9 +126,9 @@ fn handle_pen_drag(
 }
 
 /// Shift keeps a shape's proportions, Alt draws it from the centre.
-fn shape_mods(ctx: &egui::Context) -> crate::app::shape_tool::ShapeMods {
+fn shape_mods(ctx: &egui::Context) -> crate::app::tools::shape::ShapeMods {
     let m = ctx.input(|i| i.modifiers);
-    crate::app::shape_tool::ShapeMods {
+    crate::app::tools::shape::ShapeMods {
         constrain: m.shift,
         from_center: m.alt,
     }

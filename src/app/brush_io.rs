@@ -1,4 +1,4 @@
-use super::{PainterApp, painter_helpers::BrushData};
+use crate::app::PainterApp;
 use crate::brush_engine::brush_options::PixelBrushShape;
 use eframe::egui::{self, Color32, TextureOptions};
 
@@ -87,5 +87,28 @@ impl PainterApp {
         self.brush_state
             .loaded_brush_tips
             .sort_by(|a, b| a.0.cmp(&b.0));
+    }
+}
+
+/// Brush tip data extracted from image
+struct BrushData {
+    pub width: usize,
+    pub height: usize,
+    pub data: Vec<u8>,
+}
+
+impl BrushData {
+    /// Convert brush data into a loadable brush tip tuple
+    pub fn into_brush_tip(
+        self,
+        texture: egui::TextureHandle,
+    ) -> (String, PixelBrushShape, Option<egui::TextureHandle>) {
+        let name = format!("{}x{}", self.width, self.height);
+        let shape = PixelBrushShape::Custom {
+            width: self.width,
+            height: self.height,
+            data: self.data,
+        };
+        (name, shape, Some(texture))
     }
 }

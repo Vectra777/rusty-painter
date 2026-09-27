@@ -8,8 +8,8 @@
 //! along it, one starting elsewhere runs parallel to it (like sliding a pen
 //! along a real ruler).
 
-use super::PainterApp;
-use super::render_helper::ScreenMap;
+use crate::app::PainterApp;
+use crate::app::view::render::ScreenMap;
 use crate::brush_engine::symmetry::SymmetryMode;
 use eframe::egui::{self, Color32, Pos2, Stroke, Vec2};
 

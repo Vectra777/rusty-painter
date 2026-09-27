@@ -1,5 +1,5 @@
 use crate::ColorModel;
-use crate::app::painter_state::BrushState;
+use crate::app::state::BrushState;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use crate::ui::widgets::{color_swatch, draw_checkerboard, paint_swatch, section};

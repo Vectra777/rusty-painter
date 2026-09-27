@@ -2,7 +2,7 @@ use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
 use crate::{
     PainterApp,
     app::{
-        state::{ColorModel, TILE_SIZE, validate_canvas_size},
+        document::{ColorModel, TILE_SIZE, validate_canvas_size},
         tools::Tool,
     },
     canvas::{
@@ -482,7 +482,7 @@ impl StoredTileSnapshot {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::{app::painter_state::LayerState, brush_engine::brush::Brush};
+    use crate::{app::state::LayerState, brush_engine::brush::Brush};
     use eframe::egui::Vec2;
     use rayon::ThreadPoolBuilder;
 
@@ -495,29 +495,29 @@ pub(crate) mod tests {
         PainterApp {
             canvas: std::sync::Arc::new(canvas),
             stroke_worker: Default::default(),
-            brush_state: crate::app::painter_state::BrushState::new(
+            brush_state: crate::app::state::BrushState::new(
                 Brush::new(1.0, 100.0, Color32::BLACK, 10.0),
                 Vec::new(),
                 ".".into(),
                 true,
             ),
-            viewport: crate::app::painter_state::ViewportState::new(1.0, Vec2::ZERO),
-            render_cache: crate::app::painter_state::RenderCache::new(1, 1),
+            viewport: crate::app::state::ViewportState::new(1.0, Vec2::ZERO),
+            render_cache: crate::app::state::RenderCache::new(1, 1),
             layer_state: {
                 let mut state = LayerState::new(layer_count);
                 state.histories = histories;
                 state
             },
-            modal_state: crate::app::painter_state::ModalState::new(
-                crate::app::state::NewCanvasSettings::from_canvas(&Canvas::new(
+            modal_state: crate::app::state::ModalState::new(
+                crate::app::document::NewCanvasSettings::from_canvas(&Canvas::new(
                     1,
                     1,
                     Color32::WHITE,
                     TILE_SIZE,
                 )),
             ),
-            export_state: crate::app::painter_state::ExportState::new(),
-            workspace: crate::app::painter_state::WorkspaceState::new(
+            export_state: crate::app::state::ExportState::new(),
+            workspace: crate::app::state::WorkspaceState::new(
                 1,
                 1,
                 std::sync::Arc::new(ThreadPoolBuilder::new().num_threads(1).build().unwrap()),
@@ -627,7 +627,7 @@ pub(crate) mod tests {
     #[test]
     fn whole_layer_transform_is_live_and_one_undo_step() {
         use crate::app::tools::Tool;
-        use crate::app::transform;
+        use crate::app::tools::transform;
         let mut app = app_with_red_square();
         let original = layer_pixels(&app, 1);
 
@@ -668,7 +668,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cancelling_a_transform_restores_the_layer() {
-        use crate::app::transform;
+        use crate::app::tools::transform;
         let mut app = app_with_red_square();
         let original = layer_pixels(&app, 1);
         transform::transform_press(&mut app, Vec2::new(96.0, 96.0));
@@ -686,7 +686,7 @@ pub(crate) mod tests {
     #[test]
     fn distort_moves_one_corner() {
         use crate::app::tools::Tool;
-        use crate::app::transform;
+        use crate::app::tools::transform;
         let mut app = app_with_red_square();
         transform::transform_press(&mut app, Vec2::new(96.0, 96.0));
         transform::transform_release(&mut app);
@@ -712,8 +712,8 @@ pub(crate) mod tests {
 
     #[test]
     fn bucket_fill_paints_one_area_and_undoes() {
-        use crate::app::fill_tool::FillSource;
         use crate::app::tools::Tool;
+        use crate::app::tools::fill::FillSource;
         // Layer 1 holds a closed black square outline on transparency.
         let canvas = Canvas::new(128, 128, Color32::WHITE, TILE_SIZE);
         let mut tile = vec![Color32::TRANSPARENT; TILE_SIZE * TILE_SIZE];
@@ -749,7 +749,7 @@ pub(crate) mod tests {
 
     #[test]
     fn alpha_lock_and_selection_limit_a_fill() {
-        use crate::app::fill_tool::FillSource;
+        use crate::app::tools::fill::FillSource;
         use crate::selection::SelectionType;
         let canvas = Canvas::new(128, 128, Color32::WHITE, TILE_SIZE);
         // Left half of tile (0,0) opaque red, right half transparent.
@@ -1160,7 +1160,7 @@ pub(crate) mod tests {
 
     #[test]
     fn moving_off_the_canvas_and_back_keeps_the_whole_image() {
-        use crate::app::transform;
+        use crate::app::tools::transform;
         let mut app = app_with_red_square(); // red on 64..128
         let original = layer_pixels(&app, 1);
         for (from, to) in [((96.0, 96.0), (-4.0, 96.0)), ((-4.0, 96.0), (96.0, 96.0))] {
@@ -1181,7 +1181,7 @@ pub(crate) mod tests {
     #[test]
     fn transform_click_picks_the_image_under_the_pointer() {
         use crate::app::tools::Tool;
-        use crate::app::transform;
+        use crate::app::tools::transform;
         let mut app = app_with_red_square(); // layer 1: red on 64..128
         app.add_layer_and_select(); // layer 2: blue on 192..256
         let top = app.canvas.active_layer_idx;
@@ -1217,7 +1217,7 @@ pub(crate) mod tests {
 
     #[test]
     fn dragging_uses_the_gpu_overlay_and_renders_once_on_release() {
-        use crate::app::transform;
+        use crate::app::tools::transform;
         let mut app = app_with_red_square();
         let ctx = eframe::egui::Context::default();
         let _ = ctx.run(Default::default(), |_| {});
@@ -1273,7 +1273,7 @@ pub(crate) mod tests {
     #[test]
     fn transform_of_a_selection_previews_commits_and_undoes() {
         use crate::app::tools::Tool;
-        use crate::app::transform;
+        use crate::app::tools::transform;
         use crate::selection::SelectionType;
         use crate::selection::transform::TransformInfo;
         let canvas = Canvas::new(256, 256, Color32::WHITE, TILE_SIZE);
@@ -1405,7 +1405,7 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod fill_timing {
     use super::*;
-    use crate::app::painter_state::LayerState;
+    use crate::app::state::LayerState;
     use eframe::egui::Vec2;
 
     #[test]
@@ -1630,7 +1630,7 @@ mod perf {
                     i.start_pos = dragging.then_some(Vec2::ZERO);
                 }
                 app.layer_state.transform_preview_pending = true;
-                crate::app::transform::flush_transform_preview(&mut app);
+                crate::app::tools::transform::flush_transform_preview(&mut app);
             });
         }
         time("transform: preview (move 7px)", || {
@@ -1639,10 +1639,10 @@ mod perf {
                 i.offset = Vec2::new(7.0, 3.0);
             }
             app.layer_state.transform_preview_pending = true;
-            crate::app::transform::flush_transform_preview(&mut app);
+            crate::app::tools::transform::flush_transform_preview(&mut app);
         });
         time("transform: commit", || {
-            crate::app::transform::commit_floating_layer(&mut app)
+            crate::app::tools::transform::commit_floating_layer(&mut app)
         });
         // A selection float.
         app.selection_manager
@@ -1654,13 +1654,13 @@ mod perf {
             transform_press_at(&mut app)
         });
         time("transform: cancel", || {
-            crate::app::transform::cancel_floating_layer(&mut app)
+            crate::app::tools::transform::cancel_floating_layer(&mut app)
         });
     }
 
     fn transform_press_at(app: &mut PainterApp) {
-        crate::app::transform::transform_press(app, Vec2::new(1000.0, 1000.0));
-        crate::app::transform::transform_release(app);
+        crate::app::tools::transform::transform_press(app, Vec2::new(1000.0, 1000.0));
+        crate::app::tools::transform::transform_release(app);
     }
 
     #[test]
@@ -1771,7 +1771,7 @@ mod perf {
                 Vec2::new(2000.0 + a.cos() * 1500.0, 2000.0 + a.sin() * 1500.0)
             })
             .collect();
-        app.workspace.fill.mode = crate::app::fill_tool::FillMode::Enclose;
+        app.workspace.fill.mode = crate::app::tools::fill::FillMode::Enclose;
         app.workspace.fill.path = lasso.clone();
         time("enclose fill: 3000 px lasso", || app.fill_release());
     }

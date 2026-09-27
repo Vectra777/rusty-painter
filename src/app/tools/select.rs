@@ -6,7 +6,7 @@
 //! it's recorded on the active layer's history and undo brings the previous
 //! selection back.
 
-use super::PainterApp;
+use crate::app::PainterApp;
 use crate::canvas::fill::{self, ColorMatch, FillSettings};
 use crate::canvas::history::UndoAction;
 use crate::selection::magnetic::{self, LiveWire};

@@ -3,7 +3,7 @@
 //! composites it back as a single undo step, cancel restores the original.
 
 use crate::PainterApp;
-use crate::app::painter_state::FloatSession;
+use crate::app::state::FloatSession;
 use crate::app::stroke_ops::exclusive;
 use crate::app::tools::Tool;
 use crate::canvas::history::{TileSnapshot, UndoAction};
@@ -564,10 +564,7 @@ fn dragging(app: &PainterApp) -> bool {
 
 /// Upload the floating pixels as a texture (shrunk by a whole factor if
 /// larger than the GPU allows).
-fn build_overlay(
-    app: &PainterApp,
-    ctx: &egui::Context,
-) -> Option<crate::app::painter_state::FloatOverlay> {
+fn build_overlay(app: &PainterApp, ctx: &egui::Context) -> Option<crate::app::state::FloatOverlay> {
     let buffer = app.layer_state.floating_buffer.as_ref()?;
     let b = app.layer_state.float_session.as_ref()?.src_bounds?;
     let area = egui::Rect::from_min_max(b.min, b.max + egui::vec2(1.0, 1.0));
@@ -598,7 +595,7 @@ fn build_overlay(
         size: [tw, th],
         pixels,
     };
-    Some(crate::app::painter_state::FloatOverlay {
+    Some(crate::app::state::FloatOverlay {
         texture: ctx.load_texture("floating-transform", image, egui::TextureOptions::LINEAR),
         area,
         showing: false,
@@ -704,7 +701,7 @@ pub(crate) fn float_overlay_uploaded(app: &mut PainterApp, more_tiles: bool) {
 pub(crate) fn draw_float_overlay(
     app: &PainterApp,
     painter: &egui::Painter,
-    map: &crate::app::render_helper::ScreenMap,
+    map: &crate::app::view::render::ScreenMap,
 ) {
     let (Some(overlay), Tool::Transform(info)) = (&app.layer_state.float_overlay, app.active_tool)
     else {

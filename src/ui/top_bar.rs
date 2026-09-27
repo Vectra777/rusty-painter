@@ -1,6 +1,6 @@
 use crate::PainterApp;
 use crate::app::tools::Tool;
-use crate::app::transform;
+use crate::app::tools::transform;
 use crate::brush_engine::brush_options::PaintingMode;
 use crate::selection::SelectionType;
 use crate::ui::icons::Icon;
@@ -518,7 +518,7 @@ pub(crate) fn gradient_options(
     ui: &mut egui::Ui,
     compact: bool,
 ) -> &'static str {
-    use crate::app::gradient_tool::GradientColors;
+    use crate::app::tools::gradient::GradientColors;
     use crate::canvas::gradient::{GradientRepeat, GradientShape};
     if compact {
         tool_title(ui, "Gradient");
@@ -601,13 +601,13 @@ pub(crate) fn gradient_options(
 fn shape_options(
     app: &mut PainterApp,
     ui: &mut egui::Ui,
-    kind: crate::app::shape_tool::ShapeKind,
+    kind: crate::app::tools::shape::ShapeKind,
 ) -> &'static str {
     tool_title(ui, "Shape");
     crate::ui::shape_menu::shape_controls(app, ui, true);
     vdivider(ui);
     crate::ui::shape_menu::shape_actions(app, ui);
-    use crate::app::shape_tool::ShapeKind;
+    use crate::app::tools::shape::ShapeKind;
     match kind {
         ShapeKind::Polygon => {
             "Click to add points  ·  click the first point or double-click to finish  ·  Backspace removes a point  ·  Enter apply"
@@ -725,7 +725,7 @@ pub(crate) fn transform_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
 /// Fill mode, reference and line handling. `compact` lays it out in a row
 /// (options bar); otherwise stacked (tool panel).
 pub(crate) fn fill_options(app: &mut PainterApp, ui: &mut egui::Ui, compact: bool) -> &'static str {
-    use crate::app::fill_tool::{FillMode, FillSource};
+    use crate::app::tools::fill::{FillMode, FillSource};
     if compact {
         tool_title(ui, "Fill");
     }

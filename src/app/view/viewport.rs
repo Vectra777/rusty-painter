@@ -1,4 +1,4 @@
-use super::PainterApp;
+use crate::app::PainterApp;
 use eframe::egui::{self, Vec2};
 
 pub(crate) const MIN_ZOOM: f32 = 0.02;
@@ -157,9 +157,9 @@ impl PainterApp {
     pub fn draw_transform_overlay(
         &mut self,
         painter: &egui::Painter,
-        map: &super::render_helper::ScreenMap,
+        map: &crate::app::view::render::ScreenMap,
     ) {
-        let super::tools::Tool::Transform(ref mut info) = self.active_tool else {
+        let crate::app::tools::Tool::Transform(ref mut info) = self.active_tool else {
             return;
         };
         if info.bounds.is_none() {

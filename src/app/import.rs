@@ -42,7 +42,7 @@ impl PainterApp {
         let (ox, oy) = ((cw as i32 - w) / 2, (ch as i32 - h) / 2);
 
         // Leave any running session first; it would target the old layer.
-        crate::app::transform::commit_floating_layer(self);
+        crate::app::tools::transform::commit_floating_layer(self);
         self.liquify_commit();
         self.release_canvas();
 

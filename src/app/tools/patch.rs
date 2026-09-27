@@ -6,7 +6,7 @@
 //! the canvas takes no edits meanwhile. The result is blended in through
 //! the selection's soft edge, as one undo step.
 
-use super::PainterApp;
+use crate::app::PainterApp;
 use crate::canvas::blend::{color32_to_linear, rgba_to_color32_fast};
 use crate::canvas::history::{TileSnapshot, UndoAction};
 use crate::canvas::inpaint::{self, Pixel, Problem};

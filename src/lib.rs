@@ -12,7 +12,7 @@ mod ui;
 mod utils;
 
 pub use app::PainterApp;
-pub use app::state::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation};
+pub use app::document::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation};
 
 #[cfg(target_os = "android")]
 use winit::platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp};

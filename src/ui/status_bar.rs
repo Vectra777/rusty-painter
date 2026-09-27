@@ -1,6 +1,6 @@
 //! Bottom status bar: document info on the left, view controls on the right.
 
-use crate::app::viewport::{MAX_ZOOM, MIN_ZOOM};
+use crate::app::view::viewport::{MAX_ZOOM, MIN_ZOOM};
 use crate::ui::icons::Icon;
 use crate::ui::style::*;
 use crate::ui::widgets::{icon_button, vdivider};

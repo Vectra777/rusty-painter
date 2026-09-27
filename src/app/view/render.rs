@@ -1,9 +1,9 @@
 use crate::PainterApp;
-use crate::app::gpu_canvas::{
+use crate::app::document::{ATLAS_SIZE, CanvasTile, TILE_SIZE};
+use crate::app::state::{BelowCache, RenderCache};
+use crate::app::view::gpu_canvas::{
     ATLAS_BORDER, ATLAS_TEXTURE_SIZE, AtlasQuad, CanvasPaint, MIP_LEVELS, TileUpload,
 };
-use crate::app::painter_state::{BelowCache, RenderCache};
-use crate::app::state::{ATLAS_SIZE, CanvasTile, TILE_SIZE};
 use crate::canvas::storage::BelowComposite;
 use eframe::egui::{self, Color32};
 use eframe::egui_wgpu;
@@ -520,7 +520,7 @@ mod tests {
 
         /// Run frames until no dirty tiles are left.
         fn settle(&mut self, app: &mut PainterApp) {
-            use crate::app::gpu_canvas::ATLAS_TEXTURE_SIZE;
+            use crate::app::view::gpu_canvas::ATLAS_TEXTURE_SIZE;
             for _ in 0..50 {
                 let mut more = false;
                 let mut uploads = Vec::new();
@@ -563,7 +563,7 @@ mod tests {
 
         /// Canvas pixels whose on-screen texel differs from the composite.
         fn mismatches(&self, app: &PainterApp) -> Vec<(usize, usize)> {
-            use crate::app::gpu_canvas::{ATLAS_BORDER, ATLAS_TEXTURE_SIZE};
+            use crate::app::view::gpu_canvas::{ATLAS_BORDER, ATLAS_TEXTURE_SIZE};
             let img = app.canvas.flatten();
             let (w, h) = (app.canvas.width(), app.canvas.height());
             let mut bad = Vec::new();

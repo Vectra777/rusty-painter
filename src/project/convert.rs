@@ -1,5 +1,5 @@
 use crate::{
-    app::state::ColorModel,
+    app::document::ColorModel,
     canvas::blend_modes::LayerBlend,
     canvas::history::{LayerHistoryOp, LayerMeta, RemovedLayer},
     canvas::storage::{LayerId, LayerKind},

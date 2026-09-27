@@ -1,8 +1,8 @@
 //! Keyboard shortcuts, plus the tool/color actions they share with the
 //! toolbar and menus.
 
-use super::PainterApp;
-use super::tools::Tool;
+use crate::app::PainterApp;
+use crate::app::tools::Tool;
 use crate::brush_engine::brush_options::BlendMode;
 use crate::selection::SelectionType;
 use crate::selection::transform::TransformInfo;
@@ -206,7 +206,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     if deselect {
         // Esc during a transform cancels it rather than deselecting.
         if app.layer_state.floating_layer_idx.is_some() {
-            crate::app::transform::cancel_floating_layer(app);
+            crate::app::tools::transform::cancel_floating_layer(app);
         } else if app.layer_state.liquify.is_some() {
             app.liquify_cancel();
         } else if app.workspace.shapes.session.is_some() {
@@ -335,7 +335,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         if fill {
             // Pressing G again toggles bucket / enclose.
             if matches!(app.active_tool, Tool::Fill) {
-                use crate::app::fill_tool::FillMode;
+                use crate::app::tools::fill::FillMode;
                 let f = &mut app.workspace.fill;
                 f.mode = if f.mode == FillMode::Bucket {
                     FillMode::Enclose

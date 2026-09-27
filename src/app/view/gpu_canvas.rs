@@ -13,7 +13,7 @@
 use eframe::egui_wgpu::{self, wgpu};
 use wgpu::util::DeviceExt;
 
-use crate::app::state::{ATLAS_SIZE, TILE_SIZE};
+use crate::app::document::{ATLAS_SIZE, TILE_SIZE};
 
 /// Mip levels per atlas: level 4 is 1/16 scale, enough for the 0.1 minimum zoom.
 pub const MIP_LEVELS: u32 = 5;

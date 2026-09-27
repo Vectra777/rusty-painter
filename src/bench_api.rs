@@ -3,10 +3,10 @@
 //! (stroke worker, undo, the same code paths as the UI). Not a stable API.
 
 use crate::PainterApp;
-use crate::app::painter_state::{
+use crate::app::document::{ColorModel, NewCanvasSettings, TILE_SIZE};
+use crate::app::state::{
     BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState, WorkspaceState,
 };
-use crate::app::state::{ColorModel, NewCanvasSettings, TILE_SIZE};
 use crate::app::tools::Tool;
 use crate::brush_engine::brush::Brush;
 use crate::canvas::Canvas;
@@ -15,8 +15,8 @@ use crate::selection::{SelectionMode, SelectionShape, SelectionType};
 use eframe::egui::{Color32, Vec2};
 use std::sync::Arc;
 
-pub use crate::app::gradient_tool::GradientColors;
-pub use crate::app::shape_tool::{ShapeKind, ShapeMods, ShapeStyle};
+pub use crate::app::tools::gradient::GradientColors;
+pub use crate::app::tools::shape::{ShapeKind, ShapeMods, ShapeStyle};
 pub use crate::brush_engine::symmetry::SymmetryMode;
 pub use crate::canvas::gradient::GradientShape;
 pub use crate::canvas::liquify::LiquifyMode;
@@ -186,13 +186,13 @@ pub fn select_rect(app: &mut PainterApp, min: Vec2, max: Vec2) {
 }
 
 pub fn bucket_fill(app: &mut PainterApp, pos: Vec2, tolerance: u8) {
-    app.workspace.fill.mode = crate::app::fill_tool::FillMode::Bucket;
+    app.workspace.fill.mode = crate::app::tools::fill::FillMode::Bucket;
     app.workspace.fill.settings.tolerance = tolerance;
     app.fill_press(pos);
 }
 
 pub fn enclose_fill(app: &mut PainterApp, lasso: &[Vec2]) {
-    app.workspace.fill.mode = crate::app::fill_tool::FillMode::Enclose;
+    app.workspace.fill.mode = crate::app::tools::fill::FillMode::Enclose;
     app.workspace.fill.path = lasso.to_vec();
     app.fill_release();
 }
@@ -203,7 +203,7 @@ pub fn eyedropper(app: &mut PainterApp, pos: Vec2) {
 
 /// Float the layer (or selection), preview a rotation and apply it.
 pub fn transform_rotate(app: &mut PainterApp, rotation: f32) {
-    use crate::app::transform;
+    use crate::app::tools::transform;
     app.active_tool = Tool::Transform(Default::default());
     transform::transform_press(app, Vec2::new(10.0, 10.0));
     transform::transform_release(app);

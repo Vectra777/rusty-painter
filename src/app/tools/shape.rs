@@ -5,7 +5,7 @@
 //! it's applied: Enter, a press outside it, or another tool. Esc cancels.
 //! Applying paints it as one undo step, mirrored like any stroke.
 
-use super::PainterApp;
+use crate::app::PainterApp;
 use crate::brush_engine::brush::StabilizerAlgorithm;
 use crate::brush_engine::brush_options::BlendMode;
 use crate::brush_engine::stroke::{StrokeContext, StrokeState, StrokeTiles};
@@ -220,7 +220,7 @@ impl PainterApp {
         {
             self.shape_commit();
         }
-        self.active_tool = super::tools::Tool::Shape(kind);
+        self.active_tool = crate::app::tools::Tool::Shape(kind);
         self.workspace.shapes.last_kind = kind;
     }
 

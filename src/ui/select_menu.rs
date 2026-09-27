@@ -2,8 +2,8 @@
 //! type) and the selection controls it shares with the options bar.
 
 use crate::PainterApp;
-use crate::app::select_tool::SampleSource;
 use crate::app::tools::Tool;
+use crate::app::tools::select::SampleSource;
 use crate::selection::{SelectionMode, SelectionType};
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;

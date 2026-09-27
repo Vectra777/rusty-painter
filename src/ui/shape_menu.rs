@@ -2,8 +2,8 @@
 //! or fill, and the ruler.
 
 use crate::PainterApp;
-use crate::app::shape_tool::{ShapeKind, ShapeStyle};
 use crate::app::tools::Tool;
+use crate::app::tools::shape::{ShapeKind, ShapeStyle};
 use crate::ui::icons::Icon;
 use crate::ui::style::*;
 use crate::ui::widgets::segmented;

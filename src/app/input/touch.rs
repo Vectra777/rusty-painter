@@ -14,8 +14,8 @@
 //! and are ignored until they lift; whatever they started just before the
 //! pen landed is taken back.
 
-use super::PainterApp;
-use super::tools::Tool;
+use crate::app::PainterApp;
+use crate::app::tools::Tool;
 use crate::selection::transform::TransformState;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};

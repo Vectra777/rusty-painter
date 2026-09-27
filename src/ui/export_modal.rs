@@ -1,6 +1,6 @@
 use crate::{
     PainterApp,
-    app::state::validate_canvas_size,
+    app::document::validate_canvas_size,
     utils::exporter::{ExportFormat, save_color_image},
 };
 use eframe::egui;
