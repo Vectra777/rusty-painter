@@ -6,7 +6,6 @@ pub mod brush_engine;
 pub mod canvas;
 pub(crate) mod project;
 pub mod selection;
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod styling;
 mod tablet;
 mod ui;
@@ -17,6 +16,31 @@ pub use app::state::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings
 
 #[cfg(target_os = "android")]
 use winit::platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp};
+
+/// The window title (desktop) and app name.
+const APP_NAME: &str = "Rust Dab Painter";
+
+/// Launch the desktop app (the binary's `main`).
+#[cfg(not(target_os = "android"))]
+pub fn run() -> eframe::Result<()> {
+    env_logger::init();
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([480.0, 360.0]),
+        // The canvas is drawn by a custom wgpu pipeline (GPU mipmaps).
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    };
+    eframe::run_native(
+        APP_NAME,
+        options,
+        Box::new(|cc| {
+            styling::apply_global_style(&cc.egui_ctx);
+            Ok(Box::new(PainterApp::new(cc)))
+        }),
+    )
+}
 
 #[cfg(target_os = "android")]
 fn android_native_options(app: AndroidApp) -> eframe::NativeOptions {
@@ -40,7 +64,7 @@ pub fn android_main(app: AndroidApp) {
 
     let options = android_native_options(app);
     let _ = eframe::run_native(
-        "Rust Dab Painter",
+        APP_NAME,
         options,
         Box::new(|cc| {
             styling::apply_global_style(&cc.egui_ctx);
