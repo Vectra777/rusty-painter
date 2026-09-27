@@ -157,6 +157,9 @@ pub struct Brush {
     pub stabilizer_algorithm: StabilizerAlgorithm,
     pub stabilizer_mass: f32, // 0.01..1.0
     pub stabilizer_drag: f32, // 0.0..1.0
+    /// What changes from dab to dab besides pressure: tip angle and squash,
+    /// tapers, speed, randomness. All off by default.
+    pub dynamics: crate::brush_engine::dynamics::BrushDynamics,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -177,6 +180,19 @@ struct BatchCtx<'a> {
     antialiased_selection: bool,
     /// The layer's transparency is locked: paint only recolours.
     alpha_lock: bool,
+    /// Where the dabs accumulate.
+    target: Target,
+}
+
+/// Where a batch of dabs accumulates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    /// The stroke's coverage, for good.
+    Stroke,
+    /// A segment (0 or 1) of the redrawable tail (an end taper still to
+    /// come): merged into the stroke once it's far enough behind the pen,
+    /// or cleared and drawn again, tapered, when the pen lifts.
+    Tail(usize),
 }
 
 /// A whole tile's selection coverage, row by row.
@@ -200,6 +216,15 @@ fn tile_selection_coverage(
         }
     }
     coverage
+}
+
+/// Whether `m` only turns or mirrors (keeps a circle a circle).
+#[inline]
+fn is_rigid(m: [f32; 4]) -> bool {
+    let [a, b, c, d] = m;
+    ((a * a + c * c) - 1.0).abs() < 1e-4
+        && ((b * b + d * d) - 1.0).abs() < 1e-4
+        && (a * b + c * d).abs() < 1e-4
 }
 
 /// Shortest row span worth resolving with [`resolve_stroke_normal_simd`].
@@ -250,8 +275,13 @@ fn paint_batch(
         let StrokeBuffer {
             coverage,
             selection: selection_coverage,
+            tail,
             ..
         } = &mut *buffer;
+        let coverage = match ctx.target {
+            Target::Stroke => coverage,
+            Target::Tail(k) => tail[k].get_or_insert_with(|| vec![0.0; tile_size * tile_size]),
+        };
         let mut alpha_row = vec![0.0f32; tile_size];
         // Per tile row, the columns [min, max] any dab of this batch actually
         // reached (non-zero alpha). Resolving only those, rather than the
@@ -263,7 +293,7 @@ fn paint_batch(
 
         for &i in dab_ids {
             let dab = &ctx.dabs[i];
-            if !dab_reaches_tile(dab.center, ctx.r, tile_x0, tile_y0, tile_size) {
+            if !dab_reaches_tile(dab.center, dab.reach, tile_x0, tile_y0, tile_size) {
                 continue;
             }
             let overlap = tile_overlap(&dab.bounds, tile_x0, tile_y0, tile_size);
@@ -302,99 +332,130 @@ fn paint_batch(
         if !touched {
             return;
         }
-        let Some(tile_arc) = ctx.canvas.lock_tile(region.tx, region.ty) else {
-            return;
-        };
-        let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(data) = tile.data.as_mut() else {
-            return;
-        };
-        for (row, &(min_x, max_x)) in spans.iter().enumerate() {
-            if min_x > max_x {
-                continue;
-            }
-            let range = row * tile_size + min_x..row * tile_size + max_x + 1;
-            let (original, coverage) = (
-                &buffer.original[range.clone()],
-                &buffer.coverage[range.clone()],
-            );
-            // Canvas position of the span, for the alpha dither.
-            let origin = [(tile_x0 + min_x) as u32, (tile_y0 + row) as u32];
-            match ctx.blend_mode {
-                BlendMode::Normal if ctx.space == BlendSpace::Gamma => resolve_stroke_normal_gamma(
-                    original,
-                    coverage,
-                    &mut data[range.clone()],
-                    ctx.color,
-                    ctx.cap,
-                ),
-                BlendMode::Normal => {
-                    // SIMD pays off on longer spans; short ones (small dabs)
-                    // are cheaper through the plain loop.
-                    if range.len() >= SIMD_RESOLVE_MIN {
-                        resolve_stroke_normal_simd(
-                            original,
-                            coverage,
-                            &mut data[range.clone()],
-                            ctx.color,
-                            ctx.cap,
-                            origin,
-                        )
-                    } else {
-                        resolve_stroke_normal(
-                            original,
-                            coverage,
-                            &mut data[range.clone()],
-                            ctx.color,
-                            ctx.cap,
-                            origin,
-                        )
-                    }
-                }
-                BlendMode::Eraser if ctx.alpha_lock => {}
-                BlendMode::Eraser => resolve_stroke_erase(
-                    original,
-                    coverage,
-                    &mut data[range.clone()],
-                    ctx.cap,
-                    origin,
-                ),
-            }
-            if ctx.alpha_lock {
-                for (out, orig) in data[range].iter_mut().zip(original) {
-                    *out = crate::canvas::blend::with_alpha_of(*out, orig.a());
+        if let Target::Tail(k) = ctx.target {
+            // Remember where the segment is, to merge or clear it later.
+            for (row, &(lo, hi)) in spans.iter().enumerate() {
+                if lo <= hi {
+                    grow_rect(&mut buffer.tail_rect[k], [lo, row, hi + 1, row + 1]);
                 }
             }
         }
-        tile.is_empty = false;
-
-        // Report exactly what changed, so the display redraws only that.
-        let mut rect: Option<[usize; 4]> = None;
-        for (row, &(lo, hi)) in spans.iter().enumerate() {
-            if lo > hi {
-                continue;
-            }
-            let r = rect.get_or_insert([lo, row, hi + 1, row + 1]);
-            *r = [
-                r[0].min(lo),
-                r[1].min(row),
-                r[2].max(hi + 1),
-                r[3].max(row + 1),
-            ];
-        }
-        if let Some(r) = rect {
-            buffer.damage = Some(match buffer.damage {
-                Some(d) => [
-                    d[0].min(r[0]),
-                    d[1].min(r[1]),
-                    d[2].max(r[2]),
-                    d[3].max(r[3]),
-                ],
-                None => r,
-            });
-        }
+        resolve_spans(ctx, *region, &mut buffer, &spans);
     };
     dispatch_over_buckets(buckets, pool, work_pixels, draw_tile);
+}
+
+/// Grow `rect` (`[x0, y0, x1, y1)`) to include `r`.
+fn grow_rect(rect: &mut Option<[usize; 4]>, r: [usize; 4]) {
+    *rect = Some(match *rect {
+        Some(d) => [
+            d[0].min(r[0]),
+            d[1].min(r[1]),
+            d[2].max(r[2]),
+            d[3].max(r[3]),
+        ],
+        None => r,
+    });
+}
+
+/// Re-resolve a tile's pixels on `spans` (per row, the columns `[min,
+/// max]`; `min > max` for none) from its original pixels and the stroke's
+/// coverage (with the tail's, if there is one), and record the damage.
+fn resolve_spans(
+    ctx: &BatchCtx<'_>,
+    region: TileRegion,
+    buffer: &mut StrokeBuffer,
+    spans: &[(usize, usize)],
+) {
+    let tile_size = ctx.canvas.tile_size();
+    let (tile_x0, tile_y0) = (region.tx * tile_size, region.ty * tile_size);
+    let Some(tile_arc) = ctx.canvas.lock_tile(region.tx, region.ty) else {
+        return;
+    };
+    let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(data) = tile.data.as_mut() else {
+        return;
+    };
+    // The stroke and its tail together: dabs combine the same in any order.
+    let mut combined = Vec::new();
+    for (row, &(min_x, max_x)) in spans.iter().enumerate() {
+        if min_x > max_x {
+            continue;
+        }
+        let range = row * tile_size + min_x..row * tile_size + max_x + 1;
+        let original = &buffer.original[range.clone()];
+        let coverage = if buffer.tail.iter().any(Option::is_some) {
+            combined.clear();
+            combined.extend_from_slice(&buffer.coverage[range.clone()]);
+            for tail in buffer.tail.iter().flatten() {
+                for (c, &t) in combined.iter_mut().zip(&tail[range.clone()]) {
+                    *c += t * (1.0 - *c);
+                }
+            }
+            &combined[..]
+        } else {
+            &buffer.coverage[range.clone()]
+        };
+        // Canvas position of the span, for the alpha dither.
+        let origin = [(tile_x0 + min_x) as u32, (tile_y0 + row) as u32];
+        match ctx.blend_mode {
+            BlendMode::Normal if ctx.space == BlendSpace::Gamma => resolve_stroke_normal_gamma(
+                original,
+                coverage,
+                &mut data[range.clone()],
+                ctx.color,
+                ctx.cap,
+            ),
+            BlendMode::Normal => {
+                // SIMD pays off on longer spans; short ones (small dabs)
+                // are cheaper through the plain loop.
+                if range.len() >= SIMD_RESOLVE_MIN {
+                    resolve_stroke_normal_simd(
+                        original,
+                        coverage,
+                        &mut data[range.clone()],
+                        ctx.color,
+                        ctx.cap,
+                        origin,
+                    )
+                } else {
+                    resolve_stroke_normal(
+                        original,
+                        coverage,
+                        &mut data[range.clone()],
+                        ctx.color,
+                        ctx.cap,
+                        origin,
+                    )
+                }
+            }
+            BlendMode::Eraser if ctx.alpha_lock => {}
+            BlendMode::Eraser => resolve_stroke_erase(
+                original,
+                coverage,
+                &mut data[range.clone()],
+                ctx.cap,
+                origin,
+            ),
+        }
+        if ctx.alpha_lock {
+            for (out, orig) in data[range].iter_mut().zip(original) {
+                *out = crate::canvas::blend::with_alpha_of(*out, orig.a());
+            }
+        }
+    }
+    tile.is_empty = false;
+
+    // Report exactly what changed, so the display redraws only that.
+    let mut rect: Option<[usize; 4]> = None;
+    for (row, &(lo, hi)) in spans.iter().enumerate() {
+        if lo <= hi {
+            grow_rect(&mut rect, [lo, row, hi + 1, row + 1]);
+        }
+    }
+    if let Some(r) = rect {
+        grow_rect(&mut buffer.damage, r);
+    }
 }
 
 impl Brush {
@@ -423,6 +484,7 @@ impl Brush {
             stabilizer_mass: 0.1,
             stabilizer_drag: 0.5,
             is_changed: false,
+            dynamics: Default::default(),
         }
     }
 
@@ -439,6 +501,7 @@ impl Brush {
             stabilizer_mass: 0.1,
             stabilizer_drag: 0.5,
             is_changed: false,
+            dynamics: Default::default(),
         }
     }
 
@@ -481,26 +544,222 @@ impl Brush {
         undo_action: &mut UndoAction,
         stroke_tiles: &mut StrokeTiles,
     ) {
-        let o = &self.brush_options;
-        let r = o.diameter / 2.0;
-        let r_ceil = r.ceil() as i32;
-        let tile_size = canvas.tile_size();
+        let r = self.brush_options.diameter / 2.0;
         let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
+        let tile_size = canvas.tile_size();
         let dabs: Vec<PlacedDab> = centers
             .iter()
             .enumerate()
             .filter_map(|(i, &center)| {
                 let bounds = calc_dab_bounds(center, r, canvas_w, canvas_h, tile_size)?;
-                let mut dab = PlacedDab::new(center, bounds, r_ceil);
+                let mut dab = PlacedDab::new(center, bounds, r);
                 if let Some(o) = orients.and_then(|o| o.get(i)) {
                     dab.orient = *o;
                 }
                 Some(dab)
             })
             .collect();
+        self.paint_placed(
+            pool,
+            canvas,
+            selection,
+            dabs,
+            Target::Stroke,
+            undo_action,
+            stroke_tiles,
+        );
+    }
+
+    /// [`Self::dabs_oriented`] with each dab varied by its dynamics
+    /// (`vars[i]` for dab `i`; mirror copies share their original's): its
+    /// size, strength and the tip's turn and squash.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dabs_varied(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        centers: &[Vec2],
+        vars: &[crate::brush_engine::dynamics::DabVar],
+        orients: Option<&[[f32; 4]]>,
+        target: Target,
+        undo_action: &mut UndoAction,
+        stroke_tiles: &mut StrokeTiles,
+    ) {
+        use crate::brush_engine::dynamics::compose;
+        let base_r = self.brush_options.diameter / 2.0;
+        let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
+        let tile_size = canvas.tile_size();
+        // How far past its radius a turned tip reaches: a square's (or an
+        // image's) corners.
+        let corner_reach = match &self.brush_options.pixel_shape {
+            PixelBrushShape::Circle => 1.0,
+            PixelBrushShape::Square => std::f32::consts::SQRT_2,
+            PixelBrushShape::Custom { width, height, .. } => {
+                let (w, h) = (*width as f32, *height as f32);
+                (w * w + h * h).sqrt() / w.max(h).max(1.0)
+            }
+        };
+        let dabs: Vec<PlacedDab> = centers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &center)| {
+                let var = vars.get(i % vars.len().max(1)).copied().unwrap_or_default();
+                let r = (base_r * var.scale).max(0.25);
+                if var.strength <= 0.0 || base_r * var.scale < 0.1 {
+                    return None;
+                }
+                let mirror = orients.and_then(|o| o.get(i)).copied();
+                let orient = match mirror {
+                    Some(m) => compose(var.orient, m),
+                    None => var.orient,
+                };
+                let upright = orient == crate::brush_engine::dynamics::IDENTITY;
+                let reach = if upright { r } else { r * corner_reach };
+                let bounds = calc_dab_bounds(center, reach, canvas_w, canvas_h, tile_size)?;
+                let mut dab = PlacedDab::new(center, bounds, r);
+                dab.orient = orient;
+                dab.reach = reach;
+                dab.strength = var.strength;
+                Some(dab)
+            })
+            .collect();
+        self.paint_placed(
+            pool,
+            canvas,
+            selection,
+            dabs,
+            target,
+            undo_action,
+            stroke_tiles,
+        );
+    }
+
+    /// Merge tail segment `k` into the stroke for good. The pixels don't
+    /// change (they already show it), so nothing is resolved.
+    pub(crate) fn merge_tail(&self, canvas: &Canvas, stroke_tiles: &mut StrokeTiles, k: usize) {
+        let tile_size = canvas.tile_size();
+        for key in std::mem::take(&mut stroke_tiles.tail_tiles[k]) {
+            let Some(buffer) = stroke_tiles.buffers.get(&key) else {
+                continue;
+            };
+            let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let (Some([x0, y0, x1, y1]), Some(tail)) =
+                (buffer.tail_rect[k].take(), buffer.tail[k].take())
+            else {
+                continue;
+            };
+            for row in y0..y1 {
+                let range = row * tile_size + x0..row * tile_size + x1;
+                for (c, &t) in buffer.coverage[range.clone()].iter_mut().zip(&tail[range]) {
+                    *c += t * (1.0 - *c);
+                }
+            }
+        }
+    }
+
+    /// Take both tail segments back off the canvas (see [`Target::Tail`]).
+    pub(crate) fn clear_tails(&self, canvas: &Canvas, stroke_tiles: &mut StrokeTiles) {
+        let keys: std::collections::HashSet<(usize, usize)> = stroke_tiles
+            .tail_tiles
+            .iter_mut()
+            .flat_map(std::mem::take)
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let ctx = self.batch_ctx(canvas, None, &[], &stroke_tiles.buffers, Target::Stroke);
+        let tile_size = canvas.tile_size();
+        for key in keys {
+            let Some(buffer) = stroke_tiles.buffers.get(&key) else {
+                continue;
+            };
+            let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut rect: Option<[usize; 4]> = None;
+            for k in 0..2 {
+                if let Some(r) = buffer.tail_rect[k].take() {
+                    grow_rect(&mut rect, r);
+                }
+            }
+            buffer.tail = [None, None];
+            let Some([x0, y0, x1, y1]) = rect else {
+                continue;
+            };
+            // The pixels as before the stroke: resolving skips pixels the
+            // stroke doesn't cover (it only ever grows), and the tail's may
+            // no longer be.
+            if let Some(tile) = canvas.lock_tile(key.0, key.1) {
+                let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(data) = tile.data.as_mut() {
+                    for row in y0..y1 {
+                        let range = row * tile_size + x0..row * tile_size + x1;
+                        data[range.clone()].copy_from_slice(&buffer.original[range]);
+                    }
+                }
+            }
+            let mut spans = vec![(usize::MAX, 0usize); tile_size];
+            for span in &mut spans[y0..y1] {
+                *span = (x0, x1 - 1);
+            }
+            resolve_spans(
+                &ctx,
+                TileRegion {
+                    tx: key.0,
+                    ty: key.1,
+                },
+                &mut buffer,
+                &spans,
+            );
+            stroke_tiles.dirty.insert(key);
+        }
+    }
+
+    /// What a batch needs to paint and resolve with this brush.
+    fn batch_ctx<'a>(
+        &self,
+        canvas: &'a Canvas,
+        selection: Option<&'a SelectionManager>,
+        dabs: &'a [PlacedDab],
+        buffers: &'a FxHashMap<(usize, usize), Mutex<StrokeBuffer>>,
+        target: Target,
+    ) -> BatchCtx<'a> {
+        let o = &self.brush_options;
+        let wash = o.painting_mode == PaintingMode::Wash;
+        BatchCtx {
+            canvas,
+            selection,
+            dabs,
+            buffers,
+            r: o.diameter / 2.0,
+            blend_mode: o.blend_mode,
+            space: canvas.blend_space,
+            color: StrokeColor::new(o.color),
+            cap: if wash { o.opacity } else { 1.0 },
+            antialiased_selection: self.brush_type == BrushType::Soft,
+            alpha_lock: canvas
+                .layers
+                .get(canvas.active_layer_idx)
+                .is_some_and(|l| l.alpha_locked),
+            target,
+        }
+    }
+
+    /// Snapshot and paint dabs already placed on the canvas.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_placed(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        dabs: Vec<PlacedDab>,
+        target: Target,
+        undo_action: &mut UndoAction,
+        stroke_tiles: &mut StrokeTiles,
+    ) {
         if dabs.is_empty() {
             return;
         }
+        let o = &self.brush_options;
 
         let buckets = bucket_by_tile(&dabs);
         let regions: Vec<TileRegion> = buckets.iter().map(|(region, _)| *region).collect();
@@ -511,24 +770,17 @@ impl Brush {
         // stroke at opacity when resolving.
         let strength =
             o.color.a() as f32 / 255.0 * (o.flow / 100.0) * if wash { 1.0 } else { o.opacity };
-        let ctx = BatchCtx {
-            canvas,
-            selection,
-            dabs: &dabs,
-            buffers: &stroke_tiles.buffers,
-            r,
-            blend_mode: o.blend_mode,
-            space: canvas.blend_space,
-            color: StrokeColor::new(o.color),
-            cap: if wash { o.opacity } else { 1.0 },
-            antialiased_selection: self.brush_type == BrushType::Soft,
-            alpha_lock: canvas
-                .layers
-                .get(canvas.active_layer_idx)
-                .is_some_and(|l| l.alpha_locked),
-        };
-        let side = (2 * r_ceil + 1).max(1) as usize;
-        let work_pixels = dabs.len() * side * side;
+        if let Target::Tail(k) = target {
+            stroke_tiles.tail_tiles[k].extend(regions.iter().map(|r| (r.tx, r.ty)));
+        }
+        let ctx = self.batch_ctx(canvas, selection, &dabs, &stroke_tiles.buffers, target);
+        let work_pixels: usize = dabs
+            .iter()
+            .map(|d| {
+                let side = (2.0 * d.reach.ceil() + 1.0).max(1.0) as usize;
+                side * side
+            })
+            .sum();
         match self.brush_type {
             BrushType::Soft => self.paint_soft(pool, &ctx, &buckets, work_pixels, strength),
             BrushType::Pixel => self.paint_pixel(pool, &ctx, &buckets, work_pixels, strength),
@@ -579,6 +831,8 @@ impl Brush {
                     coverage: vec![0.0; tile_size * tile_size],
                     selection: None,
                     damage: None,
+                    tail: [None, None],
+                    tail_rect: [None, None],
                 }),
             );
         }
@@ -593,17 +847,24 @@ impl Brush {
         work_pixels: usize,
         strength: f32,
     ) {
-        let r = ctx.r;
-        let r_sq = r * r;
         let pixel_shape = &self.brush_options.pixel_shape;
-        let diameter = self.brush_options.diameter;
         let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+            let r = dab.r;
+            let r_sq = r * r;
+            let diameter = 2.0 * r;
+            let strength = (strength * dab.strength).min(1.0);
+            let upright = dab.upright();
             let dy = gy as f32 + 0.5 - dab.center.y;
             for (i, slot) in out.iter_mut().enumerate() {
                 let dx = (x0 + i) as f32 + 0.5 - dab.center.x;
+                let (tx, ty) = if upright {
+                    (dx, dy)
+                } else {
+                    dab.tip_offset(dx, dy)
+                };
                 let (in_shape, alpha_mod) = match pixel_shape {
-                    PixelBrushShape::Circle => (dx * dx + dy * dy <= r_sq, 1.0),
-                    PixelBrushShape::Square => (dx.abs() <= r && dy.abs() <= r, 1.0),
+                    PixelBrushShape::Circle => (tx * tx + ty * ty <= r_sq, 1.0),
+                    PixelBrushShape::Square => (tx.abs() <= r && ty.abs() <= r, 1.0),
                     PixelBrushShape::Custom {
                         width,
                         height,
@@ -634,66 +895,34 @@ impl Brush {
         strength: f32,
     ) {
         let o = &self.brush_options;
-        let r = ctx.r;
-        let r_sq = r * r;
         let hardness_val = (o.hardness / 100.0).clamp(0.0, 1.0);
         let softness_selector = o.softness_selector;
         let softness_curve = &o.softness_curve;
         let pixel_shape = &o.pixel_shape;
-        let diameter = o.diameter;
         let anti_aliasing = self.anti_aliasing;
-
-        // 1.5 pixel outer anti-aliasing fade
-        let fade_start = (r - 1.5).max(0.0);
-        let fade_width = 1.5_f32.min(r);
-        let inv_fade_width = if fade_width > 0.0 {
-            1.0 / fade_width
-        } else {
-            0.0
-        };
-
-        if anti_aliasing
-            && softness_selector == SoftnessSelector::Gaussian
-            && matches!(pixel_shape, PixelBrushShape::Circle)
-        {
-            let tip = GaussianTip {
-                r_ceil: r.ceil() as i32,
-                r_sq,
-                inv_radius: if r > 0.0 { 1.0 / r } else { 0.0 },
-                hardness: hardness_val,
-                fade_start,
-                inv_fade_width,
-            };
-            let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
-                let my = gy as i32 - dab.base_y;
-                let pdy = my as f32 - tip.r_ceil as f32 + 0.5 - dab.frac_y;
-                let mx0 = (x0 as i32 - dab.base_x) as usize;
-                // Only the circle's chord on this row can be non-zero; run the
-                // kernel there (bounds widened a pixel, the kernel itself
-                // zeroes anything outside the circle) and zero the rest.
-                let chord = tip.chord(pdy, dab.frac_x, mx0, out.len());
-                out[..chord.start].fill(0.0);
-                out[chord.end..].fill(0.0);
-                if chord.is_empty() {
-                    return chord;
-                }
-                tip.row(pdy, dab.frac_x, mx0 + chord.start, &mut out[chord.clone()]);
-                for alpha in &mut out[chord.clone()] {
-                    *alpha *= strength;
-                }
-                chord
-            };
-            paint_batch(pool, ctx, buckets, work_pixels, &stamp);
-            return;
-        }
-
         let custom = matches!(pixel_shape, PixelBrushShape::Custom { .. });
-        let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+
+        // Any tip, any dab: per pixel, in the tip's (turned, squashed) frame.
+        let general = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+            let r = dab.r;
+            let r_sq = r * r;
+            let diameter = 2.0 * r;
+            // 1.5 pixel outer anti-aliasing fade
+            let fade_start = (r - 1.5).max(0.0);
+            let fade_width = 1.5_f32.min(r);
+            let inv_fade_width = if fade_width > 0.0 {
+                1.0 / fade_width
+            } else {
+                0.0
+            };
+            let strength = (strength * dab.strength).min(1.0);
+            let turned = custom || !dab.upright();
             let pdy_canvas = gy as f32 + 0.5 - dab.center.y;
             for (i, slot) in out.iter_mut().enumerate() {
                 let pdx_canvas = (x0 + i) as f32 + 0.5 - dab.center.x;
-                // A custom tip turns with its mirror copy.
-                let (pdx, pdy) = if custom {
+                // A custom tip turns with its mirror copy; any tip with its
+                // dynamics.
+                let (pdx, pdy) = if turned {
                     dab.tip_offset(pdx_canvas, pdy_canvas)
                 } else {
                     (pdx_canvas, pdy_canvas)
@@ -746,7 +975,62 @@ impl Brush {
             }
             nonzero_span(out)
         };
-        paint_batch(pool, ctx, buckets, work_pixels, &stamp);
+
+        if anti_aliasing
+            && softness_selector == SoftnessSelector::Gaussian
+            && matches!(pixel_shape, PixelBrushShape::Circle)
+        {
+            let tip_for = |r: f32| {
+                let fade_width = 1.5_f32.min(r);
+                GaussianTip {
+                    r_ceil: r.ceil() as i32,
+                    r_sq: r * r,
+                    inv_radius: if r > 0.0 { 1.0 / r } else { 0.0 },
+                    hardness: hardness_val,
+                    fade_start: (r - 1.5).max(0.0),
+                    inv_fade_width: if fade_width > 0.0 {
+                        1.0 / fade_width
+                    } else {
+                        0.0
+                    },
+                }
+            };
+            let batch_tip = tip_for(ctx.r);
+            let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+                // Turning a round tip changes nothing; squashing it does.
+                if !is_rigid(dab.orient) {
+                    return general(dab, gy, x0, out);
+                }
+                let own;
+                let tip = if dab.r == ctx.r {
+                    &batch_tip
+                } else {
+                    own = tip_for(dab.r);
+                    &own
+                };
+                let strength = (strength * dab.strength).min(1.0);
+                let my = gy as i32 - dab.base_y;
+                let pdy = my as f32 - tip.r_ceil as f32 + 0.5 - dab.frac_y;
+                let mx0 = (x0 as i32 - dab.base_x) as usize;
+                // Only the circle's chord on this row can be non-zero; run the
+                // kernel there (bounds widened a pixel, the kernel itself
+                // zeroes anything outside the circle) and zero the rest.
+                let chord = tip.chord(pdy, dab.frac_x, mx0, out.len());
+                out[..chord.start].fill(0.0);
+                out[chord.end..].fill(0.0);
+                if chord.is_empty() {
+                    return chord;
+                }
+                tip.row(pdy, dab.frac_x, mx0 + chord.start, &mut out[chord.clone()]);
+                for alpha in &mut out[chord.clone()] {
+                    *alpha *= strength;
+                }
+                chord
+            };
+            paint_batch(pool, ctx, buckets, work_pixels, &stamp);
+            return;
+        }
+        paint_batch(pool, ctx, buckets, work_pixels, &general);
     }
 }
 

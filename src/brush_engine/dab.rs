@@ -76,13 +76,22 @@ pub(super) struct PlacedDab {
     /// Sub-pixel center offset, quantized to 1/16 px.
     pub frac_x: f32,
     pub frac_y: f32,
-    /// How a custom tip is turned for this dab (mirror copies): maps canvas
-    /// offsets from the centre to tip offsets, row-major.
+    /// How the tip is turned and squashed for this dab (its dynamics, mirror
+    /// copies): maps canvas offsets from the centre to tip offsets,
+    /// row-major.
     pub orient: [f32; 4],
+    /// Tip radius.
+    pub r: f32,
+    /// How far from the centre the dab can reach (a turned square tip's
+    /// corners reach past its radius).
+    pub reach: f32,
+    /// Strength factor on top of the brush's (dynamics), 0..1.
+    pub strength: f32,
 }
 
 impl PlacedDab {
-    pub fn new(center: Vec2, bounds: DabBounds, r_ceil: i32) -> Self {
+    pub fn new(center: Vec2, bounds: DabBounds, r: f32) -> Self {
+        let r_ceil = r.ceil() as i32;
         let quantize =
             |v: f32| ((v - v.floor()) * 16.0).floor().clamp(0.0, 15.0) as u8 as f32 / 16.0;
         Self {
@@ -93,7 +102,16 @@ impl PlacedDab {
             frac_x: quantize(center.x),
             frac_y: quantize(center.y),
             orient: [1.0, 0.0, 0.0, 1.0],
+            r,
+            reach: r,
+            strength: 1.0,
         }
+    }
+
+    /// The tip isn't turned or squashed.
+    #[inline]
+    pub fn upright(&self) -> bool {
+        self.orient == [1.0, 0.0, 0.0, 1.0]
     }
 
     /// `(dx, dy)` (canvas offset from the centre) in the tip's frame.

@@ -449,6 +449,7 @@ impl PainterApp {
                     for p in session.outline(settings.closed) {
                         stroke.add_point(&mut brush, p, 1.0, &mut context);
                     }
+                    stroke.finish(&mut brush, &mut context);
                 });
             }
             let ts = self.canvas.tile_size() as f32;

@@ -153,6 +153,44 @@ impl Symmetry {
         (out, orients)
     }
 
+    /// [`Self::expand`], also saying which of `centers` each dab copies.
+    pub fn expand_indexed(
+        &self,
+        copies: &[Copy2],
+        centers: &[Vec2],
+    ) -> (Vec<Vec2>, Vec<[f32; 4]>, Vec<usize>) {
+        let identity = [1.0, 0.0, 0.0, 1.0];
+        let n = centers.len() * (copies.len() + 1);
+        let (mut out, mut orients, mut sources) = (
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        );
+        out.extend_from_slice(centers);
+        orients.resize(centers.len(), identity);
+        sources.extend(0..centers.len());
+        let mut placed: Vec<Vec2> = Vec::with_capacity(copies.len() + 1);
+        for (i, &c) in centers.iter().enumerate() {
+            placed.clear();
+            placed.push(c);
+            let offset = c - self.center;
+            for copy in copies {
+                let p = self.center + copy.apply(offset);
+                if placed
+                    .iter()
+                    .any(|q| (*q - p).length_sq() < MERGE_DISTANCE * MERGE_DISTANCE)
+                {
+                    continue;
+                }
+                placed.push(p);
+                out.push(p);
+                orients.push(copy.tip_orientation());
+                sources.push(i);
+            }
+        }
+        (out, orients, sources)
+    }
+
     /// `p` mapped by one of the copies.
     pub fn map(&self, copy: &Copy2, p: Vec2) -> Vec2 {
         self.center + copy.apply(p - self.center)

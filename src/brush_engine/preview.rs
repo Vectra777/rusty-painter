@@ -17,7 +17,8 @@ pub fn stroke_preview_image(
 ) -> ColorImage {
     let [w, h] = size;
     let canvas = Canvas::new(w, h, Color32::TRANSPARENT, tile_size);
-    let mut stroke = StrokeState::new();
+    // The same randomness every time, so the preview doesn't flicker.
+    let mut stroke = StrokeState::with_seed(7);
     let mut undo = UndoAction {
         tiles: Vec::new(),
         selection: None,
@@ -51,7 +52,13 @@ pub fn stroke_preview_image(
         let pressure = (t * std::f32::consts::PI).sin();
         brush.brush_options.diameter = max_diameter;
         let mut context = StrokeContext::new(pool, &canvas, None, &mut undo, &mut modified);
-        stroke.add_point(brush, Vec2 { x, y }, pressure, &mut context);
+        // Drawn in about half a second, so speed dynamics show too.
+        let time = Some(t as f64 * 0.5);
+        stroke.add_sample(brush, Vec2 { x, y }, pressure, time, &mut context);
+    }
+    {
+        let mut context = StrokeContext::new(pool, &canvas, None, &mut undo, &mut modified);
+        stroke.finish(brush, &mut context);
     }
 
     brush.brush_options.diameter = original_diameter;

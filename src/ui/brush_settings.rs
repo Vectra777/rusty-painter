@@ -299,6 +299,8 @@ fn brush_settings_contents(
         .changed();
     });
 
+    changed |= dynamics_sections(ui, &mut brush.dynamics);
+
     section(ui, "Pen pressure", true, |ui| {
         let o = &mut brush.brush_options;
         property_row(ui, "Controls", |ui| {
@@ -380,4 +382,123 @@ fn brush_settings_contents(
         brush.is_changed = true;
     }
     (changed, mask_changed)
+}
+
+/// Tip shape, tapers and speed, and randomness. Returns whether anything
+/// changed.
+fn dynamics_sections(
+    ui: &mut egui::Ui,
+    d: &mut crate::brush_engine::dynamics::BrushDynamics,
+) -> bool {
+    let mut changed = false;
+    section(ui, "Tip shape", false, |ui| {
+        let t = &mut d.tip;
+        changed |= slider_row(
+            ui,
+            "Angle",
+            egui::Slider::new(&mut t.angle, -180.0..=180.0)
+                .max_decimals(0)
+                .suffix("°"),
+        )
+        .on_hover_text("Turn of the tip; with Follow stroke, relative to the stroke's direction.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Squash",
+            percent_of_unit(egui::Slider::new(&mut t.ratio, 0.05..=1.0)),
+        )
+        .on_hover_text("Tip height as a share of its width: low values make a flat nib.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Random angle",
+            egui::Slider::new(&mut t.random_angle, 0.0..=180.0)
+                .max_decimals(0)
+                .suffix("°"),
+        )
+        .on_hover_text("Each dab turns randomly by up to this much either way.")
+        .changed();
+        changed |= ui
+            .checkbox(&mut t.follow_stroke, "Follow stroke")
+            .on_hover_text("Turn the tip with the direction the stroke is going (calligraphy).")
+            .changed();
+    });
+    section(ui, "Taper & speed", false, |ui| {
+        let t = &mut d.taper;
+        changed |= slider_row(
+            ui,
+            "Taper in",
+            egui::Slider::new(&mut t.start, 0.0..=400.0)
+                .max_decimals(0)
+                .suffix(" px"),
+        )
+        .on_hover_text("Length over which the stroke's start grows to full.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Taper out",
+            egui::Slider::new(&mut t.end, 0.0..=400.0)
+                .max_decimals(0)
+                .suffix(" px"),
+        )
+        .on_hover_text(
+            "Length over which the stroke's end thins out when the pen lifts. The line \
+             follows the pen while drawing and thins as you let go.",
+        )
+        .changed();
+        if t.start > 0.0 || t.end > 0.0 {
+            property_row(ui, "Tapers", |ui| {
+                changed |= ui.toggle_value(&mut t.size, "Size").changed();
+                changed |= ui.toggle_value(&mut t.opacity, "Opacity").changed();
+            });
+            changed |= slider_row(
+                ui,
+                "Tip",
+                percent_of_unit(egui::Slider::new(&mut t.min, 0.0..=1.0)),
+            )
+            .on_hover_text("Size / opacity at the very end of a taper.")
+            .changed();
+        }
+        let s = &mut d.speed;
+        changed |= slider_row(
+            ui,
+            "Speed → size",
+            percent_of_unit(egui::Slider::new(&mut s.size, -1.0..=1.0)),
+        )
+        .on_hover_text("Below 0: fast strokes get thinner (ink). Above 0: thicker.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Speed → opacity",
+            percent_of_unit(egui::Slider::new(&mut s.opacity, -1.0..=1.0)),
+        )
+        .on_hover_text("Below 0: fast strokes get lighter (dry brush). Above 0: stronger.")
+        .changed();
+    });
+    section(ui, "Randomness", false, |ui| {
+        let r = &mut d.random;
+        changed |= slider_row(
+            ui,
+            "Size",
+            percent_of_unit(egui::Slider::new(&mut r.size, 0.0..=1.0)),
+        )
+        .on_hover_text("Each dab is randomly smaller, by up to this much.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Opacity",
+            percent_of_unit(egui::Slider::new(&mut r.opacity, 0.0..=1.0)),
+        )
+        .on_hover_text("Each dab is randomly lighter, by up to this much.")
+        .changed();
+        let mut count = r.count.max(1);
+        if slider_row(ui, "Dabs per step", egui::Slider::new(&mut count, 1..=16))
+            .on_hover_text("Several dabs at each step, spread by Jitter: spray, foliage, grain.")
+            .changed()
+        {
+            r.count = count;
+            changed = true;
+        }
+    });
+    changed
 }

@@ -42,6 +42,7 @@ impl PainterApp {
             pool: Arc::clone(&self.workspace.pool),
             layer_idx: self.canvas.active_layer_idx,
             symmetry,
+            view_scale: self.viewport.zoom,
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;

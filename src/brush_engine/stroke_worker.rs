@@ -31,6 +31,8 @@ pub struct StrokeSetup {
     pub layer_idx: usize,
     /// Mirror painting.
     pub symmetry: Symmetry,
+    /// Canvas pixels → screen points (the view zoom), for stroke speed.
+    pub view_scale: f32,
 }
 
 /// A completed stroke's undo record.
@@ -41,7 +43,12 @@ pub struct FinishedStroke {
 
 enum Job {
     Begin(Box<StrokeSetup>),
-    Sample { pos: Vec2, pressure: f32 },
+    /// `time`: seconds since the worker started, for stroke speed.
+    Sample {
+        pos: Vec2,
+        pressure: f32,
+        time: f64,
+    },
     End,
 }
 
@@ -68,6 +75,8 @@ impl Shared {
 }
 
 pub struct StrokeWorker {
+    /// Sample times count from here.
+    epoch: std::time::Instant,
     jobs: Option<Sender<Job>>,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
@@ -105,6 +114,7 @@ impl StrokeWorker {
             })
             .expect("failed to spawn the stroke worker thread");
         Self {
+            epoch: std::time::Instant::now(),
             jobs: Some(jobs),
             shared,
             thread: Some(thread),
@@ -116,7 +126,12 @@ impl StrokeWorker {
     }
 
     pub fn sample(&self, pos: Vec2, pressure: f32) {
-        self.send(Job::Sample { pos, pressure });
+        let time = self.epoch.elapsed().as_secs_f64();
+        self.send(Job::Sample {
+            pos,
+            pressure,
+            time,
+        });
     }
 
     pub fn end(&self) {
@@ -201,10 +216,12 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
     match job {
         Job::Begin(setup) => {
             let copies = setup.symmetry.copies();
+            let mut stroke = StrokeState::new();
+            stroke.view_scale = setup.view_scale;
             *session = Some(Session {
                 copies,
                 setup: *setup,
-                stroke: StrokeState::new(),
+                stroke,
                 undo: UndoAction {
                     tiles: Vec::new(),
                     selection: None,
@@ -214,55 +231,25 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
                 tiles: StrokeTiles::default(),
             });
         }
-        Job::Sample { pos, pressure } => {
-            let Some(Session {
-                setup,
-                stroke,
-                undo,
-                tiles,
-                copies,
-            }) = session
-            else {
+        Job::Sample {
+            pos,
+            pressure,
+            time,
+        } => {
+            let Some(session) = session else {
                 return;
             };
-            let StrokeSetup {
-                canvas,
-                brush,
-                selection,
-                pool,
-                symmetry,
-                ..
-            } = setup;
-            let mut context = StrokeContext::new(pool, canvas, selection.as_ref(), undo, tiles)
-                .with_symmetry(symmetry, copies);
-            stroke.add_point(brush, pos, pressure, &mut context);
-            let touched = std::mem::take(&mut tiles.dirty);
-            let mut shared = shared.lock();
-            for key in touched {
-                // A tile the dabs' rectangles reached but no pixel changed in
-                // has no damage and needs no redraw.
-                let Some(rect) = tiles
-                    .buffers
-                    .get(&key)
-                    .and_then(|b| b.lock().unwrap_or_else(|e| e.into_inner()).damage.take())
-                else {
-                    continue;
-                };
-                shared
-                    .dirty
-                    .entry(key)
-                    .and_modify(|d| {
-                        *d = [
-                            d[0].min(rect[0]),
-                            d[1].min(rect[1]),
-                            d[2].max(rect[2]),
-                            d[3].max(rect[3]),
-                        ]
-                    })
-                    .or_insert(rect);
-            }
+            session.paint(shared, |stroke, brush, context| {
+                stroke.add_sample(brush, pos, pressure, Some(time), context);
+            });
         }
         Job::End => {
+            // The pen lifted: the end of the stroke (an end taper) first.
+            if let Some(session) = session.as_mut() {
+                session.paint(shared, |stroke, brush, context| {
+                    stroke.finish(brush, context)
+                });
+            }
             // Dropping the session releases its `Arc<Canvas>` and stroke buffers.
             if let Some(Session { setup, undo, .. }) = session.take()
                 && !undo.tiles.is_empty()
@@ -272,6 +259,59 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
                     undo,
                 });
             }
+        }
+    }
+}
+
+impl Session {
+    /// Run `f` on the stroke, then hand the tiles it painted to the UI.
+    fn paint(
+        &mut self,
+        shared: &Shared,
+        f: impl FnOnce(&mut StrokeState, &mut Brush, &mut StrokeContext<'_>),
+    ) {
+        let Session {
+            setup,
+            stroke,
+            undo,
+            tiles,
+            copies,
+        } = self;
+        let StrokeSetup {
+            canvas,
+            brush,
+            selection,
+            pool,
+            symmetry,
+            ..
+        } = setup;
+        let mut context = StrokeContext::new(pool, canvas, selection.as_ref(), undo, tiles)
+            .with_symmetry(symmetry, copies);
+        f(stroke, brush, &mut context);
+        let touched = std::mem::take(&mut tiles.dirty);
+        let mut shared = shared.lock();
+        for key in touched {
+            // A tile the dabs' rectangles reached but no pixel changed in
+            // has no damage and needs no redraw.
+            let Some(rect) = tiles
+                .buffers
+                .get(&key)
+                .and_then(|b| b.lock().unwrap_or_else(|e| e.into_inner()).damage.take())
+            else {
+                continue;
+            };
+            shared
+                .dirty
+                .entry(key)
+                .and_modify(|d| {
+                    *d = [
+                        d[0].min(rect[0]),
+                        d[1].min(rect[1]),
+                        d[2].max(rect[2]),
+                        d[3].max(rect[3]),
+                    ]
+                })
+                .or_insert(rect);
         }
     }
 }
@@ -329,6 +369,7 @@ mod tests {
             pool,
             layer_idx: 1,
             symmetry: Default::default(),
+            view_scale: 1.0,
         });
         for (pos, pressure) in samples() {
             worker.sample(pos, pressure);

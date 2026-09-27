@@ -312,11 +312,121 @@ fn bench_composite_modes(c: &mut Criterion) {
     group.finish();
 }
 
+/// The pressure stroke with brush dynamics: each feature on its own, and
+/// all together, to see what each costs over the plain stroke above.
+fn bench_dynamic_strokes(c: &mut Criterion) {
+    use rusty_painter::brush_engine::dynamics::{
+        BrushDynamics, Randomness, SpeedDynamics, Taper, TipShape,
+    };
+    let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let canvas = Canvas::new(1024, 1024, Color32::WHITE, 64);
+    let points: Vec<(Vec2, f32, f64)> = (0..60)
+        .map(|i| {
+            let t = i as f32 / 59.0;
+            let pos = Vec2::new(150.0 + t * 700.0, 500.0 + (t * 9.0).sin() * 200.3);
+            (
+                pos,
+                0.3 + 0.7 * (t * std::f32::consts::PI).sin(),
+                t as f64 * 0.6,
+            )
+        })
+        .collect();
+    let taper = Taper {
+        start: 80.0,
+        end: 120.0,
+        ..Default::default()
+    };
+    let tip = TipShape {
+        ratio: 0.4,
+        follow_stroke: true,
+        random_angle: 10.0,
+        ..Default::default()
+    };
+    let random = Randomness {
+        size: 0.3,
+        opacity: 0.3,
+        ..Default::default()
+    };
+    let speed = SpeedDynamics {
+        size: -0.5,
+        opacity: 0.0,
+    };
+    let cases = [
+        (
+            "taper",
+            BrushDynamics {
+                taper,
+                ..Default::default()
+            },
+        ),
+        (
+            "tip_turned_squashed",
+            BrushDynamics {
+                tip,
+                ..Default::default()
+            },
+        ),
+        (
+            "random_size_opacity",
+            BrushDynamics {
+                random,
+                ..Default::default()
+            },
+        ),
+        (
+            "speed",
+            BrushDynamics {
+                speed,
+                ..Default::default()
+            },
+        ),
+        (
+            "all",
+            BrushDynamics {
+                tip,
+                taper,
+                speed,
+                random,
+            },
+        ),
+    ];
+    let mut group = c.benchmark_group("dynamic_stroke_60_samples");
+    for (name, dynamics) in cases {
+        let mut brush = Brush::new(
+            60.0,
+            40.0,
+            Color32::from_rgba_unmultiplied(30, 60, 200, 255),
+            10.0,
+        );
+        brush.dynamics = dynamics;
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let mut undo_action = UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                };
+                let mut stroke_tiles = StrokeTiles::default();
+                let mut stroke = StrokeState::with_seed(1);
+                let mut context =
+                    StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut stroke_tiles);
+                for &(pos, pressure, time) in &points {
+                    stroke.add_sample(&mut brush, pos, pressure, Some(time), &mut context);
+                }
+                stroke.finish(&mut brush, &mut context);
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_soft_dab,
     bench_pressure_stroke,
     bench_pressure_stroke_app_pool,
+    bench_dynamic_strokes,
     bench_huge_brush_stroke,
     bench_composite_dirty_tiles,
     bench_composite_damaged_rects,
