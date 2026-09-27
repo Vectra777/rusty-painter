@@ -59,7 +59,8 @@ scripts/build-android.sh aarch64-linux-android release   # -> target/release/apk
 
 ## Benchmarks
 ```bash
-cargo bench --bench tools_bench                              # tools: mirror painting, shapes, selections, gradients, smart patch
+cargo bench --features bench --bench app_bench               # every tool end to end on a painted 4000 px canvas
+cargo bench --bench tools_bench                              # tool engines: mirror painting, shapes, selections, gradients, smart patch
 cargo bench --bench brush_bench                              # brush stamping and compositing
 cargo bench --bench tools_bench -- --save-baseline before    # save a run...
 cargo bench --bench tools_bench -- --baseline before         # ...and compare a later one against it

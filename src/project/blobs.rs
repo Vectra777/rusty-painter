@@ -16,15 +16,45 @@ fn default_compressed() -> bool {
     true
 }
 
-pub(super) fn push_blob(blobs: &mut Vec<u8>, raw: &[u8]) -> Result<StoredBlob, String> {
-    push_blob_impl(blobs, raw, true)
-}
-
-/// Like [`push_blob`], but stores `raw` uncompressed. Use for payloads that are
+/// Store `raw` uncompressed. Use for payloads that are
 /// already compressed (e.g. PNG-encoded previews), where a second zstd pass
 /// only burns CPU for no size benefit.
 pub(super) fn push_blob_raw(blobs: &mut Vec<u8>, raw: &[u8]) -> Result<StoredBlob, String> {
     push_blob_impl(blobs, raw, false)
+}
+
+/// Store zstd-compressed payloads: compressed in parallel, stored in
+/// order (the file is the same as pushing them one by one).
+pub(super) fn push_blobs(blobs: &mut Vec<u8>, raws: &[Vec<u8>]) -> Result<Vec<StoredBlob>, String> {
+    use rayon::prelude::*;
+    // One compressor per thread, reused: making one per tile (MBs of
+    // state) cost more than compressing.
+    let compressed: Vec<Vec<u8>> = raws
+        .par_iter()
+        .map_init(
+            || zstd::bulk::Compressor::new(ZSTD_LEVEL),
+            |compressor, raw| match compressor {
+                Ok(c) => c
+                    .compress(raw)
+                    .map_err(|err| format!("Compression failed: {err}")),
+                Err(err) => Err(format!("Compression failed: {err}")),
+            },
+        )
+        .collect::<Result<_, _>>()?;
+    Ok(raws
+        .iter()
+        .zip(compressed)
+        .map(|(raw, payload)| {
+            let offset = blobs.len() as u64;
+            blobs.extend_from_slice(&payload);
+            StoredBlob {
+                offset,
+                len: payload.len() as u64,
+                raw_len: raw.len() as u64,
+                compressed: true,
+            }
+        })
+        .collect())
 }
 
 fn push_blob_impl(blobs: &mut Vec<u8>, raw: &[u8], compress: bool) -> Result<StoredBlob, String> {

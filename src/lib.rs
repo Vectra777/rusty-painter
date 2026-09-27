@@ -1,4 +1,7 @@
 mod app;
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench_api;
 pub mod brush_engine;
 pub mod canvas;
 pub(crate) mod project;

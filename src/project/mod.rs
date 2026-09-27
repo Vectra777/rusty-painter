@@ -20,7 +20,7 @@ mod blobs;
 mod convert;
 mod preview;
 
-use blobs::{StoredBlob, push_blob, read_blob};
+use blobs::{StoredBlob, push_blobs, read_blob};
 use convert::{
     StoredColor, StoredColorModel, StoredLayerHistoryOp, StoredSelectionShape, StoredTransformInfo,
 };
@@ -74,7 +74,7 @@ impl PainterApp {
     }
 }
 
-fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
     let mut blobs = Vec::new();
     let manifest = ProjectFile::from_app(app, &mut blobs)?;
     let manifest =
@@ -89,7 +89,7 @@ fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn decode_project(bytes: &[u8]) -> Result<LoadedProject, String> {
+pub(crate) fn decode_project(bytes: &[u8]) -> Result<LoadedProject, String> {
     if bytes.len() < MAGIC.len() + 8 || &bytes[..MAGIC.len()] != MAGIC {
         return Err("Unsupported project file".to_string());
     }
@@ -278,11 +278,25 @@ impl StoredLayer {
             parent: layer.parent.map(|p| p.0),
             expanded: layer.expanded,
             blend: Some(layer.blend.key().to_string()),
-            tiles: layer
-                .tiles
-                .into_iter()
-                .map(|tile| StoredTile::from_snapshot(tile, blobs))
-                .collect::<Result<_, _>>()?,
+            tiles: {
+                use rayon::prelude::*;
+                let raws: Vec<Vec<u8>> = layer
+                    .tiles
+                    .par_iter()
+                    .map(|t| colors_to_bytes(&t.data))
+                    .collect();
+                let stored = push_blobs(blobs, &raws)?;
+                layer
+                    .tiles
+                    .iter()
+                    .zip(stored)
+                    .map(|(t, rgba_zstd)| StoredTile {
+                        tx: t.tx,
+                        ty: t.ty,
+                        rgba_zstd,
+                    })
+                    .collect()
+            },
         })
     }
 
@@ -324,14 +338,6 @@ struct StoredTile {
 }
 
 impl StoredTile {
-    fn from_snapshot(tile: CanvasTileSnapshot, blobs: &mut Vec<u8>) -> Result<Self, String> {
-        Ok(Self {
-            tx: tile.tx,
-            ty: tile.ty,
-            rgba_zstd: push_blob(blobs, &colors_to_bytes(&tile.data))?,
-        })
-    }
-
     fn into_snapshot(self, tile_size: usize, blobs: &[u8]) -> Result<CanvasTileSnapshot, String> {
         let data = bytes_to_colors(read_blob(blobs, &self.rgba_zstd)?)?;
         if data.len() != tile_size * tile_size {
@@ -395,11 +401,31 @@ struct StoredUndoAction {
 impl StoredUndoAction {
     fn from_action(action: &UndoAction, blobs: &mut Vec<u8>) -> Result<Self, String> {
         Ok(Self {
-            tiles: action
-                .tiles
-                .iter()
-                .map(|tile| StoredTileSnapshot::from_snapshot(tile, blobs))
-                .collect::<Result<_, _>>()?,
+            tiles: {
+                use rayon::prelude::*;
+                let raws: Vec<Vec<u8>> = action
+                    .tiles
+                    .par_iter()
+                    .map(|t| colors_to_bytes(&t.data.to_vec()))
+                    .collect();
+                let stored = push_blobs(blobs, &raws)?;
+                action
+                    .tiles
+                    .iter()
+                    .zip(stored)
+                    .map(|(s, rgba_zstd)| StoredTileSnapshot {
+                        tx: s.tx,
+                        ty: s.ty,
+                        layer_idx: 0,
+                        layer_id: Some(s.layer_id.0),
+                        x0: s.x0,
+                        y0: s.y0,
+                        width: s.width,
+                        height: s.height,
+                        rgba_zstd,
+                    })
+                    .collect()
+            },
             selection: action
                 .selection
                 .as_ref()
@@ -444,20 +470,6 @@ struct StoredTileSnapshot {
 }
 
 impl StoredTileSnapshot {
-    fn from_snapshot(snapshot: &TileSnapshot, blobs: &mut Vec<u8>) -> Result<Self, String> {
-        Ok(Self {
-            tx: snapshot.tx,
-            ty: snapshot.ty,
-            layer_idx: 0,
-            layer_id: Some(snapshot.layer_id.0),
-            x0: snapshot.x0,
-            y0: snapshot.y0,
-            width: snapshot.width,
-            height: snapshot.height,
-            rgba_zstd: push_blob(blobs, &colors_to_bytes(&snapshot.data.to_vec()))?,
-        })
-    }
-
     fn into_snapshot(self, tile_size: usize, blobs: &[u8]) -> Result<TileSnapshot, String> {
         let data = bytes_to_colors(read_blob(blobs, &self.rgba_zstd)?)?;
         if self.width == 0

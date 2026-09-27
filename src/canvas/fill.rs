@@ -236,22 +236,37 @@ impl Grid {
     fn into_mask(self, region: &[u8], antialias: bool) -> Option<SelectionMask> {
         let (w, h) = (self.w, self.h);
         let data: Vec<u8> = if antialias {
-            (0..w * h)
-                .into_par_iter()
-                .map(|i| {
-                    if region[i] != 0 {
-                        return 255;
+            // Filled neighbours in each 3×3 block, as a row sum then a
+            // column sum (separable: two reads a pixel instead of nine).
+            let mut across = vec![0u8; w * h];
+            across
+                .par_chunks_mut(w.max(1))
+                .zip(region.par_chunks(w.max(1)))
+                .for_each(|(out, row)| {
+                    let at = |x: usize| (row[x] != 0) as u8;
+                    for (x, o) in out.iter_mut().enumerate() {
+                        let left = if x > 0 { at(x - 1) } else { 0 };
+                        let right = if x + 1 < w { at(x + 1) } else { 0 };
+                        *o = left + at(x) + right;
                     }
-                    let (x, y) = (i % w, i / w);
-                    let mut n = 0u32;
-                    for ny in y.saturating_sub(1)..(y + 2).min(h) {
-                        for nx in x.saturating_sub(1)..(x + 2).min(w) {
-                            n += (region[ny * w + nx] != 0) as u32;
+                });
+            let mut data = vec![0u8; w * h];
+            data.par_chunks_mut(w.max(1))
+                .enumerate()
+                .for_each(|(y, out)| {
+                    for (x, o) in out.iter_mut().enumerate() {
+                        let i = y * w + x;
+                        if region[i] != 0 {
+                            *o = 255;
+                            continue;
                         }
+                        let up = if y > 0 { across[i - w] } else { 0 };
+                        let down = if y + 1 < h { across[i + w] } else { 0 };
+                        let n = (up + across[i] + down) as u32;
+                        *o = (n * 255 / 9) as u8;
                     }
-                    (n * 255 / 9) as u8
-                })
-                .collect()
+                });
+            data
         } else {
             region
                 .iter()
