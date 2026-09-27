@@ -810,7 +810,6 @@ impl SelectionManager {
     /// Move the selection the way `params` moves pixels (free transform or
     /// four-corner distort), so it stays on what was transformed.
     pub fn transform_by(&mut self, params: &crate::canvas::storage::TransformParams) {
-        use crate::canvas::storage::{apply_homography, homography, invert3, rect_corners};
         let Some(shape) = &self.current_shape else {
             return;
         };
@@ -830,15 +829,12 @@ impl SelectionManager {
             self.apply_transform(params.offset, rotation, scale, params.center);
             return;
         };
-        let Some(h) = homography(rect_corners(d.src), d.dst) else {
+        let Some(inverse) = params.inverse_map() else {
             return;
         };
-        let forward = |p: Vec2| apply_homography(&h, p);
+        let forward = |p: Vec2| params.forward(p);
         self.current_shape = match shape {
             SelectionShape::Mask(mask) => {
-                let Some(inverse) = invert3(&h) else {
-                    return;
-                };
                 let corners = [
                     Vec2::new(mask.x0 as f32, mask.y0 as f32),
                     Vec2::new((mask.x0 + mask.w as i32) as f32, mask.y0 as f32),
@@ -848,10 +844,13 @@ impl SelectionManager {
                     ),
                     Vec2::new(mask.x0 as f32, (mask.y0 + mask.h as i32) as f32),
                 ]
-                .map(forward);
-                let (min, max) = corners.iter().fold(
+                .map(forward)
+                // The picture only goes where the corners do.
+                .into_iter()
+                .chain(d.dst);
+                let (min, max) = corners.fold(
                     (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)),
-                    |(lo, hi), c| (lo.min(*c), hi.max(*c)),
+                    |(lo, hi), c| (lo.min(c), hi.max(c)),
                 );
                 // A distort can throw a corner very far: stay near the canvas.
                 let [cw, ch] = self.canvas_size.map(|v| v as f32);
@@ -865,8 +864,10 @@ impl SelectionManager {
                     max.x.ceil() as i32,
                     max.y.ceil() as i32,
                 ];
+                // Outside the picture's reach: far off the mask, unselected.
+                let off = Vec2::splat(f32::MIN / 4.0);
                 Some(SelectionShape::Mask(Arc::new(
-                    mask.resample(bounds, |p| apply_homography(&inverse, p)),
+                    mask.resample(bounds, |p| inverse.map(p).unwrap_or(off)),
                 )))
             }
             _ => Some(new_lasso_shape(

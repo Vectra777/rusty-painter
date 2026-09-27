@@ -740,7 +740,10 @@ pub(crate) mod tests {
         let mut app = app_with_red_square();
         transform::transform_press(&mut app, Vec2::new(96.0, 96.0));
         transform::transform_release(&mut app);
-        transform::set_distort(&mut app, true);
+        transform::set_corner_mode(
+            &mut app,
+            Some(crate::canvas::storage::DistortKind::Perspective),
+        );
         // Drag the bottom-right corner (128,128) out to (192,192).
         transform::transform_press(&mut app, Vec2::new(128.0, 128.0));
         let Tool::Transform(info) = app.active_tool else {

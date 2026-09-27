@@ -33,6 +33,149 @@ pub struct TransformParams {
 pub struct Distort {
     pub src: eframe::egui::Rect,
     pub dst: [Vec2; 4],
+    pub kind: DistortKind,
+}
+
+/// How the inside follows the four corners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DistortKind {
+    /// A plane seen at an angle: straight lines stay straight, and the far
+    /// side is foreshortened (a homography).
+    #[default]
+    Perspective,
+    /// Each corner pulled on its own: the picture is stretched evenly
+    /// between them, with no foreshortening (bilinear).
+    Bilinear,
+}
+
+/// Whether the quad is convex (and not folded or flat): the corners a
+/// perspective or distort can go to.
+pub fn is_convex_quad(q: &[Vec2; 4]) -> bool {
+    let mut sign = 0.0f32;
+    for i in 0..4 {
+        let (a, b, c) = (q[i], q[(i + 1) % 4], q[(i + 2) % 4]);
+        let cross = (b - a).x * (c - b).y - (b - a).y * (c - b).x;
+        if cross.abs() < 1e-3 || !cross.is_finite() {
+            return false;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if cross.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
+/// Canvas point → source point for one transform, prepared once for
+/// per-pixel use. `None` where nothing of the source lands.
+pub enum InverseMap {
+    Affine {
+        center: Vec2,
+        offset: Vec2,
+        sin: f32,
+        cos: f32,
+        inv_scale: Vec2,
+    },
+    Perspective {
+        h: [f64; 9],
+        /// Sign of the homogeneous w inside the quad: points with the other
+        /// sign lie beyond the horizon (they'd come back mirrored).
+        sign: f64,
+    },
+    Bilinear {
+        /// P(u, v) = a + b·u + c·v + d·u·v over the unit square.
+        a: Vec2,
+        b: Vec2,
+        c: Vec2,
+        d: Vec2,
+        src: eframe::egui::Rect,
+    },
+}
+
+impl InverseMap {
+    #[inline]
+    pub fn map(&self, p: Vec2) -> Option<Vec2> {
+        match self {
+            Self::Affine {
+                center,
+                offset,
+                sin,
+                cos,
+                inv_scale,
+            } => {
+                let (dx, dy) = (p.x - center.x - offset.x, p.y - center.y - offset.y);
+                let (rx, ry) = (dx * cos + dy * sin, -dx * sin + dy * cos);
+                Some(Vec2::new(
+                    rx * inv_scale.x + center.x,
+                    ry * inv_scale.y + center.y,
+                ))
+            }
+            Self::Perspective { h, sign } => {
+                let (x, y) = (p.x as f64, p.y as f64);
+                let w = h[6] * x + h[7] * y + h[8];
+                if w * sign <= 1e-12 {
+                    return None;
+                }
+                Some(Vec2::new(
+                    ((h[0] * x + h[1] * y + h[2]) / w) as f32,
+                    ((h[3] * x + h[4] * y + h[5]) / w) as f32,
+                ))
+            }
+            Self::Bilinear { a, b, c, d, src } => {
+                let (u, v) = inverse_bilinear(p - *a, *b, *c, *d)?;
+                Some(Vec2::new(
+                    src.min.x + u * src.width(),
+                    src.min.y + v * src.height(),
+                ))
+            }
+        }
+    }
+}
+
+/// (u, v) in the unit square with a + b·u + c·v + d·u·v = a + `e`.
+fn inverse_bilinear(e: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Option<(f32, f32)> {
+    let cross = |p: Vec2, q: Vec2| p.x as f64 * q.y as f64 - p.y as f64 * q.x as f64;
+    // v solves k2·v² + k1·v + k0 = 0.
+    let k2 = cross(d, c);
+    let k1 = cross(e, d) + cross(b, c);
+    let k0 = cross(e, b);
+    let solve_u = |v: f64| -> Option<f64> {
+        let den_x = b.x as f64 + d.x as f64 * v;
+        let den_y = b.y as f64 + d.y as f64 * v;
+        if den_x.abs() > den_y.abs() {
+            (den_x.abs() > 1e-12).then(|| (e.x as f64 - c.x as f64 * v) / den_x)
+        } else {
+            (den_y.abs() > 1e-12).then(|| (e.y as f64 - c.y as f64 * v) / den_y)
+        }
+    };
+    // A little past the square too: the box runs through the edge pixels'
+    // corners, and the pixels outside the source are dropped later anyway.
+    const REACH: f64 = 0.25;
+    let outside = |t: f64| (-t).max(t - 1.0).max(0.0);
+    let candidates: [Option<f64>; 2] = if k2.abs() < 1e-9 * (k1.abs() + 1.0) {
+        [(k1.abs() > 1e-12).then(|| -k0 / k1), None]
+    } else {
+        let disc = k1 * k1 - 4.0 * k0 * k2;
+        if disc < 0.0 {
+            return None;
+        }
+        let root = disc.sqrt();
+        [
+            Some((-k1 - root) / (2.0 * k2)),
+            Some((-k1 + root) / (2.0 * k2)),
+        ]
+    };
+    // Of two roots, the one on the picture (the other is on the fold of
+    // the surface far outside it).
+    candidates
+        .into_iter()
+        .flatten()
+        .filter_map(|v| Some((solve_u(v)?, v)))
+        .map(|(u, v)| (outside(u).max(outside(v)), u, v))
+        .filter(|&(off, _, _)| off <= REACH)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, u, v)| (u as f32, v as f32))
 }
 
 impl TransformParams {
@@ -56,10 +199,22 @@ impl TransformParams {
 
     /// Canvas position a source point moves to.
     pub fn forward(&self, p: Vec2) -> Vec2 {
-        if let Some(d) = &self.distort
-            && let Some(h) = homography(rect_corners(d.src), d.dst)
-        {
-            return apply_homography(&h, p);
+        if let Some(d) = &self.distort {
+            match d.kind {
+                DistortKind::Perspective => {
+                    if let Some(h) = homography(rect_corners(d.src), d.dst) {
+                        return apply_homography(&h, p);
+                    }
+                }
+                DistortKind::Bilinear => {
+                    let u = (p.x - d.src.min.x) / d.src.width().max(1e-6);
+                    let v = (p.y - d.src.min.y) / d.src.height().max(1e-6);
+                    let [p0, p1, p2, p3] = d.dst;
+                    let top = p0 + (p1 - p0) * u;
+                    let bottom = p3 + (p2 - p3) * u;
+                    return top + (bottom - top) * v;
+                }
+            }
         }
         let (sin_r, cos_r) = self.rotation.sin_cos();
         let (dx, dy) = (
@@ -70,6 +225,45 @@ impl TransformParams {
             dx * cos_r - dy * sin_r + self.center.x + self.offset.x,
             dx * sin_r + dy * cos_r + self.center.y + self.offset.y,
         )
+    }
+
+    /// Canvas point → source point, prepared for per-pixel use; `None` if
+    /// the transform can't be undone (flat or degenerate).
+    pub fn inverse_map(&self) -> Option<InverseMap> {
+        let Some(d) = self.distort else {
+            if self.scale.x.abs() < f32::EPSILON || self.scale.y.abs() < f32::EPSILON {
+                return None;
+            }
+            let (sin, cos) = self.rotation.sin_cos();
+            return Some(InverseMap::Affine {
+                center: self.center,
+                offset: self.offset,
+                sin,
+                cos,
+                inv_scale: Vec2::new(1.0 / self.scale.x, 1.0 / self.scale.y),
+            });
+        };
+        match d.kind {
+            DistortKind::Perspective => {
+                let h = invert3(&homography(rect_corners(d.src), d.dst)?)?;
+                let centre = (d.dst[0] + d.dst[1] + d.dst[2] + d.dst[3]) / 4.0;
+                let w = h[6] * centre.x as f64 + h[7] * centre.y as f64 + h[8];
+                (w.abs() > 1e-12).then_some(InverseMap::Perspective {
+                    h,
+                    sign: w.signum(),
+                })
+            }
+            DistortKind::Bilinear => {
+                let [p0, p1, p2, p3] = d.dst;
+                Some(InverseMap::Bilinear {
+                    a: p0,
+                    b: p1 - p0,
+                    c: p3 - p0,
+                    d: p0 - p1 + p2 - p3,
+                    src: d.src,
+                })
+            }
+        }
     }
 
     /// Moves every pixel by the same whole number of pixels (so pixels can be
@@ -273,26 +467,10 @@ pub(super) fn transform_tiles(
     }
 
     // Destination pixel centre -> source point.
-    let inverse_h = params
-        .distort
-        .and_then(|d| homography(rect_corners(d.src), d.dst))
-        .and_then(|h| invert3(&h));
-    if params.distort.is_some() && inverse_h.is_none() {
+    let Some(inverse_map) = params.inverse_map() else {
         return HashMap::new();
-    }
-    let (sin_r, cos_r) = params.rotation.sin_cos();
-    let (inv_sx, inv_sy) = (1.0 / params.scale.x, 1.0 / params.scale.y);
-    let inverse = |p: Vec2| -> Vec2 {
-        if let Some(h) = &inverse_h {
-            return apply_homography(h, p);
-        }
-        let (dx, dy) = (
-            p.x - params.center.x - params.offset.x,
-            p.y - params.center.y - params.offset.y,
-        );
-        let (rx, ry) = (dx * cos_r + dy * sin_r, -dx * sin_r + dy * cos_r);
-        Vec2::new(rx * inv_sx + params.center.x, ry * inv_sy + params.center.y)
     };
+    let inverse = |p: Vec2| inverse_map.map(p);
     // Whole-pixel moves copy pixels exactly; anything else is resampled
     // bilinearly so rotated or scaled art stays smooth.
     let exact = params.is_whole_pixel_move();
@@ -347,10 +525,14 @@ pub(super) fn transform_tiles(
                     let pixel = if exact {
                         source(x - params.offset.x as i32, y - params.offset.y as i32)
                     } else if params.draft {
-                        let p = inverse(Vec2::new(x as f32 + 0.5, y as f32 + 0.5));
+                        let Some(p) = inverse(Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) else {
+                            continue;
+                        };
                         source(p.x.floor() as i32, p.y.floor() as i32)
                     } else {
-                        let p = inverse(Vec2::new(x as f32 + 0.5, y as f32 + 0.5));
+                        let Some(p) = inverse(Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) else {
+                            continue;
+                        };
                         let (u, v) = (p.x - 0.5, p.y - 0.5);
                         let (fx0, fy0) = (u.floor(), v.floor());
                         let (ix, iy) = (fx0 as i32, fy0 as i32);

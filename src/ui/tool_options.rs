@@ -464,11 +464,24 @@ fn transform_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
 
 /// Mode, flips, quarter turns, apply and cancel. Shared with the touch bar.
 pub(crate) fn transform_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
-    let distort = matches!(app.active_tool, Tool::Transform(info) if info.corners.is_some());
-    let mut mode = distort;
-    segmented(ui, &mut mode, &[(false, "Free"), (true, "Distort")], true);
-    if mode != distort {
-        transform::set_distort(app, mode);
+    use crate::canvas::storage::DistortKind;
+    let current = match app.active_tool {
+        Tool::Transform(info) if info.corners.is_some() => Some(info.distort_kind),
+        _ => None,
+    };
+    let mut mode = current;
+    segmented(
+        ui,
+        &mut mode,
+        &[
+            (None, "Free"),
+            (Some(DistortKind::Perspective), "Perspective"),
+            (Some(DistortKind::Bilinear), "Distort"),
+        ],
+        true,
+    );
+    if mode != current {
+        transform::set_corner_mode(app, mode);
     }
     vdivider(ui);
     if ui

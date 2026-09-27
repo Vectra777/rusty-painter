@@ -120,6 +120,9 @@ pub(super) struct StoredTransformInfo {
     state: StoredTransformState,
     #[serde(default)]
     corners: Option<[StoredVec2; 4]>,
+    /// Distort (bilinear) rather than perspective; absent in older files.
+    #[serde(default)]
+    bilinear: bool,
 }
 
 impl From<&TransformInfo> for StoredTransformInfo {
@@ -132,6 +135,7 @@ impl From<&TransformInfo> for StoredTransformInfo {
             bounds: info.bounds.map(StoredRect::from),
             state: StoredTransformState::from(info.state),
             corners: info.corners.map(|c| c.map(StoredVec2::from)),
+            bilinear: info.distort_kind == crate::canvas::storage::DistortKind::Bilinear,
         }
     }
 }
@@ -146,6 +150,11 @@ impl StoredTransformInfo {
             bounds: self.bounds.map(Into::into),
             state: self.state.into(),
             corners: self.corners.map(|c| c.map(Into::into)),
+            distort_kind: if self.bilinear {
+                crate::canvas::storage::DistortKind::Bilinear
+            } else {
+                crate::canvas::storage::DistortKind::Perspective
+            },
         }
     }
 }

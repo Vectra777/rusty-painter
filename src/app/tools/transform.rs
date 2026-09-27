@@ -7,7 +7,7 @@ use crate::app::state::FloatSession;
 use crate::app::stroke_ops::exclusive;
 use crate::app::tools::Tool;
 use crate::canvas::history::{TileSnapshot, UndoAction};
-use crate::canvas::storage::{LayerKind, TransformParams};
+use crate::canvas::storage::{DistortKind, LayerKind, TransformParams};
 use crate::selection::transform::{TransformInfo, TransformState};
 use eframe::egui::{self, Color32, Vec2};
 use rayon::prelude::*;
@@ -375,8 +375,18 @@ pub(crate) fn transform_drag(app: &mut PainterApp, pos: Vec2, keep_aspect: bool)
         TransformState::Rotating => update_rotation(info, start, pos),
         TransformState::Scaling(idx) => update_scaling(info, delta, idx, keep_aspect),
         TransformState::Corner(i) => {
-            if let Some(c) = info.corners.as_mut().and_then(|c| c.get_mut(i)) {
-                *c += delta;
+            if let Some(corners) = info.corners.as_mut()
+                && i < 4
+            {
+                let mut moved = *corners;
+                moved[i] += delta;
+                // A folded or inside-out quad has no sensible picture:
+                // the corner waits where it was (and catches up with the
+                // pointer once it's somewhere valid again).
+                if !crate::canvas::storage::is_convex_quad(&moved) {
+                    return;
+                }
+                *corners = moved;
             }
         }
         TransformState::None => return,
@@ -460,18 +470,23 @@ pub(crate) fn rotate_quarter(app: &mut PainterApp, clockwise: bool) {
     }
 }
 
-/// Switch between free transform and four-corner distort.
-pub(crate) fn set_distort(app: &mut PainterApp, distort: bool) {
+/// Switch between free transform (`None`) and moving the four corners
+/// with perspective or distort. Perspective and distort keep the corners
+/// where they are.
+pub(crate) fn set_corner_mode(app: &mut PainterApp, mode: Option<DistortKind>) {
     if let Tool::Transform(ref mut info) = app.active_tool {
-        if distort {
-            if info.corners.is_none() {
-                info.corners = Some(info.quad().unwrap_or([Vec2::ZERO; 4]));
+        match mode {
+            Some(kind) => {
+                if info.corners.is_none() {
+                    info.corners = Some(info.quad().unwrap_or([Vec2::ZERO; 4]));
+                }
+                info.distort_kind = kind;
             }
-        } else {
-            info.end_distort();
+            None => info.end_distort(),
         }
         app.layer_state.transform_preview_pending = true;
     }
+    remember_info(app);
 }
 
 pub(crate) fn mark_transform_dirty(
@@ -784,25 +799,49 @@ pub(crate) fn draw_float_overlay(
         return;
     }
     let params = info.params();
-    let corners = crate::canvas::storage::rect_corners(overlay.area)
-        .map(|c| map.to_screen(params.forward(c)));
-    let uvs = [
-        egui::pos2(0.0, 0.0),
-        egui::pos2(1.0, 0.0),
-        egui::pos2(1.0, 1.0),
-        egui::pos2(0.0, 1.0),
-    ];
-    let mut mesh = egui::Mesh::with_texture(overlay.texture.id());
-    for (pos, uv) in corners.into_iter().zip(uvs) {
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos,
-            uv,
-            color: Color32::WHITE,
-        });
+    painter.add(egui::Shape::mesh(overlay_mesh(
+        overlay.texture.id(),
+        overlay.area,
+        &params,
+        &|p| map.to_screen(p),
+    )));
+}
+
+/// The floating texture as a grid of triangles, each vertex placed where
+/// the transform puts it. Two triangles can only stretch the picture
+/// evenly, so a perspective looked different while dragging than once
+/// applied; a fine grid follows any of the transforms closely.
+fn overlay_mesh(
+    texture: egui::TextureId,
+    area: egui::Rect,
+    params: &TransformParams,
+    to_screen: &dyn Fn(Vec2) -> egui::Pos2,
+) -> egui::Mesh {
+    let steps: u32 = if params.distort.is_some() { 32 } else { 1 };
+    let mut mesh = egui::Mesh::with_texture(texture);
+    for j in 0..=steps {
+        for i in 0..=steps {
+            let (u, v) = (i as f32 / steps as f32, j as f32 / steps as f32);
+            let p = Vec2::new(
+                area.min.x + u * area.width(),
+                area.min.y + v * area.height(),
+            );
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: to_screen(params.forward(p)),
+                uv: egui::pos2(u, v),
+                color: Color32::WHITE,
+            });
+        }
     }
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    painter.add(egui::Shape::mesh(mesh));
+    let row = steps + 1;
+    for j in 0..steps {
+        for i in 0..steps {
+            let k = j * row + i;
+            mesh.add_triangle(k, k + 1, k + row + 1);
+            mesh.add_triangle(k, k + row + 1, k + row);
+        }
+    }
+    mesh
 }
 
 #[cfg(test)]
@@ -923,12 +962,61 @@ mod tests {
     }
 
     #[test]
+    fn a_corner_never_folds_the_quad() {
+        let mut app = app();
+        select_rect(&mut app, (10.0, 10.0), (30.0, 30.0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        create_floating_layer(&mut app);
+        set_corner_mode(&mut app, Some(DistortKind::Perspective));
+        let corners = |app: &PainterApp| match app.active_tool {
+            Tool::Transform(i) => i.corners.unwrap(),
+            _ => panic!(),
+        };
+        let before = corners(&app);
+        // Grab the bottom-right corner and drag it past the top-left one.
+        transform_press(&mut app, before[2]);
+        transform_drag(&mut app, before[0] - Vec2::splat(10.0), false);
+        assert_eq!(corners(&app), before, "the corner waits");
+        // Back somewhere valid: it follows the pointer again.
+        transform_drag(&mut app, before[2] + Vec2::new(8.0, 4.0), false);
+        assert!((corners(&app)[2] - (before[2] + Vec2::new(8.0, 4.0))).length() < 1e-3);
+        transform_release(&mut app);
+    }
+
+    #[test]
+    fn distort_moves_the_selection_with_it() {
+        let mut app = app();
+        select_rect(&mut app, (10.0, 10.0), (30.0, 30.0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        create_floating_layer(&mut app);
+        set_corner_mode(&mut app, Some(DistortKind::Bilinear));
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            assert_eq!(info.distort_kind, DistortKind::Bilinear);
+            let c = info.corners.as_mut().unwrap();
+            c[2] += Vec2::new(30.0, 0.0);
+        }
+        app.layer_state.transform_preview_pending = true;
+        flush_transform_preview(&mut app);
+        commit_floating_layer(&mut app);
+        let sel = &app.selection_manager;
+        // The bottom-right corner went right: the bottom edge is longer.
+        assert!(sel.contains(Vec2::new(50.0, 28.0)));
+        assert!(!sel.contains(Vec2::new(50.0, 12.0)));
+        assert_eq!(pixel(&app, 1, 50, 28), RED);
+        assert_eq!(pixel(&app, 1, 50, 12).a(), 0);
+        // The mode survives a new session.
+        assert!(
+            matches!(app.active_tool, Tool::Transform(i) if i.distort_kind == DistortKind::Bilinear)
+        );
+    }
+
+    #[test]
     fn a_distort_keeps_the_selection_on_the_pixels() {
         let mut app = app();
         select_rect(&mut app, (10.0, 10.0), (30.0, 30.0));
         app.active_tool = Tool::Transform(TransformInfo::default());
         create_floating_layer(&mut app);
-        set_distort(&mut app, true);
+        set_corner_mode(&mut app, Some(DistortKind::Perspective));
         // Push the right corners 40 px further right.
         if let Tool::Transform(ref mut info) = app.active_tool {
             let c = info.corners.as_mut().unwrap();

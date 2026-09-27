@@ -1,7 +1,7 @@
 //! The Transform tool's state: offset, rotation, scale or four-corner
 //! distort, and its eight handles.
 
-use crate::canvas::storage::{Distort, TransformParams};
+use crate::canvas::storage::{Distort, DistortKind, TransformParams};
 use eframe::egui::Rect;
 use eframe::egui::Vec2;
 
@@ -27,6 +27,8 @@ pub struct TransformInfo {
     /// top-right, bottom-right, bottom-left). Replaces offset/rotation/scale
     /// while set.
     pub corners: Option<[Vec2; 4]>,
+    /// How the inside follows `corners`: perspective or distort.
+    pub distort_kind: DistortKind,
 }
 
 impl Default for TransformInfo {
@@ -39,6 +41,7 @@ impl Default for TransformInfo {
             bounds: None,
             state: TransformState::None,
             corners: None,
+            distort_kind: DistortKind::Perspective,
         }
     }
 }
@@ -73,7 +76,11 @@ impl TransformInfo {
     pub fn params(&self) -> TransformParams {
         let center = self.bounds.map_or(Vec2::ZERO, |b| b.center().to_vec2());
         match (self.corners, self.bounds) {
-            (Some(dst), Some(src)) => TransformParams::distorted(Distort { src, dst }),
+            (Some(dst), Some(src)) => TransformParams::distorted(Distort {
+                src,
+                dst,
+                kind: self.distort_kind,
+            }),
             _ => TransformParams::new(self.offset, self.rotation, self.scale, center),
         }
     }
@@ -109,6 +116,7 @@ impl TransformInfo {
         let distort = self.corners.is_some();
         *self = TransformInfo {
             bounds,
+            distort_kind: self.distort_kind,
             ..TransformInfo::default()
         };
         if distort {

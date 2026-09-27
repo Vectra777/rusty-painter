@@ -226,12 +226,146 @@ fn identity_distort_copies_pixels_exactly() {
     let bounds = source_bounds_and_tiles(&src, ts, None).unwrap().0;
     let area =
         eframe::egui::Rect::from_min_max(bounds.min, bounds.max + eframe::egui::vec2(1.0, 1.0));
-    let params = TransformParams::distorted(Distort {
+    for kind in [DistortKind::Perspective, DistortKind::Bilinear] {
+        let params = TransformParams::distorted(Distort {
+            src: area,
+            dst: rect_corners(area),
+            kind,
+        });
+        let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
+        assert_eq!(out.get(&(0, 0)), src.get(&(0, 0)), "{kind:?}");
+    }
+}
+
+/// Every painted output pixel lies in the corners' quad, give or take the
+/// soft edge (half a source pixel, a few pixels where it's magnified); a
+/// mirrored ghost would land far outside.
+fn assert_inside_quad(out: &HashMap<(i32, i32), Vec<Color32>>, ts: usize, quad: [Vec2; 4]) {
+    for (&(tx, ty), data) in out {
+        for (i, p) in data.iter().enumerate() {
+            if p.a() == 0 {
+                continue;
+            }
+            let c = Vec2::new(
+                (tx * ts as i32 + (i % ts) as i32) as f32 + 0.5,
+                (ty * ts as i32 + (i / ts) as i32) as f32 + 0.5,
+            );
+            let inside = (0..4).all(|k| {
+                let (a, b) = (quad[k], quad[(k + 1) % 4]);
+                let edge = b - a;
+                let len = edge.length();
+                // Signed distance, positive inside for a clockwise quad.
+                (edge.x * (c - a).y - edge.y * (c - a).x) / len >= -4.0
+            });
+            assert!(inside, "pixel at {c:?} outside {quad:?}");
+        }
+    }
+}
+
+#[test]
+fn a_strong_perspective_stays_inside_its_corners() {
+    let ts = 16;
+    let src = pattern_tiles(ts);
+    let bounds = source_bounds_and_tiles(&src, ts, None).unwrap().0;
+    let area =
+        eframe::egui::Rect::from_min_max(bounds.min, bounds.max + eframe::egui::vec2(1.0, 1.0));
+    // Near-vanishing edges, magnified in places: nothing lands outside.
+    let quads = [
+        [
+            Vec2::new(20.0, 20.0),
+            Vec2::new(22.0, 20.5),
+            Vec2::new(60.0, 60.0),
+            Vec2::new(2.0, 58.0),
+        ],
+        [
+            Vec2::new(10.0, 10.0),
+            Vec2::new(60.0, 12.0),
+            Vec2::new(56.0, 20.0),
+            Vec2::new(12.0, 60.0),
+        ],
+    ];
+    for dst in quads {
+        assert!(is_convex_quad(&dst));
+        for kind in [DistortKind::Perspective, DistortKind::Bilinear] {
+            let params = TransformParams::distorted(Distort {
+                src: area,
+                dst,
+                kind,
+            });
+            let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
+            assert!(!out.is_empty());
+            assert_inside_quad(&out, ts, dst);
+        }
+    }
+}
+
+#[test]
+fn distort_goes_back_to_where_it_came_from() {
+    let area = eframe::egui::Rect::from_min_max(
+        eframe::egui::pos2(0.0, 0.0),
+        eframe::egui::pos2(40.0, 20.0),
+    );
+    let dst = [
+        Vec2::new(5.0, 3.0),
+        Vec2::new(70.0, -4.0),
+        Vec2::new(60.0, 50.0),
+        Vec2::new(-2.0, 30.0),
+    ];
+    for kind in [DistortKind::Perspective, DistortKind::Bilinear] {
+        let params = TransformParams::distorted(Distort {
+            src: area,
+            dst,
+            kind,
+        });
+        // Corners land on the corners.
+        for (c, want) in rect_corners(area).into_iter().zip(dst) {
+            assert!((params.forward(c) - want).length() < 1e-3, "{kind:?}");
+        }
+        let inverse = params.inverse_map().unwrap();
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let p = Vec2::new(i as f32 * 5.0, j as f32 * 2.5);
+                let back = inverse.map(params.forward(p)).unwrap();
+                assert!((back - p).length() < 1e-2, "{kind:?} {p:?} -> {back:?}");
+            }
+        }
+    }
+    // Distort stretches evenly: the middle of the top edge stays halfway
+    // between its corners; perspective foreshortens it.
+    let top_mid = Vec2::new(20.0, 0.0);
+    let even = (dst[0] + dst[1]) / 2.0;
+    let bilinear = TransformParams::distorted(Distort {
         src: area,
-        dst: rect_corners(area),
+        dst,
+        kind: DistortKind::Bilinear,
     });
-    let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
-    assert_eq!(out.get(&(0, 0)), src.get(&(0, 0)));
+    let perspective = TransformParams::distorted(Distort {
+        src: area,
+        dst,
+        kind: DistortKind::Perspective,
+    });
+    assert!((bilinear.forward(top_mid) - even).length() < 1e-3);
+    assert!((perspective.forward(top_mid) - even).length() > 0.5);
+}
+
+#[test]
+fn only_convex_quads_are_accepted() {
+    let square = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(10.0, 0.0),
+        Vec2::new(10.0, 10.0),
+        Vec2::new(0.0, 10.0),
+    ];
+    assert!(is_convex_quad(&square));
+    let mut folded = square;
+    folded[2] = Vec2::new(-5.0, -5.0);
+    assert!(!is_convex_quad(&folded), "corner dragged across the box");
+    let mut dented = square;
+    dented[2] = Vec2::new(4.0, 4.0);
+    assert!(!is_convex_quad(&dented), "concave");
+    let mut flat = square;
+    flat[1] = Vec2::new(0.0, 0.0);
+    assert!(!is_convex_quad(&flat));
 }
 
 #[test]

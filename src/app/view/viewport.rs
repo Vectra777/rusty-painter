@@ -192,8 +192,10 @@ impl PainterApp {
                 painter.line_segment([pts[i], pts[(i + 1) % 4]], stroke);
             }
         }
-        if info.corners.is_some() {
-            // Distort: diagonals hint at the perspective.
+        if info.corners.is_some()
+            && info.distort_kind == crate::canvas::storage::DistortKind::Perspective
+        {
+            // Diagonals hint at the perspective.
             let faint = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(70));
             painter.line_segment([pts[0], pts[2]], faint);
             painter.line_segment([pts[1], pts[3]], faint);
