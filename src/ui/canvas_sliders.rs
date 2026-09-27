@@ -190,6 +190,7 @@ pub fn canvas_sliders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
     let m = &app.modal_state;
     let covered = m.menu_sheet_open
         || m.select_menu_open
+        || m.symmetry_menu_open
         || m.show_new_canvas_modal
         || m.show_general_settings
         || m.show_shortcuts

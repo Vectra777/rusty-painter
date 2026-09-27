@@ -1,5 +1,6 @@
 use crate::brush_engine::brush::Brush;
 use crate::brush_engine::stabilizer::Stabilizer;
+use crate::brush_engine::symmetry::{Copy2, Symmetry};
 use crate::canvas::Canvas;
 use crate::canvas::history::UndoAction;
 use crate::selection::SelectionManager;
@@ -44,6 +45,8 @@ pub struct StrokeContext<'a> {
     selection: Option<&'a SelectionManager>,
     undo_action: &'a mut UndoAction,
     stroke_tiles: &'a mut StrokeTiles,
+    /// Mirror painting: the settings and their precomputed copy maps.
+    symmetry: Option<(&'a Symmetry, &'a [Copy2])>,
 }
 
 impl<'a> StrokeContext<'a> {
@@ -60,10 +63,32 @@ impl<'a> StrokeContext<'a> {
             selection,
             undo_action,
             stroke_tiles,
+            symmetry: None,
         }
     }
 
+    /// Repeat every dab with `symmetry` (whose copy maps are `copies`).
+    pub fn with_symmetry(mut self, symmetry: &'a Symmetry, copies: &'a [Copy2]) -> Self {
+        if symmetry.is_active() && !copies.is_empty() {
+            self.symmetry = Some((symmetry, copies));
+        }
+        self
+    }
+
     fn dabs(&mut self, brush: &mut Brush, centers: &[Vec2]) {
+        if let Some((symmetry, copies)) = self.symmetry {
+            let (centers, orients) = symmetry.expand(copies, centers);
+            brush.dabs_oriented(
+                self.pool,
+                self.canvas,
+                self.selection,
+                &centers,
+                Some(&orients),
+                self.undo_action,
+                self.stroke_tiles,
+            );
+            return;
+        }
         brush.dabs(
             self.pool,
             self.canvas,

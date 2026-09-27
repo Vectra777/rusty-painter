@@ -75,6 +75,7 @@ impl eframe::App for PainterApp {
             .is_some_and(|prev| prev != screen_size);
         self.workspace.screen_size = Some(screen_size);
         self.selection_manager.canvas_size = [self.canvas.width(), self.canvas.height()];
+        self.keep_guides_on_canvas();
 
         if super::shortcuts::handle_shortcuts(self, ctx) {
             needs_repaint = true;
@@ -294,6 +295,17 @@ impl eframe::App for PainterApp {
                         .draw_overlay(ui.painter(), map.zoom(), &|p| map.to_screen(p));
                 }
                 super::select_tool::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
+                super::guides::draw_guides(self, ui.painter(), &map);
+                // A hand over the guide handles: they can be dragged.
+                if let Some(canvas) = self.viewport.cursor_canvas
+                    && (self.guides_dragging() || self.over_guide_handle(canvas))
+                {
+                    ctx.set_cursor_icon(if self.guides_dragging() {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    });
+                }
 
                 super::transform::draw_float_overlay(self, ui.painter(), &map);
                 self.draw_transform_overlay(ui.painter(), &map);

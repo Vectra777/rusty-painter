@@ -117,6 +117,8 @@ pub struct ViewportState {
     pub touch: crate::app::touch::TouchState,
     /// Screen position of the previous pointer event, for pan/rotate deltas.
     pub last_pointer_pos: Option<egui::Pos2>,
+    /// The view is mirrored left to right (the pixels are not).
+    pub flip_x: bool,
 }
 
 impl ViewportState {
@@ -132,6 +134,7 @@ impl ViewportState {
             canvas_area: None,
             touch: Default::default(),
             last_pointer_pos: None,
+            flip_x: false,
         }
     }
 }
@@ -273,6 +276,8 @@ pub struct ModalState {
     pub show_shortcuts: bool,
     /// The selection tool's slide-out menu is open.
     pub select_menu_open: bool,
+    /// The mirror painting menu is open.
+    pub symmetry_menu_open: bool,
     /// Touch mode: the File / Edit / View / Help sheet is slid up.
     pub menu_sheet_open: bool,
     /// Section the menu sheet shows when it is too narrow for all of them.
@@ -287,6 +292,7 @@ impl ModalState {
             show_general_settings: false,
             show_shortcuts: false,
             select_menu_open: false,
+            symmetry_menu_open: false,
             menu_sheet_open: false,
             menu_sheet_section: Default::default(),
         }
@@ -365,6 +371,10 @@ pub struct WorkspaceState {
     pub transform_pick_layer: bool,
     /// Select tool settings and drag state.
     pub select: crate::app::select_tool::SelectToolState,
+    /// Mirror painting.
+    pub symmetry: crate::brush_engine::symmetry::Symmetry,
+    /// On-canvas guides and their handles.
+    pub guides: crate::app::guides::GuideState,
     /// Android's image picker (the photo library).
     pub gallery: crate::ui::image_gallery::GalleryState,
 }
@@ -401,6 +411,8 @@ impl WorkspaceState {
             gallery: Default::default(),
             transform_pick_layer: true,
             select: Default::default(),
+            symmetry: Default::default(),
+            guides: Default::default(),
         }
     }
 }

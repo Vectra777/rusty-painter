@@ -9,6 +9,7 @@
 
 use crate::brush_engine::brush::Brush;
 use crate::brush_engine::stroke::{StrokeContext, StrokeState, StrokeTiles};
+use crate::brush_engine::symmetry::{Copy2, Symmetry};
 use crate::canvas::Canvas;
 use crate::canvas::history::UndoAction;
 use crate::selection::SelectionManager;
@@ -28,6 +29,8 @@ pub struct StrokeSetup {
     pub pool: Arc<ThreadPool>,
     /// The layer being painted, for filing the undo record.
     pub layer_idx: usize,
+    /// Mirror painting.
+    pub symmetry: Symmetry,
 }
 
 /// A completed stroke's undo record.
@@ -190,12 +193,16 @@ struct Session {
     stroke: StrokeState,
     undo: UndoAction,
     tiles: StrokeTiles,
+    /// The symmetry's copy maps, computed once per stroke.
+    copies: Vec<Copy2>,
 }
 
 fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
     match job {
         Job::Begin(setup) => {
+            let copies = setup.symmetry.copies();
             *session = Some(Session {
+                copies,
                 setup: *setup,
                 stroke: StrokeState::new(),
                 undo: UndoAction {
@@ -213,6 +220,7 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
                 stroke,
                 undo,
                 tiles,
+                copies,
             }) = session
             else {
                 return;
@@ -222,9 +230,11 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
                 brush,
                 selection,
                 pool,
+                symmetry,
                 ..
             } = setup;
-            let mut context = StrokeContext::new(pool, canvas, selection.as_ref(), undo, tiles);
+            let mut context = StrokeContext::new(pool, canvas, selection.as_ref(), undo, tiles)
+                .with_symmetry(symmetry, copies);
             stroke.add_point(brush, pos, pressure, &mut context);
             let touched = std::mem::take(&mut tiles.dirty);
             let mut shared = shared.lock();
@@ -318,6 +328,7 @@ mod tests {
             selection: None,
             pool,
             layer_idx: 1,
+            symmetry: Default::default(),
         });
         for (pos, pressure) in samples() {
             worker.sample(pos, pressure);

@@ -73,6 +73,9 @@ pub(super) struct PlacedDab {
     /// Sub-pixel center offset, quantized to 1/16 px.
     pub frac_x: f32,
     pub frac_y: f32,
+    /// How a custom tip is turned for this dab (mirror copies): maps canvas
+    /// offsets from the centre to tip offsets, row-major.
+    pub orient: [f32; 4],
 }
 
 impl PlacedDab {
@@ -86,7 +89,15 @@ impl PlacedDab {
             base_y: center.y.floor() as i32 - r_ceil,
             frac_x: quantize(center.x),
             frac_y: quantize(center.y),
+            orient: [1.0, 0.0, 0.0, 1.0],
         }
+    }
+
+    /// `(dx, dy)` (canvas offset from the centre) in the tip's frame.
+    #[inline]
+    pub fn tip_offset(&self, dx: f32, dy: f32) -> (f32, f32) {
+        let [a, b, c, d] = self.orient;
+        (a * dx + b * dy, c * dx + d * dy)
     }
 }
 

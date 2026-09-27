@@ -38,6 +38,8 @@ pub(crate) enum Icon {
     Wand,
     ColorRange,
     Magnetic,
+    Symmetry,
+    Flip,
 }
 
 /// Maps 16×16 icon-grid coordinates into a square centered in `rect`.
@@ -155,6 +157,28 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
             let tail = quad_bezier(g.p(4.5, 9.0), g.p(3.0, 12.0), g.p(6.0, 14.0), 12);
             painter.add(Shape::line(tail, thin));
             painter.circle_filled(g.p(6.0, 14.0), g.w(1.2), color);
+        }
+        Icon::Symmetry => {
+            // A dashed axis with a stroke and its mirror image.
+            let axis = vec![g.p(8.0, 1.5), g.p(8.0, 14.5)];
+            painter.extend(Shape::dashed_line(&axis, thin, g.w(1.6), g.w(1.4)));
+            let left = quad_bezier(g.p(6.0, 3.0), g.p(0.5, 8.0), g.p(6.0, 13.0), 14);
+            let right = quad_bezier(g.p(10.0, 3.0), g.p(15.5, 8.0), g.p(10.0, 13.0), 14);
+            painter.add(Shape::line(left, Stroke::new(g.w(1.5), color)));
+            painter.add(Shape::line(right, Stroke::new(g.w(1.5), color)));
+        }
+        Icon::Flip => {
+            // Two triangles facing each other across an axis.
+            line((8.0, 1.5), (8.0, 14.5), 1.1);
+            painter.add(Shape::convex_polygon(
+                vec![g.p(6.5, 4.0), g.p(6.5, 12.0), g.p(1.5, 12.0)],
+                color,
+                Stroke::NONE,
+            ));
+            painter.add(Shape::closed_line(
+                vec![g.p(9.5, 4.0), g.p(9.5, 12.0), g.p(14.5, 12.0)],
+                thin,
+            ));
         }
         Icon::Wand => {
             // A wand with a sparkle at its tip.

@@ -45,7 +45,13 @@ impl PainterApp {
         let unrotated = self.unrotate_point_around_center(pos, canvas_center);
         let world_point = canvas_center + unrotated;
         let p = self.world_to_canvas_coords(world_point, origin);
-        Vec2::new(p.x, p.y)
+        // A flipped view shows the canvas mirrored about its centre.
+        let x = if self.viewport.flip_x {
+            self.canvas.width() as f32 - p.x
+        } else {
+            p.x
+        };
+        Vec2::new(x, p.y)
     }
 
     fn unrotate_point_around_center(&self, pos: egui::Pos2, center: egui::Pos2) -> egui::Vec2 {

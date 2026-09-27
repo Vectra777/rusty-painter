@@ -48,7 +48,12 @@ pub struct BlendStroke {
     last: Option<Vec2>,
     /// Distance travelled since the last dab.
     travelled: f32,
-    carry: Option<Carry>,
+    /// Smudge: the paint each mirror copy carries (copy 0 is the stroke
+    /// itself).
+    carries: Vec<Option<Carry>>,
+    /// Mirror painting for this stroke.
+    symmetry: crate::brush_engine::symmetry::Symmetry,
+    copies: Vec<crate::brush_engine::symmetry::Copy2>,
 }
 
 /// Pixels are mixed as linear-light premultiplied colour, the same space
@@ -152,9 +157,11 @@ impl PainterApp {
             before: HashMap::new(),
             last: Some(pos),
             travelled: 0.0,
-            carry: None,
+            carries: Vec::new(),
+            symmetry: self.workspace.symmetry,
+            copies: self.workspace.symmetry.copies(),
         });
-        self.blend_dab(pos, pressure);
+        self.blend_mirrored(pos, pressure);
     }
 
     pub(crate) fn blend_drag(&mut self, pos: Vec2, pressure: f32) {
@@ -181,7 +188,7 @@ impl PainterApp {
         stroke.travelled = length - (t - spacing);
         stroke.last = Some(pos);
         for p in dabs {
-            self.blend_dab(p, pressure);
+            self.blend_mirrored(p, pressure);
         }
     }
 
@@ -231,8 +238,19 @@ impl PainterApp {
         (o.diameter * k).max(1.0)
     }
 
-    /// One dab at `center`.
-    fn blend_dab(&mut self, center: Vec2, pressure: f32) {
+    /// A dab at `center` and its mirror copies.
+    fn blend_mirrored(&mut self, center: Vec2, pressure: f32) {
+        let Some(stroke) = self.brush_state.blend_stroke.as_ref() else {
+            return;
+        };
+        let positions = stroke.symmetry.positions(&stroke.copies, center);
+        for (copy, p) in positions {
+            self.blend_dab(p, pressure, copy);
+        }
+    }
+
+    /// One dab at `center`, for mirror copy `copy`.
+    fn blend_dab(&mut self, center: Vec2, pressure: f32, copy: usize) {
         let diameter = self.blend_diameter(pressure);
         let o = &self.brush_state.brush.brush_options;
         let r = diameter * 0.5;
@@ -300,7 +318,10 @@ impl PainterApp {
             .collect();
         let target: Vec<[f32; 4]> = if stroke.smudge {
             // The carried paint, resized if pressure changed the tip size.
-            let carry = match stroke.carry.take() {
+            if stroke.carries.len() <= copy {
+                stroke.carries.resize_with(copy + 1, || None);
+            }
+            let carry = match stroke.carries[copy].take() {
                 Some(c) if c.side == side => c,
                 Some(c) => Carry {
                     side,
@@ -317,7 +338,7 @@ impl PainterApp {
                 },
             };
             let px = carry.px.clone();
-            stroke.carry = Some(carry);
+            stroke.carries[copy] = Some(carry);
             px
         } else {
             let radius = ((r * blur_size).round() as usize).max(1);
@@ -341,7 +362,7 @@ impl PainterApp {
             result.push(out);
         }
         // Smudge picks up the blended paint for the next dab.
-        if let Some(carry) = stroke.carry.as_mut() {
+        if let Some(carry) = stroke.carries.get_mut(copy).and_then(|c| c.as_mut()) {
             for (c, &res) in carry.px.iter_mut().zip(&result) {
                 let res = to_f(res);
                 for k in 0..4 {

@@ -24,12 +24,19 @@ impl PainterApp {
             .selection_manager
             .has_selection()
             .then(|| SelectionManager::with_shape(self.selection_manager.current_shape.clone()));
+        let mut symmetry = self.workspace.symmetry;
+        // Pixel-perfect dabs sit on pixel centres; so do their mirror
+        // images when the axes do (on a half-pixel grid).
+        if self.brush_state.brush.pixel_perfect {
+            symmetry.center = (symmetry.center * 2.0).round() / 2.0;
+        }
         self.stroke_worker.begin(StrokeSetup {
             canvas: Arc::clone(&self.canvas),
             brush: self.brush_state.brush.clone(),
             selection,
             pool: Arc::clone(&self.workspace.pool),
             layer_idx: self.canvas.active_layer_idx,
+            symmetry,
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;

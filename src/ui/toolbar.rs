@@ -17,7 +17,7 @@ const MARGIN_Y: f32 = 6.0;
 
 /// Button side that fits every tool (and the colors) in `height`, if any.
 fn fitting_button_size(height: f32, touch: bool, preferred: f32) -> Option<f32> {
-    let buttons = if touch { 13.0 } else { 11.0 };
+    let buttons = if touch { 14.0 } else { 12.0 };
     let separators = if touch { 4.0 } else { 3.0 };
     // The color pair is about 1.22 buttons tall.
     let fixed = 2.0 * MARGIN_Y
@@ -41,7 +41,7 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
     } else {
         MIN_TOOL_BUTTON
     });
-    let mut select_anchor = None;
+    let mut anchors = Anchors::default();
     egui::SidePanel::left("toolbar")
         .exact_width(size + m.toolbar_width - m.tool_button)
         .resizable(false)
@@ -53,7 +53,7 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, ITEM_SPACING);
             if fitting.is_some() {
-                select_anchor = tool_buttons(app, ui, size, m.touch);
+                anchors = tool_buttons(app, ui, size, m.touch);
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     color_pair(app, ui, size);
                 });
@@ -64,25 +64,29 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
                     separator(ui, size);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            select_anchor = tool_buttons(app, ui, size, m.touch);
+                            anchors = tool_buttons(app, ui, size, m.touch);
                         });
                     });
                 });
             }
         });
-    if let Some(anchor) = select_anchor {
+    if let Some(anchor) = anchors.select {
         crate::ui::select_menu::show(app, ctx, anchor);
+    }
+    if let Some(anchor) = anchors.symmetry {
+        crate::ui::symmetry_menu::show(app, ctx, anchor);
     }
 }
 
-/// The tool buttons, top to bottom. Returns the Select button's rect (the
-/// selection menu slides out from it).
-fn tool_buttons(
-    app: &mut PainterApp,
-    ui: &mut egui::Ui,
-    size: f32,
-    touch: bool,
-) -> Option<egui::Rect> {
+/// Buttons that menus slide out from.
+#[derive(Default)]
+struct Anchors {
+    select: Option<egui::Rect>,
+    symmetry: Option<egui::Rect>,
+}
+
+/// The tool buttons, top to bottom.
+fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool) -> Anchors {
     let eraser = app.is_eraser_active();
     // On a touch screen, tapping the tool that's already active
     // slides the tool settings panel in or out.
@@ -189,6 +193,18 @@ fn tool_buttons(
     {
         app.workspace.palette.open = !palette_open;
     }
+    let mirroring = app.workspace.symmetry.is_active();
+    let response = icon_button(
+        ui,
+        Icon::Symmetry,
+        size,
+        mirroring || app.modal_state.symmetry_menu_open,
+        "Mirror painting: axes, mandala",
+    );
+    if response.clicked() {
+        app.modal_state.symmetry_menu_open = !app.modal_state.symmetry_menu_open;
+    }
+    let symmetry_anchor = Some(response.rect);
 
     // No keyboard on a touch screen: undo/redo need buttons.
     if touch {
@@ -200,7 +216,10 @@ fn tool_buttons(
             app.apply_history(true);
         }
     }
-    select_anchor
+    Anchors {
+        select: select_anchor,
+        symmetry: symmetry_anchor,
+    }
 }
 
 fn separator(ui: &mut egui::Ui, width: f32) {

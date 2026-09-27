@@ -258,9 +258,13 @@ pub fn update_dirty_textures(
     let (origin, center) = canvas_placement(app, view.rect);
     let (cos, sin) = (app.viewport.rotation.cos(), app.viewport.rotation.sin());
     let zoom = app.viewport.zoom;
+    let flip = app.viewport.flip_x.then_some(app.canvas.width() as f32);
     let (visible_x, visible_y) = visible_tile_range(
         clip.intersect(view.rect),
-        |p| (PainterApp::rotate_point(p, center, cos, -sin) - origin).to_pos2() / zoom,
+        |p| {
+            let c = (PainterApp::rotate_point(p, center, cos, -sin) - origin).to_pos2() / zoom;
+            flip.map_or(c, |w| egui::pos2(w - c.x, c.y))
+        },
         app.render_cache.tiles_x,
         app.render_cache.tiles_y,
     );
@@ -356,10 +360,13 @@ pub struct ScreenMap {
     zoom: f32,
     cos: f32,
     sin: f32,
+    /// Canvas width when the view is flipped (mirrored about the centre).
+    flip: Option<f32>,
 }
 
 impl ScreenMap {
     pub fn to_screen(self, p: eframe::egui::Vec2) -> egui::Pos2 {
+        let p = self.flip.map_or(p, |w| eframe::egui::vec2(w - p.x, p.y));
         PainterApp::rotate_point(self.origin + p * self.zoom, self.center, self.cos, self.sin)
     }
 
@@ -380,6 +387,7 @@ pub fn screen_map(app: &PainterApp, view: &CanvasView) -> ScreenMap {
         zoom: app.viewport.zoom,
         cos,
         sin,
+        flip: app.viewport.flip_x.then_some(app.canvas.width() as f32),
     }
 }
 
@@ -406,6 +414,8 @@ struct Placement {
     origin: egui::Pos2,
     center: egui::Pos2,
     rotation: f32,
+    /// Mirror the canvas left to right about its centre.
+    flip: bool,
     /// The paint callback's area; quad corners are in its NDC.
     target: egui::Rect,
 }
@@ -416,6 +426,11 @@ fn atlas_quads(placement: &Placement, atlases_x: usize, atlases_y: usize) -> Vec
     let atlas = ATLAS_SIZE as f32;
     let target = placement.target;
     let to_ndc = |canvas: egui::Pos2| {
+        let canvas = if placement.flip {
+            egui::pos2(placement.canvas_size.x - canvas.x, canvas.y)
+        } else {
+            canvas
+        };
         let screen = PainterApp::rotate_point(
             placement.origin + canvas.to_vec2() * placement.zoom,
             placement.center,
@@ -469,6 +484,7 @@ pub fn paint_canvas(app: &PainterApp, ui: &egui::Ui, view: &CanvasView, uploads:
         origin,
         center,
         rotation: app.viewport.rotation,
+        flip: app.viewport.flip_x,
         target,
     };
     let cache = &app.render_cache;
@@ -654,6 +670,7 @@ mod tests {
             origin: target.min,
             center: target.center(),
             rotation: 0.0,
+            flip: false,
             target,
         };
         let quads = atlas_quads(&placement, 2, 1);
@@ -905,5 +922,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn flipped_view_maps_to_screen_and_back() {
+        use super::ScreenMap;
+        use crate::canvas::Canvas;
+        use eframe::egui::{Color32, Vec2, pos2, vec2};
+        let mut app =
+            crate::project::tests::test_app_pub(Canvas::new(300, 200, Color32::WHITE, 64));
+        app.viewport.zoom = 1.7;
+        app.viewport.rotation = 0.6;
+        app.viewport.flip_x = true;
+        let origin = pos2(40.0, 25.0);
+        let center = origin + vec2(300.0, 200.0) * 1.7 * 0.5;
+        let (sin, cos) = 0.6f32.sin_cos();
+        let map = ScreenMap {
+            origin,
+            center,
+            zoom: 1.7,
+            cos,
+            sin,
+            flip: Some(300.0),
+        };
+        for p in [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(250.0, 30.0),
+            Vec2::new(12.5, 199.0),
+        ] {
+            let back = app.screen_to_canvas_raw(map.to_screen(p), origin, center);
+            assert!((back - p).length() < 1e-3, "{p:?} came back as {back:?}");
+        }
+        // Flipped: the canvas's left edge shows on the right.
+        let left = map.to_screen(Vec2::new(0.0, 100.0));
+        let right = map.to_screen(Vec2::new(300.0, 100.0));
+        let unrotated = |q: eframe::egui::Pos2| (q - center).x * cos + (q - center).y * sin;
+        assert!(unrotated(left) > unrotated(right));
     }
 }

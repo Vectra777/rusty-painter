@@ -95,6 +95,10 @@ fn handle_pen_drag(
     raw: Vec2,
     pressure: f32,
 ) {
+    let snap = ctx.input(|i| i.modifiers.shift);
+    if app.guides_drag(raw, snap) {
+        return;
+    }
     match app.active_tool {
         Tool::Brush => app.add_stroke_point(raw, pressure),
         Tool::Select(_) => app.select_move(pos),
@@ -248,7 +252,14 @@ fn handle_primary_press(
     // The brush may start a stroke off the canvas (on the canvas panel);
     // other tools need a press on the canvas itself.
     let brush = matches!(app.active_tool, Tool::Brush);
-    if app.viewport.is_panning || !over || !(canvas_pos.1 || brush) {
+    if app.viewport.is_panning || !over {
+        return;
+    }
+    // A guide handle under the press is the guide's, not the tool's.
+    if app.guides_press(raw) {
+        return;
+    }
+    if !(canvas_pos.1 || brush) {
         return;
     }
 
@@ -284,6 +295,9 @@ fn handle_primary_press(
 }
 
 fn handle_primary_release(app: &mut PainterApp) {
+    if app.guides_release() {
+        return;
+    }
     if matches!(app.active_tool, Tool::Transform(_)) {
         app.release_canvas();
     }
@@ -333,6 +347,10 @@ fn handle_pointer_move(
         app.workspace.auto_fit = false;
         app.viewport.offset.x += delta.x;
         app.viewport.offset.y += delta.y;
+        ctx.request_repaint();
+    } else if app.guides_dragging() {
+        let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+        app.guides_drag(raw, ctx.input(|i| i.modifiers.shift));
         ctx.request_repaint();
     } else {
         let (clamped, is_inside) = app.screen_to_canvas(pos, placement.origin, placement.center);

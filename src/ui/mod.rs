@@ -15,6 +15,7 @@ pub(crate) mod palette_window;
 pub(crate) mod select_menu;
 pub(crate) mod status_bar;
 pub(crate) mod style;
+pub(crate) mod symmetry_menu;
 pub(crate) mod toolbar;
 pub(crate) mod top_bar;
 pub(crate) mod widgets;

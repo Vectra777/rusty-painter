@@ -138,6 +138,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let select_rect = pressed(none, Key::M);
     let lasso = pressed(none, Key::L);
     let wand = pressed(none, Key::Q);
+    let flip = pressed(none, Key::H);
     let remove_anchor = pressed(none, Key::Backspace);
     let transform = pressed(none, Key::V) || pressed(none, Key::T);
     let eyedropper = pressed(none, Key::I);
@@ -210,6 +211,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             app.deselect();
         }
         app.modal_state.select_menu_open = false;
+        app.modal_state.symmetry_menu_open = false;
+        repaint = true;
+    }
+    if flip {
+        app.viewport.flip_x = !app.viewport.flip_x;
         repaint = true;
     }
     if remove_anchor && app.workspace.select.magnetic.is_some() {

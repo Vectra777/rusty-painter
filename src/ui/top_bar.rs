@@ -190,6 +190,13 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Reset Rotation", None) {
         app.viewport.rotation = 0.0;
     }
+    if menu_item(ui, "Flip Canvas Horizontally", Some("H".into())) {
+        app.viewport.flip_x = !app.viewport.flip_x;
+    }
+    ui.separator();
+    ui.menu_button("Mirror Painting", |ui| {
+        crate::ui::symmetry_menu::symmetry_controls(app, ui);
+    });
     ui.separator();
     if menu_item(ui, "Show / Hide Panels", Some("Tab".into())) {
         toggle_all_panels(app);

@@ -8,3 +8,4 @@ pub mod preview;
 pub mod stabilizer;
 pub mod stroke;
 pub mod stroke_worker;
+pub mod symmetry;

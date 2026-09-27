@@ -454,6 +454,30 @@ impl Brush {
         undo_action: &mut UndoAction,
         stroke_tiles: &mut StrokeTiles,
     ) {
+        self.dabs_oriented(
+            pool,
+            canvas,
+            selection,
+            centers,
+            None,
+            undo_action,
+            stroke_tiles,
+        );
+    }
+
+    /// [`Self::dabs`] with a tip orientation per dab (mirror copies turn a
+    /// custom tip with them).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dabs_oriented(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        centers: &[Vec2],
+        orients: Option<&[[f32; 4]]>,
+        undo_action: &mut UndoAction,
+        stroke_tiles: &mut StrokeTiles,
+    ) {
         let o = &self.brush_options;
         let r = o.diameter / 2.0;
         let r_ceil = r.ceil() as i32;
@@ -461,9 +485,14 @@ impl Brush {
         let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
         let dabs: Vec<PlacedDab> = centers
             .iter()
-            .filter_map(|&center| {
+            .enumerate()
+            .filter_map(|(i, &center)| {
                 let bounds = calc_dab_bounds(center, r, canvas_w, canvas_h, tile_size)?;
-                Some(PlacedDab::new(center, bounds, r_ceil))
+                let mut dab = PlacedDab::new(center, bounds, r_ceil);
+                if let Some(o) = orients.and_then(|o| o.get(i)) {
+                    dab.orient = *o;
+                }
+                Some(dab)
             })
             .collect();
         if dabs.is_empty() {
@@ -576,7 +605,10 @@ impl Brush {
                         width,
                         height,
                         data,
-                    } => sample_custom_mask_nn(dx, dy, diameter, *width, *height, data),
+                    } => {
+                        let (tx, ty) = dab.tip_offset(dx, dy);
+                        sample_custom_mask_nn(tx, ty, diameter, *width, *height, data)
+                    }
                 };
                 *slot = if in_shape {
                     (strength * alpha_mod).clamp(0.0, 1.0)
@@ -652,10 +684,17 @@ impl Brush {
             return;
         }
 
+        let custom = matches!(pixel_shape, PixelBrushShape::Custom { .. });
         let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
-            let pdy = gy as f32 + 0.5 - dab.center.y;
+            let pdy_canvas = gy as f32 + 0.5 - dab.center.y;
             for (i, slot) in out.iter_mut().enumerate() {
-                let pdx = (x0 + i) as f32 + 0.5 - dab.center.x;
+                let pdx_canvas = (x0 + i) as f32 + 0.5 - dab.center.x;
+                // A custom tip turns with its mirror copy.
+                let (pdx, pdy) = if custom {
+                    dab.tip_offset(pdx_canvas, pdy_canvas)
+                } else {
+                    (pdx_canvas, pdy_canvas)
+                };
                 let alpha_factor = if anti_aliasing {
                     let (base_alpha_at_pixel, dist_sq) = calc_soft_brush_alpha(
                         pdx,

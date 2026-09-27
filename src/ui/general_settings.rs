@@ -155,6 +155,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl + = / Ctrl + -", "Zoom in / out"),
             ("Ctrl + 0", "Fit to window"),
             ("Ctrl + 1", "Actual pixels"),
+            ("H", "Flip the view horizontally"),
         ],
     ),
     (
