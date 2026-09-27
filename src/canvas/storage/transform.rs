@@ -804,6 +804,11 @@ impl Canvas {
                 })
                 .collect()
         };
+        // Composited the way the preview showed it (the document's space).
+        let over = match self.blend_space {
+            crate::canvas::blend_modes::BlendSpace::Linear => crate::canvas::blend::alpha_over,
+            crate::canvas::blend_modes::BlendSpace::Gamma => super::composite::gamma_over,
+        };
         let touched: Vec<TileKey> = pairs
             .par_iter()
             .filter_map(|(key, top, cell)| {
@@ -814,7 +819,7 @@ impl Canvas {
                     .data
                     .get_or_insert_with(|| vec![Color32::TRANSPARENT; ts * ts]);
                 for (d, &t) in dst.iter_mut().zip(top_data) {
-                    *d = crate::canvas::blend::alpha_over(t, *d);
+                    *d = over(t, *d);
                 }
                 cell.is_empty = dst.iter().all(|&p| p == Color32::TRANSPARENT);
                 Some(*key)

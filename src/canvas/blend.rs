@@ -147,23 +147,111 @@ pub(crate) fn average_over(pixels: impl Iterator<Item = (Color32, Color32)>) -> 
     rgba_to_color32_fast(Rgba::from_rgba_premultiplied(r, g, b, a))
 }
 
-/// A stored (premultiplied sRGB) colour as-is in 0..1, for gamma-space
-/// blending: no decoding to linear light.
-#[inline]
-pub(crate) fn gamma_color32_to_rgba(c: Color32) -> Rgba {
-    Rgba::from_rgba_premultiplied(
-        c.r() as f32 / 255.0,
-        c.g() as f32 / 255.0,
-        c.b() as f32 / 255.0,
-        c.a() as f32 / 255.0,
-    )
+/// Un-premultiplied sRGB value of a stored channel, by `(value, alpha)`.
+/// Stored pixels are premultiplied in linear light (egui's `Color32`), in
+/// either blend space, so every tool reads them the same way.
+fn unmultiply_lut() -> &'static [u8; 256 * 256] {
+    // Cached per thread, like `gamma_lut`: this runs per pixel.
+    thread_local! {
+        static CACHED: Cell<Option<&'static [u8; 256 * 256]>> = const { Cell::new(None) };
+    }
+    CACHED.with(|cached| {
+        if let Some(lut) = cached.get() {
+            return lut;
+        }
+        let lut = build_unmultiply_lut();
+        cached.set(Some(lut));
+        lut
+    })
 }
 
-/// Inverse of [`gamma_color32_to_rgba`]: round gamma-space values to 8 bits.
+fn build_unmultiply_lut() -> &'static [u8; 256 * 256] {
+    static LUT: OnceLock<Box<[u8; 256 * 256]>> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = Box::new([0u8; 256 * 256]);
+        for a in 1..256usize {
+            for v in 0..256usize {
+                let linear = srgb_u8_to_linear(v as u8) * 255.0 / a as f32;
+                lut[a << 8 | v] = linear_to_srgb_exact(linear.min(1.0));
+            }
+        }
+        lut
+    })
+}
+
+fn linear_to_srgb_exact(linear: f32) -> u8 {
+    let v = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+/// A stored colour premultiplied in gamma space (sRGB values times alpha),
+/// for gamma-space blending: no decoding to linear light. Opaque pixels
+/// are just their stored values.
+#[inline]
+pub(crate) fn gamma_color32_to_rgba(c: Color32) -> Rgba {
+    GammaReader::new().read(c)
+}
+
+/// [`gamma_color32_to_rgba`] with its table fetched once, for loops.
+#[derive(Clone, Copy)]
+pub(crate) struct GammaReader(&'static [u8; 256 * 256]);
+
+impl GammaReader {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self(unmultiply_lut())
+    }
+
+    #[inline]
+    pub(crate) fn read(self, c: Color32) -> Rgba {
+        let a8 = c.a();
+        if a8 == 255 || a8 == 0 {
+            return Rgba::from_rgba_premultiplied(
+                c.r() as f32 / 255.0,
+                c.g() as f32 / 255.0,
+                c.b() as f32 / 255.0,
+                a8 as f32 / 255.0,
+            );
+        }
+        let row = &self.0[(a8 as usize) << 8..][..256];
+        let k = a8 as f32 / (255.0 * 255.0);
+        let g = |v: u8| row[v as usize] as f32 * k;
+        Rgba::from_rgba_premultiplied(g(c.r()), g(c.g()), g(c.b()), a8 as f32 / 255.0)
+    }
+
+    /// Normal-mode "over" of two stored colours, mixed as sRGB values.
+    #[inline]
+    pub(crate) fn over(self, src: Color32, dst: Color32) -> Color32 {
+        match src.a() {
+            255 => src,
+            0 => dst,
+            _ => {
+                let s = self.read(src);
+                gamma_rgba_to_color32(s + self.read(dst) * (1.0 - s.a()))
+            }
+        }
+    }
+}
+
+/// Inverse of [`gamma_color32_to_rgba`]: gamma-premultiplied values back to
+/// a stored colour, in 8 bits.
 #[inline]
 pub(crate) fn gamma_rgba_to_color32(c: Rgba) -> Color32 {
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    Color32::from_rgba_premultiplied(q(c.r()), q(c.g()), q(c.b()), q(c.a()))
+    let a = c.a();
+    if a >= 1.0 {
+        return Color32::from_rgb(q(c.r()), q(c.g()), q(c.b()));
+    }
+    let a8 = q(a);
+    if a8 == 0 {
+        return Color32::TRANSPARENT;
+    }
+    let inv = 1.0 / a;
+    Color32::from_rgba_unmultiplied(q(c.r() * inv), q(c.g() * inv), q(c.b() * inv), a8)
 }
 
 /// Lookup-table equivalent of `Rgba::from(Color32)` (which calls `powf` per
@@ -367,6 +455,7 @@ pub(crate) fn resolve_stroke_general(
     let dither = dither_table();
     let linear = space == BlendSpace::Linear;
     let base = if linear { color.linear } else { color.gamma };
+    let gamma = GammaReader::new();
     for (i, ((dst, &src), &cov)) in out.iter_mut().zip(original).zip(coverage).enumerate() {
         if cov <= 0.0 {
             continue;
@@ -377,7 +466,7 @@ pub(crate) fn resolve_stroke_general(
         let below = if linear {
             color32_to_linear(src)
         } else {
-            gamma_color32_to_rgba(src)
+            gamma.read(src)
         };
         let x = origin[0] + i as u32;
         let mixed = composite(mode, stroke, below, pixel_noise(x, origin[1]));
@@ -412,7 +501,7 @@ pub(crate) fn resolve_stroke_normal_gamma(
     cap: f32,
 ) {
     let [cr, cg, cb] = color.gamma;
-    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    let gamma = GammaReader::new();
     for ((dst, &src), &cov) in out.iter_mut().zip(original).zip(coverage) {
         if cov <= 0.0 {
             continue;
@@ -423,13 +512,13 @@ pub(crate) fn resolve_stroke_normal_gamma(
             continue;
         }
         let keep = 1.0 - a;
-        let f = |v: u8| v as f32 / 255.0;
-        *dst = Color32::from_rgba_premultiplied(
-            q(cr * a + f(src.r()) * keep),
-            q(cg * a + f(src.g()) * keep),
-            q(cb * a + f(src.b()) * keep),
-            q(a + f(src.a()) * keep),
-        );
+        let below = gamma.read(src);
+        *dst = gamma_rgba_to_color32(Rgba::from_rgba_premultiplied(
+            cr * a + below.r() * keep,
+            cg * a + below.g() * keep,
+            cb * a + below.b() * keep,
+            a + below.a() * keep,
+        ));
     }
 }
 
@@ -762,6 +851,55 @@ mod unmultiply_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gamma_blending_reads_and_writes_the_stored_format() {
+        // Stored pixels are egui's (premultiplied in linear light); gamma
+        // blending sees them as sRGB values times alpha.
+        for a in [1u8, 3, 64, 128, 200, 254, 255] {
+            for v in [0u8, 1, 40, 128, 200, 255] {
+                let stored = Color32::from_rgba_unmultiplied(v, v, v, a);
+                let g = gamma_color32_to_rgba(stored);
+                let want = v as f32 / 255.0 * a as f32 / 255.0;
+                // Low alpha keeps few distinct values, like any 8-bit storage.
+                let tolerance = if a < 16 { 0.02 } else { 1.5 / 255.0 };
+                assert!(
+                    (g.r() - want).abs() <= tolerance,
+                    "v {v} a {a}: {} vs {want}",
+                    g.r()
+                );
+                let back = gamma_rgba_to_color32(g);
+                assert!(
+                    back.a() == a && back.r().abs_diff(stored.r()) <= 1,
+                    "v {v} a {a}: {back:?} vs {stored:?}"
+                );
+            }
+        }
+        assert_eq!(gamma_color32_to_rgba(Color32::TRANSPARENT).a(), 0.0);
+        assert_eq!(
+            gamma_rgba_to_color32(Rgba::TRANSPARENT),
+            Color32::TRANSPARENT
+        );
+    }
+
+    #[test]
+    fn a_soft_gamma_stroke_exports_its_own_colour() {
+        // Grey at half coverage on a transparent layer: unmultiplied, it's
+        // still the brush's grey (it used to read as a darker 90).
+        let mut out = [Color32::TRANSPARENT; 1];
+        resolve_stroke_normal_gamma(
+            &[Color32::TRANSPARENT],
+            &[128.0 / 255.0],
+            &mut out,
+            StrokeColor::new(Color32::from_gray(128)),
+            1.0,
+        );
+        let [r, g, b, a] = out[0].to_srgba_unmultiplied();
+        assert_eq!(a, 128);
+        for c in [r, g, b] {
+            assert!(c.abs_diff(128) <= 1, "{:?}", out[0].to_srgba_unmultiplied());
+        }
+    }
 
     fn reference_alpha_over(src: Color32, dst: Color32) -> Color32 {
         let src_l = Rgba::from(src);

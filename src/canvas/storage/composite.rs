@@ -9,7 +9,7 @@ use eframe::egui::{Color32, ColorImage, Rgba};
 use super::{Canvas, Layer, LayerId, LayerKind, RowTileCache, layer_tile};
 use crate::canvas::blend::{
     alpha_over_batch, average_over, color32_to_linear, color32s_to_linear, gamma_color32_to_rgba,
-    gamma_rgba_to_color32, rgba_to_color32_fast,
+    rgba_to_color32_fast,
 };
 use crate::canvas::blend_modes::{
     BlendSpace, LayerBlend, composite as blend_composite, pixel_noise,
@@ -55,12 +55,8 @@ struct MaskInput {
 /// Normal-mode "over" of stored (gamma) values: the same operations as the
 /// tree compositor's gamma path, so both give identical pixels.
 #[inline]
-fn gamma_over(src: Color32, dst: Color32) -> Color32 {
-    let s = gamma_color32_to_rgba(src);
-    if s.a() <= 0.0 {
-        return dst;
-    }
-    gamma_rgba_to_color32(s + gamma_color32_to_rgba(dst) * (1.0 - s.a()))
+pub(crate) fn gamma_over(src: Color32, dst: Color32) -> Color32 {
+    crate::canvas::blend::GammaReader::new().over(src, dst)
 }
 
 /// Mask coverage of a (premultiplied) mask pixel: brightness times alpha,
@@ -472,7 +468,10 @@ impl Canvas {
                 .and_then(|g| g.data.as_deref())
                 .map(|data| match space {
                     BlendSpace::Linear => color32s_to_linear(data),
-                    BlendSpace::Gamma => data.iter().copied().map(gamma_color32_to_rgba).collect(),
+                    BlendSpace::Gamma => {
+                        let gamma = crate::canvas::blend::GammaReader::new();
+                        data.iter().map(|&c| gamma.read(c)).collect()
+                    }
                 }),
         })
     }
@@ -844,6 +843,7 @@ impl Canvas {
             return false;
         }
         let gamma = self.blend_space == BlendSpace::Gamma;
+        let reader = crate::canvas::blend::GammaReader::new();
         let mut bg_visible = false;
         let mut paint_layer = None;
         for (idx, layer) in self.layers.iter().enumerate() {
@@ -905,7 +905,7 @@ impl Canvas {
                         let src = &data[src_row + col..src_row + col + n];
                         let dst = &mut out.pixels[dst_row + col..dst_row + col + n];
                         for ((o, &s), &b) in dst.iter_mut().zip(src).zip(&bg_buf[..n]) {
-                            *o = gamma_over(s, b);
+                            *o = reader.over(s, b);
                         }
                     }
                     Some(data) => {
