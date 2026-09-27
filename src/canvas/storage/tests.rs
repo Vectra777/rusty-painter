@@ -226,14 +226,81 @@ fn identity_distort_copies_pixels_exactly() {
     let bounds = source_bounds_and_tiles(&src, ts, None).unwrap().0;
     let area =
         eframe::egui::Rect::from_min_max(bounds.min, bounds.max + eframe::egui::vec2(1.0, 1.0));
-    for kind in [DistortKind::Perspective, DistortKind::Bilinear] {
-        let params = TransformParams::distorted(Distort {
-            src: area,
-            dst: rect_corners(area),
-            kind,
+    let params = TransformParams::distorted(Distort {
+        src: area,
+        dst: rect_corners(area),
+    });
+    let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
+    assert_eq!(out.get(&(0, 0)), src.get(&(0, 0)));
+}
+
+#[test]
+fn a_straight_warp_grid_changes_no_pixel() {
+    use super::warp::{Warp, WarpGrid};
+    let ts = 16;
+    let src = pattern_tiles(ts);
+    // The box as the tool has it: pixel positions, last one included.
+    let bounds = source_bounds_and_tiles(&src, ts, None).unwrap().0;
+    for n in 2..=6 {
+        let params = TransformParams::warped(Warp {
+            src: bounds,
+            grid: WarpGrid::regular(bounds, n),
         });
         let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
-        assert_eq!(out.get(&(0, 0)), src.get(&(0, 0)), "{kind:?}");
+        let (got, want) = (&out[&(0, 0)], &src[&(0, 0)]);
+        let worst = got
+            .iter()
+            .zip(want)
+            .map(|(a, b)| {
+                a.to_array()
+                    .iter()
+                    .zip(b.to_array())
+                    .map(|(x, y)| x.abs_diff(y))
+                    .max()
+                    .unwrap()
+            })
+            .max()
+            .unwrap();
+        assert!(worst <= 1, "{n} points: off by {worst}");
+    }
+}
+
+#[test]
+fn a_warp_bends_the_picture_through_its_points() {
+    use super::warp::{Warp, WarpGrid};
+    let ts = 64;
+    // A white square 8..56 on a transparent tile.
+    let mut tile = vec![Color32::TRANSPARENT; ts * ts];
+    for y in 8..56 {
+        for x in 8..56 {
+            tile[y * ts + x] = Color32::WHITE;
+        }
+    }
+    let src = HashMap::from([((0, 0), tile)]);
+    let bounds = source_bounds_and_tiles(&src, ts, None).unwrap().0;
+    let mut grid = WarpGrid::regular(bounds, 4);
+    // Pull the top edge's two inner points up by 6: the top bulges.
+    grid.points[1].y -= 6.0;
+    grid.points[2].y -= 6.0;
+    let params = TransformParams::warped(Warp { src: bounds, grid });
+    let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
+    let px = |x: usize, y: usize| out.get(&(0, 0)).map_or(0, |t| t[y * ts + x].a());
+    assert!(px(32, 4) > 200, "bulged up in the middle");
+    assert_eq!(px(9, 3), 0, "the corners stay put");
+    assert!(
+        px(32, 40) == 255 && px(9, 50) == 255,
+        "the rest is still there"
+    );
+    // The preview's mesh and the render agree: every mesh vertex's source
+    // point is found again at its canvas point.
+    let inverse = params.inverse_map(None).unwrap();
+    for (u, v) in [(0.3, 0.1), (0.5, 0.02), (0.7, 0.5)] {
+        let p = Vec2::new(
+            bounds.min.x + u * bounds.width(),
+            bounds.min.y + v * bounds.height(),
+        );
+        let back = inverse.map(params.forward(p)).unwrap();
+        assert!((back - p).length() < 0.2, "{p:?} -> {back:?}");
     }
 }
 
@@ -286,21 +353,15 @@ fn a_strong_perspective_stays_inside_its_corners() {
     ];
     for dst in quads {
         assert!(is_convex_quad(&dst));
-        for kind in [DistortKind::Perspective, DistortKind::Bilinear] {
-            let params = TransformParams::distorted(Distort {
-                src: area,
-                dst,
-                kind,
-            });
-            let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
-            assert!(!out.is_empty());
-            assert_inside_quad(&out, ts, dst);
-        }
+        let params = TransformParams::distorted(Distort { src: area, dst });
+        let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
+        assert!(!out.is_empty());
+        assert_inside_quad(&out, ts, dst);
     }
 }
 
 #[test]
-fn distort_goes_back_to_where_it_came_from() {
+fn perspective_goes_back_to_where_it_came_from() {
     let area = eframe::egui::Rect::from_min_max(
         eframe::egui::pos2(0.0, 0.0),
         eframe::egui::pos2(40.0, 20.0),
@@ -311,41 +372,23 @@ fn distort_goes_back_to_where_it_came_from() {
         Vec2::new(60.0, 50.0),
         Vec2::new(-2.0, 30.0),
     ];
-    for kind in [DistortKind::Perspective, DistortKind::Bilinear] {
-        let params = TransformParams::distorted(Distort {
-            src: area,
-            dst,
-            kind,
-        });
-        // Corners land on the corners.
-        for (c, want) in rect_corners(area).into_iter().zip(dst) {
-            assert!((params.forward(c) - want).length() < 1e-3, "{kind:?}");
-        }
-        let inverse = params.inverse_map().unwrap();
-        for i in 0..=8 {
-            for j in 0..=8 {
-                let p = Vec2::new(i as f32 * 5.0, j as f32 * 2.5);
-                let back = inverse.map(params.forward(p)).unwrap();
-                assert!((back - p).length() < 1e-2, "{kind:?} {p:?} -> {back:?}");
-            }
+    let params = TransformParams::distorted(Distort { src: area, dst });
+    // Corners land on the corners.
+    for (c, want) in rect_corners(area).into_iter().zip(dst) {
+        assert!((params.forward(c) - want).length() < 1e-3);
+    }
+    let inverse = params.inverse_map(None).unwrap();
+    for i in 0..=8 {
+        for j in 0..=8 {
+            let p = Vec2::new(i as f32 * 5.0, j as f32 * 2.5);
+            let back = inverse.map(params.forward(p)).unwrap();
+            assert!((back - p).length() < 1e-2, "{p:?} -> {back:?}");
         }
     }
-    // Distort stretches evenly: the middle of the top edge stays halfway
-    // between its corners; perspective foreshortens it.
-    let top_mid = Vec2::new(20.0, 0.0);
+    // Perspective foreshortens: the middle of the top edge isn't halfway
+    // between its corners.
     let even = (dst[0] + dst[1]) / 2.0;
-    let bilinear = TransformParams::distorted(Distort {
-        src: area,
-        dst,
-        kind: DistortKind::Bilinear,
-    });
-    let perspective = TransformParams::distorted(Distort {
-        src: area,
-        dst,
-        kind: DistortKind::Perspective,
-    });
-    assert!((bilinear.forward(top_mid) - even).length() < 1e-3);
-    assert!((perspective.forward(top_mid) - even).length() > 0.5);
+    assert!((params.forward(Vec2::new(20.0, 0.0)) - even).length() > 0.5);
 }
 
 #[test]

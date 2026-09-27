@@ -13,7 +13,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **Shapes & Ruler**: Line, rectangle, ellipse and polygon drawn with the brush, filled, or both, editable until applied; a ruler that straightens strokes along or parallel to it.
 - **Gradients**: Linear, radial, reflected and angle gradients, previewed live, dithered, clipped to the selection.
 - **Smart Patch**: Content-aware fill of the selection from its surroundings (PatchMatch), or paint over something with the selection brush to remove it.
-- **Transform Tools**: Move, rotate, scale and flip selections or layers with a live preview; **Perspective** (drag the corners of a plane seen at an angle) and **Distort** (pull each corner freely, the picture stretched evenly between them). The selection follows what was transformed.
+- **Transform Tools**: Move, rotate, scale and flip selections or layers with a live preview; **Perspective** (drag the corners of a plane seen at an angle) and **Distort** (a grid of points, 1×1 to 5×5 cells, inner points included: the picture bends smoothly through them). The selection follows what was transformed.
 - **History**: One undo history for the whole document (pixels, selections, transforms, layer add/remove/reorder/merge), undone in the order things were done whichever layer is selected.
 - **Canvas**: Large canvas support (default 4000x4000) backed by tiled storage and GPU texture atlases.
 - **Project Files**: Save/open your work as a `.rpainter` project (compressed, includes undo history) via the Open/Save buttons in the top bar. File managers show a preview of the drawing, and Krita, GIMP or MyPaint can open it as a flattened image.

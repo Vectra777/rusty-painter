@@ -466,7 +466,7 @@ fn transform_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
 pub(crate) fn transform_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     use crate::canvas::storage::DistortKind;
     let current = match app.active_tool {
-        Tool::Transform(info) if info.corners.is_some() => Some(info.distort_kind),
+        Tool::Transform(info) => info.point_mode(),
         _ => None,
     };
     let mut mode = current;
@@ -476,12 +476,28 @@ pub(crate) fn transform_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
         &[
             (None, "Free"),
             (Some(DistortKind::Perspective), "Perspective"),
-            (Some(DistortKind::Bilinear), "Distort"),
+            (Some(DistortKind::Warp), "Distort"),
         ],
         true,
     );
     if mode != current {
         transform::set_corner_mode(app, mode);
+    }
+    if let Tool::Transform(info) = app.active_tool
+        && info.warp.is_some()
+    {
+        // Grid cells a side: more points, finer control.
+        let mut n = info.warp.map_or(info.warp_size, |w| w.n);
+        let before = n;
+        segmented(
+            ui,
+            &mut n,
+            &[(2, "1×1"), (3, "2×2"), (4, "3×3"), (5, "4×4"), (6, "5×5")],
+            true,
+        );
+        if n != before {
+            transform::set_warp_size(app, n);
+        }
     }
     vdivider(ui);
     if ui

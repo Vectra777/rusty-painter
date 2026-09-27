@@ -368,14 +368,19 @@ pub(crate) fn transform_drag(app: &mut PainterApp, pos: Vec2, keep_aspect: bool)
     };
     let delta = pos - start;
     match info.state {
-        TransformState::Moving => match info.corners.as_mut() {
-            Some(corners) => corners.iter_mut().for_each(|c| *c += delta),
+        TransformState::Moving => match info.points_mut() {
+            Some(points) => points.iter_mut().for_each(|c| *c += delta),
             None => info.offset += delta,
         },
         TransformState::Rotating => update_rotation(info, start, pos),
         TransformState::Scaling(idx) => update_scaling(info, delta, idx, keep_aspect),
         TransformState::Corner(i) => {
-            if let Some(corners) = info.corners.as_mut()
+            if let Some(grid) = info.warp.as_mut() {
+                // A warp point goes anywhere; the picture bends with it.
+                if let Some(p) = grid.used_mut().get_mut(i) {
+                    *p += delta;
+                }
+            } else if let Some(corners) = info.corners.as_mut()
                 && i < 4
             {
                 let mut moved = *corners;
@@ -437,7 +442,9 @@ pub(crate) fn flush_transform_preview(app: &mut PainterApp) {
 pub(crate) fn flip(app: &mut PainterApp, horizontal: bool) {
     create_floating_layer(app);
     if let Tool::Transform(ref mut info) = app.active_tool {
-        if let Some(c) = info.corners.as_mut() {
+        if let Some(w) = info.warp.as_mut() {
+            *w = w.flipped(horizontal);
+        } else if let Some(c) = info.corners.as_mut() {
             *c = if horizontal {
                 [c[1], c[0], c[3], c[2]]
             } else {
@@ -456,7 +463,9 @@ pub(crate) fn flip(app: &mut PainterApp, horizontal: bool) {
 pub(crate) fn rotate_quarter(app: &mut PainterApp, clockwise: bool) {
     create_floating_layer(app);
     if let Tool::Transform(ref mut info) = app.active_tool {
-        if let Some(c) = info.corners.as_mut() {
+        if let Some(w) = info.warp.as_mut() {
+            *w = w.rotated(clockwise);
+        } else if let Some(c) = info.corners.as_mut() {
             *c = if clockwise {
                 [c[3], c[0], c[1], c[2]]
             } else {
@@ -470,20 +479,21 @@ pub(crate) fn rotate_quarter(app: &mut PainterApp, clockwise: bool) {
     }
 }
 
-/// Switch between free transform (`None`) and moving the four corners
-/// with perspective or distort. Perspective and distort keep the corners
-/// where they are.
+/// Switch between free transform (`None`), perspective (four corners)
+/// and distort (a warp grid). The new mode starts from the picture as it
+/// is now.
 pub(crate) fn set_corner_mode(app: &mut PainterApp, mode: Option<DistortKind>) {
     if let Tool::Transform(ref mut info) = app.active_tool {
-        match mode {
-            Some(kind) => {
-                if info.corners.is_none() {
-                    info.corners = Some(info.quad().unwrap_or([Vec2::ZERO; 4]));
-                }
-                info.distort_kind = kind;
-            }
-            None => info.end_distort(),
-        }
+        info.set_point_mode(mode);
+        app.layer_state.transform_preview_pending = true;
+    }
+    remember_info(app);
+}
+
+/// Points along a side of the distort grid (keeps the current shape).
+pub(crate) fn set_warp_size(app: &mut PainterApp, n: usize) {
+    if let Tool::Transform(ref mut info) = app.active_tool {
+        info.set_warp_size(n);
         app.layer_state.transform_preview_pending = true;
     }
     remember_info(app);
@@ -817,7 +827,14 @@ fn overlay_mesh(
     params: &TransformParams,
     to_screen: &dyn Fn(Vec2) -> egui::Pos2,
 ) -> egui::Mesh {
-    let steps: u32 = if params.distort.is_some() { 32 } else { 1 };
+    // A warp uses the renderer's own mesh, so both show the same bends.
+    let steps = if params.warp.is_some() {
+        crate::canvas::storage::warp::MESH_STEPS as u32
+    } else if params.distort.is_some() {
+        32
+    } else {
+        1
+    };
     let mut mesh = egui::Mesh::with_texture(texture);
     for j in 0..=steps {
         for i in 0..=steps {
@@ -984,30 +1001,47 @@ mod tests {
     }
 
     #[test]
-    fn distort_moves_the_selection_with_it() {
+    fn distort_bends_the_pixels_and_the_selection_with_its_grid() {
         let mut app = app();
         select_rect(&mut app, (10.0, 10.0), (30.0, 30.0));
         app.active_tool = Tool::Transform(TransformInfo::default());
         create_floating_layer(&mut app);
-        set_corner_mode(&mut app, Some(DistortKind::Bilinear));
-        if let Tool::Transform(ref mut info) = app.active_tool {
-            assert_eq!(info.distort_kind, DistortKind::Bilinear);
-            let c = info.corners.as_mut().unwrap();
-            c[2] += Vec2::new(30.0, 0.0);
-        }
-        app.layer_state.transform_preview_pending = true;
-        flush_transform_preview(&mut app);
-        commit_floating_layer(&mut app);
-        let sel = &app.selection_manager;
-        // The bottom-right corner went right: the bottom edge is longer.
-        assert!(sel.contains(Vec2::new(50.0, 28.0)));
-        assert!(!sel.contains(Vec2::new(50.0, 12.0)));
-        assert_eq!(pixel(&app, 1, 50, 28), RED);
-        assert_eq!(pixel(&app, 1, 50, 12).a(), 0);
-        // The mode survives a new session.
+        set_corner_mode(&mut app, Some(DistortKind::Warp));
+        let grid = |app: &PainterApp| match app.active_tool {
+            Tool::Transform(i) => i.warp.unwrap(),
+            _ => panic!(),
+        };
+        assert_eq!(grid(&app).n, 4, "3×3 cells by default");
+        // Drag a point of the right edge (row 1, column 3) out and down.
+        let point = grid(&app).points[4 + 3];
+        transform_press(&mut app, point);
         assert!(
-            matches!(app.active_tool, Tool::Transform(i) if i.distort_kind == DistortKind::Bilinear)
+            matches!(app.active_tool, Tool::Transform(i) if i.state == TransformState::Corner(7))
         );
+        transform_drag(&mut app, point + Vec2::new(8.0, 5.0), false);
+        transform_release(&mut app);
+        flush_transform_preview(&mut app);
+        // A finer grid keeps the bend.
+        set_warp_size(&mut app, 6);
+        assert_eq!(grid(&app).n, 6);
+        commit_floating_layer(&mut app);
+        // The square's right edge bulged out near that point; the corners
+        // stayed where they were.
+        assert_eq!(pixel(&app, 1, 34, 18), RED, "pushed out past the old edge");
+        assert_eq!(pixel(&app, 1, 20, 20), RED);
+        assert_eq!(pixel(&app, 1, 31, 10).a(), 0, "corner unmoved");
+        let sel = &app.selection_manager;
+        assert!(
+            sel.contains(Vec2::new(34.0, 18.0)),
+            "the selection bent too"
+        );
+        assert!(!sel.contains(Vec2::new(32.0, 10.5)));
+        // The mode (and grid size) survive into the next session.
+        assert!(matches!(app.active_tool, Tool::Transform(i)
+            if i.distort_kind == DistortKind::Warp && i.warp.map(|w| w.n) == Some(6)));
+        // Undo puts the square back.
+        app.apply_history(false);
+        assert_eq!(pixel(&app, 1, 34, 18).a(), 0);
     }
 
     #[test]

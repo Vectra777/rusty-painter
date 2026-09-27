@@ -120,9 +120,17 @@ pub(super) struct StoredTransformInfo {
     state: StoredTransformState,
     #[serde(default)]
     corners: Option<[StoredVec2; 4]>,
-    /// Distort (bilinear) rather than perspective; absent in older files.
-    #[serde(default)]
+    /// Saved by one earlier build: the four corners stretched evenly (now
+    /// a two-point warp grid).
+    #[serde(default, skip_serializing)]
     bilinear: bool,
+    /// Distort mode: points along a side, then the points row by row.
+    #[serde(default)]
+    warp: Option<(usize, Vec<StoredVec2>)>,
+    #[serde(default)]
+    warp_size: Option<usize>,
+    #[serde(default)]
+    warp_mode: bool,
 }
 
 impl From<&TransformInfo> for StoredTransformInfo {
@@ -135,13 +143,19 @@ impl From<&TransformInfo> for StoredTransformInfo {
             bounds: info.bounds.map(StoredRect::from),
             state: StoredTransformState::from(info.state),
             corners: info.corners.map(|c| c.map(StoredVec2::from)),
-            bilinear: info.distort_kind == crate::canvas::storage::DistortKind::Bilinear,
+            bilinear: false,
+            warp: info
+                .warp
+                .map(|w| (w.n, w.used().iter().map(|&p| StoredVec2::from(p)).collect())),
+            warp_size: Some(info.warp_size),
+            warp_mode: info.distort_kind == crate::canvas::storage::DistortKind::Warp,
         }
     }
 }
 
 impl StoredTransformInfo {
     pub(super) fn into_info(self) -> TransformInfo {
+        let warp = self.stored_warp();
         TransformInfo {
             start_pos: self.start_pos.map(Into::into),
             offset: self.offset.into(),
@@ -149,13 +163,47 @@ impl StoredTransformInfo {
             scale: self.scale.into(),
             bounds: self.bounds.map(Into::into),
             state: self.state.into(),
-            corners: self.corners.map(|c| c.map(Into::into)),
-            distort_kind: if self.bilinear {
-                crate::canvas::storage::DistortKind::Bilinear
+            corners: if self.bilinear {
+                None
+            } else {
+                self.corners.map(|c| c.map(Into::into))
+            },
+            warp,
+            distort_kind: if self.warp_mode || self.bilinear {
+                crate::canvas::storage::DistortKind::Warp
             } else {
                 crate::canvas::storage::DistortKind::Perspective
             },
+            warp_size: self.warp_size.unwrap_or(4).clamp(
+                crate::canvas::storage::warp::MIN_POINTS,
+                crate::canvas::storage::warp::MAX_POINTS,
+            ),
         }
+    }
+
+    fn stored_warp(&self) -> Option<crate::canvas::storage::warp::WarpGrid> {
+        use crate::canvas::storage::warp::{MAX_POINTS, MIN_POINTS, WarpGrid};
+        let mut grid = WarpGrid {
+            n: 2,
+            points: [eframe::egui::Vec2::ZERO; MAX_POINTS * MAX_POINTS],
+        };
+        if self.bilinear {
+            // Corners clockwise → a 2×2 grid row by row.
+            let c = self.corners.as_ref()?;
+            for (slot, k) in [0, 1, 3, 2].into_iter().enumerate() {
+                grid.points[slot] = c[k].into();
+            }
+            return Some(grid);
+        }
+        let (n, points) = self.warp.as_ref()?;
+        if !(MIN_POINTS..=MAX_POINTS).contains(n) || points.len() != n * n {
+            return None;
+        }
+        grid.n = *n;
+        for (slot, p) in grid.points.iter_mut().zip(points) {
+            *slot = (*p).into();
+        }
+        Some(grid)
     }
 }
 

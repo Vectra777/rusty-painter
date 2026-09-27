@@ -1,6 +1,7 @@
-//! The Transform tool's state: offset, rotation, scale or four-corner
-//! distort, and its eight handles.
+//! The Transform tool's state: offset, rotation and scale, a four-corner
+//! perspective or a grid warp, and the handles for each.
 
+use crate::canvas::storage::warp::{Warp, WarpGrid};
 use crate::canvas::storage::{Distort, DistortKind, TransformParams};
 use eframe::egui::Rect;
 use eframe::egui::Vec2;
@@ -11,7 +12,8 @@ pub enum TransformState {
     Moving,
     Rotating,
     Scaling(usize), // Index of the handle (0-7)
-    /// Dragging one corner of the distort quad (0-3, clockwise from top-left).
+    /// Dragging one point: a perspective corner (0-3, clockwise from
+    /// top-left) or a warp grid point (row by row).
     Corner(usize),
 }
 
@@ -23,12 +25,16 @@ pub struct TransformInfo {
     pub scale: Vec2,
     pub bounds: Option<Rect>,
     pub state: TransformState,
-    /// Distort mode: where each corner of `bounds` goes (top-left,
+    /// Perspective mode: where each corner of `bounds` goes (top-left,
     /// top-right, bottom-right, bottom-left). Replaces offset/rotation/scale
     /// while set.
     pub corners: Option<[Vec2; 4]>,
-    /// How the inside follows `corners`: perspective or distort.
+    /// Distort mode: the warp grid's points. Replaces the rest while set.
+    pub warp: Option<WarpGrid>,
+    /// The point mode last used (kept across sessions).
     pub distort_kind: DistortKind,
+    /// Points along a side of a new warp grid.
+    pub warp_size: usize,
 }
 
 impl Default for TransformInfo {
@@ -41,7 +47,9 @@ impl Default for TransformInfo {
             bounds: None,
             state: TransformState::None,
             corners: None,
+            warp: None,
             distort_kind: DistortKind::Perspective,
+            warp_size: 4,
         }
     }
 }
@@ -65,6 +73,14 @@ fn handle_sources(bounds: Rect) -> [Vec2; 8] {
 impl TransformInfo {
     /// Whether anything moved since the session started.
     pub fn is_identity(&self) -> bool {
+        if let (Some(w), Some(b)) = (self.warp, self.bounds) {
+            let straight = WarpGrid::regular(b, w.n);
+            return w
+                .used()
+                .iter()
+                .zip(straight.used())
+                .all(|(a, b)| (*a - *b).length() < 1e-3);
+        }
         if let (Some(c), Some(b)) = (self.corners, self.bounds) {
             let src = crate::canvas::storage::rect_corners(b);
             return c.iter().zip(src).all(|(a, b)| (*a - b).length() < 1e-3);
@@ -75,19 +91,90 @@ impl TransformInfo {
     /// The canvas transform this session describes.
     pub fn params(&self) -> TransformParams {
         let center = self.bounds.map_or(Vec2::ZERO, |b| b.center().to_vec2());
-        match (self.corners, self.bounds) {
-            (Some(dst), Some(src)) => TransformParams::distorted(Distort {
-                src,
-                dst,
-                kind: self.distort_kind,
-            }),
+        match (self.warp, self.corners, self.bounds) {
+            (Some(grid), _, Some(src)) => TransformParams::warped(Warp { src, grid }),
+            (None, Some(dst), Some(src)) => TransformParams::distorted(Distort { src, dst }),
             _ => TransformParams::new(self.offset, self.rotation, self.scale, center),
+        }
+    }
+
+    /// The point mode in use: perspective, distort (warp), or free (`None`).
+    pub fn point_mode(&self) -> Option<DistortKind> {
+        if self.warp.is_some() {
+            Some(DistortKind::Warp)
+        } else if self.corners.is_some() {
+            Some(DistortKind::Perspective)
+        } else {
+            None
+        }
+    }
+
+    /// The draggable points of a perspective or warp.
+    pub fn points_mut(&mut self) -> Option<&mut [Vec2]> {
+        match (&mut self.warp, &mut self.corners) {
+            (Some(w), _) => Some(w.used_mut()),
+            (None, Some(c)) => Some(&mut c[..]),
+            _ => None,
+        }
+    }
+
+    /// Switch to `mode`, starting from what the box shows now (the new
+    /// points sit where the picture already is).
+    pub fn set_point_mode(&mut self, mode: Option<DistortKind>) {
+        if mode == self.point_mode() {
+            return;
+        }
+        let Some(bounds) = self.bounds else {
+            // No box yet: remember the mode for when there is one.
+            self.warp = None;
+            self.corners = None;
+            if let Some(kind) = mode {
+                self.distort_kind = kind;
+                match kind {
+                    DistortKind::Perspective => self.corners = Some([Vec2::ZERO; 4]),
+                    DistortKind::Warp => {
+                        self.warp = Some(WarpGrid::regular(Rect::NOTHING, self.warp_size))
+                    }
+                }
+            }
+            return;
+        };
+        let params = self.params();
+        let corners = crate::canvas::storage::rect_corners(bounds).map(|p| params.forward(p));
+        let mut grid = WarpGrid::regular(bounds, self.warp_size);
+        for p in grid.used_mut() {
+            *p = params.forward(*p);
+        }
+        self.warp = None;
+        self.corners = None;
+        match mode {
+            Some(DistortKind::Perspective) => self.corners = Some(corners),
+            Some(DistortKind::Warp) => self.warp = Some(grid),
+            // Back to free: the move / turn / scale from before the points
+            // were used; what only points can do is dropped.
+            None => {}
+        }
+        if let Some(kind) = mode {
+            self.distort_kind = kind;
+        }
+    }
+
+    /// A finer or coarser warp grid, keeping the picture's shape.
+    pub fn set_warp_size(&mut self, n: usize) {
+        self.warp_size = n;
+        if let Some(w) = self.warp.as_mut() {
+            *w = w.resized(n);
         }
     }
 
     /// Where the corners of `bounds` currently are (top-left clockwise).
     pub fn quad(&self) -> Option<[Vec2; 4]> {
         let bounds = self.bounds?;
+        if let Some(w) = self.warp {
+            let n = w.n;
+            let p = w.used();
+            return Some([p[0], p[n - 1], p[n * n - 1], p[n * (n - 1)]]);
+        }
         if let Some(c) = self.corners {
             return Some(c);
         }
@@ -101,6 +188,9 @@ impl TransformInfo {
         let Some(bounds) = self.bounds else {
             return Vec::new();
         };
+        if let Some(w) = self.warp {
+            return w.used().to_vec();
+        }
         if let Some(c) = self.corners {
             return c.to_vec();
         }
@@ -113,15 +203,21 @@ impl TransformInfo {
 
     /// Start over with a new box, keeping the free/distort mode.
     pub fn reset_to(&mut self, bounds: Option<Rect>) {
-        let distort = self.corners.is_some();
+        let mode = self.point_mode();
         *self = TransformInfo {
             bounds,
             distort_kind: self.distort_kind,
+            warp_size: self.warp_size,
             ..TransformInfo::default()
         };
-        if distort {
-            // Without a box yet, placeholder corners just remember the mode.
-            self.corners = Some(self.quad().unwrap_or([Vec2::ZERO; 4]));
+        // Without a box yet, placeholder points just remember the mode.
+        let b = bounds.unwrap_or(Rect::NOTHING);
+        match mode {
+            Some(DistortKind::Perspective) => {
+                self.corners = Some(crate::canvas::storage::rect_corners(b))
+            }
+            Some(DistortKind::Warp) => self.warp = Some(WarpGrid::regular(b, self.warp_size)),
+            None => {}
         }
     }
 
@@ -135,6 +231,7 @@ impl TransformInfo {
     /// Back to free mode (drops the distortion).
     pub fn end_distort(&mut self) {
         self.corners = None;
+        self.warp = None;
     }
 
     pub fn hit_test(&self, pos: Vec2, zoom: f32) -> TransformState {
@@ -143,9 +240,16 @@ impl TransformInfo {
         }
         let handle_radius = 10.0 / zoom;
         let handles = self.handles();
-        for (i, h) in handles.iter().enumerate() {
-            if (pos - *h).length() < handle_radius {
-                return if self.corners.is_some() {
+        // The nearest handle in reach (a fine grid's points sit close).
+        let nearest = handles
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (i, (pos - *h).length()))
+            .filter(|&(_, d)| d < handle_radius)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((i, _)) = nearest {
+            {
+                return if self.point_mode().is_some() {
                     TransformState::Corner(i)
                 } else {
                     TransformState::Scaling(i)
@@ -158,7 +262,7 @@ impl TransformInfo {
         {
             return TransformState::Moving;
         }
-        if self.corners.is_some() {
+        if self.point_mode().is_some() {
             // Outside a distorted quad: dragging still moves it.
             return TransformState::Moving;
         }

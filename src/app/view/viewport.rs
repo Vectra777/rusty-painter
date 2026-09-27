@@ -187,14 +187,47 @@ impl PainterApp {
         // Black under white reads on any artwork.
         let dark = egui::Stroke::new(3.0_f32, egui::Color32::from_black_alpha(200));
         let light = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
-        for stroke in [dark, light] {
-            for i in 0..4 {
-                painter.line_segment([pts[i], pts[(i + 1) % 4]], stroke);
+        if let (Some(grid), Some(bounds)) = (info.warp, info.bounds) {
+            // Distort: the grid's lines as the picture bends along them
+            // (the edges strong, the inner lines fainter).
+            let params = info.params();
+            let n = grid.n;
+            let samples = 12 * (n - 1);
+            let line = |along_u: bool, k: usize| -> Vec<egui::Pos2> {
+                let t = k as f32 / (n - 1) as f32;
+                (0..=samples)
+                    .map(|s| {
+                        let f = s as f32 / samples as f32;
+                        let (u, v) = if along_u { (f, t) } else { (t, f) };
+                        let p = Vec2::new(
+                            bounds.min.x + u * bounds.width(),
+                            bounds.min.y + v * bounds.height(),
+                        );
+                        to_screen(params.forward(p))
+                    })
+                    .collect()
+            };
+            let faint = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(150));
+            for along_u in [true, false] {
+                for k in 0..n {
+                    let edge = k == 0 || k == n - 1;
+                    let pts = line(along_u, k);
+                    if edge {
+                        painter.add(egui::Shape::line(pts.clone(), dark));
+                        painter.add(egui::Shape::line(pts, light));
+                    } else {
+                        painter.add(egui::Shape::line(pts, faint));
+                    }
+                }
+            }
+        } else {
+            for stroke in [dark, light] {
+                for i in 0..4 {
+                    painter.line_segment([pts[i], pts[(i + 1) % 4]], stroke);
+                }
             }
         }
-        if info.corners.is_some()
-            && info.distort_kind == crate::canvas::storage::DistortKind::Perspective
-        {
+        if info.point_mode() == Some(crate::canvas::storage::DistortKind::Perspective) {
             // Diagonals hint at the perspective.
             let faint = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(70));
             painter.line_segment([pts[0], pts[2]], faint);

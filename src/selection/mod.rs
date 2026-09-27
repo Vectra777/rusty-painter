@@ -813,7 +813,7 @@ impl SelectionManager {
         let Some(shape) = &self.current_shape else {
             return;
         };
-        let Some(d) = params.distort else {
+        if params.is_affine() {
             let (rotation, scale) = (params.rotation, params.scale);
             // A flip or a rotation turns rectangles and circles into
             // outlines; so does a non-uniform scale.
@@ -828,30 +828,28 @@ impl SelectionManager {
             }
             self.apply_transform(params.offset, rotation, scale, params.center);
             return;
-        };
-        let Some(inverse) = params.inverse_map() else {
-            return;
-        };
+        }
         let forward = |p: Vec2| params.forward(p);
         self.current_shape = match shape {
             SelectionShape::Mask(mask) => {
-                let corners = [
-                    Vec2::new(mask.x0 as f32, mask.y0 as f32),
-                    Vec2::new((mask.x0 + mask.w as i32) as f32, mask.y0 as f32),
-                    Vec2::new(
+                let mut area = eframe::egui::Rect::from_min_max(
+                    eframe::egui::pos2(mask.x0 as f32, mask.y0 as f32),
+                    eframe::egui::pos2(
                         (mask.x0 + mask.w as i32) as f32,
                         (mask.y0 + mask.h as i32) as f32,
                     ),
-                    Vec2::new(mask.x0 as f32, (mask.y0 + mask.h as i32) as f32),
-                ]
-                .map(forward)
-                // The picture only goes where the corners do.
-                .into_iter()
-                .chain(d.dst);
-                let (min, max) = corners.fold(
-                    (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)),
-                    |(lo, hi), c| (lo.min(c), hi.max(c)),
                 );
+                // A warp's mesh covers its box and the mask both.
+                if let Some(w) = params.warp {
+                    area = area.union(eframe::egui::Rect::from_min_max(
+                        w.src.min,
+                        w.src.max + eframe::egui::vec2(1.0, 1.0),
+                    ));
+                }
+                let Some(inverse) = params.inverse_map(Some(area)) else {
+                    return;
+                };
+                let (min, max) = params.dst_bounds(area);
                 // A distort can throw a corner very far: stay near the canvas.
                 let [cw, ch] = self.canvas_size.map(|v| v as f32);
                 let (min, max) = (
@@ -870,11 +868,27 @@ impl SelectionManager {
                     mask.resample(bounds, |p| inverse.map(p).unwrap_or(off)),
                 )))
             }
+            // Short segments, so the outline bends with a warp.
             _ => Some(new_lasso_shape(
-                outline_points(shape).into_iter().map(forward).collect(),
+                densify(&outline_points(shape), 4.0)
+                    .into_iter()
+                    .map(forward)
+                    .collect(),
             )),
         };
     }
+}
+
+/// The closed outline `points` with extra points so no segment is longer
+/// than `step`.
+fn densify(points: &[Vec2], step: f32) -> Vec<Vec2> {
+    let mut out = Vec::with_capacity(points.len());
+    for (i, &a) in points.iter().enumerate() {
+        let b = points[(i + 1) % points.len()];
+        let pieces = (((b - a).length() / step).ceil() as usize).clamp(1, 4096);
+        out.extend((0..pieces).map(|k| a + (b - a) * (k as f32 / pieces as f32)));
+    }
+    out
 }
 
 /// A rectangle, circle or lasso as outline points (masks have none).

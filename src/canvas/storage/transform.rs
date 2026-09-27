@@ -15,7 +15,8 @@ use eframe::egui::Vec2;
 const MAX_TRANSFORM_SOURCE_PIXELS: usize = 67_108_864;
 
 /// Transform operation parameters: an affine move/rotate/scale about
-/// `center`, or (with `distort`) a free four-corner (perspective) mapping.
+/// `center`, or (with `distort`) a four-corner perspective, or (with
+/// `warp`) a grid warp.
 #[derive(Clone, Copy, Debug)]
 pub struct TransformParams {
     pub offset: Vec2,
@@ -23,33 +24,32 @@ pub struct TransformParams {
     pub scale: Vec2,
     pub center: Vec2,
     pub distort: Option<Distort>,
+    pub warp: Option<super::warp::Warp>,
     /// Quick preview: nearest-pixel sampling instead of bilinear.
     pub draft: bool,
 }
 
-/// Four-corner distortion: the source rectangle's corners (top-left,
+/// Four-corner perspective: the source rectangle's corners (top-left,
 /// top-right, bottom-right, bottom-left) go to `dst`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Distort {
     pub src: eframe::egui::Rect,
     pub dst: [Vec2; 4],
-    pub kind: DistortKind,
 }
 
-/// How the inside follows the four corners.
+/// The Transform tool's point-moving modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DistortKind {
     /// A plane seen at an angle: straight lines stay straight, and the far
-    /// side is foreshortened (a homography).
+    /// side is foreshortened (a homography of the four corners).
     #[default]
     Perspective,
-    /// Each corner pulled on its own: the picture is stretched evenly
-    /// between them, with no foreshortening (bilinear).
-    Bilinear,
+    /// Distort: a grid of points, the picture bent smoothly through them.
+    Warp,
 }
 
 /// Whether the quad is convex (and not folded or flat): the corners a
-/// perspective or distort can go to.
+/// perspective can go to.
 pub fn is_convex_quad(q: &[Vec2; 4]) -> bool {
     let mut sign = 0.0f32;
     for i in 0..4 {
@@ -83,14 +83,7 @@ pub enum InverseMap {
         /// sign lie beyond the horizon (they'd come back mirrored).
         sign: f64,
     },
-    Bilinear {
-        /// P(u, v) = a + b·u + c·v + d·u·v over the unit square.
-        a: Vec2,
-        b: Vec2,
-        c: Vec2,
-        d: Vec2,
-        src: eframe::egui::Rect,
-    },
+    Mesh(Box<super::warp::MeshInverse>),
 }
 
 impl InverseMap {
@@ -122,60 +115,9 @@ impl InverseMap {
                     ((h[3] * x + h[4] * y + h[5]) / w) as f32,
                 ))
             }
-            Self::Bilinear { a, b, c, d, src } => {
-                let (u, v) = inverse_bilinear(p - *a, *b, *c, *d)?;
-                Some(Vec2::new(
-                    src.min.x + u * src.width(),
-                    src.min.y + v * src.height(),
-                ))
-            }
+            Self::Mesh(mesh) => mesh.map(p),
         }
     }
-}
-
-/// (u, v) in the unit square with a + b·u + c·v + d·u·v = a + `e`.
-fn inverse_bilinear(e: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Option<(f32, f32)> {
-    let cross = |p: Vec2, q: Vec2| p.x as f64 * q.y as f64 - p.y as f64 * q.x as f64;
-    // v solves k2·v² + k1·v + k0 = 0.
-    let k2 = cross(d, c);
-    let k1 = cross(e, d) + cross(b, c);
-    let k0 = cross(e, b);
-    let solve_u = |v: f64| -> Option<f64> {
-        let den_x = b.x as f64 + d.x as f64 * v;
-        let den_y = b.y as f64 + d.y as f64 * v;
-        if den_x.abs() > den_y.abs() {
-            (den_x.abs() > 1e-12).then(|| (e.x as f64 - c.x as f64 * v) / den_x)
-        } else {
-            (den_y.abs() > 1e-12).then(|| (e.y as f64 - c.y as f64 * v) / den_y)
-        }
-    };
-    // A little past the square too: the box runs through the edge pixels'
-    // corners, and the pixels outside the source are dropped later anyway.
-    const REACH: f64 = 0.25;
-    let outside = |t: f64| (-t).max(t - 1.0).max(0.0);
-    let candidates: [Option<f64>; 2] = if k2.abs() < 1e-9 * (k1.abs() + 1.0) {
-        [(k1.abs() > 1e-12).then(|| -k0 / k1), None]
-    } else {
-        let disc = k1 * k1 - 4.0 * k0 * k2;
-        if disc < 0.0 {
-            return None;
-        }
-        let root = disc.sqrt();
-        [
-            Some((-k1 - root) / (2.0 * k2)),
-            Some((-k1 + root) / (2.0 * k2)),
-        ]
-    };
-    // Of two roots, the one on the picture (the other is on the fold of
-    // the surface far outside it).
-    candidates
-        .into_iter()
-        .flatten()
-        .filter_map(|v| Some((solve_u(v)?, v)))
-        .map(|(u, v)| (outside(u).max(outside(v)), u, v))
-        .filter(|&(off, _, _)| off <= REACH)
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, u, v)| (u as f32, v as f32))
 }
 
 impl TransformParams {
@@ -186,6 +128,7 @@ impl TransformParams {
             scale,
             center,
             distort: None,
+            warp: None,
             draft: false,
         }
     }
@@ -197,24 +140,27 @@ impl TransformParams {
         }
     }
 
+    pub fn warped(warp: super::warp::Warp) -> Self {
+        Self {
+            warp: Some(warp),
+            ..Self::new(Vec2::ZERO, 0.0, Vec2::new(1.0, 1.0), Vec2::ZERO)
+        }
+    }
+
+    /// Just move / rotate / scale (no perspective or warp).
+    pub fn is_affine(&self) -> bool {
+        self.distort.is_none() && self.warp.is_none()
+    }
+
     /// Canvas position a source point moves to.
     pub fn forward(&self, p: Vec2) -> Vec2 {
-        if let Some(d) = &self.distort {
-            match d.kind {
-                DistortKind::Perspective => {
-                    if let Some(h) = homography(rect_corners(d.src), d.dst) {
-                        return apply_homography(&h, p);
-                    }
-                }
-                DistortKind::Bilinear => {
-                    let u = (p.x - d.src.min.x) / d.src.width().max(1e-6);
-                    let v = (p.y - d.src.min.y) / d.src.height().max(1e-6);
-                    let [p0, p1, p2, p3] = d.dst;
-                    let top = p0 + (p1 - p0) * u;
-                    let bottom = p3 + (p2 - p3) * u;
-                    return top + (bottom - top) * v;
-                }
-            }
+        if let Some(w) = &self.warp {
+            return w.forward(p);
+        }
+        if let Some(d) = &self.distort
+            && let Some(h) = homography(rect_corners(d.src), d.dst)
+        {
+            return apply_homography(&h, p);
         }
         let (sin_r, cos_r) = self.rotation.sin_cos();
         let (dx, dy) = (
@@ -228,8 +174,17 @@ impl TransformParams {
     }
 
     /// Canvas point → source point, prepared for per-pixel use; `None` if
-    /// the transform can't be undone (flat or degenerate).
-    pub fn inverse_map(&self) -> Option<InverseMap> {
+    /// the transform can't be undone (flat or degenerate). A warp is
+    /// meshed over `area` (source pixel edges; its box, by default).
+    pub fn inverse_map(&self, area: Option<eframe::egui::Rect>) -> Option<InverseMap> {
+        if let Some(w) = self.warp {
+            let area = area.unwrap_or(eframe::egui::Rect::from_min_max(
+                w.src.min,
+                w.src.max + eframe::egui::vec2(1.0, 1.0),
+            ));
+            let mesh = super::warp::MeshInverse::new(area, |p| w.forward(p))?;
+            return Some(InverseMap::Mesh(Box::new(mesh)));
+        }
         let Some(d) = self.distort else {
             if self.scale.x.abs() < f32::EPSILON || self.scale.y.abs() < f32::EPSILON {
                 return None;
@@ -243,33 +198,44 @@ impl TransformParams {
                 inv_scale: Vec2::new(1.0 / self.scale.x, 1.0 / self.scale.y),
             });
         };
-        match d.kind {
-            DistortKind::Perspective => {
-                let h = invert3(&homography(rect_corners(d.src), d.dst)?)?;
-                let centre = (d.dst[0] + d.dst[1] + d.dst[2] + d.dst[3]) / 4.0;
-                let w = h[6] * centre.x as f64 + h[7] * centre.y as f64 + h[8];
-                (w.abs() > 1e-12).then_some(InverseMap::Perspective {
-                    h,
-                    sign: w.signum(),
+        let h = invert3(&homography(rect_corners(d.src), d.dst)?)?;
+        let centre = (d.dst[0] + d.dst[1] + d.dst[2] + d.dst[3]) / 4.0;
+        let w = h[6] * centre.x as f64 + h[7] * centre.y as f64 + h[8];
+        (w.abs() > 1e-12).then_some(InverseMap::Perspective {
+            h,
+            sign: w.signum(),
+        })
+    }
+
+    /// The box that `area` (source pixel edges) lands in. A warp's edges
+    /// curve (and can fold outward), so its mesh is measured, not just the
+    /// corners.
+    pub fn dst_bounds(&self, area: eframe::egui::Rect) -> (Vec2, Vec2) {
+        let fold = |pts: &mut dyn Iterator<Item = Vec2>| {
+            pts.fold(
+                (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)),
+                |(lo, hi), p| (lo.min(p), hi.max(p)),
+            )
+        };
+        if self.warp.is_some() {
+            let steps = super::warp::MESH_STEPS;
+            let mut pts = (0..=steps).flat_map(|j| {
+                (0..=steps).map(move |i| {
+                    self.forward(Vec2::new(
+                        area.min.x + area.width() * i as f32 / steps as f32,
+                        area.min.y + area.height() * j as f32 / steps as f32,
+                    ))
                 })
-            }
-            DistortKind::Bilinear => {
-                let [p0, p1, p2, p3] = d.dst;
-                Some(InverseMap::Bilinear {
-                    a: p0,
-                    b: p1 - p0,
-                    c: p3 - p0,
-                    d: p0 - p1 + p2 - p3,
-                    src: d.src,
-                })
-            }
+            });
+            return fold(&mut pts);
         }
+        fold(&mut rect_corners(area).into_iter().map(|c| self.forward(c)))
     }
 
     /// Moves every pixel by the same whole number of pixels (so pixels can be
     /// copied exactly, with no resampling).
     fn is_whole_pixel_move(&self) -> bool {
-        self.distort.is_none()
+        self.is_affine()
             && self.rotation == 0.0
             && self.scale == Vec2::new(1.0, 1.0)
             && self.offset.x.fract() == 0.0
@@ -438,16 +404,10 @@ pub(super) fn transform_tiles(
         src_bounds.min,
         src_bounds.max + eframe::egui::vec2(1.0, 1.0),
     );
-    let dst_corners = rect_corners(src_area).map(|c| params.forward(c));
-    if dst_corners.iter().any(|c| !c.is_finite()) {
+    let (min, max) = params.dst_bounds(src_area);
+    if !min.is_finite() || !max.is_finite() {
         return HashMap::new();
     }
-    let min = dst_corners.iter().fold(Vec2::splat(f32::MAX), |a, c| {
-        Vec2::new(a.x.min(c.x), a.y.min(c.y))
-    });
-    let max = dst_corners.iter().fold(Vec2::splat(f32::MIN), |a, c| {
-        Vec2::new(a.x.max(c.x), a.y.max(c.y))
-    });
     let tile_size_i32 = tile_size as i32;
     // Pixels may land off the canvas: they're kept (in tiles beyond its
     // edge, not drawn), so an image moved out and back comes back whole.
@@ -467,7 +427,7 @@ pub(super) fn transform_tiles(
     }
 
     // Destination pixel centre -> source point.
-    let Some(inverse_map) = params.inverse_map() else {
+    let Some(inverse_map) = params.inverse_map(Some(src_area)) else {
         return HashMap::new();
     };
     let inverse = |p: Vec2| inverse_map.map(p);

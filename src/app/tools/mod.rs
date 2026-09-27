@@ -17,6 +17,10 @@ use crate::selection::SelectionType;
 use crate::selection::transform::TransformInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+// The Transform variant carries the warp grid (a few hundred bytes); the
+// tool is copied a handful of times a frame, and staying `Copy` keeps every
+// `if let Tool::Transform(info) = app.active_tool` simple.
+#[allow(clippy::large_enum_variant)]
 pub enum Tool {
     Brush,
     Select(SelectionType),

@@ -7,6 +7,7 @@ mod pixels;
 #[cfg(test)]
 mod tests;
 mod transform;
+pub mod warp;
 
 pub use composite::BelowComposite;
 pub use pixels::Region;
