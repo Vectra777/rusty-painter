@@ -273,6 +273,10 @@ pub struct ModalState {
     pub show_shortcuts: bool,
     /// The selection tool's slide-out menu is open.
     pub select_menu_open: bool,
+    /// Touch mode: the File / Edit / View / Help sheet is slid up.
+    pub menu_sheet_open: bool,
+    /// Section the menu sheet shows when it is too narrow for all of them.
+    pub menu_sheet_section: crate::ui::top_bar::MenuSection,
 }
 
 impl ModalState {
@@ -283,6 +287,8 @@ impl ModalState {
             show_general_settings: false,
             show_shortcuts: false,
             select_menu_open: false,
+            menu_sheet_open: false,
+            menu_sheet_section: Default::default(),
         }
     }
 }
@@ -341,6 +347,10 @@ pub struct WorkspaceState {
     pub pressure_curve: f32,
     pub show_left_panel: bool,
     pub show_right_panel: bool,
+    /// Panel visibility last frame, to tell which one was just opened.
+    pub panels_last_frame: (bool, bool),
+    /// Window size last frame, to notice resizes and screen rotations.
+    pub screen_size: Option<egui::Vec2>,
     /// Selection type the Select tool uses (last one picked).
     pub select_type: crate::selection::SelectionType,
     /// Fill tool mode and settings.
@@ -379,6 +389,8 @@ impl WorkspaceState {
             pressure_curve: 1.0,
             show_left_panel: true,
             show_right_panel: true,
+            panels_last_frame: (true, true),
+            screen_size: None,
             select_type: crate::selection::SelectionType::Rectangle,
             fill: Default::default(),
             liquify: Default::default(),

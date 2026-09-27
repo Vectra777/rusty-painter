@@ -33,6 +33,8 @@ pub(crate) enum Icon {
     Palette,
     Smudge,
     Blur,
+    Menu,
+    Finger,
 }
 
 /// Maps 16×16 icon-grid coordinates into a square centered in `rect`.
@@ -346,6 +348,19 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                 Rect::from_min_max(g.p(10.0, 2.5), g.p(14.5, 13.5))
             };
             painter.rect_filled(strip, 0.0, color);
+        }
+        Icon::Menu => {
+            for y in [4.0, 8.0, 12.0] {
+                line((2.5, y), (13.5, y), 1.5);
+            }
+        }
+        Icon::Finger => {
+            // A fingertip touching down, with a ripple.
+            let tip = Rect::from_min_max(g.p(6.0, 5.5), g.p(10.0, 15.5));
+            painter.rect_stroke(tip, g.w(2.0), thin);
+            painter.circle_filled(g.p(8.0, 5.5), g.w(1.3), color);
+            let ripple = quad_bezier(g.p(3.0, 5.5), g.p(8.0, -1.5), g.p(13.0, 5.5), 12);
+            painter.add(Shape::line(ripple, thin));
         }
     }
 }

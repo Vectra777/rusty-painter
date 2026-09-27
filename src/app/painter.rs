@@ -54,13 +54,26 @@ impl eframe::App for PainterApp {
         if self.workspace.applied_touch_mode != Some(touch) {
             let first_frame = self.workspace.applied_touch_mode.is_none();
             crate::styling::apply_style(ctx, touch);
-            // Small touch screens start with the brush panel tucked away.
-            if first_frame && touch && ctx.screen_rect().width() < 1280.0 {
+            // Small touch screens start with the brush panel tucked away,
+            // and phone-sized ones with both panels.
+            let width = ctx.screen_rect().width();
+            if first_frame && touch && width < 1280.0 {
                 self.workspace.show_left_panel = false;
+            }
+            if first_frame && width < layout::NARROW_WIDTH {
+                self.workspace.show_left_panel = false;
+                self.workspace.show_right_panel = false;
             }
             self.workspace.applied_touch_mode = Some(touch);
         }
         ui::style::set_touch_metrics(ctx, touch);
+        layout::fit_panels_to_screen(self, ctx);
+        let screen_size = ctx.screen_rect().size();
+        let resized = self
+            .workspace
+            .screen_size
+            .is_some_and(|prev| prev != screen_size);
+        self.workspace.screen_size = Some(screen_size);
         self.selection_manager.canvas_size = [self.canvas.width(), self.canvas.height()];
 
         if super::shortcuts::handle_shortcuts(self, ctx) {
@@ -103,12 +116,16 @@ impl eframe::App for PainterApp {
 
         // Bars first so they span the full window width; the tool strip is
         // added before the docks so it sits at the far left.
-        ui::top_bar::menu_bar(self, ctx);
-        // Tablets adjust size/opacity with the canvas faders instead.
+        // Tablets have the menus in a sheet over the bottom bar, and adjust
+        // size/opacity with the canvas faders instead of the options bar.
         if !touch {
+            ui::top_bar::menu_bar(self, ctx);
             ui::top_bar::options_bar(self, ctx);
         }
         ui::status_bar::status_bar(self, ctx);
+        if touch {
+            ui::top_bar::menu_sheet(self, ctx);
+        }
         ui::toolbar::toolbar(self, ctx);
 
         layout::show_tool_docks(self, ctx);
@@ -137,13 +154,19 @@ impl eframe::App for PainterApp {
                     self.workspace.fitted_to = Some(available);
                 }
 
-                // Keep the canvas still on screen while a side panel slides:
-                // the view offset is relative to the canvas area's corner.
-                let area_min = ui.max_rect().min;
+                // Keep the canvas still on screen while a side panel slides
+                // (the view offset is relative to the canvas area's corner),
+                // and keep the view centered when the window is resized or
+                // the screen rotates.
+                let area = ui.max_rect();
                 if let Some(prev) = self.viewport.canvas_area
                     && !self.workspace.auto_fit
                 {
-                    self.viewport.offset -= area_min - prev.min;
+                    if resized {
+                        self.viewport.offset += (area.size() - prev.size()) * 0.5;
+                    } else {
+                        self.viewport.offset -= area.min - prev.min;
+                    }
                 }
 
                 let view = render_helper::draw_canvas(self, ui);

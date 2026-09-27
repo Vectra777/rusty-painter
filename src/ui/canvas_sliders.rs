@@ -10,6 +10,8 @@ use eframe::egui::{self, Color32, RichText, Sense, Stroke};
 /// Touch target; the drawn track is much thinner.
 const HIT_WIDTH: f32 = 36.0;
 const FADER_HEIGHT: f32 = 170.0;
+/// Faders shrink to this on short screens.
+const MIN_FADER_HEIGHT: f32 = 60.0;
 const TRACK_WIDTH: f32 = 4.0;
 const HANDLE_SIZE: egui::Vec2 = egui::vec2(22.0, 8.0);
 const GAP: f32 = 18.0;
@@ -18,9 +20,9 @@ const MAX_SIZE: f32 = 3000.0;
 
 /// A slim vertical fader for `t` in 0..=1. Shows `value_text` beside the
 /// handle only while it is being dragged.
-fn fader(ui: &mut egui::Ui, t: &mut f32, tooltip: &str, value_text: &str) -> bool {
+fn fader(ui: &mut egui::Ui, height: f32, t: &mut f32, tooltip: &str, value_text: &str) -> bool {
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(HIT_WIDTH, FADER_HEIGHT), Sense::click_and_drag());
+        ui.allocate_exact_size(egui::vec2(HIT_WIDTH, height), Sense::click_and_drag());
     let active = response.dragged() || response.is_pointer_button_down_on();
     let response = response.on_hover_text(tooltip);
 
@@ -81,7 +83,9 @@ fn fader(ui: &mut egui::Ui, t: &mut f32, tooltip: &str, value_text: &str) -> boo
 }
 
 fn faders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
-    let height = 2.0 * FADER_HEIGHT + GAP;
+    // Both faders fit the canvas height, with a margin top and bottom.
+    let fader_height = ((area.height() - GAP - 24.0) * 0.5).clamp(MIN_FADER_HEIGHT, FADER_HEIGHT);
+    let height = 2.0 * fader_height + GAP;
     let pos = egui::pos2(area.left() + 6.0, area.center().y - height * 0.5);
 
     egui::Area::new(egui::Id::new("canvas_faders"))
@@ -95,13 +99,19 @@ fn faders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
             let span = (MAX_SIZE / MIN_SIZE).ln();
             let mut t = (options.diameter.max(MIN_SIZE) / MIN_SIZE).ln() / span;
             let size_text = format!("{:.0} px", options.diameter);
-            let size_changed = fader(ui, &mut t, "Brush size", &size_text);
+            let size_changed = fader(ui, fader_height, &mut t, "Brush size", &size_text);
             if size_changed {
                 options.diameter = (MIN_SIZE * (t * span).exp()).round().max(MIN_SIZE);
             }
 
             let opacity_text = format!("{:.0}%", options.opacity * 100.0);
-            let opacity_changed = fader(ui, &mut options.opacity, "Opacity", &opacity_text);
+            let opacity_changed = fader(
+                ui,
+                fader_height,
+                &mut options.opacity,
+                "Opacity",
+                &opacity_text,
+            );
 
             if size_changed {
                 app.brush_state.brush.is_changed = true;
@@ -126,7 +136,9 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
                     .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
                     .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| crate::ui::top_bar::transform_controls(app, ui));
+                        // Wraps onto more rows on a narrow screen.
+                        ui.set_max_width(area.width() - 36.0);
+                        ui.horizontal_wrapped(|ui| crate::ui::top_bar::transform_controls(app, ui));
                     });
             });
         return;
@@ -154,7 +166,14 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
 
 /// Touch-mode canvas overlays for the canvas `area`.
 pub fn canvas_sliders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
-    if !app.workspace.touch_mode {
+    // They'd float over the menu sheet and dialogs.
+    let m = &app.modal_state;
+    let covered = m.menu_sheet_open
+        || m.show_new_canvas_modal
+        || m.show_general_settings
+        || m.show_shortcuts
+        || app.export_state.show_modal;
+    if !app.workspace.touch_mode || covered {
         return;
     }
     faders(app, ctx, area);

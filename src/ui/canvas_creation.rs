@@ -15,17 +15,19 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
+        // Rows wrap on a narrow screen instead of running off it.
+        .max_width(540.0_f32.min(ctx.screen_rect().width() - 16.0))
         .show(ctx, |ui| {
             let settings: &mut NewCanvasSettings = &mut app.modal_state.new_canvas;
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut settings.name);
             });
 
             ui.separator();
             ui.heading("Dimensions");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Width");
                 ui.add(
                     egui::DragValue::new(&mut settings.width)
@@ -58,7 +60,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     });
             });
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Resolution (DPI)");
                 ui.add(
                     egui::DragValue::new(&mut settings.resolution)
@@ -83,7 +85,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
             ui.separator();
             ui.heading("Color");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Background");
                 ui.radio_value(&mut settings.background, BackgroundChoice::White, "White");
                 ui.radio_value(&mut settings.background, BackgroundChoice::Black, "Black");
@@ -98,7 +100,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                 }
             });
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Color Model");
                 egui::ComboBox::from_id_salt("color_model")
                     .selected_text(match settings.color_model {
@@ -116,7 +118,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
             });
             ui.weak("Grayscale paints in a single channel.");
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Color blending");
                 blend_space_picker(ui, &mut settings.blend_space);
             });
@@ -136,7 +138,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
             }
 
             ui.separator();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(validation.is_ok(), egui::Button::new("Create"))
                     .clicked()

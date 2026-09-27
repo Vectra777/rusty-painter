@@ -8,149 +8,203 @@ use crate::ui::style::*;
 use crate::ui::widgets::{icon_button, paint_swatch};
 use eframe::egui::{self, Sense, Stroke};
 
+/// Smallest a tool button shrinks to on short screens before the strip scrolls.
+const MIN_TOOL_BUTTON: f32 = 28.0;
+const MIN_TOOL_BUTTON_TOUCH: f32 = 34.0;
+const SEPARATOR_HEIGHT: f32 = 9.0;
+const ITEM_SPACING: f32 = 2.0;
+const MARGIN_Y: f32 = 6.0;
+
+/// Button side that fits every tool (and the colors) in `height`, if any.
+fn fitting_button_size(height: f32, touch: bool, preferred: f32) -> Option<f32> {
+    let buttons = if touch { 13.0 } else { 11.0 };
+    let separators = if touch { 4.0 } else { 3.0 };
+    // The color pair is about 1.22 buttons tall.
+    let fixed = 2.0 * MARGIN_Y
+        + separators * SEPARATOR_HEIGHT
+        + (buttons + separators + 1.0) * ITEM_SPACING;
+    let size = ((height - fixed) / (buttons + 1.22)).floor().min(preferred);
+    let min = if touch {
+        MIN_TOOL_BUTTON_TOUCH
+    } else {
+        MIN_TOOL_BUTTON
+    };
+    (size >= min).then_some(size)
+}
+
 pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
     let m = metrics(ctx);
+    let fitting = fitting_button_size(ctx.available_rect().height(), m.touch, m.tool_button);
+    // Too short even for the smallest buttons: keep them usable and scroll.
+    let size = fitting.unwrap_or(if m.touch {
+        MIN_TOOL_BUTTON_TOUCH
+    } else {
+        MIN_TOOL_BUTTON
+    });
     let mut select_anchor = None;
     egui::SidePanel::left("toolbar")
-        .exact_width(m.toolbar_width)
+        .exact_width(size + m.toolbar_width - m.tool_button)
         .resizable(false)
         .frame(
             egui::Frame::none()
                 .fill(BG_PANEL)
-                .inner_margin(egui::Margin::symmetric(5.0, 6.0)),
+                .inner_margin(egui::Margin::symmetric(5.0, MARGIN_Y)),
         )
         .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, 2.0);
-            let size = m.tool_button;
-            let eraser = app.is_eraser_active();
-            // On a touch screen, tapping the tool that's already active
-            // slides the tool settings panel in or out.
-            let tool_button = |ui: &mut egui::Ui, app: &mut PainterApp, icon, selected, tip| {
-                let clicked = icon_button(ui, icon, size, selected, tip).clicked();
-                if clicked && selected && m.touch {
-                    app.workspace.show_left_panel = !app.workspace.show_left_panel;
-                    return false;
-                }
-                clicked
-            };
-
-            let brush_active = matches!(app.active_tool, Tool::Brush) && !eraser;
-            if tool_button(ui, app, Icon::Brush, brush_active, "Brush (B)") {
-                app.set_brush_tool(false);
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, ITEM_SPACING);
+            if fitting.is_some() {
+                select_anchor = tool_buttons(app, ui, size, m.touch);
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    color_pair(app, ui, size);
+                });
+            } else {
+                // The colors stay pinned at the bottom; the tools scroll.
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    color_pair(app, ui, size);
+                    separator(ui, size);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            select_anchor = tool_buttons(app, ui, size, m.touch);
+                        });
+                    });
+                });
             }
-            if tool_button(ui, app, Icon::Eraser, eraser, "Eraser (E)") {
-                app.set_brush_tool(true);
-            }
-            let smudge_active = matches!(app.active_tool, Tool::Smudge);
-            if tool_button(
-                ui,
-                app,
-                Icon::Smudge,
-                smudge_active,
-                "Smudge (S): smear paint with the brush's settings",
-            ) {
-                app.set_blend_tool(true);
-            }
-            let blur_active = matches!(app.active_tool, Tool::Blur);
-            if tool_button(
-                ui,
-                app,
-                Icon::Blur,
-                blur_active,
-                "Blur (S again): soften paint with the brush's settings",
-            ) {
-                app.set_blend_tool(false);
-            }
-            separator(ui, size);
-
-            // One Select button: it shows the current type, and clicking it
-            // slides out the menu to pick another type, the mode and more.
-            let select_active = matches!(app.active_tool, Tool::Select(_));
-            let icon = crate::ui::select_menu::icon_for(app.workspace.select_type);
-            let response = icon_button(
-                ui,
-                icon,
-                size,
-                select_active,
-                "Selection (M / L) — click for types and modes",
-            );
-            if response.clicked() {
-                if !select_active {
-                    app.set_select_tool(app.workspace.select_type);
-                }
-                app.modal_state.select_menu_open = !app.modal_state.select_menu_open;
-            }
-            select_anchor = Some(response.rect);
-            separator(ui, size);
-
-            let transform_active = matches!(app.active_tool, Tool::Transform(_));
-            if tool_button(ui, app, Icon::Transform, transform_active, "Transform (V)") {
-                app.set_transform_tool();
-            }
-            let picker_active = matches!(app.active_tool, Tool::Eyedropper);
-            if tool_button(
-                ui,
-                app,
-                Icon::Eyedropper,
-                picker_active,
-                "Eyedropper (I, or Alt+click)",
-            ) {
-                app.active_tool = Tool::Eyedropper;
-            }
-            let fill_active = matches!(app.active_tool, Tool::Fill);
-            if tool_button(
-                ui,
-                app,
-                Icon::Bucket,
-                fill_active,
-                "Fill (G): bucket or enclose",
-            ) {
-                app.active_tool = Tool::Fill;
-            }
-            let liquify_active = matches!(app.active_tool, Tool::Liquify);
-            if tool_button(ui, app, Icon::Liquify, liquify_active, "Liquify (W)") {
-                app.active_tool = Tool::Liquify;
-            }
-            separator(ui, size);
-            let presets_open = app.brush_state.show_presets;
-            if icon_button(ui, Icon::Presets, size, presets_open, "Brush presets (P)").clicked() {
-                app.brush_state.show_presets = !presets_open;
-            }
-            let palette_open = app.workspace.palette.open;
-            if icon_button(
-                ui,
-                Icon::Palette,
-                size,
-                palette_open,
-                "Palette: extract colours, recolour a layer",
-            )
-            .clicked()
-            {
-                app.workspace.palette.open = !palette_open;
-            }
-
-            // No keyboard on a touch screen: undo/redo need buttons.
-            if m.touch {
-                separator(ui, size);
-                if icon_button(ui, Icon::Undo, size, false, "Undo (two-finger tap)").clicked() {
-                    app.apply_history(false);
-                }
-                if icon_button(ui, Icon::Redo, size, false, "Redo (three-finger tap)").clicked() {
-                    app.apply_history(true);
-                }
-            }
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                color_pair(app, ui, size);
-            });
         });
     if let Some(anchor) = select_anchor {
         crate::ui::select_menu::show(app, ctx, anchor);
     }
 }
 
+/// The tool buttons, top to bottom. Returns the Select button's rect (the
+/// selection menu slides out from it).
+fn tool_buttons(
+    app: &mut PainterApp,
+    ui: &mut egui::Ui,
+    size: f32,
+    touch: bool,
+) -> Option<egui::Rect> {
+    let eraser = app.is_eraser_active();
+    // On a touch screen, tapping the tool that's already active
+    // slides the tool settings panel in or out.
+    let tool_button = |ui: &mut egui::Ui, app: &mut PainterApp, icon, selected, tip| {
+        let clicked = icon_button(ui, icon, size, selected, tip).clicked();
+        if clicked && selected && touch {
+            app.workspace.show_left_panel = !app.workspace.show_left_panel;
+            return false;
+        }
+        clicked
+    };
+
+    let brush_active = matches!(app.active_tool, Tool::Brush) && !eraser;
+    if tool_button(ui, app, Icon::Brush, brush_active, "Brush (B)") {
+        app.set_brush_tool(false);
+    }
+    if tool_button(ui, app, Icon::Eraser, eraser, "Eraser (E)") {
+        app.set_brush_tool(true);
+    }
+    let smudge_active = matches!(app.active_tool, Tool::Smudge);
+    if tool_button(
+        ui,
+        app,
+        Icon::Smudge,
+        smudge_active,
+        "Smudge (S): smear paint with the brush's settings",
+    ) {
+        app.set_blend_tool(true);
+    }
+    let blur_active = matches!(app.active_tool, Tool::Blur);
+    if tool_button(
+        ui,
+        app,
+        Icon::Blur,
+        blur_active,
+        "Blur (S again): soften paint with the brush's settings",
+    ) {
+        app.set_blend_tool(false);
+    }
+    separator(ui, size);
+
+    // One Select button: it shows the current type, and clicking it
+    // slides out the menu to pick another type, the mode and more.
+    let select_active = matches!(app.active_tool, Tool::Select(_));
+    let icon = crate::ui::select_menu::icon_for(app.workspace.select_type);
+    let response = icon_button(
+        ui,
+        icon,
+        size,
+        select_active,
+        "Selection (M / L) — click for types and modes",
+    );
+    if response.clicked() {
+        if !select_active {
+            app.set_select_tool(app.workspace.select_type);
+        }
+        app.modal_state.select_menu_open = !app.modal_state.select_menu_open;
+    }
+    let select_anchor = Some(response.rect);
+    separator(ui, size);
+
+    let transform_active = matches!(app.active_tool, Tool::Transform(_));
+    if tool_button(ui, app, Icon::Transform, transform_active, "Transform (V)") {
+        app.set_transform_tool();
+    }
+    let picker_active = matches!(app.active_tool, Tool::Eyedropper);
+    if tool_button(
+        ui,
+        app,
+        Icon::Eyedropper,
+        picker_active,
+        "Eyedropper (I, or Alt+click)",
+    ) {
+        app.active_tool = Tool::Eyedropper;
+    }
+    let fill_active = matches!(app.active_tool, Tool::Fill);
+    if tool_button(
+        ui,
+        app,
+        Icon::Bucket,
+        fill_active,
+        "Fill (G): bucket or enclose",
+    ) {
+        app.active_tool = Tool::Fill;
+    }
+    let liquify_active = matches!(app.active_tool, Tool::Liquify);
+    if tool_button(ui, app, Icon::Liquify, liquify_active, "Liquify (W)") {
+        app.active_tool = Tool::Liquify;
+    }
+    separator(ui, size);
+    let presets_open = app.brush_state.show_presets;
+    if icon_button(ui, Icon::Presets, size, presets_open, "Brush presets (P)").clicked() {
+        app.brush_state.show_presets = !presets_open;
+    }
+    let palette_open = app.workspace.palette.open;
+    if icon_button(
+        ui,
+        Icon::Palette,
+        size,
+        palette_open,
+        "Palette: extract colours, recolour a layer",
+    )
+    .clicked()
+    {
+        app.workspace.palette.open = !palette_open;
+    }
+
+    // No keyboard on a touch screen: undo/redo need buttons.
+    if touch {
+        separator(ui, size);
+        if icon_button(ui, Icon::Undo, size, false, "Undo (two-finger tap)").clicked() {
+            app.apply_history(false);
+        }
+        if icon_button(ui, Icon::Redo, size, false, "Redo (three-finger tap)").clicked() {
+            app.apply_history(true);
+        }
+    }
+    select_anchor
+}
+
 fn separator(ui: &mut egui::Ui, width: f32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 9.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, SEPARATOR_HEIGHT), Sense::hover());
     ui.painter().hline(
         rect.x_range().shrink(4.0),
         rect.center().y,

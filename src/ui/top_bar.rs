@@ -12,11 +12,20 @@ fn shortcut(ctx: &egui::Context, modifiers: Modifiers, key: Key) -> String {
     ctx.format_shortcut(&KeyboardShortcut::new(modifiers, key))
 }
 
+fn menu_action_id() -> egui::Id {
+    egui::Id::new("rusty_painter_menu_action")
+}
+
 /// A menu entry with a right-aligned shortcut hint; closes the menu on click.
 fn menu_item(ui: &mut egui::Ui, label: &str, hint: Option<String>) -> bool {
     let touch = metrics(ui.ctx()).touch;
-    let min_height = if touch { 44.0 } else { 0.0 };
-    let mut button = egui::Button::new(label).min_size(egui::vec2(220.0, min_height));
+    // Touch menus live in the sheet, where items span its column.
+    let (min_width, min_height) = if touch {
+        (ui.available_width().max(220.0), 44.0)
+    } else {
+        (220.0, 0.0)
+    };
+    let mut button = egui::Button::new(label).min_size(egui::vec2(min_width, min_height));
     // Keyboard shortcuts mean nothing without a keyboard.
     if let Some(hint) = hint.filter(|_| !touch) {
         button = button.shortcut_text(RichText::new(hint).color(TEXT_DIM));
@@ -24,8 +33,16 @@ fn menu_item(ui: &mut egui::Ui, label: &str, hint: Option<String>) -> bool {
     let clicked = ui.add(button).clicked();
     if clicked {
         ui.close_menu();
+        // Lets the touch menu sheet close too.
+        ui.ctx().data_mut(|d| d.insert_temp(menu_action_id(), true));
     }
     clicked
+}
+
+/// Whether a menu item was picked since the last call.
+fn take_menu_action(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(menu_action_id()))
+        .unwrap_or(false)
 }
 
 fn bar_frame(fill: egui::Color32) -> egui::Frame {
@@ -34,120 +51,260 @@ fn bar_frame(fill: egui::Color32) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(8.0, 0.0))
 }
 
-/// File / Edit / View / Help menus.
-pub fn menu_bar(app: &mut PainterApp, ctx: &egui::Context) {
-    let cmd = Modifiers::COMMAND;
-    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+/// The top-level menus, shared by the desktop menu bar and the touch sheet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MenuSection {
+    #[default]
+    File,
+    Edit,
+    View,
+    Help,
+}
 
+impl MenuSection {
+    const ALL: [(MenuSection, &'static str); 4] = [
+        (MenuSection::File, "File"),
+        (MenuSection::Edit, "Edit"),
+        (MenuSection::View, "View"),
+        (MenuSection::Help, "Help"),
+    ];
+
+    fn items(self, app: &mut PainterApp, ui: &mut egui::Ui) {
+        match self {
+            MenuSection::File => file_menu(app, ui),
+            MenuSection::Edit => edit_menu(app, ui),
+            MenuSection::View => view_menu(app, ui),
+            MenuSection::Help => help_menu(app, ui),
+        }
+    }
+}
+
+/// File / Edit / View / Help menus. Touch mode has the bottom menu sheet
+/// instead (see [`menu_sheet`]).
+pub fn menu_bar(app: &mut PainterApp, ctx: &egui::Context) {
     egui::TopBottomPanel::top("menu_bar")
         .exact_height(metrics(ctx).menu_height)
         .frame(bar_frame(BG_CANVAS))
         .show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
-
-                ui.menu_button("File", |ui| {
-                    if menu_item(ui, "New Canvas…", Some(shortcut(ctx, cmd, Key::N))) {
-                        open_new_canvas_dialog(app);
-                    }
-                    if menu_item(ui, "Open…", Some(shortcut(ctx, cmd, Key::O))) {
-                        open_project(app);
-                    }
-                    if menu_item(ui, "Save…", Some(shortcut(ctx, cmd, Key::S))) {
-                        save_project(app);
-                    }
-                    ui.separator();
-                    if menu_item(ui, "Import Image…", Some(shortcut(ctx, cmd_shift, Key::O))) {
-                        crate::app::import::import_image_dialog(app);
-                    }
-                    if menu_item(ui, "Export Image…", Some(shortcut(ctx, cmd, Key::E))) {
-                        open_export_dialog(app);
-                    }
-                    ui.separator();
-                    if menu_item(ui, "Settings…", None) {
-                        app.modal_state.show_general_settings = true;
-                    }
-                });
-
-                ui.menu_button("Edit", |ui| {
-                    if menu_item(ui, "Undo", Some(shortcut(ctx, cmd, Key::Z))) {
-                        app.apply_history(false);
-                    }
-                    if menu_item(ui, "Redo", Some(shortcut(ctx, cmd_shift, Key::Z))) {
-                        app.apply_history(true);
-                    }
-                    ui.separator();
-                    if menu_item(ui, "New Layer", Some(shortcut(ctx, cmd_shift, Key::N))) {
-                        app.add_layer_and_select();
-                    }
-                    if menu_item(ui, "Palette…", None) {
-                        app.workspace.palette.open = true;
-                    }
-                    if menu_item(ui, "New Folder", Some(shortcut(ctx, cmd, Key::G))) {
-                        app.add_folder();
-                    }
-                    if menu_item(ui, "Add Layer Mask", None) {
-                        app.add_mask_to_active();
-                    }
-                    if menu_item(ui, "Deselect", Some(shortcut(ctx, cmd, Key::D))) {
-                        app.selection_manager.clear_selection();
-                    }
-                    if menu_item(ui, "Swap Colors", Some("X".into())) {
-                        app.swap_colors();
-                    }
-                    ui.separator();
-                    if menu_item(ui, "Clear Canvas (not undoable)", None) {
-                        app.clear_canvas();
-                    }
-                });
-
-                ui.menu_button("View", |ui| {
-                    if menu_item(ui, "Zoom In", Some(shortcut(ctx, cmd, Key::Equals))) {
-                        app.zoom_by_from_center(1.25);
-                    }
-                    if menu_item(ui, "Zoom Out", Some(shortcut(ctx, cmd, Key::Minus))) {
-                        app.zoom_by_from_center(0.8);
-                    }
-                    if menu_item(ui, "Fit to Window", Some(shortcut(ctx, cmd, Key::Num0))) {
-                        app.fit_view();
-                    }
-                    if menu_item(ui, "Actual Pixels", Some(shortcut(ctx, cmd, Key::Num1))) {
-                        app.set_zoom_from_center(1.0);
-                    }
-                    if menu_item(ui, "Reset Rotation", None) {
-                        app.viewport.rotation = 0.0;
-                    }
-                    ui.separator();
-                    if menu_item(ui, "Show / Hide Panels", Some("Tab".into())) {
-                        toggle_all_panels(app);
-                    }
-                    ui.checkbox(&mut app.workspace.show_left_panel, "Brush panel");
-                    ui.checkbox(&mut app.workspace.show_right_panel, "Color & layers panel");
-                    ui.checkbox(&mut app.workspace.touch_mode, "Touch mode");
-                    ui.separator();
-                    if menu_item(ui, "Reset Panel Layout", None) {
-                        app.dock_left = crate::app::layout::default_left_dock();
-                        app.dock_right = crate::app::layout::default_right_dock();
-                    }
-                });
-
-                ui.menu_button("Help", |ui| {
-                    let label = if app.workspace.touch_mode {
-                        "Gestures & Shortcuts"
-                    } else {
-                        "Keyboard Shortcuts"
-                    };
-                    if menu_item(ui, label, None) {
-                        app.modal_state.show_shortcuts = true;
-                    }
-                });
+                for (section, title) in MenuSection::ALL {
+                    ui.menu_button(title, |ui| section.items(app, ui));
+                }
 
                 // Show/hide the side panels (also Tab on desktop).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    panel_toggles(app, ui);
+                    let size = (metrics(ctx).menu_height - 4.0).min(40.0);
+                    panel_toggles(app, ui, size);
                 });
             });
         });
+}
+
+fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let ctx = &ui.ctx().clone();
+    let cmd = Modifiers::COMMAND;
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    if menu_item(ui, "New Canvas…", Some(shortcut(ctx, cmd, Key::N))) {
+        open_new_canvas_dialog(app);
+    }
+    if menu_item(ui, "Open…", Some(shortcut(ctx, cmd, Key::O))) {
+        open_project(app);
+    }
+    if menu_item(ui, "Save…", Some(shortcut(ctx, cmd, Key::S))) {
+        save_project(app);
+    }
+    ui.separator();
+    if menu_item(ui, "Import Image…", Some(shortcut(ctx, cmd_shift, Key::O))) {
+        crate::app::import::import_image_dialog(app);
+    }
+    if menu_item(ui, "Export Image…", Some(shortcut(ctx, cmd, Key::E))) {
+        open_export_dialog(app);
+    }
+    ui.separator();
+    if menu_item(ui, "Settings…", None) {
+        app.modal_state.show_general_settings = true;
+    }
+}
+
+fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let ctx = &ui.ctx().clone();
+    let cmd = Modifiers::COMMAND;
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    if menu_item(ui, "Undo", Some(shortcut(ctx, cmd, Key::Z))) {
+        app.apply_history(false);
+    }
+    if menu_item(ui, "Redo", Some(shortcut(ctx, cmd_shift, Key::Z))) {
+        app.apply_history(true);
+    }
+    ui.separator();
+    if menu_item(ui, "New Layer", Some(shortcut(ctx, cmd_shift, Key::N))) {
+        app.add_layer_and_select();
+    }
+    if menu_item(ui, "Palette…", None) {
+        app.workspace.palette.open = true;
+    }
+    if menu_item(ui, "New Folder", Some(shortcut(ctx, cmd, Key::G))) {
+        app.add_folder();
+    }
+    if menu_item(ui, "Add Layer Mask", None) {
+        app.add_mask_to_active();
+    }
+    if menu_item(ui, "Deselect", Some(shortcut(ctx, cmd, Key::D))) {
+        app.selection_manager.clear_selection();
+    }
+    if menu_item(ui, "Swap Colors", Some("X".into())) {
+        app.swap_colors();
+    }
+    ui.separator();
+    if menu_item(ui, "Clear Canvas (not undoable)", None) {
+        app.clear_canvas();
+    }
+}
+
+fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let ctx = &ui.ctx().clone();
+    let cmd = Modifiers::COMMAND;
+    if menu_item(ui, "Zoom In", Some(shortcut(ctx, cmd, Key::Equals))) {
+        app.zoom_by_from_center(1.25);
+    }
+    if menu_item(ui, "Zoom Out", Some(shortcut(ctx, cmd, Key::Minus))) {
+        app.zoom_by_from_center(0.8);
+    }
+    if menu_item(ui, "Fit to Window", Some(shortcut(ctx, cmd, Key::Num0))) {
+        app.fit_view();
+    }
+    if menu_item(ui, "Actual Pixels", Some(shortcut(ctx, cmd, Key::Num1))) {
+        app.set_zoom_from_center(1.0);
+    }
+    if menu_item(ui, "Reset Rotation", None) {
+        app.viewport.rotation = 0.0;
+    }
+    ui.separator();
+    if menu_item(ui, "Show / Hide Panels", Some("Tab".into())) {
+        toggle_all_panels(app);
+    }
+    ui.checkbox(&mut app.workspace.show_left_panel, "Brush panel");
+    ui.checkbox(&mut app.workspace.show_right_panel, "Color & layers panel");
+    ui.checkbox(&mut app.workspace.touch_mode, "Touch mode");
+    if app.workspace.touch_mode {
+        ui.checkbox(&mut app.workspace.finger_painting, "Paint with one finger")
+            .on_hover_text("When off, only a stylus paints and one finger pans the canvas.");
+    }
+    ui.separator();
+    if menu_item(ui, "Reset Panel Layout", None) {
+        app.dock_left = crate::app::layout::default_left_dock();
+        app.dock_right = crate::app::layout::default_right_dock();
+    }
+}
+
+fn help_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let label = if app.workspace.touch_mode {
+        "Gestures & Shortcuts"
+    } else {
+        "Keyboard Shortcuts"
+    };
+    if menu_item(ui, label, None) {
+        app.modal_state.show_shortcuts = true;
+    }
+}
+
+/// Width of one menu column in the touch sheet.
+const SHEET_COLUMN_WIDTH: f32 = 240.0;
+
+/// Touch mode: the menus in a sheet that slides up from the bottom bar.
+/// Wide screens show every menu side by side; narrow ones one at a time.
+pub fn menu_sheet(app: &mut PainterApp, ctx: &egui::Context) {
+    let open = app.modal_state.menu_sheet_open;
+    let t = ctx.animate_bool_with_time(egui::Id::new("menu_sheet_anim"), open, 0.18);
+    if t <= 0.0 {
+        return;
+    }
+    // Everything above the bottom bar (the status bar is already placed).
+    let area = ctx.available_rect();
+    let width = area.width();
+    let columns = (width - 16.0) >= SHEET_COLUMN_WIDTH * 4.0;
+    let height_id = egui::Id::new("menu_sheet_height");
+    let height: f32 = ctx
+        .data(|d| d.get_temp(height_id))
+        .unwrap_or(area.height() * 0.5);
+    let height = height.min(area.height());
+    let top = area.bottom() - height * t;
+
+    // Dim the canvas and swallow taps on it: a tap outside closes the sheet
+    // instead of painting.
+    let backdrop = egui::Area::new(egui::Id::new("menu_sheet_backdrop"))
+        .fixed_pos(area.min)
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let (rect, response) =
+                ui.allocate_exact_size(area.size(), egui::Sense::click_and_drag());
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::from_black_alpha((90.0 * t) as u8));
+            response
+        })
+        .inner;
+
+    let response = egui::Area::new(egui::Id::new("menu_sheet"))
+        .fixed_pos(egui::pos2(area.left(), top))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            // Slide out from under the bottom bar, not over it.
+            ui.set_clip_rect(area);
+            egui::Frame::none()
+                .fill(BG_PANEL)
+                .stroke(egui::Stroke::new(1.0_f32, BORDER_LIGHT))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.set_width(width - 16.0);
+                    ui.set_max_height(area.height() - 16.0);
+                    if columns {
+                        ui.horizontal_top(|ui| {
+                            for (section, title) in MenuSection::ALL {
+                                ui.vertical(|ui| {
+                                    ui.set_width(SHEET_COLUMN_WIDTH - 8.0);
+                                    ui.label(RichText::new(title).strong().color(TEXT_STRONG));
+                                    section.items(app, ui);
+                                });
+                            }
+                        });
+                    } else {
+                        sheet_tabs(app, ui);
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let section = app.modal_state.menu_sheet_section;
+                            section.items(app, ui);
+                        });
+                    }
+                });
+        })
+        .response;
+    ctx.data_mut(|d| d.insert_temp(height_id, response.rect.height()));
+
+    // Close after picking an item, or on a tap outside the sheet.
+    if take_menu_action(ctx) || backdrop.clicked() || backdrop.drag_started() {
+        app.modal_state.menu_sheet_open = false;
+    }
+    if t < 1.0 {
+        ctx.request_repaint();
+    }
+}
+
+fn sheet_tabs(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let width = ui.available_width() / MenuSection::ALL.len() as f32;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (section, title) in MenuSection::ALL {
+            let selected = app.modal_state.menu_sheet_section == section;
+            let text = RichText::new(title).color(if selected { TEXT_STRONG } else { TEXT });
+            let button = egui::Button::new(text)
+                .fill(if selected { ACCENT } else { BG_RAISED })
+                .min_size(egui::vec2(width, 40.0));
+            if ui.add(button).clicked() {
+                app.modal_state.menu_sheet_section = section;
+            }
+        }
+    });
 }
 
 /// Context bar under the menus showing the active tool's options.
@@ -156,31 +313,45 @@ pub fn options_bar(app: &mut PainterApp, ctx: &egui::Context) {
         .exact_height(metrics(ctx).bar_height)
         .frame(bar_frame(BG_PANEL))
         .show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
-                // Desktop only (tablets use the canvas faders); hints fill the right.
-                let hint = match app.active_tool {
-                    Tool::Brush => brush_options(app, ui),
-                    Tool::Select(kind) => select_options(app, ui, kind),
-                    Tool::Transform(_) => transform_options(app, ui),
-                    Tool::Eyedropper => eyedropper_options(app, ui),
-                    Tool::Fill => fill_options(app, ui, true),
-                    Tool::Liquify => liquify_options(app, ui, true),
-                    Tool::Smudge | Tool::Blur => blend_options(app, ui),
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Hints are optional: drop them rather than overlap the options.
-                    let font = egui::TextStyle::Small.resolve(ui.style());
-                    let width = ui
-                        .painter()
-                        .layout_no_wrap(hint.into(), font, TEXT_DIM)
-                        .size()
-                        .x;
-                    if width + 12.0 < ui.available_width() {
-                        ui.label(RichText::new(hint).small().color(TEXT_DIM));
-                    }
+            // Options wider than the window scroll sideways instead of
+            // being cut off.
+            let height = ui.available_height();
+            egui::ScrollArea::horizontal()
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| options_row(app, ui),
+                    );
                 });
-            });
         });
+}
+
+fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
+    // Desktop only (tablets use the canvas faders); hints fill the right.
+    let hint = match app.active_tool {
+        Tool::Brush => brush_options(app, ui),
+        Tool::Select(kind) => select_options(app, ui, kind),
+        Tool::Transform(_) => transform_options(app, ui),
+        Tool::Eyedropper => eyedropper_options(app, ui),
+        Tool::Fill => fill_options(app, ui, true),
+        Tool::Liquify => liquify_options(app, ui, true),
+        Tool::Smudge | Tool::Blur => blend_options(app, ui),
+    };
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Hints are optional: drop them rather than overlap the options.
+        let font = egui::TextStyle::Small.resolve(ui.style());
+        let width = ui
+            .painter()
+            .layout_no_wrap(hint.into(), font, TEXT_DIM)
+            .size()
+            .x;
+        if width + 12.0 < ui.available_width() {
+            ui.label(RichText::new(hint).small().color(TEXT_DIM));
+        }
+    });
 }
 
 fn tool_title(ui: &mut egui::Ui, title: &str) {
@@ -571,8 +742,7 @@ fn toggle_all_panels(app: &mut PainterApp) {
 }
 
 /// Buttons that show/hide the side docks (more canvas on small screens).
-fn panel_toggles(app: &mut PainterApp, ui: &mut egui::Ui) {
-    let size = (metrics(ui.ctx()).menu_height - 4.0).min(40.0);
+pub(crate) fn panel_toggles(app: &mut PainterApp, ui: &mut egui::Ui, size: f32) {
     let ws = &mut app.workspace;
     if icon_button(
         ui,

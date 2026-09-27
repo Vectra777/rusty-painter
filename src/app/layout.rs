@@ -100,27 +100,54 @@ impl<'a> TabViewer for ToolTabViewer<'a> {
     }
 }
 
+/// Below this window width the side panels take turns instead of both
+/// squeezing the canvas.
+pub(crate) const NARROW_WIDTH: f32 = 760.0;
+/// Canvas strip a side panel leaves free on a narrow screen.
+const MIN_CANVAS_WIDTH: f32 = 48.0;
+const PANEL_MIN_WIDTH: f32 = 250.0;
+
+/// On a narrow screen keep one side panel open at a time: the one just
+/// opened wins (or the color & layers panel, after a resize).
+pub(crate) fn fit_panels_to_screen(app: &mut PainterApp, ctx: &egui::Context) {
+    let ws = &mut app.workspace;
+    if ctx.screen_rect().width() < NARROW_WIDTH && ws.show_left_panel && ws.show_right_panel {
+        let (left_was_open, _) = ws.panels_last_frame;
+        if left_was_open {
+            ws.show_left_panel = false;
+        } else {
+            ws.show_right_panel = false;
+        }
+    }
+    ws.panels_last_frame = (ws.show_left_panel, ws.show_right_panel);
+}
+
 pub(crate) fn show_tool_docks(app: &mut PainterApp, ctx: &egui::Context) {
     let dock_style = crate::styling::dock_style(&ctx.style());
     let panel_frame = egui::Frame::none().fill(BG_CANVAS);
+    // A panel never covers the whole canvas on a small screen.
+    let max_width = (ctx.available_rect().width() - MIN_CANVAS_WIDTH).max(160.0);
+    let min_width = PANEL_MIN_WIDTH.min(max_width);
 
     // Panels slide in and out; hidden ones take no space.
     egui::SidePanel::left("tool_dock_left")
         .resizable(true)
-        .default_width(300.0)
-        .min_width(250.0)
+        .default_width(300.0_f32.min(max_width))
+        .min_width(min_width)
+        .max_width(max_width)
         .frame(panel_frame)
         .show_animated(ctx, app.workspace.show_left_panel, |ui| {
-            show_dock(app, ui, "tool_dock_left", dock_style.clone());
+            show_dock(app, ui, "tool_dock_left", dock_style.clone(), min_width);
         });
 
     egui::SidePanel::right("tool_dock_right")
         .resizable(true)
-        .default_width(290.0)
-        .min_width(250.0)
+        .default_width(290.0_f32.min(max_width))
+        .min_width(min_width)
+        .max_width(max_width)
         .frame(panel_frame)
         .show_animated(ctx, app.workspace.show_right_panel, |ui| {
-            show_dock(app, ui, "tool_dock_right", dock_style);
+            show_dock(app, ui, "tool_dock_right", dock_style, min_width);
         });
 }
 
@@ -129,8 +156,9 @@ fn show_dock(
     ui: &mut egui::Ui,
     dock_id: &'static str,
     style: egui_dock::Style,
+    min_width: f32,
 ) {
-    ui.set_min_width(250.0);
+    ui.set_min_width(min_width);
     let dock = if dock_id == "tool_dock_left" {
         &mut app.dock_left
     } else {
