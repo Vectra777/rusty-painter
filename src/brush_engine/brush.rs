@@ -446,8 +446,6 @@ fn resolve_spans(
     buffer: &mut StrokeBuffer,
     spans: &[(usize, usize)],
 ) {
-    let tile_size = ctx.canvas.tile_size();
-    let (tile_x0, tile_y0) = (region.tx * tile_size, region.ty * tile_size);
     let Some(tile_arc) = ctx.canvas.lock_tile(region.tx, region.ty) else {
         return;
     };
@@ -455,6 +453,21 @@ fn resolve_spans(
     let Some(data) = tile.data.as_mut() else {
         return;
     };
+    resolve_spans_in(ctx, region, buffer, spans, data);
+    tile.is_empty = false;
+}
+
+/// [`resolve_spans`] into a tile's pixels the caller holds locked.
+#[inline]
+fn resolve_spans_in(
+    ctx: &BatchCtx<'_>,
+    region: TileRegion,
+    buffer: &mut StrokeBuffer,
+    spans: &[(usize, usize)],
+    data: &mut [Color32],
+) {
+    let tile_size = ctx.canvas.tile_size();
+    let (tile_x0, tile_y0) = (region.tx * tile_size, region.ty * tile_size);
     // The stroke and its tail together: dabs combine the same in any order.
     let mut combined = Vec::new();
     let mut combined_colors: Vec<[f32; 3]> = Vec::new();
@@ -550,7 +563,6 @@ fn resolve_spans(
             }
         }
     }
-    tile.is_empty = false;
 
     // Report exactly what changed, so the display redraws only that.
     let mut rect: Option<[usize; 4]> = None;
@@ -827,9 +839,14 @@ impl Brush {
             let Some([x0, y0, x1, y1]) = rect else {
                 continue;
             };
-            // The pixels as before the stroke: resolving skips pixels the
-            // stroke doesn't cover (it only ever grows), and the tail's may
-            // no longer be.
+            let mut spans = vec![(usize::MAX, 0usize); tile_size];
+            for span in &mut spans[y0..y1] {
+                *span = (x0, x1 - 1);
+            }
+            // The pixels as before the stroke (resolving skips pixels the
+            // stroke doesn't cover, and the tail's may no longer be), then
+            // the stroke again: under one lock, so the display never sees
+            // the stroke missing in between.
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(data) = tile.data.as_mut() {
@@ -837,21 +854,13 @@ impl Brush {
                         let range = row * tile_size + x0..row * tile_size + x1;
                         data[range.clone()].copy_from_slice(&buffer.original[range]);
                     }
+                    let region = TileRegion {
+                        tx: key.0,
+                        ty: key.1,
+                    };
+                    resolve_spans_in(&ctx, region, &mut buffer, &spans, data);
                 }
             }
-            let mut spans = vec![(usize::MAX, 0usize); tile_size];
-            for span in &mut spans[y0..y1] {
-                *span = (x0, x1 - 1);
-            }
-            resolve_spans(
-                &ctx,
-                TileRegion {
-                    tx: key.0,
-                    ty: key.1,
-                },
-                &mut buffer,
-                &spans,
-            );
             stroke_tiles.dirty.insert(key);
         }
     }

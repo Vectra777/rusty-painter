@@ -112,13 +112,13 @@ impl PainterApp {
             preset("Pencil (Sketch)", {
                 // Graphite on paper: the grain shows under light pressure,
                 // the tip widens as the pen leans.
-                let mut b = Brush::new(6.0, 60.0, black, 10.0);
-                b.brush_options.flow = 30.0;
-                b.brush_options.opacity = 0.8;
-                b.brush_options.pressure_min_size = 0.4;
+                let mut b = Brush::new(6.0, 80.0, Color32::from_rgb(40, 40, 45), 8.0);
+                b.brush_options.flow = 60.0;
+                b.brush_options.opacity = 0.9;
+                b.brush_options.pressure_min_size = 0.5;
                 b.brush_options.pressure_opacity = true;
                 b.jitter = 0.5;
-                b.texture = paper("Paper", TextureMode::Height, 0.7);
+                b.texture = paper("Fine grain", TextureMode::Subtract, 0.5);
                 b.dynamics.taper = Taper {
                     start: 20.0,
                     end: 30.0,
@@ -133,7 +133,6 @@ impl PainterApp {
             preset("Ink Pen", {
                 // Thins at both ends and when drawn fast, like a dip pen.
                 let mut b = Brush::new(8.0, 100.0, black, 5.0);
-                b.stabilizer = 0.2;
                 b.brush_options.flow = 100.0;
                 b.dynamics.taper = Taper {
                     start: 25.0,
@@ -151,7 +150,6 @@ impl PainterApp {
                 // A flat nib held at 45°: thick and thin by direction.
                 let mut b = Brush::new(16.0, 100.0, black, 4.0);
                 b.brush_options.pressure_min_size = 0.5;
-                b.stabilizer = 0.25;
                 b.dynamics.tip.angle = 45.0;
                 b.dynamics.tip.ratio = 0.18;
                 b.dynamics.taper = Taper {
@@ -203,13 +201,17 @@ impl PainterApp {
             }),
             preset("Chalk", {
                 // A rough disc on rough paper: gaps where the paper is low.
-                let mut b = Brush::new(30.0, 80.0, black, 20.0);
+                let mut b = Brush::new(30.0, 80.0, black, 8.0);
                 b.brush_options.pixel_shape = tip("Rough disc");
-                b.jitter = 5.0;
-                b.brush_options.flow = 60.0;
+                b.jitter = 3.0;
+                b.brush_options.flow = 85.0;
                 b.brush_options.pressure_opacity = true;
+                b.brush_options.pressure_min_size = 0.6;
                 b.dynamics.tip.random_angle = 180.0;
-                b.texture = paper("Rough paper", TextureMode::Subtract, 0.8);
+                b.texture = paper("Rough paper", TextureMode::Height, 0.85).map(|mut t| {
+                    t.scale = 0.7;
+                    t
+                });
                 b
             }),
             preset("Charcoal", {
@@ -228,15 +230,17 @@ impl PainterApp {
                 b
             }),
             preset("Dry Bristles", {
-                let mut b = Brush::new(36.0, 80.0, black, 8.0);
+                // Streaks from the bristles dragged along the stroke.
+                let mut b = Brush::new(36.0, 80.0, black, 3.0);
                 b.brush_options.pixel_shape = tip("Bristles");
-                b.brush_options.flow = 70.0;
+                b.brush_options.flow = 35.0;
+                b.brush_options.pressure_min_size = 0.6;
+                b.brush_options.pressure_opacity = true;
                 b.dynamics.tip.follow_stroke = true;
                 b.dynamics.speed = SpeedDynamics {
                     size: 0.0,
-                    opacity: -0.5,
+                    opacity: -0.4,
                 };
-                b.texture = paper("Canvas", TextureMode::Subtract, 0.5);
                 b
             }),
             preset("Spray", {

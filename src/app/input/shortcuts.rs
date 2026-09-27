@@ -53,11 +53,27 @@ impl PainterApp {
             return;
         };
         let eraser = preset.brush.brush_options.blend_mode == BlendMode::Eraser;
+        // The stabiliser is the artist's, not the brush's: a preset (or the
+        // switch between brush and eraser) keeps it.
+        let b = &self.brush_state.brush;
+        let stabilizer = (
+            b.stabilizer_algorithm,
+            b.stabilizer,
+            b.stabilizer_mass,
+            b.stabilizer_drag,
+        );
         self.set_brush_tool(eraser);
         let bs = &mut self.brush_state;
         let color = bs.brush.brush_options.color;
         bs.brush = preset.brush;
         bs.brush.brush_options.color = color;
+        let b = &mut bs.brush;
+        (
+            b.stabilizer_algorithm,
+            b.stabilizer,
+            b.stabilizer_mass,
+            b.stabilizer_drag,
+        ) = stabilizer;
         bs.brush.is_changed = true;
         bs.brush_preview.dirty = true;
         bs.active_preset = Some(preset.name);
@@ -379,4 +395,37 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
 
     repaint
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use crate::brush_engine::brush::StabilizerAlgorithm;
+    use crate::canvas::Canvas;
+    use eframe::egui::Color32;
+
+    #[test]
+    fn a_preset_keeps_the_stabiliser() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.brush_state.presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+        let b = &mut app.brush_state.brush;
+        b.stabilizer_algorithm = StabilizerAlgorithm::Dynamic;
+        b.stabilizer = 0.7;
+        b.stabilizer_mass = 0.3;
+        b.stabilizer_drag = 0.4;
+        for i in 0..app.brush_state.presets.len() {
+            app.apply_preset(i);
+            let b = &app.brush_state.brush;
+            let name = &app.brush_state.presets[i].name;
+            assert_eq!(
+                b.stabilizer_algorithm,
+                StabilizerAlgorithm::Dynamic,
+                "{name}"
+            );
+            assert_eq!(
+                (b.stabilizer, b.stabilizer_mass, b.stabilizer_drag),
+                (0.7, 0.3, 0.4),
+                "{name}"
+            );
+        }
+    }
 }

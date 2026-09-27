@@ -403,7 +403,6 @@ impl StrokeState {
             if self.tail.is_empty() {
                 return;
             }
-            context.clear_tails(brush);
             let taper = brush.dynamics.taper;
             let end = self.travel;
             let mut tail = std::mem::take(&mut self.tail);
@@ -417,7 +416,11 @@ impl StrokeState {
                     plan.var.strength *= f;
                 }
             }
+            // The tapered end first, while the tail still shows (together
+            // they look like the tail), then the tail off: the line is never
+            // shown without its end.
             paint_plans(brush, original, &tail, Target::Stroke, context);
+            context.clear_tails(brush);
         }));
         let o = &mut brush.brush_options;
         (o.diameter, o.opacity, o.flow) = original;

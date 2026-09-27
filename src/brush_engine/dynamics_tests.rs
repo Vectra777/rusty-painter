@@ -819,3 +819,59 @@ fn speed_stays_smooth_when_samples_come_in_bursts() {
         thickness(&bursty, 150)
     );
 }
+
+/// Renders every built-in tip and preset stroke to PNGs in
+/// `RUSTY_PAINTER_RENDER_DIR`, for looking at them.
+#[test]
+#[ignore = "writes images; set RUSTY_PAINTER_RENDER_DIR"]
+fn render_presets_and_tips() {
+    let Ok(dir) = std::env::var("RUSTY_PAINTER_RENDER_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    for p in crate::brush_engine::texture::builtin() {
+        let n = p.size as u32;
+        let img = image::GrayImage::from_fn(n * 2, n * 2, |x, y| {
+            image::Luma([(p.data[((y % n) * n + x % n) as usize] * 255.0) as u8])
+        });
+        img.save(dir.join(format!("paper_{}.png", p.name))).unwrap();
+    }
+    for (name, tip) in crate::brush_engine::tip::builtin() {
+        let img = image::GrayImage::from_raw(
+            tip.width as u32,
+            tip.height as u32,
+            tip.pixels.iter().map(|v| 255 - v).collect(),
+        )
+        .unwrap();
+        img.save(dir.join(format!("tip_{name}.png"))).unwrap();
+    }
+    for preset in crate::PainterApp::create_default_brush_presets(Color32::BLACK) {
+        let mut brush = preset.brush.clone();
+        let eraser =
+            brush.brush_options.blend_mode == crate::brush_engine::brush_options::BlendMode::Eraser;
+        let below = if eraser {
+            Color32::from_rgb(40, 90, 160)
+        } else {
+            Color32::WHITE
+        };
+        let (canvas, _) = paint_preset(&mut brush, below);
+        let mut img = image::RgbaImage::new(W as u32, H as u32);
+        for y in 0..H {
+            for x in 0..W {
+                let [r, g, b, a] = pixel(&canvas, x, y).to_srgba_unmultiplied();
+                // Over white, as it would look on paper.
+                let over = |c: u8| ((c as u32 * a as u32 + 255 * (255 - a as u32)) / 255) as u8;
+                img.put_pixel(
+                    x as u32,
+                    y as u32,
+                    image::Rgba([over(r), over(g), over(b), 255]),
+                );
+            }
+        }
+        img.save(dir.join(format!(
+            "preset_{}.png",
+            preset.name.replace([' ', '(', ')'], "_")
+        )))
+        .unwrap();
+    }
+}

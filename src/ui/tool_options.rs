@@ -5,7 +5,6 @@
 use crate::PainterApp;
 use crate::app::tools::Tool;
 use crate::app::tools::transform;
-use crate::brush_engine::brush_options::PaintingMode;
 use crate::selection::SelectionType;
 use crate::ui::style::*;
 use crate::ui::widgets::{bar_frame, percent_of_unit, segmented, vdivider};
@@ -107,16 +106,6 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
             .max_decimals(0)
             .suffix("%"),
     );
-    vdivider(ui);
-    changed |= segmented(
-        ui,
-        &mut brush.brush_options.painting_mode,
-        &[
-            (PaintingMode::BuildUp, "Build-up"),
-            (PaintingMode::Wash, "Wash"),
-        ],
-        true,
-    );
 
     if size_changed {
         brush.is_changed = true;
@@ -125,8 +114,8 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     if changed {
         app.brush_state.brush_preview.dirty = true;
     }
-    vdivider(ui);
-    crate::ui::shape_menu::ruler_controls(app, ui);
+    // Kept to the essentials: the rest is in the brush panel, the ruler in
+    // the View menu (R).
 
     "{[} {]} size  ·  Alt+click pick color  ·  Space drag to pan"
 }

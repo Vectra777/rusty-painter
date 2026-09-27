@@ -150,39 +150,67 @@ impl BrushTexture {
     }
 }
 
+/// Side of the built-in patterns: large enough that the repeat doesn't show.
+const TILE: usize = 512;
+
 /// The built-in patterns (generated once).
 pub fn builtin() -> &'static [Arc<Pattern>] {
     static PATTERNS: OnceLock<Vec<Arc<Pattern>>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
-        let make = |name: &str, f: &dyn Fn(f32, f32) -> f32| {
-            let size = 256;
-            let data = (0..size * size)
-                .map(|i| f((i % size) as f32, (i / size) as f32))
+        let make = |name: &str, f: &(dyn Fn(f32, f32) -> f32 + Sync)| {
+            use rayon::prelude::*;
+            let data = (0..TILE * TILE)
+                .into_par_iter()
+                .map(|i| f((i % TILE) as f32, (i / TILE) as f32))
                 .collect();
             Arc::new(Pattern {
                 name: name.to_string(),
-                size,
+                size: TILE,
                 data: normalized(data),
             })
         };
         vec![
-            make("Paper", &|x, y| fbm(x, y, 32.0, 4, 1)),
+            // Fine tooth with a little larger-scale unevenness.
+            make("Paper", &|x, y| {
+                0.75 * fbm(x, y, (8.0, 8.0), 3, 1) + 0.25 * fbm(x, y, (64.0, 64.0), 2, 2)
+            }),
+            // Coarser, deeper tooth: pronounced peaks and valleys.
             make("Rough paper", &|x, y| {
-                let n = fbm(x, y, 64.0, 5, 2);
-                n * n
+                smoothstep(0.3, 0.7, fbm(x, y, (16.0, 16.0), 4, 3))
             }),
-            make("Canvas", &|x, y| {
-                let t = std::f32::consts::TAU / 8.0;
-                let weave = ((x * t).sin() * (y * t).cos()).abs();
-                0.7 * weave + 0.3 * fbm(x, y, 16.0, 2, 3)
-            }),
-            make("Fine grain", &|x, y| fbm(x, y, 4.0, 2, 4)),
+            make("Canvas", &weave),
+            // Pixel-scale grain.
+            make("Fine grain", &|x, y| fbm(x, y, (3.0, 3.0), 1, 5)),
+            // Streaks along x on a fine tooth.
             make("Charcoal", &|x, y| {
-                // Streaks: cells long along x, short across.
-                fbm2(x, y, (128.0, 8.0), 4, 5).powf(1.5)
+                0.55 * fbm(x, y, (64.0, 4.0), 3, 6) + 0.45 * fbm(x, y, (4.0, 4.0), 2, 7)
             }),
         ]
     })
+}
+
+fn smoothstep(lo: f32, hi: f32, v: f32) -> f32 {
+    let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A plain canvas weave: threads 8 px apart going over and under each
+/// other, each thread rounded across and slightly uneven along.
+fn weave(x: f32, y: f32) -> f32 {
+    const PITCH: f32 = 8.0;
+    let (cx, cy) = ((x / PITCH).floor(), (y / PITCH).floor());
+    let (fx, fy) = (x / PITCH - cx, y / PITCH - cy);
+    // Which thread is on top alternates cell by cell.
+    let warp_on_top = (cx as i64 + cy as i64).rem_euclid(2) == 0;
+    // A thread's cross-section: high in the middle, low at its edges; along
+    // it, it dips where it goes under the other.
+    let across = |f: f32| (std::f32::consts::PI * f).sin();
+    let warp = across(fx) * (0.6 + 0.4 * across(fy));
+    let weft = across(fy) * (0.6 + 0.4 * across(fx));
+    let top = if warp_on_top { warp } else { weft };
+    let under = if warp_on_top { weft } else { warp };
+    let v = top.max(under * 0.55);
+    0.85 * v + 0.15 * fbm(x, y, (4.0, 4.0), 2, 8)
 }
 
 /// Stretch values to 0..=1.
@@ -197,50 +225,68 @@ fn normalized(mut data: Vec<f32>) -> Vec<f32> {
     data
 }
 
-/// Tileable fractal noise over a 256 px square: `octaves` of value noise,
-/// the first with cells of `cell` pixels (a power of two, so it tiles).
-fn fbm(x: f32, y: f32, cell: f32, octaves: u32, seed: u32) -> f32 {
-    fbm2(x, y, (cell, cell), octaves, seed)
-}
-
-/// [`fbm`] with cells of different width and height (streaks).
-fn fbm2(x: f32, y: f32, cell: (f32, f32), octaves: u32, seed: u32) -> f32 {
+/// Tileable fractal gradient noise over the [`TILE`] square: `octaves`,
+/// the first with cells of `cell` pixels (powers of two, so it tiles), each
+/// next one half the size. Gradient (Perlin) noise rather than value
+/// noise: no blocky, cross-shaped lattice artefacts.
+fn fbm(x: f32, y: f32, cell: (f32, f32), octaves: u32, seed: u32) -> f32 {
+    // At pixel centres: on whole-number points fine octaves would sample
+    // the lattice itself, where gradient noise is zero, and draw a grid.
+    let (x, y) = (x + 0.5, y + 0.5);
     let (mut sum, mut amp, mut norm, mut cell) = (0.0, 1.0, 0.0, cell);
     for o in 0..octaves {
-        let period = ((256.0 / cell.0) as u32, (256.0 / cell.1) as u32);
-        sum += amp * value_noise(x / cell.0, y / cell.1, period, seed * 31 + o);
+        if cell.0 < 2.0 || cell.1 < 2.0 {
+            break;
+        }
+        let s = seed * 31 + o;
+        let period = (
+            ((TILE as f32 / cell.0) as u32).max(1),
+            ((TILE as f32 / cell.1) as u32).max(1),
+        );
+        // Each octave shifted by its own part of a cell, so their lattices
+        // don't line up (the pattern still tiles: the period is unchanged).
+        let (ox, oy) = (hash(o, 1, s) * cell.0, hash(o, 2, s) * cell.1);
+        sum += amp * gradient_noise((x + ox) / cell.0, (y + oy) / cell.1, period, s);
         norm += amp;
         amp *= 0.5;
-        cell = ((cell.0 * 0.5).max(1.0), (cell.1 * 0.5).max(1.0));
+        cell = (cell.0 * 0.5, cell.1 * 0.5);
     }
-    sum / norm
+    0.5 + 0.5 * sum / norm.max(1e-6)
 }
 
-/// Smooth value noise on a lattice that repeats every `period` cells.
-fn value_noise(x: f32, y: f32, period: (u32, u32), seed: u32) -> f32 {
-    let period = (period.0.max(1), period.1.max(1));
+/// Perlin gradient noise (about -1..1) on a lattice repeating every
+/// `period` cells.
+fn gradient_noise(x: f32, y: f32, period: (u32, u32), seed: u32) -> f32 {
     let (xi, yi) = (x.floor(), y.floor());
     let (fx, fy) = (x - xi, y - yi);
-    let smooth = |t: f32| t * t * (3.0 - 2.0 * t);
-    let (sx, sy) = (smooth(fx), smooth(fy));
+    let fade = |t: f32| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    let (u, v) = (fade(fx), fade(fy));
     let corner = |dx: u32, dy: u32| {
         let cx = (xi as i64 as u32).wrapping_add(dx) % period.0;
         let cy = (yi as i64 as u32).wrapping_add(dy) % period.1;
-        hash(cx, cy, seed)
+        let a = hash(cx, cy, seed) * std::f32::consts::TAU;
+        // The corner's gradient dotted with the offset to it.
+        a.cos() * (fx - dx as f32) + a.sin() * (fy - dy as f32)
     };
-    let top = corner(0, 0) + (corner(1, 0) - corner(0, 0)) * sx;
-    let bottom = corner(0, 1) + (corner(1, 1) - corner(0, 1)) * sx;
-    top + (bottom - top) * sy
+    let top = corner(0, 0) + (corner(1, 0) - corner(0, 0)) * u;
+    let bottom = corner(0, 1) + (corner(1, 1) - corner(0, 1)) * u;
+    (top + (bottom - top) * v) * std::f32::consts::SQRT_2
 }
 
-/// A repeatable pseudo-random value in 0..1 for a lattice point.
+/// A repeatable pseudo-random value in 0..1 for a lattice point: x, y and
+/// the seed mixed in one after another (a plain xor of their products
+/// correlates neighbours and draws repeating motifs).
 fn hash(x: u32, y: u32, seed: u32) -> f32 {
-    let mut h =
-        x.wrapping_mul(0x8da6_b343) ^ y.wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0x5bd1_e995);
-    h ^= h >> 15;
-    (h & 0xffff) as f32 / 65535.0
+    fn mix(mut h: u32) -> u32 {
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x7feb_352d);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x846c_a68b);
+        h ^= h >> 16;
+        h
+    }
+    let h = mix(mix(mix(seed.wrapping_add(0x9e37_79b9)) ^ x) ^ y);
+    (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
 #[cfg(test)]
