@@ -109,6 +109,18 @@ Work is saved as a single `.rpainter` file via **Open**/**Save** in the top bar 
 - **Export**: File → Export, or `Ctrl+E`.
 
 ## Project Structure
+```
+rusty-painter/
+├── src/            the application and engine (detailed below)
+├── benches/        criterion benchmarks (app, tools, brush, blend)
+├── examples/       standalone experiments (stroke cost)
+├── docs/wiki/      architecture and developer guide
+├── scripts/        Android build, NDK linker wrappers, flamegraph
+├── vendor-winit/   patched winit for Android
+├── imgs/           README media
+└── .github/        CI and release workflows
+```
+
 One library crate (`src/lib.rs`); `src/main.rs` only calls `rusty_painter::run()`, and Android enters at `android_main`. Modules depend downwards: `app` and `ui` use the engine modules, never the other way round.
 
 ```
