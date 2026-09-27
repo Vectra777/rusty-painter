@@ -69,7 +69,11 @@ impl PainterApp {
         let Some(preset) = self.brush_state.presets.get(index).cloned() else {
             return;
         };
-        let eraser = preset.brush.brush_options.blend_mode == BlendMode::Eraser;
+        // Erasing, any brush erases: picking one keeps the eraser on, with
+        // that brush's tip, texture and dynamics. An eraser preset picked
+        // while painting switches to erasing.
+        let eraser = self.brush_state.eraser_active
+            || preset.brush.brush_options.blend_mode == BlendMode::Eraser;
         // The stabiliser is the artist's, not the brush's: a preset (or the
         // switch between brush and eraser) keeps it.
         let b = &self.brush_state.brush;
@@ -84,6 +88,9 @@ impl PainterApp {
         let color = bs.brush.brush_options.color;
         bs.brush = preset.brush;
         bs.brush.brush_options.color = color;
+        if eraser {
+            bs.brush.brush_options.blend_mode = BlendMode::Eraser;
+        }
         let b = &mut bs.brush;
         (
             b.stabilizer_algorithm,
@@ -420,8 +427,55 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
 #[cfg(test)]
 mod preset_tests {
     use crate::brush_engine::brush::StabilizerAlgorithm;
+    use crate::brush_engine::brush_options::BlendMode;
     use crate::canvas::Canvas;
-    use eframe::egui::Color32;
+    use eframe::egui::{Color32, Vec2};
+
+    #[test]
+    fn any_brush_erases_while_erasing() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        app.canvas_mut()
+            .set_layer_tile_data(1, 0, 0, vec![Color32::RED; 64 * 64]);
+        app.brush_state.presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+        let index = |app: &crate::PainterApp, name: &str| {
+            app.brush_state
+                .presets
+                .iter()
+                .position(|p| p.name == name)
+                .unwrap()
+        };
+        app.set_brush_tool(true);
+        let chalk = index(&app, "Chalk");
+        app.apply_preset(chalk);
+        assert!(app.is_eraser_active(), "picking a brush keeps the eraser");
+        let b = &app.brush_state.brush;
+        assert_eq!(b.brush_options.blend_mode, BlendMode::Eraser);
+        assert!(b.texture.is_some(), "with the chalk's texture");
+        assert_eq!(app.brush_state.active_preset.as_deref(), Some("Chalk"));
+        // It erases (with the grain: not every pixel fully).
+        app.brush_state.brush.brush_options.diameter = 20.0;
+        app.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
+        for x in 11..54 {
+            app.add_stroke_point(Vec2::new(x as f32, 32.0), 1.0);
+        }
+        app.finish_stroke();
+        app.release_canvas();
+        let tile = app.canvas.get_layer_tile_data(1, 0, 0).unwrap();
+        assert!(tile[32 * 64 + 32].a() < 255, "erased");
+        assert_eq!(tile[2 * 64 + 32], Color32::RED, "away from the stroke");
+        // Back to painting: the brush's own brush, painting again.
+        app.set_brush_tool(false);
+        assert!(!app.is_eraser_active());
+        assert_eq!(
+            app.brush_state.brush.brush_options.blend_mode,
+            BlendMode::Normal
+        );
+        // An eraser preset picked while painting switches to erasing.
+        let soft = index(&app, "Eraser (Soft)");
+        app.apply_preset(soft);
+        assert!(app.is_eraser_active());
+    }
 
     #[test]
     fn a_preset_keeps_the_stabiliser() {

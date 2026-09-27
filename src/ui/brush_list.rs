@@ -116,8 +116,9 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<usize> {
                         .entry(preset.name.clone())
                         .or_insert_with(|| preview_texture(&preset.brush, &pool, ui.ctx()))
                         .id();
-                    let active = bs.active_preset.as_deref() == Some(preset.name.as_str())
-                        && bs.eraser_active == is_eraser;
+                    // Any brush can be the eraser's, so the name alone says
+                    // which is in use.
+                    let active = bs.active_preset.as_deref() == Some(preset.name.as_str());
                     if preset_tile(ui, &preset.name, texture, tile_height, active).clicked() {
                         picked = Some(index);
                     }
