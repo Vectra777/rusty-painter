@@ -343,7 +343,7 @@ impl PainterApp {
     /// finishes a polygon or closes a magnetic outline.
     fn settle_tool_sessions(&mut self, ctx: &egui::Context, response: &egui::Response) {
         // Leaving the Transform tool applies the running transform.
-        if self.layer_state.floating_layer_idx.is_some()
+        if crate::app::tools::transform::transform_running(self)
             && !matches!(self.active_tool, crate::app::tools::Tool::Transform(_))
         {
             crate::app::tools::transform::commit_floating_layer(self);
@@ -368,7 +368,10 @@ impl PainterApp {
         // double-click closes it.
         let magnetic = matches!(
             self.active_tool,
-            crate::app::tools::Tool::Select(crate::selection::SelectionType::Magnetic)
+            crate::app::tools::Tool::Select(
+                crate::selection::SelectionType::Magnetic
+                    | crate::selection::SelectionType::Polygon
+            )
         );
         if !magnetic {
             self.workspace.select.magnetic = None;
@@ -393,9 +396,18 @@ impl PainterApp {
     fn draw_overlays(&mut self, ctx: &egui::Context, ui: &egui::Ui, view: &render::CanvasView) {
         // Overlays follow the canvas exactly (zoom, pan and rotation).
         let map = render::screen_map(self, view);
-        if !matches!(self.active_tool, crate::app::tools::Tool::Transform(_)) {
-            self.selection_manager
-                .draw_overlay(ui.painter(), map.zoom(), &|p| map.to_screen(p));
+        // With Transform, the outline shows where the box puts it.
+        match self.active_tool {
+            crate::app::tools::Tool::Transform(info) => {
+                let params = info.params();
+                self.selection_manager
+                    .draw_overlay(ui.painter(), map.zoom(), &|p| {
+                        map.to_screen(params.forward(p))
+                    });
+            }
+            _ => self
+                .selection_manager
+                .draw_overlay(ui.painter(), map.zoom(), &|p| map.to_screen(p)),
         }
         crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
@@ -499,7 +511,7 @@ impl PainterApp {
         if self.layer_state.liquify.is_some() {
             self.liquify_commit();
         }
-        if self.layer_state.floating_layer_idx.is_some() {
+        if crate::app::tools::transform::transform_running(self) {
             crate::app::tools::transform::commit_floating_layer(self);
         }
         // Finish any stroke first so it is in the history (and undoable).

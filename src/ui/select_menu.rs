@@ -11,7 +11,7 @@ use crate::ui::widgets::{segmented, slider_row, vdivider};
 use eframe::egui::{self, RichText, Sense, Stroke};
 
 /// Every selection type with its icon, label and shortcut hint.
-pub(crate) const TYPES: [(SelectionType, Icon, &str, &str); 7] = [
+pub(crate) const TYPES: [(SelectionType, Icon, &str, &str); 8] = [
     (SelectionType::Rectangle, Icon::SelectRect, "Rectangle", "M"),
     (SelectionType::Circle, Icon::SelectEllipse, "Ellipse", "M"),
     (SelectionType::Lasso, Icon::Lasso, "Lasso", "L"),
@@ -21,6 +21,7 @@ pub(crate) const TYPES: [(SelectionType, Icon, &str, &str); 7] = [
         "Magnetic lasso",
         "L",
     ),
+    (SelectionType::Polygon, Icon::SelectPolygon, "Polygon", "L"),
     (SelectionType::Wand, Icon::Wand, "Magic wand", "Q"),
     (
         SelectionType::ColorRange,
@@ -175,7 +176,7 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
             );
             rerun |= source_picker(ui, &mut c.source, compact);
         }
-        SelectionType::Magnetic => {
+        SelectionType::Magnetic | SelectionType::Polygon => {
             let session = app.workspace.select.magnetic.is_some();
             if ui
                 .add_enabled(session, egui::Button::new("Close"))
@@ -193,10 +194,13 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
             }
             if !compact {
                 ui.label(
-                    RichText::new(
+                    RichText::new(if kind == SelectionType::Polygon {
+                        "Click each corner. Click the start point, double-click or \
+                         press Enter to close."
+                    } else {
                         "Click along an edge, or drag with a pen. Click the start point \
-                         or double-click to close.",
-                    )
+                         or double-click to close."
+                    })
                     .small()
                     .color(TEXT_DIM),
                 );

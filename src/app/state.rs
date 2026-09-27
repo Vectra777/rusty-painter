@@ -239,6 +239,12 @@ pub struct LayerState {
     pub floating_buffer: Option<HashMap<(i32, i32), Vec<Color32>>>,
     /// What the running transform session needs to undo or cancel itself.
     pub float_session: Option<FloatSession>,
+    /// Transforming the selection outline alone (it had no pixels to
+    /// lift): the selection as it was, applied on commit.
+    pub selection_transform: Option<crate::selection::SelectionShape>,
+    /// The running session's transform, kept for when the Transform tool is
+    /// left (another tool picked): the session is applied as it was.
+    pub transform_info: Option<crate::selection::transform::TransformInfo>,
     /// The floating pixels as a GPU texture, drawn transformed while the
     /// box is dragged (instead of re-rendering the layer every frame).
     pub float_overlay: Option<FloatOverlay>,
@@ -265,6 +271,8 @@ impl LayerState {
             floating_layer_idx: None,
             floating_buffer: None,
             float_session: None,
+            selection_transform: None,
+            transform_info: None,
             float_overlay: None,
             transform_preview_pending: false,
             liquify: None,

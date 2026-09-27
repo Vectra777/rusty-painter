@@ -171,9 +171,11 @@ impl PainterApp {
                 .selection_manager
                 .has_selection()
                 .then_some(&self.selection_manager);
+            // An empty selection still gets a box: the outline transforms.
             info.reset_to(
                 self.canvas
-                    .get_content_bounds(self.canvas.active_layer_idx, selection),
+                    .get_content_bounds(self.canvas.active_layer_idx, selection)
+                    .or_else(|| self.selection_manager.get_bounds()),
             );
         }
         let Some(quad) = info.quad() else {

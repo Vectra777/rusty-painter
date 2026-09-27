@@ -91,14 +91,15 @@ fn same_selection(a: &Option<SelectionShape>, b: &Option<SelectionShape>) -> boo
     }
 }
 
-/// A magnetic lasso being drawn.
+/// A magnetic lasso or polygon being drawn.
 pub struct MagneticSession {
     /// The outline so far (through the anchors).
     pub points: Vec<Vec2>,
     /// Indices into `points` of the anchors, starting with the first point.
     anchors: Vec<usize>,
-    /// Shortest paths from the last anchor.
-    wire: LiveWire,
+    /// Shortest paths from the last anchor; none for a polygon, whose
+    /// edges are straight.
+    wire: Option<LiveWire>,
     /// From the last anchor to the cursor, following edges.
     pub preview: Vec<Vec2>,
     cursor: Vec2,
@@ -160,7 +161,8 @@ impl PainterApp {
     pub(crate) fn select_press(&mut self, pos: Vec2, kind: SelectionType, mode: SelectionMode) {
         match kind {
             SelectionType::Wand | SelectionType::ColorRange => self.select_pick(pos, kind, mode),
-            SelectionType::Magnetic => self.magnetic_press(pos, mode),
+            SelectionType::Magnetic => self.magnetic_press(pos, mode, true),
+            SelectionType::Polygon => self.magnetic_press(pos, mode, false),
             _ => {
                 // A smart patch fills exactly what's painted.
                 let mode = if kind == SelectionType::Brush && self.workspace.patch.smart_patch {
@@ -349,14 +351,14 @@ impl PainterApp {
         LiveWire::new(&reference, anchor, window)
     }
 
-    fn magnetic_press(&mut self, pos: Vec2, mode: SelectionMode) {
+    fn magnetic_press(&mut self, pos: Vec2, mode: SelectionMode, snap: bool) {
         if self.workspace.select.magnetic.is_some() {
             // Anchors are placed on release (a click, or the end of a drag).
             self.magnetic_move(pos);
             return;
         }
         self.select_cancel();
-        let wire = self.wire_from(pos, pos);
+        let wire = snap.then(|| self.wire_from(pos, pos));
         self.workspace.select.magnetic = Some(MagneticSession {
             points: vec![pos],
             anchors: vec![0],
@@ -384,19 +386,21 @@ impl PainterApp {
             .select
             .magnetic
             .as_ref()
-            .is_some_and(|s| !s.wire.reaches(pos));
+            .is_some_and(|s| s.wire.as_ref().is_some_and(|w| !w.reaches(pos)));
         let new_wire = needs_wire.then(|| self.wire_from(anchor, pos));
         let Some(session) = self.workspace.select.magnetic.as_mut() else {
             return;
         };
-        if let Some(wire) = new_wire {
-            session.wire = wire;
-        }
         session.cursor = pos;
-        session.preview = session
-            .wire
-            .path_to(pos)
-            .unwrap_or_else(|| vec![anchor, pos]);
+        let Some(wire) = session.wire.as_mut() else {
+            // A polygon: a straight edge to the cursor.
+            session.preview = vec![anchor, pos];
+            return;
+        };
+        if let Some(new_wire) = new_wire {
+            *wire = new_wire;
+        }
+        session.preview = wire.path_to(pos).unwrap_or_else(|| vec![anchor, pos]);
         // A long wire fixes an anchor where its path has settled, so the
         // outline doesn't jump about and the search stays small.
         let auto = (AUTO_ANCHOR / zoom).min(MAX_WIRE_SPAN);
@@ -417,11 +421,8 @@ impl PainterApp {
             session.anchors.push(session.points.len() - 1);
             let wire = self.wire_from(new_anchor, pos);
             if let Some(session) = self.workspace.select.magnetic.as_mut() {
-                session.wire = wire;
-                session.preview = session
-                    .wire
-                    .path_to(pos)
-                    .unwrap_or_else(|| vec![new_anchor, pos]);
+                session.preview = wire.path_to(pos).unwrap_or_else(|| vec![new_anchor, pos]);
+                session.wire = Some(wire);
             }
         }
     }
@@ -443,7 +444,10 @@ impl PainterApp {
             return;
         }
         let preview = session.preview.clone();
-        let wire = self.wire_from(cursor, cursor);
+        let wire = session
+            .wire
+            .is_some()
+            .then(|| self.wire_from(cursor, cursor));
         if let Some(session) = self.workspace.select.magnetic.as_mut() {
             session.points.extend_from_slice(&preview[1..]);
             session.anchors.push(session.points.len() - 1);
@@ -465,10 +469,14 @@ impl PainterApp {
         let last = *session.anchors.last().unwrap_or(&0);
         session.points.truncate(last + 1);
         let (anchor, cursor) = (session.points[last], session.cursor);
+        if session.wire.is_none() {
+            session.preview = vec![anchor, cursor];
+            return;
+        }
         let wire = self.wire_from(anchor, cursor);
         if let Some(session) = self.workspace.select.magnetic.as_mut() {
-            session.wire = wire;
-            session.preview = session.wire.path_to(cursor).unwrap_or_else(|| vec![anchor]);
+            session.preview = wire.path_to(cursor).unwrap_or_else(|| vec![anchor]);
+            session.wire = Some(wire);
         }
     }
 
@@ -483,7 +491,7 @@ impl PainterApp {
         // Back to the start along the edges when it's in reach.
         let first = session.points[0];
         let last = *session.points.last().unwrap_or(&first);
-        let back = ((last - first).length() <= MAX_WIRE_SPAN)
+        let back = (session.wire.is_some() && (last - first).length() <= MAX_WIRE_SPAN)
             .then(|| self.wire_from(last, first).path_to(first))
             .flatten();
         if let Some(back) = back {
@@ -670,6 +678,46 @@ mod tests {
         }
         assert!(app.workspace.select.magnetic.is_none());
         assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+    }
+
+    #[test]
+    fn a_polygon_joins_the_clicks_with_straight_edges() {
+        let mut app = app_with_squares(&[(40, 40)]);
+        let press = |app: &mut crate::PainterApp, p: Vec2| {
+            app.select_press(p, SelectionType::Polygon, SelectionMode::Replace);
+            app.select_move(p);
+            app.select_release();
+        };
+        // A triangle, the same clicks the magnetic lasso would snap.
+        press(&mut app, Vec2::new(10.0, 10.0));
+        press(&mut app, Vec2::new(110.0, 10.0));
+        let session = app.workspace.select.magnetic.as_ref().unwrap();
+        assert_eq!(session.preview.len(), 1, "no path search between clicks");
+        app.select_move(Vec2::new(10.0, 110.0));
+        let session = app.workspace.select.magnetic.as_ref().unwrap();
+        assert_eq!(
+            session.preview,
+            vec![Vec2::new(110.0, 10.0), Vec2::new(10.0, 110.0)]
+        );
+        press(&mut app, Vec2::new(10.0, 110.0));
+        // Clicking the first point closes it.
+        press(&mut app, Vec2::new(10.5, 10.5));
+        assert!(app.workspace.select.magnetic.is_none());
+        let sel = &app.selection_manager;
+        assert!(sel.contains(Vec2::new(30.0, 30.0)));
+        assert!(
+            sel.contains(Vec2::new(50.0, 50.0)),
+            "the square doesn't pull it in"
+        );
+        assert!(!sel.contains(Vec2::new(90.0, 90.0)), "past the long edge");
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+        // Undo points work the same.
+        press(&mut app, Vec2::new(5.0, 5.0));
+        press(&mut app, Vec2::new(50.0, 5.0));
+        app.magnetic_undo_anchor();
+        let session = app.workspace.select.magnetic.as_ref().unwrap();
+        assert_eq!(session.anchor_points().count(), 1);
+        assert_eq!(session.preview.len(), 2);
     }
 
     #[test]

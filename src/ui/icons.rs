@@ -38,6 +38,7 @@ pub(crate) enum Icon {
     Wand,
     ColorRange,
     Magnetic,
+    SelectPolygon,
     Symmetry,
     Flip,
     ShapeLine,
@@ -163,6 +164,20 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
             let tail = quad_bezier(g.p(4.5, 9.0), g.p(3.0, 12.0), g.p(6.0, 14.0), 12);
             painter.add(Shape::line(tail, thin));
             painter.circle_filled(g.p(6.0, 14.0), g.w(1.2), color);
+        }
+        Icon::SelectPolygon => {
+            let pts = [
+                g.p(3.0, 3.0),
+                g.p(13.0, 5.0),
+                g.p(10.0, 9.0),
+                g.p(13.5, 13.5),
+                g.p(2.5, 12.0),
+                g.p(3.0, 3.0),
+            ];
+            painter.extend(Shape::dashed_line(&pts, thin, g.w(2.0), g.w(1.6)));
+            for p in &pts[..5] {
+                painter.circle_filled(*p, g.w(1.1), color);
+            }
         }
         Icon::ShapeLine => {
             line((2.5, 13.5), (13.5, 2.5), 1.6);

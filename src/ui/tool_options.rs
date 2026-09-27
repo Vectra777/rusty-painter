@@ -446,6 +446,9 @@ fn select_options(app: &mut PainterApp, ui: &mut egui::Ui, kind: SelectionType) 
         SelectionType::ColorRange => {
             "Click a colour to select it everywhere  ·  Shift add  ·  Alt erase"
         }
+        SelectionType::Polygon => {
+            "Click each corner  ·  click the start, double-click or Enter to close  ·  Backspace removes a point  ·  Esc cancels"
+        }
         SelectionType::Magnetic => {
             "Click along an edge  ·  click the start or double-click to close  ·  Backspace removes a point  ·  Esc cancels"
         }

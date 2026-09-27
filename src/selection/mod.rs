@@ -24,6 +24,8 @@ pub enum SelectionType {
     ColorRange,
     /// Click (or drag) along an edge: the outline snaps to it.
     Magnetic,
+    /// Click corners: straight edges between them.
+    Polygon,
 }
 
 impl SelectionType {
@@ -356,7 +358,10 @@ impl SelectionManager {
                 self.current_shape = Some(new_lasso_shape(vec![pos]));
             }
             // Handled by the app, not dragged here.
-            SelectionType::Wand | SelectionType::ColorRange | SelectionType::Magnetic => {
+            SelectionType::Wand
+            | SelectionType::ColorRange
+            | SelectionType::Magnetic
+            | SelectionType::Polygon => {
                 self.is_dragging = false;
                 self.current_shape = self.drag_base.take();
             }
@@ -798,6 +803,99 @@ impl SelectionManager {
                 }
             }
         }
+    }
+}
+
+impl SelectionManager {
+    /// Move the selection the way `params` moves pixels (free transform or
+    /// four-corner distort), so it stays on what was transformed.
+    pub fn transform_by(&mut self, params: &crate::canvas::storage::TransformParams) {
+        use crate::canvas::storage::{apply_homography, homography, invert3, rect_corners};
+        let Some(shape) = &self.current_shape else {
+            return;
+        };
+        let Some(d) = params.distort else {
+            let (rotation, scale) = (params.rotation, params.scale);
+            // A flip or a rotation turns rectangles and circles into
+            // outlines; so does a non-uniform scale.
+            let keeps_shape = rotation == 0.0 && scale.x > 0.0 && scale.y > 0.0;
+            let simple = match shape {
+                SelectionShape::Rectangle { .. } => keeps_shape,
+                SelectionShape::Circle { .. } => keeps_shape && (scale.x - scale.y).abs() <= 1e-3,
+                _ => true,
+            };
+            if !simple {
+                self.current_shape = Some(new_lasso_shape(outline_points(shape)));
+            }
+            self.apply_transform(params.offset, rotation, scale, params.center);
+            return;
+        };
+        let Some(h) = homography(rect_corners(d.src), d.dst) else {
+            return;
+        };
+        let forward = |p: Vec2| apply_homography(&h, p);
+        self.current_shape = match shape {
+            SelectionShape::Mask(mask) => {
+                let Some(inverse) = invert3(&h) else {
+                    return;
+                };
+                let corners = [
+                    Vec2::new(mask.x0 as f32, mask.y0 as f32),
+                    Vec2::new((mask.x0 + mask.w as i32) as f32, mask.y0 as f32),
+                    Vec2::new(
+                        (mask.x0 + mask.w as i32) as f32,
+                        (mask.y0 + mask.h as i32) as f32,
+                    ),
+                    Vec2::new(mask.x0 as f32, (mask.y0 + mask.h as i32) as f32),
+                ]
+                .map(forward);
+                let (min, max) = corners.iter().fold(
+                    (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN)),
+                    |(lo, hi), c| (lo.min(*c), hi.max(*c)),
+                );
+                // A distort can throw a corner very far: stay near the canvas.
+                let [cw, ch] = self.canvas_size.map(|v| v as f32);
+                let (min, max) = (
+                    min.max(Vec2::new(-cw, -ch)),
+                    max.min(Vec2::new(cw * 2.0, ch * 2.0)),
+                );
+                let bounds = [
+                    min.x.floor() as i32,
+                    min.y.floor() as i32,
+                    max.x.ceil() as i32,
+                    max.y.ceil() as i32,
+                ];
+                Some(SelectionShape::Mask(Arc::new(
+                    mask.resample(bounds, |p| apply_homography(&inverse, p)),
+                )))
+            }
+            _ => Some(new_lasso_shape(
+                outline_points(shape).into_iter().map(forward).collect(),
+            )),
+        };
+    }
+}
+
+/// A rectangle, circle or lasso as outline points (masks have none).
+fn outline_points(shape: &SelectionShape) -> Vec<Vec2> {
+    match shape {
+        SelectionShape::Rectangle { start, end } => vec![
+            *start,
+            Vec2::new(end.x, start.y),
+            *end,
+            Vec2::new(start.x, end.y),
+        ],
+        SelectionShape::Circle { center, radius } => {
+            let n = ((radius * 0.5) as usize).clamp(32, 512);
+            (0..n)
+                .map(|i| {
+                    let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                    *center + Vec2::new(a.cos(), a.sin()) * *radius
+                })
+                .collect()
+        }
+        SelectionShape::Lasso { points, .. } => points.clone(),
+        SelectionShape::Mask(_) => Vec::new(),
     }
 }
 

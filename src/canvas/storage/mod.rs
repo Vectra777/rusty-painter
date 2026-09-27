@@ -10,8 +10,8 @@ mod transform;
 
 pub use composite::BelowComposite;
 pub use pixels::Region;
-pub(crate) use transform::rect_corners;
 pub use transform::{Distort, TransformParams};
+pub(crate) use transform::{apply_homography, homography, invert3, rect_corners};
 
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex};

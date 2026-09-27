@@ -143,7 +143,9 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
                 ],
                 true,
             );
-            if kind == SelectionType::Magnetic && app.workspace.select.magnetic.is_some() {
+            if matches!(kind, SelectionType::Magnetic | SelectionType::Polygon)
+                && app.workspace.select.magnetic.is_some()
+            {
                 crate::ui::widgets::vdivider(ui);
                 if ui.button("Close").clicked() {
                     app.magnetic_close();

@@ -253,7 +253,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     if deselect {
         // Esc during a transform cancels it rather than deselecting.
-        if app.layer_state.floating_layer_idx.is_some() {
+        if crate::app::tools::transform::transform_running(app) {
             crate::app::tools::transform::cancel_floating_layer(app);
         } else if app.layer_state.liquify.is_some() {
             app.liquify_cancel();
@@ -353,9 +353,10 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             app.set_select_tool(kind);
         }
         if lasso {
-            // Pressing L again toggles freehand / magnetic.
+            // Pressing L again steps freehand → polygon → magnetic.
             let kind = match app.active_tool {
-                Tool::Select(SelectionType::Lasso) => SelectionType::Magnetic,
+                Tool::Select(SelectionType::Lasso) => SelectionType::Polygon,
+                Tool::Select(SelectionType::Polygon) => SelectionType::Magnetic,
                 _ => SelectionType::Lasso,
             };
             app.set_select_tool(kind);

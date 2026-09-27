@@ -13,22 +13,60 @@ use eframe::egui::{self, Color32, Vec2};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+/// Whether a transform session is running (pixels or a selection).
+pub(crate) fn transform_running(app: &PainterApp) -> bool {
+    app.layer_state.floating_layer_idx.is_some() || app.layer_state.selection_transform.is_some()
+}
+
+/// Keep a copy of the session's transform (see
+/// [`crate::app::state::LayerState::transform_info`]).
+fn remember_info(app: &mut PainterApp) {
+    if let Tool::Transform(info) = app.active_tool
+        && transform_running(app)
+    {
+        app.layer_state.transform_info = Some(info);
+    }
+}
+
+/// The running session's transform: the tool's, or the copy kept when
+/// the tool was left.
+fn session_info(app: &PainterApp) -> Option<TransformInfo> {
+    match app.active_tool {
+        Tool::Transform(info) => Some(info),
+        _ => app.layer_state.transform_info,
+    }
+}
+
 /// Lift the selection, or the whole active layer without one, onto a
-/// floating layer. Does nothing if a session is already running, or the
-/// layer is locked, not a paint layer, or has nothing to lift.
+/// floating layer. A selection with nothing under it to lift (or on a layer
+/// that can't be changed) is transformed itself, as an outline. Does
+/// nothing if a session is already running, or there's nothing to lift.
 pub(crate) fn create_floating_layer(app: &mut PainterApp) {
-    if app.layer_state.floating_layer_idx.is_some() {
+    if transform_running(app) {
         return;
     }
+    if !lift_pixels(app) && app.selection_manager.has_selection() {
+        app.layer_state.selection_transform = app.selection_manager.current_shape.clone();
+        let bounds = app.selection_manager.get_bounds();
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            info.reset_to(bounds);
+        }
+    }
+    remember_info(app);
+}
+
+/// The floating-layer part of [`create_floating_layer`]: whether it lifted
+/// anything.
+fn lift_pixels(app: &mut PainterApp) -> bool {
     let active = app.canvas.active_layer_idx;
     let Some(layer) = app.canvas.layers.get(active) else {
-        return;
+        return false;
     };
     if layer.locked || !matches!(layer.kind, LayerKind::Paint) {
-        return;
+        return false;
     }
     let Some(source_id) = app.canvas.layer_id_at(active) else {
-        return;
+        return false;
     };
     app.release_canvas();
 
@@ -37,7 +75,7 @@ pub(crate) fn create_floating_layer(app: &mut PainterApp) {
         .has_selection()
         .then_some(&app.selection_manager);
     let Some(idx) = exclusive(&mut app.canvas).float_pixels(selection) else {
-        return;
+        return false;
     };
     let buffer = app.canvas.capture_layer_pixels(idx);
 
@@ -80,10 +118,27 @@ pub(crate) fn create_floating_layer(app: &mut PainterApp) {
         Some(b) => app.mark_tiles_in_bounds_dirty(b),
         None => app.mark_all_tiles_dirty(),
     }
+    true
+}
+
+/// Apply a selection-only transform: the selection moves, as one undo step.
+fn commit_selection_transform(app: &mut PainterApp) {
+    let Some(before) = app.layer_state.selection_transform.take() else {
+        return;
+    };
+    if let Some(info) = session_info(app).filter(|i| !i.is_identity()) {
+        app.selection_manager.transform_by(&info.params());
+        app.record_selection_change(Some(before));
+    }
+    reset_tool_info(app);
 }
 
 /// Composite the floating layer back into its source as one undo step.
 pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
+    if app.layer_state.selection_transform.is_some() {
+        commit_selection_transform(app);
+        return;
+    }
     let Some(idx) = app.layer_state.floating_layer_idx else {
         return;
     };
@@ -98,15 +153,15 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
         if let Tool::Transform(ref mut info) = app.active_tool {
             info.start_pos = None;
         }
+        if let Some(info) = app.layer_state.transform_info.as_mut() {
+            info.start_pos = None;
+        }
         app.layer_state.transform_preview_pending = true;
     }
     flush_transform_preview(app);
     app.release_canvas();
     let session = app.layer_state.float_session.take();
-    let info = match app.active_tool {
-        Tool::Transform(info) => Some(info),
-        _ => None,
-    };
+    let info = session_info(app);
     // Where the floating pixels are now: the transformed box (no rescan).
     let float_bounds = info
         .and_then(|i| i.bounds.map(|b| calc_transformed_bounds(b, &i.params())))
@@ -174,17 +229,11 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
         }
     }
 
-    // The selection follows the pixels.
+    // The selection follows the pixels (a distort too).
     if let Some(info) = info
         && !info.is_identity()
     {
-        if info.corners.is_some() {
-            app.selection_manager.clear_selection();
-        } else {
-            let center = info.bounds.map_or(Vec2::ZERO, |b| b.center().to_vec2());
-            app.selection_manager
-                .apply_transform(info.offset, info.rotation, info.scale, center);
-        }
+        app.selection_manager.transform_by(&info.params());
     }
     reset_tool_info(app);
 
@@ -201,6 +250,11 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
 
 /// Drop the floating layer and put the source back as it was.
 pub(crate) fn cancel_floating_layer(app: &mut PainterApp) {
+    // A selection-only transform changed nothing yet.
+    if app.layer_state.selection_transform.take().is_some() {
+        reset_tool_info(app);
+        return;
+    }
     let Some(idx) = app.layer_state.floating_layer_idx else {
         return;
     };
@@ -243,6 +297,7 @@ pub(crate) fn cancel_floating_layer(app: &mut PainterApp) {
 }
 
 fn reset_tool_info(app: &mut PainterApp) {
+    app.layer_state.transform_info = None;
     if let Tool::Transform(ref mut info) = app.active_tool {
         info.reset_to(None);
     }
@@ -328,6 +383,7 @@ pub(crate) fn transform_drag(app: &mut PainterApp, pos: Vec2, keep_aspect: bool)
     }
     info.start_pos = Some(pos);
     app.layer_state.transform_preview_pending = true;
+    remember_info(app);
 }
 
 pub(crate) fn transform_release(app: &mut PainterApp) {
@@ -335,6 +391,7 @@ pub(crate) fn transform_release(app: &mut PainterApp) {
         info.start_pos = None;
         info.state = TransformState::None;
     }
+    remember_info(app);
     // Replace the quick drag preview (or the GPU overlay) with the
     // full-quality render.
     if overlay_showing(app)
@@ -356,10 +413,12 @@ pub(crate) fn flush_transform_preview(app: &mut PainterApp) {
     if overlay_showing(app) && dragging(app) {
         return;
     }
+    // Once a frame, after input: covers every change to the box.
+    remember_info(app);
     if !std::mem::take(&mut app.layer_state.transform_preview_pending) {
         return;
     }
-    if let Tool::Transform(info) = app.active_tool {
+    if let Some(info) = session_info(app) {
         apply_live_transform_preview(app, &info);
     }
 }
@@ -794,6 +853,150 @@ mod tests {
         flush_transform_preview(app);
         transform_release(app);
         commit_floating_layer(app);
+    }
+
+    fn select_rect(app: &mut PainterApp, from: (f32, f32), to: (f32, f32)) {
+        app.selection_manager.apply_shape(
+            SelectionShape::Rectangle {
+                start: Vec2::new(from.0, from.1),
+                end: Vec2::new(to.0, to.1),
+            },
+            SelectionMode::Replace,
+        );
+    }
+
+    #[test]
+    fn an_empty_selection_is_transformed_itself() {
+        let mut app = app();
+        // Nothing painted in 40..60 × 20..40.
+        select_rect(&mut app, (40.0, 20.0), (60.0, 40.0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        transform_press(&mut app, Vec2::new(50.0, 30.0));
+        assert!(
+            app.layer_state.floating_layer_idx.is_none(),
+            "no pixels lifted"
+        );
+        assert!(transform_running(&app));
+        assert!(
+            matches!(app.active_tool, Tool::Transform(i) if i.bounds.is_some()),
+            "a box to drag"
+        );
+        transform_drag(&mut app, Vec2::new(150.0, 30.0), false);
+        transform_release(&mut app);
+        assert!(
+            app.selection_manager.contains(Vec2::new(50.0, 30.0)),
+            "applied on commit"
+        );
+        commit_floating_layer(&mut app);
+        assert!(!transform_running(&app));
+        let sel = &app.selection_manager;
+        assert!(sel.contains(Vec2::new(150.0, 30.0)), "the outline moved");
+        assert!(!sel.contains(Vec2::new(50.0, 30.0)));
+        assert_eq!(pixel(&app, 1, 20, 20), RED, "the paint didn't move");
+        assert_eq!(pixel(&app, 1, 148, 20), BLUE);
+        // One undo step, back to the old outline; redo moves it again.
+        app.apply_history(false);
+        assert!(app.selection_manager.contains(Vec2::new(50.0, 30.0)));
+        assert!(!app.selection_manager.contains(Vec2::new(150.0, 30.0)));
+        app.apply_history(true);
+        assert!(app.selection_manager.contains(Vec2::new(150.0, 30.0)));
+    }
+
+    #[test]
+    fn cancelling_a_selection_transform_keeps_the_selection() {
+        let mut app = app();
+        select_rect(&mut app, (40.0, 20.0), (60.0, 40.0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        transform_press(&mut app, Vec2::new(50.0, 30.0));
+        transform_drag(&mut app, Vec2::new(150.0, 30.0), false);
+        cancel_floating_layer(&mut app);
+        assert!(!transform_running(&app));
+        assert!(app.selection_manager.contains(Vec2::new(50.0, 30.0)));
+        assert!(app.layer_state.history.stacks().0.is_empty());
+        // Leaving the tool mid-drag applies it, like a pixel transform.
+        transform_press(&mut app, Vec2::new(50.0, 30.0));
+        transform_drag(&mut app, Vec2::new(60.0, 30.0), false);
+        transform_release(&mut app);
+        app.active_tool = Tool::Select(crate::selection::SelectionType::Rectangle);
+        commit_floating_layer(&mut app);
+        assert!(app.selection_manager.contains(Vec2::new(68.0, 30.0)));
+    }
+
+    #[test]
+    fn a_distort_keeps_the_selection_on_the_pixels() {
+        let mut app = app();
+        select_rect(&mut app, (10.0, 10.0), (30.0, 30.0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        create_floating_layer(&mut app);
+        set_distort(&mut app, true);
+        // Push the right corners 40 px further right.
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            let c = info.corners.as_mut().unwrap();
+            c[1].x += 40.0;
+            c[2].x += 40.0;
+        }
+        app.layer_state.transform_preview_pending = true;
+        flush_transform_preview(&mut app);
+        commit_floating_layer(&mut app);
+        let sel = &app.selection_manager;
+        assert!(sel.has_selection(), "not dropped");
+        assert!(
+            sel.contains(Vec2::new(60.0, 20.0)),
+            "stretched with the pixels"
+        );
+        assert!(!sel.contains(Vec2::new(80.0, 20.0)));
+        assert_eq!(pixel(&app, 1, 60, 20), RED);
+    }
+
+    #[test]
+    fn a_gamma_document_commits_what_the_preview_showed() {
+        let mut app = app();
+        app.canvas_mut().blend_space = crate::canvas::blend_modes::BlendSpace::Gamma;
+        // Half-transparent black at 10..30, opaque white at 50..70.
+        let mut tile = vec![Color32::TRANSPARENT; 64 * 64];
+        for y in 10..30 {
+            for x in 10..30 {
+                tile[y * 64 + x] = Color32::from_black_alpha(128);
+            }
+            for x in 50..64 {
+                tile[y * 64 + x] = Color32::WHITE;
+            }
+        }
+        app.canvas_mut().set_layer_tile_data(1, 0, 0, tile);
+        select_rect(&mut app, (10.0, 10.0), (30.0, 30.0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        transform_press(&mut app, Vec2::new(20.0, 20.0));
+        transform_drag(&mut app, Vec2::new(60.0, 20.0), false);
+        flush_transform_preview(&mut app);
+        transform_release(&mut app);
+        commit_floating_layer(&mut app);
+        // Black at half alpha over white, mixed as sRGB values: mid grey
+        // (mixed in linear light it would be 187).
+        let p = pixel(&app, 1, 55, 20);
+        assert_eq!(p.a(), 255);
+        assert!(p.r().abs_diff(127) <= 1, "{p:?}");
+    }
+
+    #[test]
+    fn leaving_the_tool_applies_the_move_as_an_undo_step() {
+        let mut app = app();
+        select_rect(&mut app, (10.0, 10.0), (30.0, 30.0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        transform_press(&mut app, Vec2::new(20.0, 20.0));
+        transform_drag(&mut app, Vec2::new(60.0, 20.0), false);
+        flush_transform_preview(&mut app);
+        transform_release(&mut app);
+        // Picking another tool: the frame's settle step commits.
+        app.active_tool = Tool::Brush;
+        commit_floating_layer(&mut app);
+        assert_eq!(pixel(&app, 1, 60, 20), RED);
+        assert!(
+            app.selection_manager.contains(Vec2::new(60.0, 20.0)),
+            "selection followed"
+        );
+        app.apply_history(false);
+        assert_eq!(pixel(&app, 1, 20, 20), RED, "undo puts it back");
+        assert_eq!(pixel(&app, 1, 60, 20).a(), 0);
     }
 
     #[test]
