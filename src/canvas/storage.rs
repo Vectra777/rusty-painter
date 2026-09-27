@@ -2569,6 +2569,93 @@ impl Canvas {
         ))
     }
 
+    /// Paint over layer `layer_idx` inside `bounds` (`[x0, y0, x1, y1)`,
+    /// canvas pixels) with the premultiplied colour `color_at(x, y)` returns
+    /// for each pixel (transparent paints nothing), recording the touched
+    /// tiles in `history`. Alpha-locked layers only recolour. Tiles are
+    /// processed in parallel. Returns the changed canvas area.
+    pub fn paint_region(
+        &self,
+        layer_idx: usize,
+        bounds: [i32; 4],
+        color_at: impl Fn(i32, i32) -> Color32 + Sync,
+        history: &mut UndoAction,
+    ) -> Option<eframe::egui::Rect> {
+        let layer = self.layers.get(layer_idx)?;
+        let layer_id = layer.id;
+        let alpha_lock = layer.alpha_locked;
+        let ts = self.tile_size as i32;
+        let [bx0, by0, bx1, by1] = bounds;
+        let (bx0, by0) = (bx0.max(0), by0.max(0));
+        let (bx1, by1) = (bx1.min(self.width as i32), by1.min(self.height as i32));
+        if bx1 <= bx0 || by1 <= by0 {
+            return None;
+        }
+        let mut cells = Vec::new();
+        for ty in by0 / ts..=(by1 - 1) / ts {
+            for tx in bx0 / ts..=(bx1 - 1) / ts {
+                if let Some(cell) = self.ensure_layer_tile(layer_idx, tx, ty) {
+                    cells.push(((tx, ty), cell));
+                }
+            }
+        }
+        let tile_len = (ts * ts) as usize;
+        let snapshots: Vec<TileSnapshot> = cells
+            .par_iter()
+            .filter_map(|&((tx, ty), ref cell)| {
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let data = cell
+                    .data
+                    .get_or_insert_with(|| vec![Color32::TRANSPARENT; tile_len]);
+                let mut before: Option<Vec<Color32>> = None;
+                // Only the part of the tile inside the bounds.
+                let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
+                let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
+                for ly in ly0..ly1 {
+                    for lx in lx0..lx1 {
+                        let src = color_at(tx * ts + lx, ty * ts + ly);
+                        if src.a() == 0 {
+                            continue;
+                        }
+                        let i = (ly * ts + lx) as usize;
+                        let dst = data[i];
+                        if alpha_lock && dst.a() == 0 {
+                            continue;
+                        }
+                        let mut out = crate::canvas::blend::alpha_over(src, dst);
+                        if alpha_lock {
+                            out = crate::canvas::blend::with_alpha_of(out, dst.a());
+                        }
+                        if out != dst {
+                            before.get_or_insert_with(|| data.clone());
+                            data[i] = out;
+                        }
+                    }
+                }
+                let before = before?;
+                cell.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
+                Some(TileSnapshot {
+                    tx,
+                    ty,
+                    layer_id,
+                    x0: 0,
+                    y0: 0,
+                    width: ts as usize,
+                    height: ts as usize,
+                    data: before.into(),
+                })
+            })
+            .collect();
+        if snapshots.is_empty() {
+            return None;
+        }
+        history.tiles.extend(snapshots);
+        Some(eframe::egui::Rect::from_min_max(
+            eframe::egui::pos2(bx0 as f32, by0 as f32),
+            eframe::egui::pos2(bx1 as f32, by1 as f32),
+        ))
+    }
+
     /// Composite floating layer `float_idx` onto `target_idx` (normal blend,
     /// full opacity), remove it and make the target active. Returns the
     /// tiles it drew into.
@@ -3469,5 +3556,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn empty_action() -> UndoAction {
+        UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: None,
+        }
+    }
+
+    #[test]
+    fn paint_region_paints_inside_its_bounds_across_tiles() {
+        let canvas = Canvas::new(128, 128, Color32::WHITE, 64);
+        let mut undo = empty_action();
+        let red = Color32::from_rgb(255, 0, 0);
+        let rect = canvas.paint_region(1, [60, 10, 70, 20], |_, _| red, &mut undo);
+        assert!(rect.is_some());
+        assert_eq!(undo.tiles.len(), 2, "one snapshot per touched tile");
+        let left = canvas.get_layer_tile_data(1, 0, 0).unwrap();
+        let right = canvas.get_layer_tile_data(1, 1, 0).unwrap();
+        assert_eq!(left[15 * 64 + 63], red);
+        assert_eq!(right[15 * 64 + 5], red);
+        assert_eq!(
+            right[15 * 64 + 6],
+            Color32::TRANSPARENT,
+            "outside the bounds"
+        );
+        assert_eq!(
+            left[25 * 64 + 63],
+            Color32::TRANSPARENT,
+            "outside the bounds"
+        );
+    }
+
+    #[test]
+    fn paint_region_respects_alpha_lock_and_skips_unchanged_tiles() {
+        let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+        let mut data = vec![Color32::TRANSPARENT; 64 * 64];
+        data[0] = Color32::from_rgb(0, 0, 255);
+        canvas.set_layer_tile_data(1, 0, 0, data);
+        canvas.layers[1].alpha_locked = true;
+        let mut undo = empty_action();
+        let red = Color32::from_rgb(255, 0, 0);
+        canvas.paint_region(1, [0, 0, 64, 64], |_, _| red, &mut undo);
+        let tile = canvas.get_layer_tile_data(1, 0, 0).unwrap();
+        assert_eq!(tile[0], red, "painted pixel recoloured");
+        assert_eq!(tile[1], Color32::TRANSPARENT, "empty pixel stays empty");
+
+        let mut undo = empty_action();
+        let none = canvas.paint_region(1, [0, 0, 64, 64], |_, _| Color32::TRANSPARENT, &mut undo);
+        assert!(none.is_none());
+        assert!(undo.tiles.is_empty());
     }
 }

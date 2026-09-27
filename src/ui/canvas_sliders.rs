@@ -4,8 +4,9 @@
 
 use crate::PainterApp;
 use crate::app::tools::Tool;
+use crate::selection::{SelectionMode, SelectionType};
 use crate::ui::style::*;
-use eframe::egui::{self, Color32, RichText, Sense, Stroke};
+use eframe::egui::{self, Color32, Sense, Stroke};
 
 /// Touch target; the drawn track is much thinner.
 const HIT_WIDTH: f32 = 36.0;
@@ -125,42 +126,61 @@ fn faders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
 /// A floating button at the top of the canvas for the one action the
 /// current tool needs (the desktop options bar has these).
 fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
-    if matches!(app.active_tool, Tool::Transform(_)) {
-        egui::Area::new(egui::Id::new("canvas_context_action"))
-            .fixed_pos(egui::pos2(area.center().x, area.top() + 12.0))
-            .pivot(egui::Align2::CENTER_TOP)
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                egui::Frame::none()
-                    .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
-                    .inner_margin(egui::Margin::same(6.0))
-                    .show(ui, |ui| {
-                        // Wraps onto more rows on a narrow screen.
-                        ui.set_max_width(area.width() - 36.0);
-                        ui.horizontal_wrapped(|ui| crate::ui::top_bar::transform_controls(app, ui));
-                    });
-            });
-        return;
+    match app.active_tool {
+        Tool::Transform(_) => context_bar(ctx, area, |ui| {
+            crate::ui::top_bar::transform_controls(app, ui)
+        }),
+        // No Shift/Alt on a touch screen: the modes and actions as buttons.
+        Tool::Select(kind) => context_bar(ctx, area, |ui| {
+            crate::ui::widgets::segmented(
+                ui,
+                &mut app.selection_manager.mode,
+                &[
+                    (SelectionMode::Replace, "Replace"),
+                    (SelectionMode::Add, "Add"),
+                    (SelectionMode::Subtract, "Erase"),
+                    (SelectionMode::Intersect, "Intersect"),
+                ],
+                true,
+            );
+            if kind == SelectionType::Magnetic && app.workspace.select.magnetic.is_some() {
+                crate::ui::widgets::vdivider(ui);
+                if ui.button("Close").clicked() {
+                    app.magnetic_close();
+                }
+                if ui.button("Undo point").clicked() {
+                    app.magnetic_undo_anchor();
+                }
+            }
+            crate::ui::widgets::vdivider(ui);
+            if ui.button("Invert").clicked() {
+                app.invert_selection();
+            }
+            let has = app.selection_manager.has_selection();
+            if ui.add_enabled(has, egui::Button::new("Deselect")).clicked() {
+                app.deselect();
+            }
+        }),
+        _ => {}
     }
-    let action = match app.active_tool {
-        Tool::Select(_) if app.selection_manager.has_selection() => "Deselect",
-        _ => return,
-    };
+}
+
+/// A floating bar at the top of the canvas for the current tool's actions
+/// (the desktop options bar has these); wraps on a narrow screen.
+fn context_bar(ctx: &egui::Context, area: egui::Rect, add_contents: impl FnOnce(&mut egui::Ui)) {
     egui::Area::new(egui::Id::new("canvas_context_action"))
         .fixed_pos(egui::pos2(area.center().x, area.top() + 12.0))
         .pivot(egui::Align2::CENTER_TOP)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            let button = egui::Button::new(RichText::new(action).color(TEXT_STRONG))
+            egui::Frame::none()
                 .fill(BG_PANEL)
                 .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
-                .min_size(egui::vec2(0.0, 40.0));
-            if ui.add(button).clicked()
-                && let Tool::Select(_) = app.active_tool
-            {
-                app.selection_manager.clear_selection();
-            }
+                .inner_margin(egui::Margin::same(6.0))
+                .show(ui, |ui| {
+                    ui.set_max_width(area.width() - 36.0);
+                    ui.horizontal_wrapped(add_contents);
+                });
         });
 }
 
@@ -169,6 +189,7 @@ pub fn canvas_sliders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
     // They'd float over the menu sheet and dialogs.
     let m = &app.modal_state;
     let covered = m.menu_sheet_open
+        || m.select_menu_open
         || m.show_new_canvas_modal
         || m.show_general_settings
         || m.show_shortcuts

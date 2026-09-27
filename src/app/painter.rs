@@ -221,6 +221,22 @@ impl eframe::App for PainterApp {
                 {
                     super::transform::commit_floating_layer(self);
                 }
+                // A magnetic outline in progress belongs to its tool; a
+                // double-click closes it.
+                let magnetic = matches!(
+                    self.active_tool,
+                    super::tools::Tool::Select(crate::selection::SelectionType::Magnetic)
+                );
+                if !magnetic {
+                    self.workspace.select.magnetic = None;
+                } else if view.response.hovered()
+                    && ctx.input(|i| {
+                        i.pointer
+                            .button_double_clicked(egui::PointerButton::Primary)
+                    })
+                {
+                    self.magnetic_close();
+                }
                 // Likewise for liquify.
                 if self.layer_state.liquify.is_some()
                     && !matches!(self.active_tool, super::tools::Tool::Liquify)
@@ -277,6 +293,7 @@ impl eframe::App for PainterApp {
                     self.selection_manager
                         .draw_overlay(ui.painter(), map.zoom(), &|p| map.to_screen(p));
                 }
+                super::select_tool::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
 
                 super::transform::draw_float_overlay(self, ui.painter(), &map);
                 self.draw_transform_overlay(ui.painter(), &map);
@@ -335,6 +352,14 @@ impl PainterApp {
 
     /// Undo (or redo) the last action on the active layer.
     pub(crate) fn apply_history(&mut self, redo: bool) {
+        // Undo inside a magnetic outline takes back its last anchor.
+        if self.workspace.select.magnetic.is_some() {
+            if !redo {
+                self.magnetic_undo_anchor();
+            }
+            return;
+        }
+        self.forget_last_pick();
         // A running liquify or transform session becomes a normal step first,
         // so undo takes it back and redo brings it again (cancelling it
         // outright left nothing to redo).

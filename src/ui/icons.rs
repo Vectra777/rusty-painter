@@ -35,6 +35,9 @@ pub(crate) enum Icon {
     Blur,
     Menu,
     Finger,
+    Wand,
+    ColorRange,
+    Magnetic,
 }
 
 /// Maps 16×16 icon-grid coordinates into a square centered in `rect`.
@@ -152,6 +155,49 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
             let tail = quad_bezier(g.p(4.5, 9.0), g.p(3.0, 12.0), g.p(6.0, 14.0), 12);
             painter.add(Shape::line(tail, thin));
             painter.circle_filled(g.p(6.0, 14.0), g.w(1.2), color);
+        }
+        Icon::Wand => {
+            // A wand with a sparkle at its tip.
+            line((2.5, 13.5), (9.5, 6.5), 1.8);
+            for (a, b) in [
+                ((12.0, 1.5), (12.0, 4.5)),
+                ((10.5, 3.0), (13.5, 3.0)),
+                ((14.0, 6.5), (14.0, 8.5)),
+                ((13.0, 7.5), (15.0, 7.5)),
+                ((7.0, 1.5), (7.0, 3.5)),
+                ((6.0, 2.5), (8.0, 2.5)),
+            ] {
+                line(a, b, 1.1);
+            }
+        }
+        Icon::ColorRange => {
+            // Three swatches, two picked out by a dashed outline.
+            for (x, y) in [(2.0, 2.0), (9.0, 2.0), (2.0, 9.0)] {
+                let r = Rect::from_min_size(g.p(x + 1.0, y + 1.0), egui::vec2(g.w(3.0), g.w(3.0)));
+                painter.rect_filled(r, 0.0, color);
+            }
+            let pts = vec![
+                g.p(1.5, 1.5),
+                g.p(14.5, 1.5),
+                g.p(14.5, 7.5),
+                g.p(7.5, 7.5),
+                g.p(7.5, 14.5),
+                g.p(1.5, 14.5),
+                g.p(1.5, 1.5),
+            ];
+            painter.extend(Shape::dashed_line(&pts, thin, g.w(1.6), g.w(1.4)));
+            painter.circle_stroke(g.p(12.0, 12.0), g.w(2.0), thin);
+        }
+        Icon::Magnetic => {
+            // A lasso loop with anchor points, and a small magnet.
+            let loop_pts = ellipse_points(g.p(7.5, 7.0), g.w(5.5), g.w(4.5), 40);
+            painter.add(Shape::line(loop_pts, thin));
+            for (x, y) in [(2.0, 7.0), (7.5, 2.5), (13.0, 7.0)] {
+                let r = Rect::from_center_size(g.p(x, y), egui::vec2(g.w(2.2), g.w(2.2)));
+                painter.rect_filled(r, 0.0, color);
+            }
+            let u = quad_bezier(g.p(9.5, 11.0), g.p(12.0, 16.5), g.p(14.5, 11.0), 12);
+            painter.add(Shape::line(u, Stroke::new(g.w(1.8), color)));
         }
         Icon::Transform => {
             line((8.0, 3.0), (8.0, 13.0), 1.25);

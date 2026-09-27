@@ -1,6 +1,7 @@
 use eframe::egui::Vec2;
 use eframe::egui::{Color32, Painter, Pos2, Shape, Stroke};
 use std::sync::Arc;
+pub mod magnetic;
 pub mod mask;
 pub mod transform;
 
@@ -13,6 +14,19 @@ pub enum SelectionType {
     Lasso,
     /// Paint the selection with a soft round brush.
     Brush,
+    /// Click an area: select it by colour (magic wand).
+    Wand,
+    /// Click a colour: select it everywhere.
+    ColorRange,
+    /// Click (or drag) along an edge: the outline snaps to it.
+    Magnetic,
+}
+
+impl SelectionType {
+    /// Picked with a click rather than drawn by dragging.
+    pub fn is_click(self) -> bool {
+        matches!(self, SelectionType::Wand | SelectionType::ColorRange)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +242,13 @@ pub struct SelectionManager {
     brush_mask: Option<SelectionMask>,
     brush_last: Option<Vec2>,
     pub brush_path: Vec<Vec2>,
+    /// Smoothing for the freehand lasso and the selection brush (0 = off,
+    /// 1 = strongest).
+    pub smoothing: f32,
+    stabilizer: crate::brush_engine::stabilizer::Stabilizer,
+    /// The smoothed and the raw position of the last input.
+    smooth_last: Option<Vec2>,
+    raw_last: Option<Vec2>,
 }
 
 impl Default for SelectionManager {
@@ -250,7 +271,20 @@ impl SelectionManager {
             brush_mask: None,
             brush_last: None,
             brush_path: Vec::new(),
+            smoothing: 0.0,
+            stabilizer: Default::default(),
+            smooth_last: None,
+            raw_last: None,
         }
+    }
+
+    /// `raw` input smoothed along the drag.
+    fn smooth(&mut self, raw: Vec2) -> Vec2 {
+        let settings = crate::brush_engine::stabilizer::StabilizerSettings::simple(self.smoothing);
+        let pos = self.stabilizer.step(&settings, self.smooth_last, raw);
+        self.smooth_last = Some(pos);
+        self.raw_last = Some(raw);
+        pos
     }
 
     /// A manager holding `shape`, e.g. a copy of the selection for a stroke.
@@ -276,6 +310,9 @@ impl SelectionManager {
     ) {
         self.is_dragging = true;
         self.drag_mode = mode;
+        self.stabilizer = Default::default();
+        self.smooth_last = Some(pos);
+        self.raw_last = Some(pos);
         self.drag_base = match mode {
             SelectionMode::Replace => None,
             _ => self.current_shape.take(),
@@ -284,8 +321,10 @@ impl SelectionManager {
             SelectionType::Brush => {
                 let [w, h] = self.canvas_size;
                 let mut mask = SelectionMask::empty(0, 0, w.min(1 << 15), h.min(1 << 15));
-                // Add/subtract paint onto the current selection.
-                if let Some(base) = &self.drag_base
+                // Add/subtract paint onto the current selection; intersect
+                // paints a new one and keeps the overlap at the end.
+                if mode != SelectionMode::Intersect
+                    && let Some(base) = &self.drag_base
                     && let Some(base) = rasterize_shape(base, self.canvas_size)
                 {
                     mask = mask.combine(&base, SelectionMode::Add);
@@ -312,6 +351,11 @@ impl SelectionManager {
             SelectionType::Lasso => {
                 self.current_shape = Some(new_lasso_shape(vec![pos]));
             }
+            // Handled by the app, not dragged here.
+            SelectionType::Wand | SelectionType::ColorRange | SelectionType::Magnetic => {
+                self.is_dragging = false;
+                self.current_shape = self.drag_base.take();
+            }
         }
     }
 
@@ -319,6 +363,13 @@ impl SelectionManager {
         if !self.is_dragging {
             return;
         }
+        let freehand = self.brush_mask.is_some()
+            || matches!(self.current_shape, Some(SelectionShape::Lasso { .. }));
+        let pos = if freehand { self.smooth(pos) } else { pos };
+        self.push_selection_point(pos);
+    }
+
+    fn push_selection_point(&mut self, pos: Vec2) {
         if let (Some(mask), Some(last)) = (&mut self.brush_mask, self.brush_last) {
             // Dabs along the segment, a quarter radius apart.
             let add = self.drag_mode != SelectionMode::Subtract;
@@ -369,11 +420,30 @@ impl SelectionManager {
     }
 
     pub fn end_selection(&mut self) {
+        // A smoothed path lags the input: finish where the input stopped.
+        if self.smoothing > 0.0
+            && let (Some(raw), Some(last)) = (self.raw_last, self.smooth_last)
+            && raw != last
+        {
+            self.push_selection_point(raw);
+        }
+        self.smooth_last = None;
+        self.raw_last = None;
         self.is_dragging = false;
         let base = self.drag_base.take();
         if let Some(mask) = self.brush_mask.take() {
             self.brush_last = None;
             self.brush_path.clear();
+            let mask = match (
+                self.drag_mode,
+                base.and_then(|b| rasterize_shape(&b, self.canvas_size)),
+            ) {
+                (SelectionMode::Intersect, Some(base)) => {
+                    base.combine(&mask, SelectionMode::Intersect)
+                }
+                (SelectionMode::Intersect, None) => return,
+                _ => mask,
+            };
             self.current_shape = mask.cropped().map(|m| SelectionShape::Mask(Arc::new(m)));
             return;
         }
@@ -401,6 +471,40 @@ impl SelectionManager {
                 combined.map(|m| SelectionShape::Mask(Arc::new(m)))
             }
         };
+    }
+
+    /// Combine `mask` (a new selection, e.g. from the magic wand) with the
+    /// current one according to `mode`.
+    pub fn apply_mask(&mut self, mask: SelectionMask, mode: SelectionMode) {
+        let current = self
+            .current_shape
+            .take()
+            .filter(|_| mode != SelectionMode::Replace)
+            .and_then(|s| rasterize_shape(&s, self.canvas_size));
+        let combined = match (current, mode) {
+            (_, SelectionMode::Replace) | (None, SelectionMode::Add) => mask.cropped(),
+            (None, _) => None,
+            (Some(current), mode) => current.combine(&mask, mode).cropped(),
+        };
+        self.current_shape = combined.map(|m| SelectionShape::Mask(Arc::new(m)));
+    }
+
+    /// Combine `shape` with the current selection according to `mode`.
+    pub fn apply_shape(&mut self, shape: SelectionShape, mode: SelectionMode) {
+        if mode == SelectionMode::Replace {
+            self.current_shape = Some(shape);
+        } else if let Some(mask) = rasterize_shape(&shape, self.canvas_size) {
+            self.apply_mask(mask, mode);
+        }
+    }
+
+    /// Like [`Self::apply_mask`] when the new selection may be empty.
+    pub fn apply_mask_or_nothing(&mut self, mask: Option<SelectionMask>, mode: SelectionMode) {
+        match (mask, mode) {
+            (Some(mask), mode) => self.apply_mask(mask, mode),
+            (None, SelectionMode::Replace | SelectionMode::Intersect) => self.current_shape = None,
+            (None, SelectionMode::Add | SelectionMode::Subtract) => {}
+        }
     }
 
     pub fn clear_selection(&mut self) {
@@ -1030,5 +1134,43 @@ mod tests {
             assert_eq!(grid[20 * 40 + 20], 1.0);
             assert_eq!(grid[0], 0.0);
         }
+    }
+
+    #[test]
+    fn intersect_keeps_only_the_overlap() {
+        let a = SelectionMask::new(0, 0, 4, 1, vec![255, 255, 255, 0]);
+        let b = SelectionMask::new(2, 0, 4, 1, vec![128, 255, 255, 255]);
+        let both = a.combine(&b, SelectionMode::Intersect);
+        assert_eq!((both.x0, both.w), (2, 2));
+        assert_eq!(both.data, vec![128, 0]);
+        let apart = SelectionMask::new(10, 0, 2, 1, vec![255, 255]);
+        assert!(
+            a.combine(&apart, SelectionMode::Intersect)
+                .cropped()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn apply_mask_combines_with_the_current_selection() {
+        let mut m = SelectionManager::new();
+        m.canvas_size = [16, 16];
+        let left = SelectionMask::new(0, 0, 8, 16, vec![255; 8 * 16]);
+        let top = SelectionMask::new(0, 0, 16, 8, vec![255; 16 * 8]);
+        m.apply_mask(top.clone(), SelectionMode::Subtract);
+        assert!(
+            !m.has_selection(),
+            "subtracting from nothing selects nothing"
+        );
+        m.apply_mask(left.clone(), SelectionMode::Replace);
+        m.apply_mask(top.clone(), SelectionMode::Intersect);
+        assert!(m.contains(Vec2::new(2.0, 2.0)));
+        assert!(!m.contains(Vec2::new(2.0, 12.0)));
+        assert!(!m.contains(Vec2::new(12.0, 2.0)));
+        m.apply_mask(left, SelectionMode::Add);
+        assert!(m.contains(Vec2::new(2.0, 12.0)));
+        m.apply_mask(top, SelectionMode::Subtract);
+        assert!(!m.contains(Vec2::new(2.0, 2.0)));
+        assert!(m.contains(Vec2::new(2.0, 12.0)));
     }
 }

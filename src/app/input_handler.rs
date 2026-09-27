@@ -97,11 +97,7 @@ fn handle_pen_drag(
 ) {
     match app.active_tool {
         Tool::Brush => app.add_stroke_point(raw, pressure),
-        Tool::Select(_) => {
-            if app.selection_manager.is_dragging {
-                app.selection_manager.update_selection(pos);
-            }
-        }
+        Tool::Select(_) => app.select_move(pos),
         Tool::Transform(_) => {
             let keep_aspect = ctx.input(|i| i.modifiers.shift);
             transform::transform_drag(app, pos, keep_aspect);
@@ -277,8 +273,7 @@ fn handle_primary_press(
             } else {
                 app.selection_manager.mode
             };
-            app.selection_manager
-                .start_selection_with_mode(canvas_pos.0, t, mode);
+            app.select_press(canvas_pos.0, t, mode);
         }
         Tool::Transform(_) => transform::transform_press(app, canvas_pos.0),
         Tool::Eyedropper => app.pick_color(canvas_pos.0),
@@ -294,7 +289,7 @@ fn handle_primary_release(app: &mut PainterApp) {
     }
     match app.active_tool {
         Tool::Brush => app.finish_stroke(),
-        Tool::Select(_) => app.selection_manager.end_selection(),
+        Tool::Select(_) => app.select_release(),
         Tool::Eyedropper => {}
         Tool::Fill => app.fill_release(),
         Tool::Liquify => app.liquify_release(),
@@ -307,6 +302,7 @@ fn handle_keyboard(app: &mut PainterApp, key: egui::Key, pressed: bool) {
     if pressed && key == egui::Key::Enter {
         transform::commit_floating_layer(app);
         app.liquify_commit();
+        app.magnetic_close();
     }
 }
 
@@ -401,8 +397,9 @@ fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2)
 }
 
 fn handle_select_move(app: &mut PainterApp, ctx: &egui::Context, pos: Vec2) {
-    if app.selection_manager.is_dragging {
-        app.selection_manager.update_selection(pos);
+    // The magnetic lasso follows the pointer between clicks too.
+    if app.selection_manager.is_dragging || app.workspace.select.magnetic.is_some() {
+        app.select_move(pos);
         ctx.request_repaint();
     }
 }

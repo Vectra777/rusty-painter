@@ -137,6 +137,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let eraser = pressed(none, Key::E);
     let select_rect = pressed(none, Key::M);
     let lasso = pressed(none, Key::L);
+    let wand = pressed(none, Key::Q);
+    let remove_anchor = pressed(none, Key::Backspace);
     let transform = pressed(none, Key::V) || pressed(none, Key::T);
     let eyedropper = pressed(none, Key::I);
     let fill = pressed(none, Key::G);
@@ -202,18 +204,24 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             crate::app::transform::cancel_floating_layer(app);
         } else if app.layer_state.liquify.is_some() {
             app.liquify_cancel();
+        } else if app.selection_manager.is_dragging || app.workspace.select.magnetic.is_some() {
+            app.select_cancel();
         } else {
-            app.selection_manager.clear_selection();
+            app.deselect();
         }
         app.modal_state.select_menu_open = false;
         repaint = true;
     }
+    if remove_anchor && app.workspace.select.magnetic.is_some() {
+        app.magnetic_undo_anchor();
+        repaint = true;
+    }
     if select_all {
-        app.selection_manager.select_all();
+        app.select_all();
         repaint = true;
     }
     if invert {
-        app.selection_manager.invert();
+        app.invert_selection();
         repaint = true;
     }
     if alpha_lock {
@@ -266,7 +274,20 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             app.set_select_tool(kind);
         }
         if lasso {
-            app.set_select_tool(SelectionType::Lasso);
+            // Pressing L again toggles freehand / magnetic.
+            let kind = match app.active_tool {
+                Tool::Select(SelectionType::Lasso) => SelectionType::Magnetic,
+                _ => SelectionType::Lasso,
+            };
+            app.set_select_tool(kind);
+        }
+        if wand {
+            // Pressing Q again toggles magic wand / colour range.
+            let kind = match app.active_tool {
+                Tool::Select(SelectionType::Wand) => SelectionType::ColorRange,
+                _ => SelectionType::Wand,
+            };
+            app.set_select_tool(kind);
         }
         if transform {
             app.set_transform_tool();

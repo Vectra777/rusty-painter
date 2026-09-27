@@ -17,6 +17,8 @@ pub enum SelectionMode {
     Replace,
     Add,
     Subtract,
+    /// Keep only what both selections cover.
+    Intersect,
 }
 
 #[derive(Debug)]
@@ -149,8 +151,14 @@ impl SelectionMask {
                 self.x0 + self.w as i32,
                 self.y0 + self.h as i32,
             ),
+            SelectionMode::Intersect => (
+                self.x0.max(other.x0),
+                self.y0.max(other.y0),
+                (self.x0 + self.w as i32).min(other.x0 + other.w as i32),
+                (self.y0 + self.h as i32).min(other.y0 + other.h as i32),
+            ),
         };
-        let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
         let mut data = vec![0; w * h];
         use rayon::prelude::*;
         data.par_chunks_mut(w.max(1))
@@ -163,11 +171,93 @@ impl SelectionMask {
                     *out = match mode {
                         SelectionMode::Add => a.max(b) as u8,
                         SelectionMode::Subtract => (a * (255 - b) / 255) as u8,
+                        SelectionMode::Intersect => a.min(b) as u8,
                         SelectionMode::Replace => b as u8,
                     };
                 }
             });
         Self::new(x0, y0, w, h, data)
+    }
+
+    /// The selection grown (`radius` > 0) or shrunk (< 0) by `radius`
+    /// pixels, with a soft one-pixel edge. Distances are chamfer (3-4)
+    /// approximations of round ones.
+    pub fn grown(&self, radius: i32) -> Option<Self> {
+        if radius == 0 {
+            return Some(self.clone());
+        }
+        let pad = radius.max(0) + 1;
+        let (w, h) = (self.w + 2 * pad as usize, self.h + 2 * pad as usize);
+        let (x0, y0) = (self.x0 - pad, self.y0 - pad);
+        // Distance (chamfer units, 3 per pixel) to the nearest pixel on the
+        // other side: selected when growing, unselected when shrinking.
+        let grow = radius > 0;
+        let inside = |x: usize, y: usize| self.value(x0 + x as i32, y0 + y as i32) >= 128;
+        const FAR: u32 = u32::MAX / 2;
+        let mut dist: Vec<u32> = (0..w * h)
+            .map(|i| if inside(i % w, i / w) == grow { 0 } else { FAR })
+            .collect();
+        for y in 0..h {
+            for x in 0..w {
+                let mut d = dist[y * w + x];
+                if x > 0 {
+                    d = d.min(dist[y * w + x - 1] + 3);
+                }
+                if y > 0 {
+                    d = d.min(dist[(y - 1) * w + x] + 3);
+                    if x > 0 {
+                        d = d.min(dist[(y - 1) * w + x - 1] + 4);
+                    }
+                    if x + 1 < w {
+                        d = d.min(dist[(y - 1) * w + x + 1] + 4);
+                    }
+                }
+                dist[y * w + x] = d;
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let mut d = dist[y * w + x];
+                if x + 1 < w {
+                    d = d.min(dist[y * w + x + 1] + 3);
+                }
+                if y + 1 < h {
+                    d = d.min(dist[(y + 1) * w + x] + 3);
+                    if x + 1 < w {
+                        d = d.min(dist[(y + 1) * w + x + 1] + 4);
+                    }
+                    if x > 0 {
+                        d = d.min(dist[(y + 1) * w + x - 1] + 4);
+                    }
+                }
+                dist[y * w + x] = d;
+            }
+        }
+        let reach = 3 * radius.unsigned_abs();
+        let selected: Vec<bool> = dist
+            .iter()
+            .map(|&d| if grow { d <= reach } else { d > reach })
+            .collect();
+        // Soft edge: unselected pixels next to selected ones get partial
+        // coverage.
+        use rayon::prelude::*;
+        let data: Vec<u8> = (0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                if selected[i] {
+                    return 255;
+                }
+                let (x, y) = (i % w, i / w);
+                let mut n = 0u32;
+                for ny in y.saturating_sub(1)..(y + 2).min(h) {
+                    for nx in x.saturating_sub(1)..(x + 2).min(w) {
+                        n += selected[ny * w + nx] as u32;
+                    }
+                }
+                (n * 255 / 9) as u8
+            })
+            .collect();
+        Self::new(x0, y0, w, h, data).cropped()
     }
 
     /// Paint a soft round dab into the mask (growing nothing: the mask must
@@ -310,6 +400,20 @@ fn trace_outline(mask: &SelectionMask) -> Vec<Vec<Vec2>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grow_and_shrink_move_the_edge() {
+        let square = SelectionMask::new(10, 10, 10, 10, vec![255; 100]);
+        let grown = square.grown(3).unwrap();
+        assert!(grown.value(7, 15) >= 128, "3 px out");
+        assert!(!grown.value(5, 15) >= 128, "5 px out");
+        // Corners grow round-ish, not square.
+        assert!(!grown.value(7, 7) >= 128);
+        let shrunk = square.grown(-3).unwrap();
+        assert!(shrunk.value(15, 15) >= 128);
+        assert!(!shrunk.value(11, 15) >= 128, "edge eaten away");
+        assert!(square.grown(-6).is_none(), "shrunk to nothing");
+    }
 
     fn square(x0: i32, y0: i32, size: usize) -> SelectionMask {
         SelectionMask::new(x0, y0, size, size, vec![255; size * size])

@@ -13,6 +13,7 @@ pub(crate) mod painter_helpers;
 pub(crate) mod painter_state;
 pub(crate) mod palette_tool;
 pub(crate) mod render_helper;
+pub(crate) mod select_tool;
 pub(crate) mod shortcuts;
 pub(crate) mod state;
 pub(crate) mod stroke_ops;

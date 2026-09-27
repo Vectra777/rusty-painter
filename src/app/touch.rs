@@ -157,9 +157,7 @@ impl PainterApp {
             self.cancel_recent_stroke();
         }
         match self.active_tool {
-            Tool::Select(_) if self.selection_manager.is_dragging => {
-                self.selection_manager.clear_selection();
-            }
+            Tool::Select(_) => self.select_cancel(),
             Tool::Transform(ref mut info) => {
                 info.start_pos = None;
                 info.state = TransformState::None;

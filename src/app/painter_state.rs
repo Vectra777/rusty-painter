@@ -363,6 +363,8 @@ pub struct WorkspaceState {
     pub blend: crate::app::blend_tool::BlendToolSettings,
     /// Transform tool: clicking another layer's pixels selects that layer.
     pub transform_pick_layer: bool,
+    /// Select tool settings and drag state.
+    pub select: crate::app::select_tool::SelectToolState,
     /// Android's image picker (the photo library).
     pub gallery: crate::ui::image_gallery::GalleryState,
 }
@@ -398,6 +400,7 @@ impl WorkspaceState {
             blend: Default::default(),
             gallery: Default::default(),
             transform_pick_layer: true,
+            select: Default::default(),
         }
     }
 }

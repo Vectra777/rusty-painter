@@ -395,6 +395,18 @@ fn paint_batch(
 }
 
 impl Brush {
+    /// The stroke smoothing this brush asks for.
+    pub fn stabilizer_settings(&self) -> crate::brush_engine::stabilizer::StabilizerSettings {
+        crate::brush_engine::stabilizer::StabilizerSettings {
+            algorithm: self.stabilizer_algorithm,
+            strength: self.stabilizer,
+            mass: self.stabilizer_mass,
+            drag: self.stabilizer_drag,
+        }
+    }
+}
+
+impl Brush {
     /// Create a standard soft brush with the given radius, hardness, base color and spacing.
     pub fn new(diameter: f32, hardness: f32, color: Color32, spacing: f32) -> Self {
         Self {

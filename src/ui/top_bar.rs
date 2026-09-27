@@ -150,8 +150,18 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Add Layer Mask", None) {
         app.add_mask_to_active();
     }
+    if menu_item(ui, "Select All", Some(shortcut(ctx, cmd, Key::A))) {
+        app.select_all();
+    }
+    if menu_item(
+        ui,
+        "Invert Selection",
+        Some(shortcut(ctx, cmd_shift, Key::I)),
+    ) {
+        app.invert_selection();
+    }
     if menu_item(ui, "Deselect", Some(shortcut(ctx, cmd, Key::D))) {
-        app.selection_manager.clear_selection();
+        app.deselect();
     }
     if menu_item(ui, "Swap Colors", Some("X".into())) {
         app.swap_colors();
@@ -484,25 +494,37 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
 
 fn select_options(app: &mut PainterApp, ui: &mut egui::Ui, kind: SelectionType) -> &'static str {
     tool_title(ui, "Selection");
-    let mut kind_value = kind;
-    if segmented(
-        ui,
-        &mut kind_value,
-        &[
-            (SelectionType::Rectangle, "Rectangle"),
-            (SelectionType::Circle, "Ellipse"),
-            (SelectionType::Lasso, "Lasso"),
-            (SelectionType::Brush, "Brush"),
-        ],
-        true,
-    ) {
-        app.set_select_tool(kind_value);
+    let types = &crate::ui::select_menu::TYPES;
+    let label = types.iter().find(|t| t.0 == kind).map_or("", |t| t.2);
+    let mut picked = None;
+    egui::ComboBox::from_id_salt("selection_type")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            for &(t, _, name, _) in types {
+                if ui.selectable_label(t == kind, name).clicked() {
+                    picked = Some(t);
+                }
+            }
+        });
+    if let Some(t) = picked {
+        app.set_select_tool(t);
     }
     vdivider(ui);
     crate::ui::select_menu::mode_and_brush_controls(app, ui, true);
     vdivider(ui);
     crate::ui::select_menu::selection_actions(app, ui);
-    "Shift add  ·  Alt subtract  ·  Ctrl+A all  ·  Ctrl+Shift+I invert"
+    match kind {
+        SelectionType::Wand => {
+            "Click an area to select it  ·  Shift add  ·  Alt erase  ·  Q toggles colour range"
+        }
+        SelectionType::ColorRange => {
+            "Click a colour to select it everywhere  ·  Shift add  ·  Alt erase"
+        }
+        SelectionType::Magnetic => {
+            "Click along an edge  ·  click the start or double-click to close  ·  Backspace removes a point  ·  Esc cancels"
+        }
+        _ => "Shift add  ·  Alt erase  ·  Ctrl+A all  ·  Ctrl+Shift+I invert",
+    }
 }
 
 fn transform_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
