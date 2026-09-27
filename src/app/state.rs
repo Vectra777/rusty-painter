@@ -27,6 +27,8 @@ pub struct BrushState {
     pub presets: Vec<BrushPreset>,
     pub preset_previews: HashMap<String, egui::TextureHandle>,
     pub loaded_brush_tips: Vec<(String, PixelBrushShape, Option<egui::TextureHandle>)>,
+    /// Paper textures from `brushes/textures/` (besides the built-in ones).
+    pub loaded_textures: Vec<Arc<crate::brush_engine::texture::Pattern>>,
     pub brushes_path: PathBuf,
     pub is_drawing: bool,
     pub use_masked_brush: bool,
@@ -75,6 +77,7 @@ impl BrushState {
             presets,
             preset_previews: HashMap::new(),
             loaded_brush_tips: Vec::new(),
+            loaded_textures: Vec::new(),
             brushes_path,
             is_drawing: false,
             use_masked_brush,

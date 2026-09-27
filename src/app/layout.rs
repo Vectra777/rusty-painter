@@ -81,6 +81,7 @@ impl<'a> TabViewer for ToolTabViewer<'a> {
                 &mut self.app.brush_state.brush_preview,
                 &self.app.workspace.pool,
                 &self.app.brush_state.loaded_brush_tips,
+                &self.app.brush_state.loaded_textures,
             ),
             ToolTab::ColorPicker => ui::color_picker::color_picker_panel(
                 ui,

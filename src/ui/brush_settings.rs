@@ -63,13 +63,14 @@ pub fn brush_settings_panel(
     preview: &mut BrushPreviewState,
     pool: &ThreadPool,
     loaded_tips: &[(String, PixelBrushShape, Option<egui::TextureHandle>)],
+    textures: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
 ) {
     egui::ScrollArea::vertical()
         .id_salt("brush_settings_scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             let (changed, mask_changed) =
-                brush_settings_contents(ui, brush, preview, pool, loaded_tips);
+                brush_settings_contents(ui, brush, preview, pool, loaded_tips, textures);
             if changed || mask_changed {
                 preview.dirty = true;
             }
@@ -86,6 +87,7 @@ fn brush_settings_contents(
     preview: &mut BrushPreviewState,
     pool: &ThreadPool,
     loaded_tips: &[(String, PixelBrushShape, Option<egui::TextureHandle>)],
+    textures: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
 ) -> (bool, bool) {
     let mut changed = false;
     let mut mask_changed = false;
@@ -316,6 +318,7 @@ fn brush_settings_contents(
     });
 
     changed |= dynamics_sections(ui, &mut brush.dynamics);
+    changed |= texture_section(ui, &mut brush.texture, textures);
 
     section(ui, "Pen pressure", true, |ui| {
         let o = &mut brush.brush_options;
@@ -515,6 +518,82 @@ fn dynamics_sections(
             r.count = count;
             changed = true;
         }
+    });
+    changed
+}
+
+/// Paper texture: which pattern, how it combines, its scale and strength.
+fn texture_section(
+    ui: &mut egui::Ui,
+    texture: &mut Option<crate::brush_engine::texture::BrushTexture>,
+    loaded: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
+) -> bool {
+    use crate::brush_engine::texture::{BrushTexture, TextureMode, builtin};
+    let mut changed = false;
+    section(ui, "Texture", false, |ui| {
+        let current = texture
+            .as_ref()
+            .map_or("None", |t| t.pattern.name.as_str())
+            .to_string();
+        property_row(ui, "Paper", |ui| {
+            egui::ComboBox::from_id_salt("brush_texture")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(texture.is_none(), "None").clicked() {
+                        *texture = None;
+                        changed = true;
+                    }
+                    for pattern in builtin().iter().chain(loaded) {
+                        let selected = texture
+                            .as_ref()
+                            .is_some_and(|t| std::sync::Arc::ptr_eq(&t.pattern, pattern));
+                        if ui.selectable_label(selected, &pattern.name).clicked() && !selected {
+                            match texture {
+                                Some(t) => t.pattern = pattern.clone(),
+                                None => *texture = Some(BrushTexture::new(pattern.clone())),
+                            }
+                            changed = true;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Add your own: greyscale pictures in brushes/textures/.");
+        });
+        let Some(t) = texture else {
+            return;
+        };
+        property_row(ui, "Mode", |ui| {
+            let modes: Vec<(TextureMode, &str)> =
+                TextureMode::ALL.iter().map(|&m| (m, m.label())).collect();
+            changed |= segmented(ui, &mut t.mode, &modes, false);
+        });
+        changed |= slider_row(
+            ui,
+            "Strength",
+            percent_of_unit(egui::Slider::new(&mut t.strength, 0.0..=1.0)),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Scale",
+            egui::Slider::new(&mut t.scale, 0.25..=4.0)
+                .logarithmic(true)
+                .max_decimals(2)
+                .suffix("×"),
+        )
+        .changed();
+        changed |= ui.checkbox(&mut t.invert, "Invert").changed();
+        ui.label(
+            egui::RichText::new(match t.mode {
+                TextureMode::Multiply => "The grain darkens the stroke evenly.",
+                TextureMode::Subtract => "Low spots lose paint first; heavy strokes fill in.",
+                TextureMode::Height => {
+                    "Light pressure only catches the peaks; press harder to fill the valleys."
+                }
+            })
+            .small()
+            .color(TEXT_DIM),
+        );
     });
     changed
 }

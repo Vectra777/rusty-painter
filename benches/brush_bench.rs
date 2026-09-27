@@ -390,6 +390,32 @@ fn bench_dynamic_strokes(c: &mut Criterion) {
             },
         ),
     ];
+    // A textured stroke (paper grain on every dab).
+    {
+        use rusty_painter::brush_engine::texture::{BrushTexture, builtin};
+        let mut brush = Brush::new(60.0, 40.0, Color32::from_rgb(30, 60, 200), 10.0);
+        brush.texture = Some(BrushTexture::new(builtin()[0].clone()));
+        let mut group = c.benchmark_group("textured_stroke_60_samples");
+        group.bench_function("paper", |b| {
+            b.iter(|| {
+                let mut undo_action = UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                };
+                let mut stroke_tiles = StrokeTiles::default();
+                let mut stroke = StrokeState::with_seed(1);
+                let mut context =
+                    StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut stroke_tiles);
+                for &(pos, pressure, time) in &points {
+                    stroke.add_sample(&mut brush, pos, pressure, Some(time), &mut context);
+                }
+                stroke.finish(&mut brush, &mut context);
+            });
+        });
+        group.finish();
+    }
     let mut group = c.benchmark_group("dynamic_stroke_60_samples");
     // An image tip (a 256 px speckled picture used at 60 px: mipmapped).
     {

@@ -45,7 +45,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Build-up vs wash | ✅ | ✅ | ⚠️ "Constant Opacity" | ✅ |
 | Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ❌ normal + erase only |
 | Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ⚠️ separate smudge tool only |
-| Paper / grain texture | ✅ | ✅ | ✅ | ❌ |
+| Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height |
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ❌ |
 | Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ❌ |
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ❌ |
@@ -79,7 +79,7 @@ below.
 - [ ] **3. Randomness per dab.** Size, opacity and flow randomness; several
   dabs per step (spray) — *done*; hue, saturation and value randomness —
   *to do* (needs the coloured stroke buffer, with 5).
-- [ ] **4. Texture.** Paper grain on the brush (built-in grains and your own
+- [x] **4. Texture.** Paper grain on the brush (built-in grains and your own
   images), with scale, strength and how it combines (multiply, subtract,
   height).
 - [ ] **5. Brush blend modes.** Multiply, screen, add (glow), overlay,

@@ -330,3 +330,36 @@ fn an_image_tip_keeps_its_proportions_and_turns() {
         "turned: {w}×{h}"
     );
 }
+
+#[test]
+fn a_texture_leaves_grain_and_does_nothing_at_no_strength() {
+    use crate::brush_engine::texture::{BrushTexture, TextureMode, builtin};
+    let stroke = |texture: Option<BrushTexture>| {
+        let mut b = brush(BrushDynamics::default());
+        b.brush_options.hardness = 50.0;
+        b.texture = texture;
+        let (canvas, _) = paint(&mut b, &line(64.0, 0.5), 1, true);
+        canvas
+    };
+    let plain = stroke(None);
+    let mut none = BrushTexture::new(builtin()[1].clone());
+    none.strength = 0.0;
+    assert_eq!(
+        pixels(&stroke(Some(none))),
+        pixels(&plain),
+        "strength 0: unchanged"
+    );
+    let mut grain = BrushTexture::new(builtin()[1].clone());
+    grain.mode = TextureMode::Subtract;
+    grain.strength = 1.0;
+    let textured = stroke(Some(grain));
+    // Along the middle of the stroke, the grain makes the alpha vary.
+    let row: Vec<u8> = (40..220).map(|x| alpha(&textured, x, 64)).collect();
+    let (lo, hi) = (row.iter().min().unwrap(), row.iter().max().unwrap());
+    assert!(hi - lo > 60, "grain: {lo}..{hi}");
+    let flat: Vec<u8> = (40..220).map(|x| alpha(&plain, x, 64)).collect();
+    assert!(
+        flat.iter().all(|&a| a == flat[0]),
+        "the plain stroke is even"
+    );
+}

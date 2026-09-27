@@ -160,6 +160,8 @@ pub struct Brush {
     /// What changes from dab to dab besides pressure: tip angle and squash,
     /// tapers, speed, randomness. All off by default.
     pub dynamics: crate::brush_engine::dynamics::BrushDynamics,
+    /// Paper grain taking paint away from each dab; `None` for none.
+    pub texture: Option<crate::brush_engine::texture::BrushTexture>,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -182,6 +184,8 @@ struct BatchCtx<'a> {
     alpha_lock: bool,
     /// Where the dabs accumulate.
     target: Target,
+    /// The brush's texture, applied to every dab.
+    texture: Option<&'a crate::brush_engine::texture::BrushTexture>,
 }
 
 /// Where a batch of dabs accumulates.
@@ -307,6 +311,9 @@ fn paint_batch(
                 }
                 let (first, last) = (span.start, span.end - 1);
                 let start = (gy - tile_y0) * tile_size + (overlap.min_x - tile_x0);
+                if let Some(texture) = ctx.texture {
+                    texture.apply_row(gy, overlap.min_x + first, &mut alphas[span.clone()]);
+                }
                 if let Some(sel) = selection_coverage {
                     for (alpha, &s) in alphas[span.clone()]
                         .iter_mut()
@@ -485,6 +492,7 @@ impl Brush {
             stabilizer_drag: 0.5,
             is_changed: false,
             dynamics: Default::default(),
+            texture: None,
         }
     }
 
@@ -502,6 +510,7 @@ impl Brush {
             stabilizer_drag: 0.5,
             is_changed: false,
             dynamics: Default::default(),
+            texture: None,
         }
     }
 
@@ -713,7 +722,7 @@ impl Brush {
 
     /// What a batch needs to paint and resolve with this brush.
     fn batch_ctx<'a>(
-        &self,
+        &'a self,
         canvas: &'a Canvas,
         selection: Option<&'a SelectionManager>,
         dabs: &'a [PlacedDab],
@@ -738,6 +747,7 @@ impl Brush {
                 .get(canvas.active_layer_idx)
                 .is_some_and(|l| l.alpha_locked),
             target,
+            texture: self.texture.as_ref(),
         }
     }
 

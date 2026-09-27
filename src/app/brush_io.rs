@@ -13,6 +13,34 @@ impl PainterApp {
         self.brush_state.loaded_brush_tips.clear();
         self.scan_and_load_brush_images(ctx);
         self.sort_loaded_brushes();
+        self.load_textures();
+    }
+
+    /// Pictures in `brushes/textures/` become paper textures.
+    fn load_textures(&mut self) {
+        let dir = self.brush_state.brushes_path.join("textures");
+        let mut textures = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() || !Self::is_valid_image_extension(&path) {
+                    continue;
+                }
+                match image::open(&path) {
+                    Ok(img) => {
+                        let name = path
+                            .file_stem()
+                            .map_or_else(|| "Texture".into(), |s| s.to_string_lossy().into_owned());
+                        textures.push(crate::brush_engine::texture::Pattern::from_image(
+                            &name, &img,
+                        ));
+                    }
+                    Err(err) => log::warn!("Skipping texture {}: {err}", path.display()),
+                }
+            }
+        }
+        textures.sort_by(|a, b| a.name.cmp(&b.name));
+        self.brush_state.loaded_textures = textures;
     }
 
     fn ensure_brushes_directory_exists(&self) {
