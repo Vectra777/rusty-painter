@@ -35,7 +35,7 @@ This is an experimental setup and may need platform fixes. Building for Android 
 
 - `vendor-winit/` — a patched copy of `winit`, pulled in via `[patch.crates-io]` in `Cargo.toml`, needed for Android windowing/lifecycle support beyond what upstream `winit` provides out of the box.
 - `scripts/linkers/` + `scripts/build-android.sh` — wrapper scripts that route each Android target's linker invocation through the NDK toolchain; `.cargo/config.toml` points cargo at them. Run `scripts/build-android.sh` rather than a bare `cargo apk build` to make sure these are picked up.
-- `src/utils/android.rs` — the native JNI/lifecycle glue (`android_logger`, `jni`, `ndk-context`) that makes the app actually run once launched, as opposed to just compiling for the target.
+- `src/android.rs` — the native JNI/lifecycle glue (`android_logger`, `jni`, `ndk-context`) that makes the app actually run once launched, as opposed to just compiling for the target.
 
 To build:
 
@@ -75,7 +75,7 @@ FREQ=199 scripts/flamegraph.sh   # fewer samples
 Needs `perf` and `cargo install flamegraph`. The script builds with frame pointers into `target/profiling` and records with `--call-graph fp --no-inline`. Plain `cargo flamegraph` uses DWARF call graphs and inline resolution, which here wrote a large `perf.data` and spent ~7 minutes at full CPU turning a 10 s recording into a graph.
 
 ## CI and releases
-- **CI** (`.github/workflows/ci.yml`) runs on every push to `master` and on pull requests: `cargo fmt --check`, `clippy -D warnings`, tests, a bench build, an Android compile check, and `cargo audit`.
+- **CI** (`.github/workflows/ci.yml`) runs on every push to `master` and on pull requests: `cargo fmt --check`, `clippy -D warnings`, tests, a bench build, a docs build, an Android compile check, and `cargo audit`.
 - **Release** (`.github/workflows/release.yml`) runs the same checks first, then builds and publishes:
   - **By hand:** GitHub → *Actions* → *Release* → *Run workflow*. Enter the version and tick the platforms (Linux, Windows, Android). Untick *Publish* to only build; the files are then downloadable from the run page.
   - **By tag:** `git tag v0.2.0 && git push origin v0.2.0` builds all three and publishes release `v0.2.0`.
@@ -87,38 +87,65 @@ Needs `perf` and `cargo install flamegraph`. The script builds with frame pointe
   Without them the APK is signed with a throwaway key: it installs, but Android won't let a later release update it (different signature), so set them before sharing APKs. Keep the keystore safe: losing it means users must uninstall to upgrade.
 
 ## Controls
-- **Paint**: Left click and drag
-- **Pan**: Hold `Space` + left drag
-- **Zoom**: Middle-click drag vertically
-- **Rotate Canvas**: Right-click drag horizontally
-- **Clear Canvas**: `C`
-- **Undo**: `Ctrl+Z`
-- **Redo**: `Ctrl+Shift+Z`
-- **Cancel Selection**: `Escape`
-- **Commit Transform**: `Enter`
+The full list is in **Help → Keyboard Shortcuts**. The main ones:
+
+- **Paint**: left drag (pen pressure where supported). `B` brush, `E` eraser, `[` / `]` size.
+- **View**: `Space` + drag or right drag to pan, middle drag to rotate, wheel to zoom, `Ctrl+0` fit, `Ctrl+1` actual pixels, `H` flip. Two fingers pan, pinch and twist.
+- **Tools**: `M` rectangle/ellipse select, `L` lasso, `Q` magic wand, `U` shapes, `Shift+G` gradient, `V`/`T` transform, `I` eyedropper, `G` fill, `W` liquify, `S` smudge/blur, `R` ruler.
+- **Edit**: `Ctrl+Z` undo, `Ctrl+Shift+Z` / `Ctrl+Y` redo, `Ctrl+A` select all, `Ctrl+D` / `Esc` deselect, `Ctrl+Shift+I` invert, `Shift+F5` content-aware fill, `Enter` / `Esc` apply / cancel a transform.
+- **File**: `Ctrl+N` new, `Ctrl+O` open, `Ctrl+S` save, `Ctrl+E` export, `Ctrl+Shift+O` import an image as a layer.
 
 ## Project Files
 Work is saved as a single `.rpainter` file via **Open**/**Save** in the top bar — layers, tile data, and undo history all round-trip. Internally it's a versioned binary format (`src/project/`): tile pixel data is zstd-compressed per tile, layers are matched up by a stable id (not position) so undo stays correct even if you'd reordered layers before saving, and the thumbnail preview is stored uncompressed since it's already PNG-encoded. Older project files remain loadable after format additions — new fields default sensibly on read rather than breaking the load.
 
 ## UI Panels
-- **Top Bar**: Switch between Brush, Select (Rect, Circle, Lasso), and Transform tools.
+- **Menus and options bar**: File/Edit/View/Help on desktop (a slide-up sheet on tablets); under them, the active tool's options.
+- **Toolbar**: the tools on the left edge.
 - **Brush Settings**: Choose brush type/mode, size, hardness, flow, spacing, jitter, stabilizer, pixel-perfect mode, AA.
 - **Color Picker**: Triangle HSVA picker with opacity slider.
 - **Brush Presets**: Quick presets; selecting one keeps your current color.
 - **Layers**: Add/remove layers, drag to reorder, toggle visibility, set opacity, choose active layer.
 - **General Settings**: Toggle masked brush (fast), high-quality zoom out (slower), adjust brush thread count.
-- **Export**: Export your canvas via the Export button in the top bar.
+- **Export**: File → Export, or `Ctrl+E`.
 
 ## Project Structure
-- `src/main.rs` – native app entry point.
-- `src/app/` - Application state, input handling, and tool logic.
-- `src/canvas/` – tiled canvas storage, compositing, and undo history.
-- `src/brush_engine/` – brush logic, stroke spacing, and mask generation.
-- `src/selection/` - Selection shapes and transformation logic.
-- `src/tablet/` - Tablet input handling.
-- `src/ui/` – egui panels for brushes, colors, layers, and settings.
-- `src/utils/` – small helpers for colors and exporting.
-- `src/project/` – `.rpainter` project file save/load format.
+One library crate (`src/lib.rs`); `src/main.rs` only calls `rusty_painter::run()`, and Android enters at `android_main`. Modules depend downwards: `app` and `ui` use the engine modules, never the other way round.
+
+```
+src/
+├── app/                 the application: PainterApp and everything it does
+│   ├── painter.rs       PainterApp and the frame loop (setup → chrome → canvas → tools → pixels → windows)
+│   ├── state.rs         app state grouped by concern (brush, viewport, layers, workspace...)
+│   ├── document.rs      canvas settings and limits, tile/atlas sizes
+│   ├── canvas_ops.rs    replace the document, layer add/remove/move, redraw marking
+│   ├── stroke_ops.rs    brush strokes via the stroke worker; exclusive canvas access
+│   ├── input/           pointer, pen and touch routing to the active tool; keyboard shortcuts
+│   ├── tools/           one module per tool (select, shape, gradient, fill, transform, liquify, patch...)
+│   └── view/            GPU canvas, tile upload and compositing for display, view transform
+├── canvas/              the document model and pixel algorithms
+│   ├── storage/         Canvas, layers and tiles; compositing; pixel writers; transforms
+│   ├── history.rs       per-layer undo (tile snapshots, selection and layer tree changes)
+│   └── blend*.rs, fill.rs, gradient.rs, inpaint.rs, liquify.rs, palette.rs
+├── brush_engine/        dabs, tips, strokes, stabiliser, mirror painting, the stroke worker thread
+├── selection/           selection shapes and masks, magnetic lasso, transform state
+├── project/             .rpainter save/open, image export
+├── tablet/              pen input (octotablet: Windows Ink, Wayland)
+├── ui/                  egui panels, menus, tool options, theme (style.rs tokens, theme.rs)
+├── android.rs           Android platform glue
+└── bench_api.rs         headless entry points for benches/app_bench.rs (feature `bench`)
+```
+
+The [developer guide](docs/wiki/Developer-Guide.md) says where a typical change goes and how to test it; [architecture](docs/wiki/Architecture.md) covers the data model and pipelines.
+
+## Development
+The checks CI runs:
+```bash
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+cargo check --locked --benches --features bench
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
+```
 
 ## Contributing
 The project is early-stage and focused on performance experiments. If you have ideas for improving brush quality, tiling performance, or UI/UX, feel free to open an issue or directly contact me. Tests and benchmarks are especially welcome.
