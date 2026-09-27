@@ -173,6 +173,13 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
             100.0,
             percent_of_unit(egui::Slider::new(&mut b.smudge_length, 0.0..=1.0)),
         );
+        ui.add_space(6.0);
+        bar_slider(
+            ui,
+            "Colour",
+            80.0,
+            percent_of_unit(egui::Slider::new(&mut b.color_rate, 0.0..=1.0)),
+        );
     } else {
         bar_slider(
             ui,
@@ -185,7 +192,7 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
         app.brush_state.brush.is_changed = true;
     }
     if smudge {
-        "Drag to smear the paint  ·  Length: how far colour is carried  ·  uses the brush's spacing & pressure"
+        "Drag to smear the paint  ·  Length: how far colour is carried  ·  Colour above 0: a wet brush mixing in the brush colour"
     } else {
         "Paint over edges to soften them  ·  uses the brush's spacing & pressure"
     }

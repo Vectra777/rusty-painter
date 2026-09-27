@@ -5,7 +5,10 @@
 //!
 //! Smudge carries a patch of paint along the stroke: every dab mixes the
 //! carried paint into the canvas under the tip, then picks up some of the
-//! result (how much it keeps is the smudge length). Blur mixes each pixel
+//! result (how much it keeps is the smudge length). With a colour rate it
+//! is a wet mixing brush, like Krita's Color Smudge: each dab first mixes
+//! that much of the brush colour into the carried paint, so it lays down
+//! the brush colour blended with whatever it drags. Blur mixes each pixel
 //! toward the average around it. Both are sequential per dab (each dab sees
 //! the previous one's result), so they run their own small engine rather
 //! than the batched brush pipeline.
@@ -23,6 +26,9 @@ pub struct BlendToolSettings {
     pub smudge_length: f32,
     /// Blur: size of the area averaged, relative to the brush radius.
     pub blur_size: f32,
+    /// Smudge: how much of the brush colour is mixed into the carried paint
+    /// per brush width travelled (0 = a plain smudge, 1 = all brush colour).
+    pub color_rate: f32,
 }
 
 impl Default for BlendToolSettings {
@@ -30,6 +36,7 @@ impl Default for BlendToolSettings {
         Self {
             smudge_length: 0.8,
             blur_size: 0.35,
+            color_rate: 0.0,
         }
     }
 }
@@ -267,6 +274,13 @@ impl PainterApp {
             self.workspace.blend.smudge_length.clamp(0.0, 1.0),
             self.workspace.blend.blur_size,
         );
+        // Brush colour added per brush width travelled, whatever the
+        // spacing: per dab, the share that compounds to it over one width.
+        let steps_per_width = (100.0 / o.spacing.max(1.0)).max(1.0);
+        let color_rate = 1.0
+            - (1.0 - self.workspace.blend.color_rate.clamp(0.0, 1.0)).powf(1.0 / steps_per_width);
+        // The brush colour as carried paint (linear, premultiplied, opaque).
+        let brush_paint = to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b()));
         let Some(stroke) = self.brush_state.blend_stroke.as_mut() else {
             return;
         };
@@ -338,6 +352,18 @@ impl PainterApp {
                     px: under.clone(),
                 },
             };
+            let mut carry = carry;
+            if color_rate > 0.0 {
+                // Wet paint (Krita's Color Smudge): the brush picks up the
+                // paint under it (keeping the smudge length's share of what
+                // it carried), then adds its own colour.
+                for (c, u) in carry.px.iter_mut().zip(&under) {
+                    for k in 0..4 {
+                        c[k] = u[k] + (c[k] - u[k]) * length;
+                        c[k] += (brush_paint[k] - c[k]) * color_rate;
+                    }
+                }
+            }
             let px = carry.px.clone();
             stroke.carries[copy] = Some(carry);
             px
@@ -362,8 +388,11 @@ impl PainterApp {
             changed |= out != before;
             result.push(out);
         }
-        // Smudge picks up the blended paint for the next dab.
-        if let Some(carry) = stroke.carries.get_mut(copy).and_then(|c| c.as_mut()) {
+        // Smudge picks up the blended paint for the next dab (a wet brush
+        // picked up the paint under it before painting).
+        if color_rate <= 0.0
+            && let Some(carry) = stroke.carries.get_mut(copy).and_then(|c| c.as_mut())
+        {
             for (c, &res) in carry.px.iter_mut().zip(&result) {
                 let res = to_f(res);
                 for k in 0..4 {
@@ -404,5 +433,104 @@ mod tests {
         let out = box_blur(&edge, side, 2);
         let mid = out[4 * side + 4][0];
         assert!(mid > 0.08 && mid < 0.92, "{mid}");
+    }
+}
+
+#[cfg(test)]
+mod mix_tests {
+    use crate::canvas::Canvas;
+    use eframe::egui::{Color32, Vec2};
+
+    fn app(below: Option<Color32>) -> crate::PainterApp {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        if let Some(c) = below {
+            for tx in 0..2 {
+                app.canvas_mut()
+                    .set_layer_tile_data(1, tx, 0, vec![c; 64 * 64]);
+            }
+        }
+        app.active_tool = crate::app::tools::Tool::Smudge;
+        let o = &mut app.brush_state.brush.brush_options;
+        o.diameter = 20.0;
+        o.hardness = 100.0;
+        o.pressure_size = false;
+        o.color = Color32::from_rgb(20, 40, 230);
+        app
+    }
+
+    fn drag(app: &mut crate::PainterApp) {
+        app.blend_press(Vec2::new(10.0, 32.0), 1.0);
+        for i in 1..=20 {
+            app.blend_drag(Vec2::new(10.0 + i as f32 * 5.0, 32.0), 1.0);
+        }
+        app.blend_release();
+    }
+
+    fn pixel(app: &crate::PainterApp, x: i32) -> Color32 {
+        app.canvas
+            .get_layer_tile_data(1, x / 64, 0)
+            .map_or(Color32::TRANSPARENT, |t| t[(32 * 64 + x % 64) as usize])
+    }
+
+    #[test]
+    fn a_wet_brush_paints_its_colour_on_empty_layers() {
+        let mut app = app(None);
+        app.workspace.blend.color_rate = 0.6;
+        drag(&mut app);
+        let p = pixel(&app, 60);
+        assert!(
+            p.a() > 200 && p.b() > p.r() * 3,
+            "brush blue laid down: {p:?}"
+        );
+    }
+
+    #[test]
+    fn a_wet_brush_mixes_with_the_paint_under_it() {
+        let red = Color32::from_rgb(230, 30, 20);
+        let mut app = app(Some(red));
+        app.workspace.blend.color_rate = 0.3;
+        drag(&mut app);
+        let p = pixel(&app, 60);
+        assert!(p.r() > 40 && p.b() > 40, "red and blue mixed: {p:?}");
+    }
+
+    #[test]
+    fn the_colour_rate_doesnt_depend_on_spacing() {
+        let red = Color32::from_rgb(230, 30, 20);
+        let at = |spacing: f32| {
+            let mut app = app(Some(red));
+            app.workspace.blend.color_rate = 0.3;
+            app.brush_state.brush.brush_options.spacing = spacing;
+            drag(&mut app);
+            pixel(&app, 60)
+        };
+        let (dense, sparse) = (at(10.0), at(40.0));
+        let diff = dense
+            .to_array()
+            .iter()
+            .zip(sparse.to_array())
+            .map(|(a, b)| a.abs_diff(b))
+            .max()
+            .unwrap();
+        assert!(diff <= 40, "{dense:?} vs {sparse:?}");
+    }
+
+    #[test]
+    fn no_colour_rate_is_the_plain_smudge() {
+        let red = Color32::from_rgb(230, 30, 20);
+        let mut plain = app(Some(red));
+        drag(&mut plain);
+        let mut zero = app(Some(red));
+        zero.workspace.blend.color_rate = 0.0;
+        drag(&mut zero);
+        for x in 0..128 {
+            assert_eq!(pixel(&plain, x), pixel(&zero, x));
+        }
+        assert_eq!(
+            pixel(&plain, 60),
+            red,
+            "smudging one colour changes nothing"
+        );
     }
 }
