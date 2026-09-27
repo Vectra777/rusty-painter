@@ -53,6 +53,13 @@ impl PainterApp {
         Some(task.progress.load(Ordering::Relaxed) as f32 / 1000.0)
     }
 
+    /// Cancel a running fill and forget it (the document is going away).
+    pub(crate) fn patch_abandon(&mut self) {
+        if let Some(task) = self.workspace.patch.task.take() {
+            task.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn patch_cancel(&mut self) {
         if let Some(task) = &self.workspace.patch.task {
             task.cancel.store(true, Ordering::Relaxed);

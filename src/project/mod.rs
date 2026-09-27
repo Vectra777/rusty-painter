@@ -2,7 +2,6 @@ use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
 use crate::{
     PainterApp,
     app::{
-        painter_state::LayerState,
         state::{ColorModel, TILE_SIZE, validate_canvas_size},
         tools::Tool,
     },
@@ -12,7 +11,7 @@ use crate::{
         storage::{CanvasLayerSnapshot, CanvasTileSnapshot, LayerId},
     },
 };
-use eframe::egui::{Color32, Vec2};
+use eframe::egui::Color32;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
@@ -53,23 +52,9 @@ impl PainterApp {
 
     pub(crate) fn load_project_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let loaded = load_project(path)?;
-        let width = loaded.canvas.width();
-        let height = loaded.canvas.height();
-        let layer_count = loaded.canvas.layers.len();
-
-        *self.canvas_mut() = loaded.canvas;
+        self.replace_document(loaded.canvas, loaded.histories);
         self.workspace.color_model = loaded.color_model;
-        self.layer_state = LayerState::new(layer_count);
-        self.layer_state.histories = loaded.histories;
-        self.recreate_render_cache(width, height);
-        self.brush_state.is_drawing = false;
         self.active_tool = Tool::Brush;
-        self.selection_manager.clear_selection();
-        self.viewport.offset = Vec2::ZERO;
-        self.viewport.zoom = 1.0;
-        self.viewport.rotation = 0.0;
-        self.workspace.auto_fit = true;
-        self.workspace.fitted_to = None;
         Ok(())
     }
 }
@@ -498,6 +483,7 @@ impl StoredTileSnapshot {
 pub(crate) mod tests {
     use super::*;
     use crate::{app::painter_state::LayerState, brush_engine::brush::Brush};
+    use eframe::egui::Vec2;
     use rayon::ThreadPoolBuilder;
 
     pub(crate) fn test_app_pub(canvas: Canvas) -> PainterApp {
@@ -1420,6 +1406,7 @@ pub(crate) mod tests {
 mod fill_timing {
     use super::*;
     use crate::app::painter_state::LayerState;
+    use eframe::egui::Vec2;
 
     #[test]
     #[ignore = "timing; run with --release --ignored"]
@@ -1515,6 +1502,7 @@ mod perf {
     use crate::app::tools::Tool;
     use crate::selection::SelectionType;
     use crate::selection::transform::TransformInfo;
+    use eframe::egui::Vec2;
     use std::time::Instant;
 
     const N: usize = 4000;
@@ -1792,6 +1780,7 @@ mod perf {
 #[cfg(test)]
 mod soft_brush_look {
     use super::*;
+    use eframe::egui::Vec2;
 
     /// Paints soft strokes like the screenshots and writes them to
     /// `$SOFT_OUT` (a PNG) to inspect by eye.

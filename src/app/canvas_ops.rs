@@ -1,6 +1,6 @@
 use super::{
     PainterApp,
-    painter_state::RenderCache,
+    painter_state::{LayerState, RenderCache},
     state::{CanvasTile, ColorModel, TILE_SIZE},
 };
 use crate::canvas::Canvas;
@@ -87,17 +87,56 @@ impl PainterApp {
     }
 
     fn rebuild_canvas(&mut self, width: usize, height: usize, background: Color32) {
-        self.reset_canvas_state(width, height, background);
+        let canvas = Canvas::new(width, height, background, TILE_SIZE);
+        let histories = (0..canvas.layers.len()).map(|_| History::new()).collect();
+        self.replace_document(canvas, histories);
+    }
+
+    /// Make `canvas` (with its per-layer `histories`) the document, for a
+    /// new canvas or an opened project.
+    ///
+    /// Everything tied to the old document goes, in this order:
+    /// 1. background work holding it: the stroke worker is finished and a
+    ///    running content-aware fill is cancelled (its result would land in
+    ///    whichever new layer shares an id);
+    /// 2. tool sessions are dropped, not applied (a floating transform or
+    ///    liquify refers to old layer indices; a gradient or shape preview
+    ///    holds old tiles);
+    /// 3. the canvas, fresh per-layer state and render cache are installed;
+    /// 4. the selection is cleared and the view refits.
+    pub(crate) fn replace_document(&mut self, canvas: Canvas, histories: Vec<History>) {
+        // 1. Background work.
+        self.release_canvas();
+        self.patch_abandon();
+        // 2. Tool sessions.
+        self.end_tool_sessions();
+        // 3. The document and what mirrors its layers.
+        let (width, height) = (canvas.width(), canvas.height());
+        *self.canvas_mut() = canvas;
+        self.layer_state = LayerState::new(self.canvas.layers.len());
+        self.layer_state.histories = histories;
         self.recreate_render_cache(width, height);
+        // 4. Selection and view.
+        self.selection_manager.clear_selection();
+        self.selection_manager.canvas_size = [width, height];
         self.reset_viewport_state();
     }
 
-    fn reset_canvas_state(&mut self, width: usize, height: usize, background: Color32) {
-        *self.canvas_mut() = Canvas::new(width, height, background, TILE_SIZE);
-        let layer_count = self.canvas.layers.len();
-        self.layer_state.histories = (0..layer_count).map(|_| History::new()).collect();
-        self.layer_state.layer_ui_colors = vec![Color32::from_gray(40); layer_count];
-        self.layer_state.layer_dragging = None;
+    /// Drop every in-progress tool session without applying it.
+    fn end_tool_sessions(&mut self) {
+        self.selection_manager.clear_selection();
+        self.select_cancel();
+        self.forget_last_pick();
+        self.brush_state.blend_stroke = None;
+        let ws = &mut self.workspace;
+        ws.shapes.session = None;
+        ws.gradient.session = None;
+        ws.fill.path.clear();
+        ws.guides.end_drag();
+        self.viewport.touch.pen_on_canvas = false;
+        self.viewport.touch.action_mark = None;
+        // Transform and liquify sessions live in `layer_state`, which the
+        // caller replaces.
     }
 
     pub(crate) fn recreate_render_cache(&mut self, width: usize, height: usize) {
@@ -110,7 +149,7 @@ impl PainterApp {
         self.viewport.is_primary_down = false;
     }
 
-    fn reset_viewport_state(&mut self) {
+    pub(crate) fn reset_viewport_state(&mut self) {
         self.viewport.offset = Vec2::ZERO;
         self.viewport.zoom = 1.0;
         self.viewport.rotation = 0.0;
@@ -549,5 +588,86 @@ impl PainterApp {
             }
         }
         self.debug_assert_layer_state_in_sync();
+    }
+}
+
+#[cfg(test)]
+mod document_tests {
+    use crate::canvas::Canvas;
+    use crate::project::tests::test_app_pub;
+    use eframe::egui::{Color32, Vec2};
+
+    /// A 256 px app with layer 1 active.
+    fn app() -> crate::PainterApp {
+        let mut app = test_app_pub(Canvas::new(256, 256, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        app.selection_manager.canvas_size = [256, 256];
+        app
+    }
+
+    /// Start a new 128 px canvas the way the New Canvas dialog does.
+    fn new_canvas(app: &mut crate::PainterApp) {
+        app.modal_state.new_canvas.width = 128.0;
+        app.modal_state.new_canvas.height = 128.0;
+        app.modal_state.new_canvas.unit = crate::app::state::CanvasUnit::Pixels;
+        app.apply_new_canvas();
+    }
+
+    #[test]
+    fn a_new_canvas_drops_the_old_documents_selection_and_sessions() {
+        let mut app = app();
+        app.select_all();
+        app.gradient_press(Vec2::new(0.0, 0.0));
+        app.gradient_drag(Vec2::new(200.0, 0.0), false);
+        app.gradient_update();
+        app.shape_press(
+            crate::app::shape_tool::ShapeKind::Line,
+            Vec2::new(10.0, 10.0),
+        );
+        new_canvas(&mut app);
+
+        assert!(!app.selection_manager.has_selection(), "selection kept");
+        assert!(app.workspace.gradient.session.is_none(), "gradient kept");
+        assert!(app.workspace.shapes.session.is_none(), "shape kept");
+        // Applying whatever was left must not touch the new document.
+        app.gradient_commit();
+        app.shape_commit();
+        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 0);
+    }
+
+    #[test]
+    fn a_new_canvas_drops_a_floating_transform() {
+        let mut app = app();
+        // Something to float.
+        app.canvas_mut()
+            .set_layer_tile_data(1, 0, 0, vec![Color32::RED; 64 * 64]);
+        app.active_tool = crate::app::tools::Tool::Transform(Default::default());
+        crate::app::transform::transform_press(&mut app, Vec2::new(10.0, 10.0));
+        crate::app::transform::transform_release(&mut app);
+        assert!(app.layer_state.floating_layer_idx.is_some());
+        new_canvas(&mut app);
+        assert!(app.layer_state.floating_layer_idx.is_none());
+        assert_eq!(app.canvas.layers.len(), 2, "no stray floating layer");
+        // Leaving the tool (which applies a float) is harmless now.
+        crate::app::transform::commit_floating_layer(&mut app);
+        assert_eq!(app.canvas.layers.len(), 2);
+    }
+
+    #[test]
+    fn opening_a_project_drops_the_old_sessions() {
+        let mut app = app();
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let path = std::env::temp_dir().join(format!("rp-open-{}.rpainter", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        app.select_all();
+        app.gradient_press(Vec2::new(0.0, 0.0));
+        app.gradient_drag(Vec2::new(200.0, 0.0), false);
+        app.gradient_update();
+        app.load_project_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(app.workspace.gradient.session.is_none(), "gradient kept");
+        assert!(!app.selection_manager.has_selection(), "selection kept");
+        app.gradient_commit();
+        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 0);
     }
 }

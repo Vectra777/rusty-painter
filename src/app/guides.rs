@@ -69,6 +69,14 @@ pub struct GuideState {
     ruler_line: Option<(Vec2, Vec2)>,
 }
 
+impl GuideState {
+    /// Let go of any handle being dragged.
+    pub(crate) fn end_drag(&mut self) {
+        self.drag = None;
+        self.ruler_line = None;
+    }
+}
+
 impl PainterApp {
     fn symmetry_guides_shown(&self) -> bool {
         self.workspace.symmetry.is_active() && !self.workspace.guides.hide_symmetry
