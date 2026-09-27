@@ -4,6 +4,7 @@
 pub(crate) mod blend;
 pub(crate) mod fill;
 pub(crate) mod gradient;
+pub(crate) mod gradient_colors;
 pub(crate) mod guides;
 pub(crate) mod liquify;
 pub(crate) mod palette;

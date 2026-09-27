@@ -222,10 +222,8 @@ impl PainterApp {
                 data: data.into(),
             })
             .collect();
-        if !tiles.is_empty()
-            && let Some(history) = self.layer_state.histories.get_mut(layer_idx)
-        {
-            history.push_action(UndoAction {
+        if !tiles.is_empty() {
+            self.layer_state.history.push_action(UndoAction {
                 tiles,
                 selection: None,
                 transform: None,
@@ -294,7 +292,7 @@ mod tests {
             (px.r() as i32 - 120).abs() <= 3 && (px.g() as i32 - 120).abs() <= 3,
             "the red is gone: {px:?}"
         );
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         let tile = app.canvas.get_layer_tile_data(1, 0, 0).unwrap();
         assert_eq!(tile[50 * 64 + 50], red, "undone");

@@ -87,9 +87,7 @@ impl PainterApp {
             self.mark_tile_damage(tx, ty, rect);
         }
         for finished in self.stroke_worker.take_finished() {
-            if let Some(history) = self.layer_state.histories.get_mut(finished.layer_idx) {
-                history.push_action(finished.undo);
-            }
+            self.layer_state.history.push_action(finished.undo);
         }
         self.stroke_worker.is_busy()
     }

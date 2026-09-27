@@ -55,6 +55,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
             .size()
             .x;
         if width + 12.0 < ui.available_width() {
+            let hint = crate::app::input::keyboard::with_keycaps(ui.ctx(), hint);
             ui.label(RichText::new(hint).small().color(TEXT_DIM));
         }
     });
@@ -127,7 +128,7 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     vdivider(ui);
     crate::ui::shape_menu::ruler_controls(app, ui);
 
-    "[ ] size  ·  Alt+click pick color  ·  Space drag to pan"
+    "{[} {]} size  ·  Alt+click pick color  ·  Space drag to pan"
 }
 
 /// Smudge / Blur: the brush's size, strength (flow) and softness, plus the
@@ -197,7 +198,6 @@ pub(crate) fn gradient_options(
     ui: &mut egui::Ui,
     compact: bool,
 ) -> &'static str {
-    use crate::app::tools::gradient::GradientColors;
     use crate::canvas::gradient::{GradientRepeat, GradientShape};
     if compact {
         tool_title(ui, "Gradient");
@@ -217,15 +217,16 @@ pub(crate) fn gradient_options(
     if compact {
         vdivider(ui);
     }
-    changed |= segmented(
-        ui,
-        &mut s.colors,
-        &[
-            (GradientColors::ForegroundToBackground, "To secondary"),
-            (GradientColors::ForegroundToTransparent, "To clear"),
-        ],
-        compact,
+    let brush_colors = (
+        app.brush_state.brush.brush_options.color,
+        app.brush_state.secondary_color,
     );
+    let (picked, edit) = gradient_picker(ui, &mut app.workspace.gradient, brush_colors);
+    changed |= picked;
+    if let Some(copy) = edit {
+        app.gradient_edit(copy);
+    }
+    let s = &mut app.workspace.gradient.settings;
     if compact {
         vdivider(ui);
     }
@@ -275,6 +276,110 @@ pub(crate) fn gradient_options(
         app.gradient_cancel();
     }
     "Drag from the first colour to the second  ·  Shift: 15° steps  ·  drag the ends to adjust  ·  Enter apply"
+}
+
+/// The gradient's colours as a strip; a click lists every choice (the brush
+/// colours, the presets and the user's own) with a preview of each. Returns
+/// whether the choice changed, and whether the editor was asked for (on a
+/// new copy: `Some(true)`).
+fn gradient_picker(
+    ui: &mut egui::Ui,
+    state: &mut crate::app::tools::gradient::GradientToolState,
+    (primary, secondary): (egui::Color32, egui::Color32),
+) -> (bool, Option<bool>) {
+    use crate::app::tools::gradient::GradientColors;
+    use crate::ui::widgets::paint_gradient_strip;
+    let id = ui.make_persistent_id("gradient_colors");
+    let height = ui.spacing().interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(96.0, height), egui::Sense::click());
+    let library = &state.library;
+    let colors = &mut state.settings.colors;
+    paint_gradient_strip(
+        ui.painter(),
+        rect.shrink(3.0),
+        &library.stops(*colors, primary, secondary),
+    );
+    if response.hovered() {
+        ui.painter().rect_stroke(
+            rect.shrink(2.0),
+            0.0,
+            egui::Stroke::new(1.0_f32, TEXT_STRONG),
+        );
+    }
+    let response =
+        response.on_hover_text(format!("{}  ·  click for presets", library.name(*colors)));
+    if response.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(id));
+    }
+    let mut edit = ui
+        .button("Edit…")
+        .on_hover_text("Change the colours in the Gradient Editor (a preset is copied first)")
+        .clicked()
+        .then_some(false);
+    let mut changed = false;
+    let row_height = if metrics(ui.ctx()).touch { 36.0 } else { 24.0 };
+    egui::popup_below_widget(
+        ui,
+        id,
+        &response,
+        egui::PopupCloseBehavior::CloseOnClick,
+        |ui| {
+            ui.set_min_width(230.0);
+            egui::ScrollArea::vertical()
+                .max_height(420.0)
+                .show(ui, |ui| {
+                    for choice in library.choices() {
+                        if choice == GradientColors::Custom(0) {
+                            ui.separator();
+                            ui.label(
+                                RichText::new("YOUR GRADIENTS")
+                                    .small()
+                                    .strong()
+                                    .color(TEXT_DIM),
+                            );
+                        }
+                        let (row, item) = ui.allocate_exact_size(
+                            egui::vec2(230.0, row_height),
+                            egui::Sense::click(),
+                        );
+                        if choice == *colors {
+                            ui.painter().rect_filled(row, 2.0, ACCENT_DIM);
+                        } else if item.hovered() {
+                            ui.painter().rect_filled(row, 2.0, WIDGET_HOVER);
+                        }
+                        let strip = egui::Rect::from_min_size(
+                            row.min + egui::vec2(4.0, 4.0),
+                            egui::vec2(88.0, row.height() - 8.0),
+                        );
+                        paint_gradient_strip(
+                            ui.painter(),
+                            strip,
+                            &library.stops(choice, primary, secondary),
+                        );
+                        ui.painter().text(
+                            egui::pos2(strip.right() + 8.0, row.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            library.name(choice),
+                            egui::TextStyle::Body.resolve(ui.style()),
+                            TEXT,
+                        );
+                        if item.clicked() && choice != *colors {
+                            *colors = choice;
+                            changed = true;
+                        }
+                    }
+                });
+            ui.separator();
+            if ui
+                .button("New gradient…")
+                .on_hover_text("A copy of the chosen gradient, to change in the editor")
+                .clicked()
+            {
+                edit = Some(true);
+            }
+        },
+    );
+    (changed, edit)
 }
 
 fn shape_options(
@@ -412,9 +517,18 @@ pub(crate) fn fill_options(app: &mut PainterApp, ui: &mut egui::Ui, compact: boo
     segmented(
         ui,
         &mut f.mode,
-        &[(FillMode::Bucket, "Bucket"), (FillMode::Enclose, "Enclose")],
+        &[
+            (FillMode::Bucket, "Bucket"),
+            (FillMode::Enclose, "Enclose"),
+            (FillMode::LassoDelete, "Lasso delete"),
+        ],
         compact,
     );
+    // Lasso delete erases exactly what it encloses: none of the rest apply.
+    if f.mode == FillMode::LassoDelete {
+        return "Draw around what to erase from the layer (inside the selection, if any)  ·  \
+                G: next mode  ·  Delete key: erase the selection";
+    }
     if compact {
         vdivider(ui);
         ui.label(RichText::new("Look at").color(TEXT_DIM));
@@ -467,9 +581,9 @@ pub(crate) fn fill_options(app: &mut PainterApp, ui: &mut egui::Ui, compact: boo
     }
     ui.checkbox(&mut s.antialias, "Smooth edge");
     match f.mode {
-        FillMode::Bucket => "Click an area to fill it  ·  G toggles Enclose",
-        FillMode::Enclose => {
-            "Draw around the areas to fill, even across lines  ·  G toggles Bucket"
+        FillMode::Bucket => "Click an area to fill it  ·  G: next mode (Enclose)",
+        FillMode::Enclose | FillMode::LassoDelete => {
+            "Draw around the areas to fill, even across lines  ·  G: next mode (Lasso delete)"
         }
     }
 }

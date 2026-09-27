@@ -35,6 +35,8 @@ criterion = "0.5"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 octotablet = "0.1"
 rfd = "0.17.2"
+# Images on the system clipboard (copy / paste between apps).
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30.12", features = ["android-native-activity"] }

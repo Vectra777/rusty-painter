@@ -167,6 +167,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     let mut add_folder = false;
     let mut add_mask = false;
     let mut to_delete = None;
+    let mut duplicate: Option<usize> = None;
     let mut active_idx = app.canvas.active_layer_idx;
     let mut needs_refresh = false;
     let mut rows: Vec<RowInfo> = Vec::new();
@@ -425,13 +426,11 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 if row_response.clicked() {
                     active_idx = i;
                 }
+                // Double-click renames (folders open and close with their
+                // arrow).
                 if row_response.double_clicked() {
-                    if is_group {
-                        toggle_expanded = Some(i);
-                    } else {
-                        active_idx = i;
-                        renaming = Some(i);
-                    }
+                    active_idx = i;
+                    renaming = Some(i);
                 }
                 // The background stays at the bottom.
                 if row_response.drag_started() && i != 0 {
@@ -442,6 +441,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     if ui.button("Rename").clicked() {
                         active_idx = i;
                         renaming = Some(i);
+                        ui.close_menu();
+                    }
+                    if !is_group && i != 0 && ui.button("Duplicate").clicked() {
+                        duplicate = Some(i);
                         ui.close_menu();
                     }
                     if !is_group && i != 0 {
@@ -564,6 +567,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     }
     if add_mask {
         app.add_mask_to_active();
+    }
+    if let Some(idx) = duplicate {
+        app.canvas_mut().active_layer_idx = idx;
+        app.duplicate_layer();
     }
     if let Some(idx) = to_delete {
         app.remove_layer(idx);

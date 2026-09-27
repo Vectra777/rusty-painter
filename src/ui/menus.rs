@@ -5,10 +5,11 @@ use crate::PainterApp;
 use crate::ui::icons::Icon;
 use crate::ui::style::*;
 use crate::ui::widgets::{bar_frame, icon_button};
-use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, RichText};
+use eframe::egui::{self, Key, Modifiers, RichText};
 
+/// As printed on this keyboard (see [`crate::app::input::keyboard`]).
 fn shortcut(ctx: &egui::Context, modifiers: Modifiers, key: Key) -> String {
-    ctx.format_shortcut(&KeyboardShortcut::new(modifiers, key))
+    crate::app::input::keyboard::shortcut_label(ctx, modifiers, key)
 }
 
 fn menu_action_id() -> egui::Id {
@@ -131,8 +132,24 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.apply_history(true);
     }
     ui.separator();
+    if menu_item(ui, "Cut", Some(shortcut(ctx, cmd, Key::X))) {
+        app.cut_selection();
+    }
+    if menu_item(ui, "Copy", Some(shortcut(ctx, cmd, Key::C))) {
+        app.copy_selection(false);
+    }
+    if menu_item(ui, "Copy Merged", Some(shortcut(ctx, cmd_shift, Key::C))) {
+        app.copy_selection(true);
+    }
+    if menu_item(ui, "Paste", Some(shortcut(ctx, cmd, Key::V))) {
+        app.paste();
+    }
+    ui.separator();
     if menu_item(ui, "New Layer", Some(shortcut(ctx, cmd_shift, Key::N))) {
         app.add_layer_and_select();
+    }
+    if menu_item(ui, "Duplicate Layer", Some(shortcut(ctx, cmd, Key::J))) {
+        app.duplicate_layer();
     }
     if menu_item(ui, "Palette…", None) {
         app.workspace.palette.open = true;
@@ -159,6 +176,9 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         Some(shortcut(ctx, Modifiers::SHIFT, Key::F5)),
     ) {
         app.content_aware_fill();
+    }
+    if menu_item(ui, "Delete Selected Pixels", Some("Delete".into())) {
+        app.delete_selection_contents();
     }
     if menu_item(ui, "Deselect", Some(shortcut(ctx, cmd, Key::D))) {
         app.deselect();
@@ -208,6 +228,14 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if app.workspace.touch_mode {
         ui.checkbox(&mut app.workspace.finger_painting, "Paint with one finger")
             .on_hover_text("When off, only a stylus paints and one finger pans the canvas.");
+    }
+    let stats = &mut app.workspace.frame_stats;
+    if ui
+        .checkbox(&mut stats.enabled, "Frame times")
+        .on_hover_text("Frames per second and time per frame in the status bar")
+        .changed()
+    {
+        stats.window_open = stats.enabled;
     }
     ui.separator();
     if menu_item(ui, "Reset Panel Layout", None) {

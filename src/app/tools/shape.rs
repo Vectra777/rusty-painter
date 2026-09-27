@@ -470,9 +470,7 @@ impl PainterApp {
         if undo.tiles.is_empty() {
             return;
         }
-        if let Some(history) = self.layer_state.histories.get_mut(layer_idx) {
-            history.push_action(undo);
-        }
+        self.layer_state.history.push_action(undo);
         if let Some(rect) = changed {
             self.mark_tiles_in_bounds_dirty(rect);
         }
@@ -622,7 +620,7 @@ mod tests {
         assert!(painted(&app, 20, 50), "outline");
         assert!(painted(&app, 60, 50), "fill");
         assert!(!painted(&app, 110, 50));
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert!(
             !painted(&app, 20, 50) && !painted(&app, 60, 50),

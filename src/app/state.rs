@@ -1,5 +1,5 @@
 //! The app's state, grouped by concern: brush, viewport, render cache,
-//! layers (histories, floating layer), modals, export and workspace
+//! layers (undo history, floating layer), modals, export and workspace
 //! (tool settings and panel layout).
 
 use crate::app::document::{CanvasTile, ColorModel, NewCanvasSettings, TILE_SIZE};
@@ -240,7 +240,10 @@ pub struct LayerState {
     pub transform_preview_pending: bool,
     /// The running liquify session, if any.
     pub liquify: Option<crate::app::tools::liquify::LiquifySession>,
-    pub histories: Vec<History>,
+    /// The document's undo history: one stack for every layer, in the
+    /// order things were done, so undo always takes back the last change
+    /// wherever it was.
+    pub history: History,
     /// Per-layer thumbnail textures for the layers panel, by layer index.
     pub thumbnails: Vec<Option<egui::TextureHandle>>,
     /// Set when canvas content may have changed since thumbnails were built.
@@ -259,7 +262,7 @@ impl LayerState {
             float_overlay: None,
             transform_preview_pending: false,
             liquify: None,
-            histories: (0..layer_count).map(|_| History::new()).collect(),
+            history: History::new(),
             thumbnails: Vec::new(),
             thumbnails_dirty: true,
             thumbnails_built_at: None,
@@ -385,6 +388,18 @@ pub struct WorkspaceState {
     pub patch: crate::app::tools::patch::PatchState,
     /// Android's image picker (the photo library).
     pub gallery: crate::ui::image_gallery::GalleryState,
+    /// Textures dropped this frame, kept until the next one. egui-wgpu frees
+    /// a texture before submitting the frame's uploads, so one updated and
+    /// freed in the same frame fails the submit.
+    pub retired_textures: Vec<egui::TextureHandle>,
+    /// Frame timing for the readout (View → Frame Times).
+    pub frame_stats: crate::app::frame_stats::FrameStats,
+    /// Copied pixels (Ctrl+C / Ctrl+V).
+    pub clipboard: crate::app::clipboard::ClipboardState,
+    /// The display's refresh rate, measured from frame pacing.
+    pub refresh: crate::app::frame_stats::RefreshRate,
+    /// Keyboard layout, for where shortcuts are and how they're labelled.
+    pub keyboard: crate::app::input::keyboard::KeyboardState,
 }
 
 impl WorkspaceState {
@@ -424,6 +439,11 @@ impl WorkspaceState {
             shapes: Default::default(),
             gradient: Default::default(),
             patch: Default::default(),
+            retired_textures: Vec::new(),
+            frame_stats: Default::default(),
+            clipboard: Default::default(),
+            refresh: Default::default(),
+            keyboard: crate::app::input::keyboard::KeyboardState::new(),
         }
     }
 }

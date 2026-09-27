@@ -174,7 +174,7 @@ fn rasterize_shape(shape: &SelectionShape, canvas_size: [usize; 2]) -> Option<Se
 }
 
 /// Canvas-space bounding box of a shape.
-fn shape_bounds(shape: &SelectionShape) -> Option<eframe::egui::Rect> {
+pub(crate) fn shape_bounds(shape: &SelectionShape) -> Option<eframe::egui::Rect> {
     use eframe::egui::{Rect, pos2, vec2};
     match shape {
         SelectionShape::Rectangle { start, end } => Some(Rect::from_two_pos(

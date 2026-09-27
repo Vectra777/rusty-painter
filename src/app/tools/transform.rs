@@ -116,6 +116,21 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
         .as_ref()
         .and_then(|s| app.canvas.layer_index_of(s.source_id))
         .unwrap_or(idx.saturating_sub(1));
+    // What the tiles the pixels land on hold now (besides those they came
+    // from, saved when lifted): undo puts them back as they were, not empty.
+    let landing: HashMap<(i32, i32), Vec<Color32>> = match &session {
+        Some(session) => app
+            .canvas
+            .layer_tile_keys(idx)
+            .into_iter()
+            .filter(|key| !session.source_tiles.contains_key(key))
+            .filter_map(|(tx, ty)| {
+                let data = app.canvas.get_layer_tile_data(target, tx, ty)?;
+                Some(((tx, ty), data))
+            })
+            .collect(),
+        None => HashMap::new(),
+    };
     let touched = exclusive(&mut app.canvas).merge_floating(idx, target);
     app.remove_layer_state(idx);
     app.layer_state.floating_layer_idx = None;
@@ -128,6 +143,7 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
         let ts = app.canvas.tile_size();
         // Moved into the undo step, not copied.
         let mut source_tiles = std::mem::take(&mut session.source_tiles);
+        source_tiles.extend(landing);
         let mut keys: Vec<(i32, i32)> = source_tiles.keys().copied().collect();
         keys.extend(touched.iter().filter(|k| !source_tiles.contains_key(k)));
         let tiles: Vec<TileSnapshot> = keys
@@ -147,16 +163,14 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
             })
             .collect();
         let moved = info.is_some_and(|i| !i.is_identity());
-        if moved && let Some(active) = app.canvas.layer_index_of(session.source_id) {
+        if moved && app.canvas.layer_index_of(session.source_id).is_some() {
             let action = UndoAction {
                 tiles,
                 selection: Some(session.selection.clone()),
                 transform: None,
                 layer_action: None,
             };
-            if let Some(history) = app.layer_state.histories.get_mut(active) {
-                history.push_action(action);
-            }
+            app.layer_state.history.push_action(action);
         }
     }
 
@@ -730,4 +744,71 @@ pub(crate) fn draw_float_overlay(
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     painter.add(egui::Shape::mesh(mesh));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canvas::Canvas;
+    use crate::selection::{SelectionMode, SelectionShape};
+
+    const RED: Color32 = Color32::from_rgb(255, 0, 0);
+    const BLUE: Color32 = Color32::from_rgb(0, 0, 255);
+
+    fn pixel(app: &PainterApp, layer: usize, x: i32, y: i32) -> Color32 {
+        app.canvas
+            .get_layer_tile_data(layer, x / 64, y / 64)
+            .and_then(|t| t.get(((y % 64) * 64 + x % 64) as usize).copied())
+            .unwrap_or(Color32::TRANSPARENT)
+    }
+
+    /// Layer 1: a red square in tile (0,0), blue paint filling tile (2,0).
+    fn app() -> PainterApp {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(256, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        let mut red = vec![Color32::TRANSPARENT; 64 * 64];
+        for y in 10..30 {
+            for x in 10..30 {
+                red[y * 64 + x] = RED;
+            }
+        }
+        app.canvas_mut().set_layer_tile_data(1, 0, 0, red);
+        app.canvas_mut()
+            .set_layer_tile_data(1, 2, 0, vec![BLUE; 64 * 64]);
+        app.selection_manager.canvas_size = [256, 64];
+        app
+    }
+
+    /// Select the red square and move it by `dx` with the Transform tool.
+    fn move_square(app: &mut PainterApp, dx: f32) {
+        app.selection_manager.apply_shape(
+            SelectionShape::Rectangle {
+                start: Vec2::new(10.0, 10.0),
+                end: Vec2::new(30.0, 30.0),
+            },
+            SelectionMode::Replace,
+        );
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        transform_press(app, Vec2::new(20.0, 20.0));
+        transform_drag(app, Vec2::new(20.0 + dx, 20.0), false);
+        flush_transform_preview(app);
+        transform_release(app);
+        commit_floating_layer(app);
+    }
+
+    #[test]
+    fn undoing_a_move_onto_paint_keeps_the_paint_that_was_there() {
+        let mut app = app();
+        move_square(&mut app, 128.0);
+        assert_eq!(pixel(&app, 1, 148, 20), RED, "moved onto the blue");
+        assert_eq!(pixel(&app, 1, 20, 20).a(), 0, "lifted from its place");
+        app.apply_history(false);
+        assert_eq!(pixel(&app, 1, 20, 20), RED, "back where it was");
+        assert_eq!(pixel(&app, 1, 148, 20), BLUE, "the blue under it is back");
+        assert_eq!(pixel(&app, 1, 180, 50), BLUE, "the rest of the blue too");
+        app.apply_history(true);
+        assert_eq!(pixel(&app, 1, 148, 20), RED, "redo moves it again");
+        assert_eq!(pixel(&app, 1, 180, 50), BLUE);
+        assert_eq!(pixel(&app, 1, 20, 20).a(), 0);
+    }
 }

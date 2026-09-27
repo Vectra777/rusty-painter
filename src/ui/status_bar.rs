@@ -71,6 +71,7 @@ pub fn status_bar(app: &mut PainterApp, ctx: &egui::Context) {
                             crate::ui::menus::panel_toggles(app, ui, size);
                             vdivider(ui);
                         }
+                        crate::ui::frame_times::status_readout(app, ui);
                         view_controls(app, ui, compact);
                         // Report only what the controls use, not the free space.
                         ui.min_rect().width()
@@ -208,13 +209,20 @@ fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui, compact: bool) {
     {
         app.set_ruler(!ruler);
     }
-    if !compact && small_button(ui, "1:1", "Actual pixels (Ctrl+1)") {
+    let keys = |text: &str| crate::app::input::keyboard::with_keycaps(ui.ctx(), text);
+    let (actual_tip, fit_tip, in_tip, out_tip) = (
+        keys("Actual pixels (Ctrl+{1})"),
+        keys("Fit to window (Ctrl+{0})"),
+        keys("Zoom in (Ctrl+{=})"),
+        keys("Zoom out (Ctrl+{-})"),
+    );
+    if !compact && small_button(ui, "1:1", &actual_tip) {
         app.set_zoom_from_center(1.0);
     }
-    if small_button(ui, "Fit", "Fit to window (Ctrl+0)") {
+    if small_button(ui, "Fit", &fit_tip) {
         app.fit_view();
     }
-    if !compact && small_button(ui, "+", "Zoom in (Ctrl+=)") {
+    if !compact && small_button(ui, "+", &in_tip) {
         app.zoom_by_from_center(1.25);
     }
 
@@ -230,7 +238,7 @@ fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui, compact: bool) {
         app.set_zoom_from_center(percent / 100.0);
     }
 
-    if !compact && small_button(ui, "−", "Zoom out (Ctrl+-)") {
+    if !compact && small_button(ui, "−", &out_tip) {
         app.zoom_by_from_center(0.8);
     }
 

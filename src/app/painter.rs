@@ -2,6 +2,7 @@
 //! frame as a fixed sequence of stages (setup, chrome, canvas, tools,
 //! pixels, windows), each a method below it.
 
+use crate::app::frame_stats::Stage;
 use crate::app::input;
 use crate::app::stroke_ops::exclusive;
 use crate::app::view::render;
@@ -21,8 +22,11 @@ use std::sync::Arc;
 
 use crate::selection::SelectionManager;
 
-/// How long a frame waits for the stroke worker before drawing anyway.
-const STROKE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(5);
+/// Share of a frame the stroke worker may take to paint this frame's dabs
+/// before the frame goes on without them (they show next frame).
+const STROKE_FRAME_SHARE: f32 = 0.4;
+/// The budget before the refresh rate is known, and its bounds (ms).
+const STROKE_BUDGET_MS: (f32, std::ops::RangeInclusive<f32>) = (5.0, 1.0..=6.0);
 
 /// Main egui application that owns the canvas, brush state, UI and rendering caches.
 pub struct PainterApp {
@@ -50,8 +54,13 @@ pub struct PainterApp {
 
 impl eframe::App for PainterApp {
     /// Handle UI, input, painting updates, and tile uploads each frame.
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.workspace.frame_stats.begin(frame.info().cpu_usage);
+        self.workspace.refresh.tick();
+        self.workspace.keyboard.observe(ctx);
         let mut needs_repaint = false;
+        // Last frame's dropped textures, now safe to free.
+        self.workspace.retired_textures.clear();
 
         // 1. Frame setup: theme, panel sizes, shortcuts, finished background work.
         let touch = self.workspace.touch_mode;
@@ -74,6 +83,7 @@ impl eframe::App for PainterApp {
         self.poll_export();
 
         ui::layers::refresh_thumbnails(self, ctx);
+        self.workspace.frame_stats.mark(Stage::Setup);
 
         // 2. Chrome. Bars first so they span the full window width; the tool strip is
         // added before the docks so it sits at the far left.
@@ -90,6 +100,7 @@ impl eframe::App for PainterApp {
         ui::toolbar::toolbar(self, ctx);
 
         layout::show_tool_docks(self, ctx);
+        self.workspace.frame_stats.mark(Stage::Panels);
 
         let canvas_frame = egui::Frame::none().fill(ui::style::BG_CANVAS);
         egui::CentralPanel::default()
@@ -139,7 +150,8 @@ impl eframe::App for PainterApp {
                 // so the layer isn't CPU-rendered even once while dragging.
                 crate::app::tools::transform::update_float_overlay(self, ctx);
                 crate::app::tools::transform::flush_transform_preview(self);
-                // The gradient repaints at most once a frame while dragged.
+                // The gradient repaints at most once a frame while dragged,
+                // and only once its last repaint is all on screen.
                 self.gradient_update();
                 // Twirl / pinch / bloat keep working while the brush is held.
                 if self.liquify_is_holding() && self.workspace.liquify.mode.is_continuous() {
@@ -147,13 +159,14 @@ impl eframe::App for PainterApp {
                     self.liquify_hold(dt);
                     needs_repaint = true;
                 }
+                self.workspace.frame_stats.mark(Stage::Tools);
                 // 5. Pixels: let the stroke worker catch up, upload dirty
                 // tiles, paint the canvas, then the overlays on top.
                 // Give the stroke worker a short budget to paint this frame's
                 // samples so they usually show this frame; a heavy brush can't
                 // stall the frame beyond it and simply shows up next frame.
                 if self.brush_state.is_drawing {
-                    self.stroke_worker.wait_idle_for(STROKE_FRAME_BUDGET);
+                    self.stroke_worker.wait_idle_for(self.stroke_frame_budget());
                 }
                 if self.sync_stroke_worker() {
                     needs_repaint = true;
@@ -161,14 +174,19 @@ impl eframe::App for PainterApp {
                 if self.render_cache.tiles.iter().any(|t| t.dirty) {
                     self.layer_state.thumbnails_dirty = true;
                 }
+                self.workspace.frame_stats.mark(Stage::Stroke);
                 // Composite and paint after input, so this frame's dabs and any
                 // pan/zoom show up in this frame.
                 let (uploads, more_tiles) =
                     render::update_dirty_textures(self, &view, ui.clip_rect());
+                self.workspace.frame_stats.mark(Stage::Tiles);
                 if more_tiles {
                     needs_repaint = true;
                 }
                 crate::app::tools::transform::float_overlay_uploaded(self, more_tiles);
+                if self.gradient_uploaded(more_tiles) {
+                    needs_repaint = true;
+                }
                 render::paint_canvas(self, ui, &view, uploads);
 
                 if self.brush_state.is_drawing {
@@ -177,10 +195,12 @@ impl eframe::App for PainterApp {
 
                 self.draw_overlays(ctx, ui, &view);
                 ui::canvas_sliders::canvas_sliders(self, ctx, view.response.rect);
+                self.workspace.frame_stats.mark(Stage::Canvas);
             });
 
         // 6. Modals and floating windows.
         self.show_windows(ctx);
+        self.workspace.frame_stats.mark(Stage::Windows);
 
         // Single consolidated repaint request
         if needs_repaint {
@@ -391,10 +411,17 @@ impl PainterApp {
 
         crate::app::tools::transform::draw_float_overlay(self, ui.painter(), &map);
         self.draw_transform_overlay(ui.painter(), &map);
-        // Enclose-and-fill lasso in progress.
+        // Enclose-and-fill or lasso-delete lasso in progress (red when it
+        // erases).
         if matches!(self.active_tool, crate::app::tools::Tool::Fill)
             && self.workspace.fill.path.len() > 1
         {
+            let ink = if self.workspace.fill.mode == crate::app::tools::fill::FillMode::LassoDelete
+            {
+                egui::Color32::from_rgb(255, 110, 110)
+            } else {
+                egui::Color32::WHITE
+            };
             let pts: Vec<egui::Pos2> = self
                 .workspace
                 .fill
@@ -409,7 +436,7 @@ impl PainterApp {
             ));
             painter.add(egui::Shape::line(
                 pts.clone(),
-                egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+                egui::Stroke::new(1.0_f32, ink),
             ));
             if let (Some(a), Some(b)) = (pts.first(), pts.last()) {
                 painter.line_segment(
@@ -429,10 +456,23 @@ impl PainterApp {
         ui::general_settings::shortcuts_window(self, ctx);
         ui::brush_list::presets_window(self, ctx);
         ui::export_modal::export_modal(self, ctx);
+        ui::frame_times::frame_times_window(self, ctx);
+        ui::gradient_editor::gradient_editor_window(self, ctx);
     }
 }
 
 impl PainterApp {
+    /// How long a frame waits for the stroke worker before drawing anyway:
+    /// a share of one refresh, so a 240 Hz screen keeps its frame rate while
+    /// a heavy brush paints.
+    fn stroke_frame_budget(&self) -> std::time::Duration {
+        let (default, bounds) = STROKE_BUDGET_MS;
+        let ms = self.workspace.refresh.period_ms().map_or(default, |p| {
+            (p * STROKE_FRAME_SHARE).clamp(*bounds.start(), *bounds.end())
+        });
+        std::time::Duration::from_secs_f32(ms / 1000.0)
+    }
+
     /// Clear every layer to white. Not undoable.
     pub(crate) fn clear_canvas(&mut self) {
         self.canvas_mut().clear(Color32::WHITE);
@@ -461,14 +501,8 @@ impl PainterApp {
         }
         // Finish any stroke first so it is in the history (and undoable).
         self.release_canvas();
-        if self.canvas.active_layer_idx < self.layer_state.histories.len() {
-            let active_idx = self.canvas.active_layer_idx;
-            // Detach the active layer's History for the duration of the
-            // call: `History::undo`/`redo` need `&mut Canvas` to reverse a
-            // layer add/remove/move, and this avoids holding a live borrow
-            // of `self.layer_state.histories` at the same time.
-            let mut history = std::mem::take(&mut self.layer_state.histories[active_idx]);
-
+        {
+            let history = &mut self.layer_state.history;
             let (affected, layer_action) = if redo {
                 history.redo(
                     exclusive(&mut self.canvas),
@@ -483,31 +517,15 @@ impl PainterApp {
                 )
             };
 
-            // A structural change (layer added/removed/moved) also needs
-            // the per-layer side-car state (this same `histories` vec,
-            // render caches, UI colors) mirrored to match — `History`
-            // itself only has `&mut Canvas`, so it can't reach those here.
+            // A structural change (layer added/removed/moved) also needs the
+            // per-layer side-car state (UI colors) mirrored to match —
+            // `History` only has `&mut Canvas`, so it can't reach those.
             use crate::canvas::history::LayerHistoryOp;
             match &layer_action {
                 Some(LayerHistoryOp::Added { index, .. }) => {
                     if redo {
-                        // Redo: the layer was just re-inserted into
-                        // canvas.layers at `index`. Give it fresh side-car
-                        // slots, then reattach this exact History object —
-                        // it already carries whatever this layer's own
-                        // undo/redo stacks held.
                         self.insert_layer_state(*index);
-                        self.layer_state.histories[*index] = history;
                     } else {
-                        // Undo: the layer was just removed from
-                        // canvas.layers at `index`. Its own History
-                        // (`history`, held locally) is intentionally
-                        // dropped here — reaching this action at all means
-                        // it's the very first entry ever pushed for this
-                        // layer (nothing else could still be above it on
-                        // the SAME per-layer stack), so nothing of value is
-                        // lost except the ability to redo the add itself;
-                        // adding the layer again is one click away.
                         self.remove_layer_state(*index);
                     }
                 }
@@ -520,25 +538,11 @@ impl PainterApp {
                     } else {
                         self.insert_layer_states(&indices);
                     }
-                    // `history` belongs to the surviving active layer (per
-                    // the "record onto whichever layer ends up active"
-                    // rule), not the one just added/removed above — put it
-                    // back wherever the canvas now says is active.
-                    let new_active = self.canvas.active_layer_idx;
-                    self.layer_state.histories[new_active] = history;
                 }
                 Some(LayerHistoryOp::Moved { from, to, .. }) => {
-                    // `from`/`to` are the move just applied, which may be a
-                    // layer other than the selected one. `history` came out of
-                    // the selected layer's slot, so put it back before
-                    // mirroring the move, then re-take it from where the
-                    // selection now is.
-                    self.layer_state.histories[active_idx] = history;
                     self.reorder_layer_state(*from, *to);
                 }
-                None => {
-                    self.layer_state.histories[active_idx] = history;
-                }
+                None => {}
             }
 
             if layer_action.is_some() {

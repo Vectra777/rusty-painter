@@ -22,7 +22,10 @@ impl PainterApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let canvas_w = 4000;
         let canvas_h = 4000;
-        let canvas = crate::canvas::Canvas::new(canvas_w, canvas_h, Color32::WHITE, TILE_SIZE);
+        let mut canvas = crate::canvas::Canvas::new(canvas_w, canvas_h, Color32::WHITE, TILE_SIZE);
+        // New documents blend like Krita and Photoshop; the New Canvas
+        // dialog starts from this.
+        canvas.blend_space = crate::canvas::blend_modes::BlendSpace::Gamma;
         let layer_count = canvas.layers.len();
         let new_canvas = NewCanvasSettings::from_canvas(&canvas);
         let color_model = new_canvas.color_model;
@@ -69,6 +72,13 @@ impl PainterApp {
         };
 
         app.load_brush_tips(cc.egui_ctx.clone());
+        // The user's gradients sit next to the brushes folder.
+        let gradients = app
+            .brush_state
+            .brushes_path
+            .with_file_name("gradients.json");
+        app.workspace.gradient.library =
+            crate::app::tools::gradient::GradientLibrary::load(gradients);
         app
     }
 

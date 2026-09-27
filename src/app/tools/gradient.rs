@@ -4,20 +4,12 @@
 //! it, or another tool. Esc cancels.
 
 use crate::app::PainterApp;
+pub use crate::app::tools::gradient_colors::{GradientColors, GradientLibrary};
 use crate::canvas::gradient::{Gradient, GradientRepeat, GradientShape, Ramp};
 use crate::canvas::history::UndoAction;
 use crate::canvas::storage::LayerKind;
 use crate::selection::SelectionMask;
 use eframe::egui::{self, Color32, Stroke, Vec2};
-
-/// Which colours a gradient runs between.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GradientColors {
-    /// Brush colour to secondary colour.
-    ForegroundToBackground,
-    /// Brush colour fading out.
-    ForegroundToTransparent,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GradientSettings {
@@ -68,6 +60,25 @@ pub struct GradientSession {
 pub struct GradientToolState {
     pub settings: GradientSettings,
     pub session: Option<GradientSession>,
+    /// Presets and the user's own gradients.
+    pub library: GradientLibrary,
+    /// The Gradient Editor, while open.
+    pub editor: Option<GradientEditor>,
+    /// The last repaint isn't all on screen yet (a big area takes a few
+    /// frames to upload); repainting before then would show bands of old
+    /// and new gradient.
+    uploading: bool,
+}
+
+/// The Gradient Editor's state: which user gradient it edits.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GradientEditor {
+    /// Index into [`GradientLibrary::custom`].
+    pub index: usize,
+    /// The stop being edited.
+    pub selected: usize,
+    /// The stop being dragged along the strip.
+    pub dragging: Option<usize>,
 }
 
 /// In screen points.
@@ -162,17 +173,47 @@ impl PainterApp {
     }
 
     /// Paint the gradient again after it (or its settings) changed. Called
-    /// once a frame, so dragging costs one repaint per frame.
+    /// once a frame, so dragging costs at most one repaint per frame, and
+    /// none until the last one is fully on screen.
     pub(crate) fn gradient_update(&mut self) {
-        let dirty = self
-            .workspace
-            .gradient
+        let state = &self.workspace.gradient;
+        let dirty = state
             .session
             .as_ref()
             .is_some_and(|s| s.dirty && (s.end - s.start).length() > 0.5);
-        if dirty {
+        if dirty && !state.uploading {
             self.gradient_paint();
+            self.workspace.gradient.uploading = true;
         }
+    }
+
+    /// After this frame's tile uploads: whether the gradient waits to be
+    /// repainted (so another frame is needed).
+    pub(crate) fn gradient_uploaded(&mut self, more_tiles: bool) -> bool {
+        let state = &mut self.workspace.gradient;
+        state.uploading &= more_tiles;
+        !state.uploading && state.session.as_ref().is_some_and(|s| s.dirty)
+    }
+
+    /// Open the Gradient Editor on the chosen gradient, or on a copy of it
+    /// when `copy` (a new gradient). The brush colours and presets can't
+    /// change, so they're always copied first (the copy looks the same, so
+    /// nothing repaints).
+    pub(crate) fn gradient_edit(&mut self, copy: bool) {
+        let state = &mut self.workspace.gradient;
+        let index = match state.settings.colors {
+            GradientColors::Custom(i) if !copy && i < state.library.custom.len() => i,
+            other => {
+                let mut copy = state.library.editable(other);
+                copy.name = format!("{} copy", copy.name);
+                state.settings.colors = state.library.add(copy);
+                state.library.custom.len() - 1
+            }
+        };
+        state.editor = Some(GradientEditor {
+            index,
+            ..Default::default()
+        });
     }
 
     /// Settings changed: repaint the gradient being placed.
@@ -193,18 +234,16 @@ impl PainterApp {
     fn gradient_paint(&mut self) {
         self.release_canvas();
         let settings = self.workspace.gradient.settings;
-        let brush = self.brush_state.brush.brush_options.color;
         let model = self.workspace.color_model;
-        let convert = |c: Color32| PainterApp::convert_color_for_model(c, model);
-        let from = convert(brush);
-        let to = match settings.colors {
-            GradientColors::ForegroundToBackground => convert(self.brush_state.secondary_color),
-            GradientColors::ForegroundToTransparent => {
-                let [r, g, b, _] = from.to_srgba_unmultiplied();
-                Color32::from_rgba_unmultiplied(r, g, b, 0)
-            }
-        };
-        let ramp = Ramp::new(from, to, self.canvas.blend_space, settings.opacity);
+        let mut stops = self.workspace.gradient.library.stops(
+            settings.colors,
+            self.brush_state.brush.brush_options.color,
+            self.brush_state.secondary_color,
+        );
+        for stop in &mut stops {
+            stop.color = PainterApp::convert_color_for_model(stop.color, model);
+        }
+        let ramp = Ramp::from_stops(&stops, self.canvas.blend_space, settings.opacity);
         let pool = std::sync::Arc::clone(&self.workspace.pool);
         let canvas = std::sync::Arc::clone(&self.canvas);
         let Some(session) = self.workspace.gradient.session.as_mut() else {
@@ -274,14 +313,12 @@ impl PainterApp {
         if tiles.is_empty() {
             return;
         }
-        if let Some(history) = self.layer_state.histories.get_mut(session.layer) {
-            history.push_action(UndoAction {
-                tiles,
-                selection: None,
-                transform: None,
-                layer_action: None,
-            });
-        }
+        self.layer_state.history.push_action(UndoAction {
+            tiles,
+            selection: None,
+            transform: None,
+            layer_action: None,
+        });
     }
 
     /// Take the gradient back off the layer.
@@ -323,11 +360,12 @@ pub(crate) fn draw_gradient(
         crate::ui::widgets::paint_swatch(painter, r, color);
     };
     let settings = app.workspace.gradient.settings;
-    let from = app.brush_state.brush.brush_options.color;
-    let to = match settings.colors {
-        GradientColors::ForegroundToBackground => app.brush_state.secondary_color,
-        GradientColors::ForegroundToTransparent => Color32::TRANSPARENT,
-    };
+    let stops = app.workspace.gradient.library.stops(
+        settings.colors,
+        app.brush_state.brush.brush_options.color,
+        app.brush_state.secondary_color,
+    );
+    let (from, to) = (stops[0].color, stops[stops.len() - 1].color);
     let (first, second) = if settings.reverse {
         (to, from)
     } else {
@@ -340,6 +378,7 @@ pub(crate) fn draw_gradient(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::tools::gradient_colors::PRESETS;
     use crate::canvas::Canvas;
 
     fn app() -> crate::PainterApp {
@@ -366,6 +405,7 @@ mod tests {
         app.gradient_press(Vec2::new(0.0, 32.0));
         app.gradient_drag(Vec2::new(128.0, 32.0), false);
         app.gradient_update();
+        app.gradient_uploaded(false);
         app.gradient_release();
         // Black to white, mixed in linear light: the middle is sRGB ~188.
         let (left, mid, right) = (
@@ -391,9 +431,51 @@ mod tests {
             "past the end: the end colour"
         );
         app.gradient_commit();
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert_eq!(pixel(&app, 80, 10).a(), 0, "undone");
+    }
+
+    #[test]
+    fn a_gradient_waits_for_its_last_repaint_to_reach_the_screen() {
+        let mut app = app();
+        app.gradient_press(Vec2::new(0.0, 32.0));
+        app.gradient_drag(Vec2::new(128.0, 32.0), false);
+        app.gradient_update();
+        // Tiles still uploading: a move doesn't repaint yet.
+        app.gradient_drag(Vec2::new(64.0, 32.0), false);
+        assert!(!app.gradient_uploaded(true));
+        app.gradient_update();
+        assert!(pixel(&app, 80, 10).r() < 235, "repainted too early");
+        // All on screen: the next frame repaints.
+        assert!(app.gradient_uploaded(false), "asks for another frame");
+        app.gradient_update();
+        assert!(pixel(&app, 80, 10).r() > 235, "repainted");
+    }
+
+    #[test]
+    fn a_preset_paints_its_own_colours() {
+        let mut app = app();
+        let sunset = PRESETS.iter().position(|p| p.name == "Sunset").unwrap();
+        app.workspace.gradient.settings.colors = GradientColors::Preset(sunset);
+        app.workspace.gradient.settings.dither = false;
+        // The first column is before the start.
+        app.gradient_press(Vec2::new(8.0, 32.0));
+        app.gradient_drag(Vec2::new(128.0, 32.0), false);
+        app.gradient_commit();
+        let [r, g, b, _] = PRESETS[sunset].stops[0].1;
+        let first = pixel(&app, 0, 10);
+        assert!(
+            first.r().abs_diff(r) <= 2 && first.g().abs_diff(g) <= 2 && first.b().abs_diff(b) <= 2,
+            "starts at the first stop: {first:?}"
+        );
+        assert!(pixel(&app, 127, 10).r() > 240, "ends on the yellow");
+        // Every preset lists its stops in order, from 0 to 1.
+        for preset in PRESETS {
+            let pos: Vec<f32> = preset.stops.iter().map(|s| s.0).collect();
+            assert!(pos.windows(2).all(|w| w[0] <= w[1]), "{}", preset.name);
+            assert_eq!((pos[0], pos[pos.len() - 1]), (0.0, 1.0), "{}", preset.name);
+        }
     }
 
     #[test]
@@ -404,7 +486,7 @@ mod tests {
         app.gradient_update();
         app.gradient_cancel();
         assert_eq!(pixel(&app, 50, 10).a(), 0);
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 0);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 0);
     }
 
     #[test]
@@ -442,6 +524,7 @@ mod tests {
                 app.gradient_drag(Vec2::new(1000.0 * i as f32, 3000.0), false);
                 let t = std::time::Instant::now();
                 app.gradient_update();
+                app.gradient_uploaded(false);
                 eprintln!("{colors:?} repaint {i}: {:?}", t.elapsed());
             }
             app.gradient_cancel();

@@ -4,8 +4,6 @@
 
 use crate::PainterApp;
 use crate::app::tools::Tool;
-use crate::canvas::history::{TileSnapshot, UndoAction};
-use crate::canvas::storage::LayerKind;
 use crate::selection::transform::TransformInfo;
 use eframe::egui::Color32;
 
@@ -41,77 +39,16 @@ impl PainterApp {
         let (w, h) = (img.width() as i32, img.height() as i32);
         let (ox, oy) = ((cw as i32 - w) / 2, (ch as i32 - h) / 2);
 
-        // Leave any running session first; it would target the old layer.
-        crate::app::tools::transform::commit_floating_layer(self);
-        self.liquify_commit();
-        self.release_canvas();
-
-        let (index, parent) = self.insertion_point(true);
-        let idx = self.insert_entry(index, name.to_string(), LayerKind::Paint, parent, true);
-        let Some(layer_id) = self.canvas.layer_id_at(idx) else {
-            return;
-        };
-
         let ts = self.canvas.tile_size() as i32;
-        let keys: Vec<(i32, i32)> = (oy.div_euclid(ts)..=(oy + h - 1).div_euclid(ts))
-            .flat_map(|ty| {
-                (ox.div_euclid(ts)..=(ox + w - 1).div_euclid(ts)).map(move |tx| (tx, ty))
-            })
-            .collect();
-        let tiles: Vec<((i32, i32), Vec<Color32>)> = {
-            use rayon::prelude::*;
-            let img = &img;
-            keys.par_iter()
-                .filter_map(|&(tx, ty)| {
-                    let mut tile = vec![Color32::TRANSPARENT; (ts * ts) as usize];
-                    let mut any = false;
-                    for ly in 0..ts {
-                        let y = ty * ts + ly - oy;
-                        if y < 0 || y >= h {
-                            continue;
-                        }
-                        for lx in 0..ts {
-                            let x = tx * ts + lx - ox;
-                            if x < 0 || x >= w {
-                                continue;
-                            }
-                            let [r, g, b, a] = img.get_pixel(x as u32, y as u32).0;
-                            if a > 0 {
-                                tile[(ly * ts + lx) as usize] =
-                                    Color32::from_rgba_unmultiplied(r, g, b, a);
-                                any = true;
-                            }
-                        }
-                    }
-                    any.then_some(((tx, ty), tile))
-                })
-                .collect()
-        };
-        let mut snapshots = Vec::with_capacity(tiles.len());
-        for ((tx, ty), tile) in tiles {
-            self.canvas.set_layer_tile_data(idx, tx, ty, tile);
-            snapshots.push(TileSnapshot {
-                tx,
-                ty,
-                layer_id,
-                x0: 0,
-                y0: 0,
-                width: ts as usize,
-                height: ts as usize,
-                data: vec![Color32::TRANSPARENT; (ts * ts) as usize].into(),
-            });
-        }
-        // The pixels as their own step on top of the layer's creation, so
-        // redo brings them back too.
-        if !snapshots.is_empty()
-            && let Some(history) = self.layer_state.histories.get_mut(idx)
+        let tiles = pixels_to_tiles(ts, (ox, oy), (w, h), |x, y| {
+            let [r, g, b, a] = img.get_pixel(x as u32, y as u32).0;
+            Color32::from_rgba_unmultiplied(r, g, b, a)
+        });
+        if self
+            .add_layer_with_tiles(name.to_string(), tiles, |_| {})
+            .is_none()
         {
-            history.push_action(UndoAction {
-                tiles: snapshots,
-                selection: None,
-                transform: None,
-                layer_action: None,
-            });
+            return;
         }
         self.selection_manager.clear_selection();
         self.active_tool = Tool::Transform(TransformInfo::default());
@@ -234,6 +171,48 @@ pub(crate) fn import_image_dialog(app: &mut PainterApp) {
 #[cfg(target_os = "android")]
 pub(crate) fn import_image_dialog(app: &mut PainterApp) {
     app.workspace.gallery.open();
+}
+
+/// The `w`×`h` pixels `pixel(x, y)` returns (premultiplied), placed with
+/// their top-left at canvas `origin`, cut into whole tiles of `ts`; tiles
+/// left fully transparent are skipped.
+pub(crate) fn pixels_to_tiles(
+    ts: i32,
+    (ox, oy): (i32, i32),
+    (w, h): (i32, i32),
+    pixel: impl Fn(i32, i32) -> Color32 + Sync,
+) -> Vec<((i32, i32), Vec<Color32>)> {
+    use rayon::prelude::*;
+    if w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    let keys: Vec<(i32, i32)> = (oy.div_euclid(ts)..=(oy + h - 1).div_euclid(ts))
+        .flat_map(|ty| (ox.div_euclid(ts)..=(ox + w - 1).div_euclid(ts)).map(move |tx| (tx, ty)))
+        .collect();
+    keys.par_iter()
+        .filter_map(|&(tx, ty)| {
+            let mut tile = vec![Color32::TRANSPARENT; (ts * ts) as usize];
+            let mut any = false;
+            for ly in 0..ts {
+                let y = ty * ts + ly - oy;
+                if y < 0 || y >= h {
+                    continue;
+                }
+                for lx in 0..ts {
+                    let x = tx * ts + lx - ox;
+                    if x < 0 || x >= w {
+                        continue;
+                    }
+                    let p = pixel(x, y);
+                    if p.a() > 0 {
+                        tile[(ly * ts + lx) as usize] = p;
+                        any = true;
+                    }
+                }
+            }
+            any.then_some(((tx, ty), tile))
+        })
+        .collect()
 }
 
 #[cfg(test)]

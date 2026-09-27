@@ -1,6 +1,8 @@
-//! Undo history, one per layer: each step keeps the tiles as they were
-//! (compressed once older), plus selection and layer tree changes;
-//! undo and redo swap them back.
+//! Undo history, one for the whole document: each step keeps the tiles as
+//! they were (compressed once older, and naming their layer by stable id),
+//! plus selection and layer tree changes; undo and redo swap them back.
+//! One stack in the order things were done means undo always takes back
+//! the last change, whichever layer it was on.
 
 use crate::canvas::Canvas;
 use crate::canvas::storage::LayerId;
@@ -259,6 +261,21 @@ impl History {
 
     pub(crate) fn stacks(&self) -> (&[UndoAction], &[UndoAction]) {
         (&self.undo_stack, &self.redo_stack)
+    }
+
+    /// One history from several (older project files kept one per layer).
+    /// Steps on different layers restore different tiles, so their relative
+    /// order only matters for layer moves; the stacks are kept whole, in
+    /// the order given.
+    pub(crate) fn merged(histories: Vec<History>) -> Self {
+        let mut merged = Self::new();
+        for h in histories {
+            merged.undo_stack.extend(h.undo_stack);
+            merged.redo_stack.extend(h.redo_stack);
+        }
+        compress_older_actions(&mut merged.undo_stack);
+        trim_oldest(&mut merged.undo_stack, MAX_UNDO_BYTES);
+        merged
     }
 
     pub(crate) fn from_stacks(undo_stack: Vec<UndoAction>, redo_stack: Vec<UndoAction>) -> Self {

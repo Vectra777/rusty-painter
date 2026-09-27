@@ -198,9 +198,10 @@ impl PainterApp {
         let Some(stroke) = self.brush_state.blend_stroke.take() else {
             return;
         };
-        let Some(idx) = self.canvas.layer_index_of(stroke.layer_id) else {
+        // The layer may be gone since (deleted mid-stroke).
+        if self.canvas.layer_index_of(stroke.layer_id).is_none() {
             return;
-        };
+        }
         if stroke.before.is_empty() {
             return;
         }
@@ -219,14 +220,12 @@ impl PainterApp {
                 data: data.into(),
             })
             .collect();
-        if let Some(history) = self.layer_state.histories.get_mut(idx) {
-            history.push_action(UndoAction {
-                tiles,
-                selection: None,
-                transform: None,
-                layer_action: None,
-            });
-        }
+        self.layer_state.history.push_action(UndoAction {
+            tiles,
+            selection: None,
+            transform: None,
+            layer_action: None,
+        });
         self.layer_state.thumbnails_dirty = true;
     }
 

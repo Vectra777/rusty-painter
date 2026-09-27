@@ -73,7 +73,7 @@ fn headless(canvas: Canvas) -> PainterApp {
         render_cache: RenderCache::new(1, 1),
         layer_state: {
             let mut state = LayerState::new(layers);
-            state.histories = (0..layers).map(|_| History::new()).collect();
+            state.history = History::new();
             state
         },
         modal_state: ModalState::new(NewCanvasSettings::from_canvas(&Canvas::new(
@@ -272,6 +272,8 @@ pub fn gradient(
     app.gradient_press(a);
     app.gradient_drag(b, false);
     app.gradient_update();
+    // A frame whose uploads all went through.
+    app.gradient_uploaded(false);
     app.gradient_drag(b + Vec2::new(40.0, 25.0), false);
     app.gradient_update();
     app.gradient_release();
@@ -323,8 +325,5 @@ pub fn import_image(app: &mut PainterApp, bytes: &[u8]) {
 
 /// Undo steps on the active layer.
 pub fn undo_depth(app: &PainterApp) -> usize {
-    app.layer_state.histories[app.canvas.active_layer_idx]
-        .stacks()
-        .0
-        .len()
+    app.layer_state.history.stacks().0.len()
 }

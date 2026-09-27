@@ -18,6 +18,7 @@ const DUPLICATE_NAME_WARNING_ID: &str = "brush_preset_duplicate_name";
 /// Preview texture size; drawn stretched to the tile width.
 const PREVIEW_PX: [usize; 2] = [480, 96];
 const PREVIEW_DIAMETER: f32 = 26.0;
+/// Starting width; the window can be resized both ways.
 const WINDOW_WIDTH: f32 = 280.0;
 
 pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
@@ -30,11 +31,10 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
     egui::Window::new("Brush Presets")
         .open(&mut open)
         .collapsible(false)
-        .resizable([false, true])
+        .resizable(true)
         .default_pos(default_pos)
-        .default_height(520.0)
-        .min_width(WINDOW_WIDTH)
-        .max_width(WINDOW_WIDTH)
+        .default_size([WINDOW_WIDTH, 520.0])
+        .min_size([200.0, 160.0])
         .show(ctx, |ui| {
             if let Some(index) = presets_list(app, ui) {
                 app.apply_preset(index);
@@ -151,9 +151,13 @@ fn preset_tile(
         },
     );
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    // At the preview's own shape, centred, however wide the window is.
+    let inner = rect.shrink2(egui::vec2(8.0, 6.0));
+    let aspect = PREVIEW_PX[0] as f32 / PREVIEW_PX[1] as f32;
+    let size = egui::vec2(inner.width().min(inner.height() * aspect), inner.height());
     painter.image(
         texture,
-        rect.shrink2(egui::vec2(8.0, 6.0)),
+        egui::Rect::from_center_size(inner.center(), size),
         uv,
         Color32::WHITE,
     );

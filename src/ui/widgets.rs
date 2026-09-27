@@ -38,6 +38,39 @@ pub(crate) fn paint_swatch(painter: &egui::Painter, rect: Rect, color: Color32) 
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, BORDER));
 }
 
+/// A gradient's colours left to right across `rect`, over a checkerboard
+/// where they're see-through.
+pub(crate) fn paint_gradient_strip(
+    painter: &egui::Painter,
+    rect: Rect,
+    stops: &[crate::canvas::gradient::Stop],
+) {
+    let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
+        return;
+    };
+    if stops.iter().any(|s| s.color.a() < 255) {
+        draw_checkerboard(painter, rect, (rect.height() / 3.0).clamp(3.0, 8.0));
+    }
+    // The end colours carry on to the edges.
+    let points: Vec<(f32, Color32)> = std::iter::once((0.0, first.color))
+        .chain(stops.iter().map(|s| (s.pos.clamp(0.0, 1.0), s.color)))
+        .chain(std::iter::once((1.0, last.color)))
+        .collect();
+    let mut mesh = egui::Mesh::default();
+    for (pos, color) in points {
+        let x = egui::lerp(rect.left()..=rect.right(), pos);
+        let i = mesh.vertices.len() as u32;
+        mesh.colored_vertex(egui::pos2(x, rect.top()), color);
+        mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
+        if i > 0 {
+            mesh.add_triangle(i - 2, i - 1, i);
+            mesh.add_triangle(i - 1, i, i + 1);
+        }
+    }
+    painter.add(mesh);
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, BORDER));
+}
+
 /// A clickable color swatch of the given size.
 pub(crate) fn color_swatch(ui: &mut egui::Ui, color: Color32, size: egui::Vec2) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());

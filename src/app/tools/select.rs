@@ -142,15 +142,12 @@ impl PainterApp {
         if prev.is_none() && self.selection_manager.current_shape.is_none() {
             return;
         }
-        let active = self.canvas.active_layer_idx;
-        if let Some(history) = self.layer_state.histories.get_mut(active) {
-            history.push_action(UndoAction {
-                tiles: Vec::new(),
-                selection: Some(prev),
-                transform: None,
-                layer_action: None,
-            });
-        }
+        self.layer_state.history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: Some(prev),
+            transform: None,
+            layer_action: None,
+        });
     }
 
     /// Forget the last wand/colour click (the selection changed otherwise).
@@ -585,7 +582,7 @@ mod tests {
     fn deselecting_nothing_records_nothing() {
         let mut app = app();
         app.deselect();
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 0);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 0);
     }
 
     /// Layer 1 of a 128×128 canvas with red squares at the given corners
@@ -628,7 +625,7 @@ mod tests {
         app.workspace.select.wand.contiguous = false;
         app.rerun_last_pick();
         assert!(app.selection_manager.contains(Vec2::new(95.0, 95.0)));
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert!(!app.selection_manager.has_selection());
     }
@@ -672,7 +669,7 @@ mod tests {
             );
         }
         assert!(app.workspace.select.magnetic.is_none());
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
     }
 
     #[test]

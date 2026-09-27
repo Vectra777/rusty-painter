@@ -252,9 +252,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0348a1c054491f4bfe6ab86a7b6ab1e44e45d899005de92f58b3df180b36ddaf"
 dependencies = [
  "clipboard-win",
+ "image",
  "log",
  "objc2 0.6.3",
  "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
@@ -3090,6 +3093,7 @@ name = "rusty-painter"
 version = "0.0.1"
 dependencies = [
  "android_logger",
+ "arboard",
  "criterion",
  "eframe",
  "egui_dock",

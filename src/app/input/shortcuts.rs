@@ -110,6 +110,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     if ctx.wants_keyboard_input() {
         return false;
     }
+    use crate::app::input::keyboard::consume_at;
+    // Before the keys below consume V (the Transform tool).
+    let clipboard = app.clipboard_keys(ctx);
 
     let cmd = Modifiers::COMMAND;
     let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
@@ -121,15 +124,20 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let undo = !redo && pressed(cmd, Key::Z);
     let new_layer = pressed(cmd_shift, Key::N);
     let new_folder = pressed(cmd, Key::G);
+    let duplicate = pressed(cmd, Key::J);
     let new_canvas = !new_layer && pressed(cmd, Key::N);
     let import = pressed(cmd_shift, Key::O);
     let open = !import && pressed(cmd, Key::O);
     let save = pressed(cmd, Key::S);
     let export = pressed(cmd, Key::E);
-    let fit = pressed(cmd, Key::Num0);
-    let actual = pressed(cmd, Key::Num1);
-    let zoom_in = pressed(cmd, Key::Equals) || pressed(cmd, Key::Plus);
-    let zoom_out = pressed(cmd, Key::Minus);
+    // Digits and symbols by key position (no Shift or AltGr needed on
+    // AZERTY and the like), or by the character typed.
+    let at =
+        |mods: Modifiers, position: Key| consume_at(ctx, mods, position) || pressed(mods, position);
+    let fit = at(cmd, Key::Num0);
+    let actual = at(cmd, Key::Num1);
+    let zoom_in = at(cmd, Key::Equals) || pressed(cmd, Key::Plus);
+    let zoom_out = at(cmd, Key::Minus);
     let invert = pressed(cmd_shift, Key::I);
     let select_all = pressed(cmd, Key::A);
     let deselect = pressed(cmd, Key::D) || pressed(none, Key::Escape);
@@ -144,19 +152,24 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let shapes = pressed(none, Key::U);
     let ruler = pressed(none, Key::R);
     let remove_anchor = pressed(none, Key::Backspace);
+    let delete = pressed(none, Key::Delete);
     let transform = pressed(none, Key::V) || pressed(none, Key::T);
     let eyedropper = pressed(none, Key::I);
     let fill = pressed(none, Key::G);
-    let alpha_lock = pressed(none, Key::Slash);
+    let alpha_lock = at(none, Key::Slash);
     let liquify = pressed(none, Key::W);
     let blend = pressed(none, Key::S);
     let swap = pressed(none, Key::X);
     let panels = pressed(none, Key::Tab);
     let presets = pressed(none, Key::P);
-    let smaller = pressed(none, Key::OpenBracket);
-    let bigger = pressed(none, Key::CloseBracket);
+    let smaller = at(none, Key::OpenBracket);
+    let bigger = at(none, Key::CloseBracket);
 
-    let mut repaint = false;
+    let mut repaint = clipboard;
+    if duplicate {
+        app.duplicate_layer();
+        repaint = true;
+    }
 
     if undo || redo {
         app.apply_history(redo);
@@ -235,6 +248,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         repaint = true;
     } else if remove_anchor && app.workspace.shapes.session.is_some() {
         app.shape_undo_point();
+        repaint = true;
+    } else if (delete || remove_anchor) && app.layer_state.floating_layer_idx.is_none() {
+        // Delete (or Backspace, the Mac delete key) erases the selected
+        // pixels; a floating transform is left alone.
+        app.delete_selection_contents();
         repaint = true;
     }
     if ruler {
@@ -333,15 +351,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             app.active_tool = Tool::Eyedropper;
         }
         if fill {
-            // Pressing G again toggles bucket / enclose.
+            // Pressing G again goes to the next mode (bucket, enclose,
+            // lasso delete).
             if matches!(app.active_tool, Tool::Fill) {
-                use crate::app::tools::fill::FillMode;
                 let f = &mut app.workspace.fill;
-                f.mode = if f.mode == FillMode::Bucket {
-                    FillMode::Enclose
-                } else {
-                    FillMode::Bucket
-                };
+                f.mode = f.mode.next();
             }
             app.active_tool = Tool::Fill;
         }

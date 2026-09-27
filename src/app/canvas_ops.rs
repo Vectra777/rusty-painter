@@ -8,7 +8,7 @@ use crate::app::{
     state::{LayerState, RenderCache},
 };
 use crate::canvas::Canvas;
-use crate::canvas::history::{History, LayerHistoryOp, RemovedLayer, UndoAction};
+use crate::canvas::history::{History, LayerHistoryOp, RemovedLayer, TileSnapshot, UndoAction};
 use crate::canvas::storage::{LayerId, LayerKind};
 use eframe::egui::{self, Color32, Vec2};
 
@@ -23,11 +23,6 @@ impl PainterApp {
     /// every mutation, and compiled out entirely in release builds.
     fn debug_assert_layer_state_in_sync(&self) {
         let layer_count = self.canvas.layers.len();
-        debug_assert_eq!(
-            self.layer_state.histories.len(),
-            layer_count,
-            "layer_state.histories desynced from canvas.layers"
-        );
         debug_assert_eq!(
             self.layer_state.layer_ui_colors.len(),
             layer_count,
@@ -92,11 +87,10 @@ impl PainterApp {
 
     fn rebuild_canvas(&mut self, width: usize, height: usize, background: Color32) {
         let canvas = Canvas::new(width, height, background, TILE_SIZE);
-        let histories = (0..canvas.layers.len()).map(|_| History::new()).collect();
-        self.replace_document(canvas, histories);
+        self.replace_document(canvas, History::new());
     }
 
-    /// Make `canvas` (with its per-layer `histories`) the document, for a
+    /// Make `canvas` (with its undo `history`) the document, for a
     /// new canvas or an opened project.
     ///
     /// Everything tied to the old document goes, in this order:
@@ -108,7 +102,7 @@ impl PainterApp {
     ///    holds old tiles);
     /// 3. the canvas, fresh per-layer state and render cache are installed;
     /// 4. the selection is cleared and the view refits.
-    pub(crate) fn replace_document(&mut self, canvas: Canvas, histories: Vec<History>) {
+    pub(crate) fn replace_document(&mut self, canvas: Canvas, history: History) {
         // 1. Background work.
         self.release_canvas();
         self.patch_abandon();
@@ -117,8 +111,15 @@ impl PainterApp {
         // 3. The document and what mirrors its layers.
         let (width, height) = (canvas.width(), canvas.height());
         *self.canvas_mut() = canvas;
-        self.layer_state = LayerState::new(self.canvas.layers.len());
-        self.layer_state.histories = histories;
+        let old = std::mem::replace(
+            &mut self.layer_state,
+            LayerState::new(self.canvas.layers.len()),
+        );
+        // The thumbnails may have been updated this frame.
+        let retired = &mut self.workspace.retired_textures;
+        retired.extend(old.thumbnails.into_iter().flatten());
+        retired.extend(old.float_overlay.map(|o| o.texture));
+        self.layer_state.history = history;
         self.recreate_render_cache(width, height);
         // 4. Selection and view.
         self.selection_manager.clear_selection();
@@ -301,24 +302,20 @@ impl PainterApp {
                 active_after,
             }),
         };
-        if let Some(hist) = self.layer_state.histories.get_mut(active_after) {
-            hist.push_action(action);
-        }
+        self.layer_state.history.push_action(action);
 
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;
         self.debug_assert_layer_state_in_sync();
     }
 
-    /// Move the side-car per-layer state (undo history, render cache,
-    /// cache-dirty set, UI color) from `from` to `to`, mirroring a move
+    /// Move the side-car per-layer state (UI color) from `from` to `to`,
+    /// mirroring a move
     /// already applied to `canvas.layers` itself. Shared by the UI reorder
     /// entry point (`reorder_layers`) and undo/redo of a layer move, which
     /// moves `canvas.layers` itself inside `History::undo`/`redo` and can't
     /// also reach into `LayerState`/`RenderCache` from there.
     pub(crate) fn reorder_layer_state(&mut self, from: usize, to: usize) {
-        let hist = self.layer_state.histories.remove(from);
-        self.layer_state.histories.insert(to, hist);
         let ui_color = self.layer_state.layer_ui_colors.remove(from);
         self.layer_state.layer_ui_colors.insert(to, ui_color);
         self.debug_assert_layer_state_in_sync();
@@ -365,6 +362,63 @@ impl PainterApp {
         }
     }
 
+    /// A new paint layer just above the selected one holding `tiles`
+    /// (whole tiles by coordinate), selected, as one undo step: undo takes
+    /// the layer away, redo brings it back with its pixels. `setup` adjusts
+    /// the layer (opacity, blend...) before it's recorded. Returns its index.
+    pub(crate) fn add_layer_with_tiles(
+        &mut self,
+        name: String,
+        tiles: Vec<((i32, i32), Vec<Color32>)>,
+        setup: impl FnOnce(&mut crate::canvas::storage::Layer),
+    ) -> Option<usize> {
+        // Leave any running session first; it would target the old layer.
+        crate::app::tools::transform::commit_floating_layer(self);
+        self.liquify_commit();
+        self.release_canvas();
+        let active_before = self.canvas.active_layer_idx;
+        let (index, parent) = self.insertion_point(true);
+        let id = self
+            .canvas_mut()
+            .insert_new_layer(index, name, LayerKind::Paint, parent);
+        let idx = self.canvas.layer_index_of(id)?;
+        setup(&mut self.canvas_mut().layers[idx]);
+        self.insert_layer_state(idx);
+        self.canvas_mut().active_layer_idx = idx;
+        let ts = self.canvas.tile_size();
+        let snapshots = tiles
+            .into_iter()
+            .map(|((tx, ty), data)| {
+                self.canvas.set_layer_tile_data(idx, tx, ty, data);
+                TileSnapshot {
+                    tx,
+                    ty,
+                    layer_id: id,
+                    x0: 0,
+                    y0: 0,
+                    width: ts,
+                    height: ts,
+                    data: vec![Color32::TRANSPARENT; ts * ts].into(),
+                }
+            })
+            .collect();
+        self.layer_state.history.push_action(UndoAction {
+            tiles: snapshots,
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Added {
+                index: idx,
+                id,
+                meta: self.canvas.layer_meta_at(idx),
+                active_before,
+                active_after: idx,
+            }),
+        });
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+        Some(idx)
+    }
+
     /// Insert a new entry with undo; returns its index.
     pub(crate) fn insert_entry(
         &mut self,
@@ -401,9 +455,7 @@ impl PainterApp {
                 active_after,
             }),
         };
-        if let Some(hist) = self.layer_state.histories.get_mut(idx) {
-            hist.push_action(action);
-        }
+        self.layer_state.history.push_action(action);
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;
         idx
@@ -537,9 +589,7 @@ impl PainterApp {
                 active_after,
             }),
         };
-        if let Some(hist) = self.layer_state.histories.get_mut(active_after) {
-            hist.push_action(action);
-        }
+        self.layer_state.history.push_action(action);
 
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;
@@ -547,7 +597,6 @@ impl PainterApp {
 
     pub(crate) fn insert_layer_state(&mut self, idx: usize) {
         let idx = idx.min(self.canvas.layers.len());
-        self.layer_state.histories.insert(idx, History::new());
         self.layer_state
             .layer_ui_colors
             .insert(idx, Color32::from_gray(40));
@@ -555,9 +604,6 @@ impl PainterApp {
     }
 
     pub(crate) fn remove_layer_state(&mut self, idx: usize) {
-        if idx < self.layer_state.histories.len() {
-            self.layer_state.histories.remove(idx);
-        }
         if idx < self.layer_state.layer_ui_colors.len() {
             self.layer_state.layer_ui_colors.remove(idx);
         }
@@ -569,8 +615,7 @@ impl PainterApp {
     /// final positions; the per-layer state is only in sync after all of them.
     pub(crate) fn insert_layer_states(&mut self, ascending: &[usize]) {
         for &idx in ascending {
-            let idx = idx.min(self.layer_state.histories.len());
-            self.layer_state.histories.insert(idx, History::new());
+            let idx = idx.min(self.layer_state.layer_ui_colors.len());
             self.layer_state
                 .layer_ui_colors
                 .insert(idx, Color32::from_gray(40));
@@ -584,9 +629,6 @@ impl PainterApp {
         let mut descending = indices.to_vec();
         descending.sort_unstable_by(|a, b| b.cmp(a));
         for idx in descending {
-            if idx < self.layer_state.histories.len() {
-                self.layer_state.histories.remove(idx);
-            }
             if idx < self.layer_state.layer_ui_colors.len() {
                 self.layer_state.layer_ui_colors.remove(idx);
             }
@@ -599,7 +641,7 @@ impl PainterApp {
 mod document_tests {
     use crate::canvas::Canvas;
     use crate::project::tests::test_app_pub;
-    use eframe::egui::{Color32, Vec2};
+    use eframe::egui::{self, Color32, Vec2};
 
     /// A 256 px app with layer 1 active.
     fn app() -> crate::PainterApp {
@@ -636,7 +678,23 @@ mod document_tests {
         // Applying whatever was left must not touch the new document.
         app.gradient_commit();
         app.shape_commit();
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 0);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 0);
+    }
+
+    #[test]
+    fn a_new_canvas_keeps_the_old_thumbnails_until_the_next_frame() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let image = egui::ColorImage::new([4, 4], Color32::RED);
+        app.layer_state.thumbnails = vec![Some(ctx.load_texture(
+            "layer_thumb_0",
+            image,
+            egui::TextureOptions::LINEAR,
+        ))];
+        new_canvas(&mut app);
+        // Freed this frame, egui-wgpu would destroy it before submitting
+        // this frame's update to it.
+        assert_eq!(app.workspace.retired_textures.len(), 1);
     }
 
     #[test]
@@ -672,6 +730,6 @@ mod document_tests {
         assert!(app.workspace.gradient.session.is_none(), "gradient kept");
         assert!(!app.selection_manager.has_selection(), "selection kept");
         app.gradient_commit();
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 0);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 0);
     }
 }

@@ -53,7 +53,7 @@ pub struct TouchState {
     pub(crate) pen_on_canvas: bool,
     /// Where the active layer's history stood when the current stroke began
     /// (layer index, push count), to take the stroke back if it's cancelled.
-    pub(crate) action_mark: Option<(usize, u64)>,
+    pub(crate) action_mark: Option<u64>,
 }
 
 struct Gesture {
@@ -90,17 +90,12 @@ impl PainterApp {
         }
     }
 
-    /// Remember where the active layer's history stands, as a stroke begins.
+    /// Remember where the history stands, as a stroke begins.
     pub(crate) fn mark_action(&mut self) {
         // File the previous stroke first, so it can't land after the mark
         // and be mistaken for this one.
         self.settle_strokes();
-        let layer = self.canvas.active_layer_idx;
-        self.viewport.touch.action_mark = self
-            .layer_state
-            .histories
-            .get(layer)
-            .map(|h| (layer, h.push_count()));
+        self.viewport.touch.action_mark = Some(self.layer_state.history.push_count());
     }
 
     /// End the stroke in progress (brush or smudge/blur) and take it back,
@@ -113,19 +108,12 @@ impl PainterApp {
         let mark = self.viewport.touch.action_mark.take();
         self.release_canvas();
         self.blend_release();
-        let Some((layer, count)) = mark.filter(|_| in_progress) else {
+        let Some(count) = mark.filter(|_| in_progress) else {
             return;
         };
-        let recorded = self
-            .layer_state
-            .histories
-            .get(layer)
-            .is_some_and(|h| h.push_count() > count);
-        if recorded && layer == self.canvas.active_layer_idx {
+        if self.layer_state.history.push_count() > count {
             self.apply_history(false);
-            if let Some(history) = self.layer_state.histories.get_mut(layer) {
-                history.discard_redo();
-            }
+            self.layer_state.history.discard_redo();
         }
     }
 
@@ -268,7 +256,7 @@ pub(crate) fn handle_touch(
                         tap = Some(g.max_touches);
                     }
                     let deg = app.viewport.rotation.to_degrees().rem_euclid(360.0);
-                    if deg < ROTATION_SNAP_DEG || deg > 360.0 - ROTATION_SNAP_DEG {
+                    if !(ROTATION_SNAP_DEG..=360.0 - ROTATION_SNAP_DEG).contains(&deg) {
                         app.viewport.rotation = 0.0;
                     }
                     repaint = true;
@@ -340,7 +328,7 @@ mod tests {
     }
 
     fn undo_len(app: &crate::PainterApp) -> usize {
-        app.layer_state.histories[1].stacks().0.len()
+        app.layer_state.history.stacks().0.len()
     }
 
     #[test]
@@ -349,7 +337,7 @@ mod tests {
         stroke(&mut app, Vec2::new(10.0, 10.0), Vec2::new(40.0, 20.0));
         app.discard_current_action();
         assert_eq!(undo_len(&app), 0);
-        assert_eq!(app.layer_state.histories[1].stacks().1.len(), 0, "no redo");
+        assert_eq!(app.layer_state.history.stacks().1.len(), 0, "no redo");
         let tile = app.canvas.get_layer_tile_data(1, 0, 0).unwrap_or_default();
         assert!(
             tile.iter().all(|&c| c == Color32::TRANSPARENT),

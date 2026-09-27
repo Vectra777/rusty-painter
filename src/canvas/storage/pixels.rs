@@ -200,9 +200,61 @@ impl Canvas {
         color: Color32,
         history: &mut UndoAction,
     ) -> Option<eframe::egui::Rect> {
-        let layer = self.layers.get(layer_idx)?;
-        let layer_id = layer.id;
-        let alpha_lock = layer.alpha_locked;
+        let alpha_lock = self.layers.get(layer_idx)?.alpha_locked;
+        let [r, g, b, a] = color.to_srgba_unmultiplied();
+        // The fill colour at every coverage level, as pixels (egui colours
+        // are the canvas's pixel format).
+        let colors: Vec<Color32> = (0..=255u32)
+            .map(|cov| {
+                let alpha = ((a as u32 * cov + 127) / 255) as u8;
+                Color32::from_rgba_unmultiplied(r, g, b, alpha)
+            })
+            .collect();
+        self.apply_mask(layer_idx, mask, history, |dst, cov| {
+            if alpha_lock && dst.a() == 0 {
+                return dst;
+            }
+            let out = crate::canvas::blend::alpha_over(colors[cov as usize], dst);
+            if alpha_lock {
+                crate::canvas::blend::with_alpha_of(out, dst.a())
+            } else {
+                out
+            }
+        })
+    }
+
+    /// Erase layer `layer_idx` with `mask` as coverage (255 clears a pixel,
+    /// less fades it), recording the touched tiles in `history`. Nothing
+    /// happens on an alpha-locked layer. Returns the changed canvas area.
+    pub fn erase_mask(
+        &self,
+        layer_idx: usize,
+        mask: &crate::selection::SelectionMask,
+        history: &mut UndoAction,
+    ) -> Option<eframe::egui::Rect> {
+        if self.layers.get(layer_idx)?.alpha_locked {
+            return None;
+        }
+        self.apply_mask(layer_idx, mask, history, |dst, cov| {
+            // Premultiplied: fading scales every channel alike.
+            let keep = 255 - cov as u32;
+            let f = |c: u8| ((c as u32 * keep + 127) / 255) as u8;
+            let [r, g, b, a] = dst.to_array();
+            Color32::from_rgba_premultiplied(f(r), f(g), f(b), f(a))
+        })
+    }
+
+    /// Replace each pixel of layer `layer_idx` that `mask` covers with
+    /// `apply(pixel, coverage)`, tiles in parallel, recording the changed
+    /// tiles in `history`. Returns the changed canvas area.
+    fn apply_mask(
+        &self,
+        layer_idx: usize,
+        mask: &crate::selection::SelectionMask,
+        history: &mut UndoAction,
+        apply: impl Fn(Color32, u8) -> Color32 + Sync,
+    ) -> Option<eframe::egui::Rect> {
+        let layer_id = self.layers.get(layer_idx)?.id;
         let ts = self.tile_size as i32;
         let [bx0, by0, bx1, by1] = mask.content_bounds()?;
         let (bx0, by0) = (bx0.max(0), by0.max(0));
@@ -219,15 +271,6 @@ impl Canvas {
             }
         }
         let tile_len = (ts * ts) as usize;
-        let [r, g, b, a] = color.to_srgba_unmultiplied();
-        // The fill colour at every coverage level, as pixels (egui colours
-        // are the canvas's pixel format).
-        let colors: Vec<Color32> = (0..=255u32)
-            .map(|cov| {
-                let alpha = ((a as u32 * cov + 127) / 255) as u8;
-                Color32::from_rgba_unmultiplied(r, g, b, alpha)
-            })
-            .collect();
         let snapshots: Vec<TileSnapshot> = cells
             .par_iter()
             .filter_map(|&((tx, ty), ref cell)| {
@@ -245,14 +288,7 @@ impl Canvas {
                         }
                         let i = (ly * ts + lx) as usize;
                         let dst = data[i];
-                        if alpha_lock && dst.a() == 0 {
-                            continue;
-                        }
-                        let src = colors[cov as usize];
-                        let mut out = crate::canvas::blend::alpha_over(src, dst);
-                        if alpha_lock {
-                            out = crate::canvas::blend::with_alpha_of(out, dst.a());
-                        }
+                        let out = apply(dst, cov);
                         changed |= out != dst;
                         data[i] = out;
                     }

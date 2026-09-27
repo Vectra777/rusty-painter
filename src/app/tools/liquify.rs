@@ -181,9 +181,9 @@ impl PainterApp {
         if session.written.is_empty() {
             return;
         }
-        let Some(idx) = self.canvas.layer_index_of(session.layer_id) else {
+        if self.canvas.layer_index_of(session.layer_id).is_none() {
             return;
-        };
+        }
         let ts = self.canvas.tile_size();
         let tiles = session
             .written
@@ -210,9 +210,7 @@ impl PainterApp {
             transform: None,
             layer_action: None,
         };
-        if let Some(history) = self.layer_state.histories.get_mut(idx) {
-            history.push_action(action);
-        }
+        self.layer_state.history.push_action(action);
     }
 
     /// Put the layer back as it was before the session.

@@ -118,9 +118,7 @@ impl PainterApp {
             &mut action,
         );
         if let Some(rect) = changed {
-            if let Some(history) = self.layer_state.histories.get_mut(idx) {
-                history.push_action(action);
-            }
+            self.layer_state.history.push_action(action);
             self.mark_tiles_in_bounds_dirty(rect);
             self.layer_state.thumbnails_dirty = true;
         }

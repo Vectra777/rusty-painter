@@ -464,11 +464,7 @@ mod tests {
         assert!(painted(&app, 20, 20));
         assert!(painted(&app, 108, 20), "the mirror image across x = 64");
         assert!(painted(&app, 98, 40));
-        assert_eq!(
-            app.layer_state.histories[1].stacks().0.len(),
-            1,
-            "one undo step"
-        );
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
         app.apply_history(false);
         assert!(!painted(&app, 20, 20) && !painted(&app, 108, 20));
     }

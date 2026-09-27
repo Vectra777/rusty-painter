@@ -32,12 +32,15 @@ use preview::{StoredPreview, preview_png_blob};
 
 const MAGIC: &[u8; 8] = b"RPNTV001";
 const PROJECT_FORMAT: &str = "rusty-painter-project";
-const PROJECT_VERSION: u32 = 2;
+/// 3: one undo history for the document (2 kept one per layer).
+const PROJECT_VERSION: u32 = 3;
+/// The oldest version still read.
+const OLDEST_PROJECT_VERSION: u32 = 2;
 
 pub(crate) struct LoadedProject {
     pub canvas: Canvas,
     pub color_model: ColorModel,
-    pub histories: Vec<History>,
+    pub history: History,
 }
 
 pub(crate) fn save_project(app: &PainterApp, path: impl AsRef<Path>) -> Result<(), String> {
@@ -57,7 +60,7 @@ impl PainterApp {
 
     pub(crate) fn load_project_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let loaded = load_project(path)?;
-        self.replace_document(loaded.canvas, loaded.histories);
+        self.replace_document(loaded.canvas, loaded.history);
         self.workspace.color_model = loaded.color_model;
         self.active_tool = Tool::Brush;
         Ok(())
@@ -144,6 +147,7 @@ struct ProjectFile {
     active_layer_idx: usize,
     preview: Option<StoredPreview>,
     layers: Vec<StoredLayer>,
+    /// Version 3: the one document history. Version 2: one per layer.
     histories: Vec<StoredHistory>,
 }
 
@@ -169,17 +173,17 @@ impl ProjectFile {
                 .into_iter()
                 .map(|layer| StoredLayer::from_snapshot(layer, blobs))
                 .collect::<Result<_, _>>()?,
-            histories: app
-                .layer_state
-                .histories
-                .iter()
-                .map(|history| StoredHistory::from_history(history, blobs))
-                .collect::<Result<_, _>>()?,
+            histories: vec![StoredHistory::from_history(
+                &app.layer_state.history,
+                blobs,
+            )?],
         })
     }
 
     fn into_loaded_project(self, blobs: &[u8]) -> Result<LoadedProject, String> {
-        if self.format != PROJECT_FORMAT || self.version != PROJECT_VERSION {
+        if self.format != PROJECT_FORMAT
+            || !(OLDEST_PROJECT_VERSION..=PROJECT_VERSION).contains(&self.version)
+        {
             return Err("Unsupported project file".to_string());
         }
         validate_canvas_size(self.width, self.height)?;
@@ -208,18 +212,18 @@ impl ProjectFile {
             _ => BlendSpace::Linear,
         };
 
-        let mut histories: Vec<_> = self
+        let histories: Vec<History> = self
             .histories
             .into_iter()
             .map(|history| history.into_history(self.tile_size, blobs))
             .collect::<Result<_, _>>()?;
-        histories.resize_with(canvas.layers.len(), History::new);
-        histories.truncate(canvas.layers.len());
+        // Version 2's per-layer histories become one.
+        let history = History::merged(histories);
 
         Ok(LoadedProject {
             canvas,
             color_model: self.color_model.into(),
-            histories,
+            history,
         })
     }
 }
@@ -510,7 +514,7 @@ pub(crate) mod tests {
             render_cache: crate::app::state::RenderCache::new(1, 1),
             layer_state: {
                 let mut state = LayerState::new(layer_count);
-                state.histories = histories;
+                state.history = History::merged(histories);
                 state
             },
             modal_state: crate::app::state::ModalState::new(
@@ -552,11 +556,11 @@ pub(crate) mod tests {
             1,
             "layer and its mask are both gone"
         );
-        assert_eq!(app.layer_state.histories.len(), 1);
+        assert_eq!(app.layer_state.layer_ui_colors.len(), 1);
 
         app.apply_history(false);
         assert_eq!(app.canvas.layers.len(), 3);
-        assert_eq!(app.layer_state.histories.len(), 3);
+        assert_eq!(app.layer_state.layer_ui_colors.len(), 3);
         let restored_owner = app.canvas.layers[1].id;
         assert_eq!(restored_owner, owner);
         assert!(
@@ -594,7 +598,7 @@ pub(crate) mod tests {
         let _ = app.canvas_mut();
 
         assert!(!app.brush_state.is_drawing);
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         assert_ne!(
             app.canvas.get_layer_tile_data(1, 0, 0),
             Some(vec![Color32::TRANSPARENT; TILE_SIZE * TILE_SIZE]),
@@ -662,7 +666,7 @@ pub(crate) mod tests {
             "moved out of tile (1,1)"
         );
         assert!(layer_pixels(&app, 1)[4 + 2].is_some(), "into tile (2,1)");
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
 
         app.apply_history(false);
         assert_eq!(layer_pixels(&app, 1), original);
@@ -683,9 +687,9 @@ pub(crate) mod tests {
         transform::flush_transform_preview(&mut app);
         transform::cancel_floating_layer(&mut app);
         assert_eq!(app.canvas.layers.len(), 2);
-        assert_eq!(app.layer_state.histories.len(), 2);
+        assert_eq!(app.layer_state.layer_ui_colors.len(), 2);
         assert_eq!(layer_pixels(&app, 1), original);
-        assert!(app.layer_state.histories[1].stacks().0.is_empty());
+        assert!(app.layer_state.history.stacks().0.is_empty());
     }
 
     #[test]
@@ -746,7 +750,7 @@ pub(crate) mod tests {
             "outside untouched"
         );
         assert_eq!(after[10 * TILE_SIZE + 30], Color32::BLACK, "line untouched");
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
 
         app.apply_history(false);
         assert_eq!(app.canvas.get_layer_tile_data(1, 0, 0).unwrap(), before);
@@ -815,11 +819,11 @@ pub(crate) mod tests {
         }
         assert_ne!(layer_pixels(&app, 1), original, "pixels moved");
         assert!(
-            app.layer_state.histories[1].stacks().0.is_empty(),
+            app.layer_state.history.stacks().0.is_empty(),
             "no step until applied"
         );
         app.liquify_commit();
-        assert_eq!(app.layer_state.histories[1].stacks().0.len(), 1);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert_eq!(layer_pixels(&app, 1), original);
 
@@ -1316,7 +1320,10 @@ pub(crate) mod tests {
         assert!(app.layer_state.floating_layer_idx.is_none());
         assert_eq!(app.canvas.layers.len(), 2);
         app.apply_history(false);
-        assert_eq!(app.canvas.layers.len(), app.layer_state.histories.len());
+        assert_eq!(
+            app.canvas.layers.len(),
+            app.layer_state.layer_ui_colors.len()
+        );
     }
 
     #[test]
@@ -1403,7 +1410,7 @@ pub(crate) mod tests {
             loaded.canvas.get_layer_tile_data(1, 0, 0).unwrap()[0],
             Color32::from_rgb(255, 0, 0)
         );
-        assert_eq!(loaded.histories[1].stacks().0.len(), 1);
+        assert_eq!(loaded.history.stacks().0.len(), 1);
     }
 }
 

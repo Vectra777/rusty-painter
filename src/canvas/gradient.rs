@@ -175,42 +175,83 @@ fn pixel(c: [f32; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(q(c[0]), q(c[1]), q(c[2]), q(c[3]))
 }
 
+/// A colour along a gradient: `pos` from 0 (start) to 1 (end), unmultiplied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stop {
+    pub pos: f32,
+    pub color: Color32,
+}
+
 impl Ramp {
     /// From `from` to `to` (unmultiplied colours), mixed in `space`, with
     /// alpha scaled by `opacity`.
     pub fn new(from: Color32, to: Color32, space: BlendSpace, opacity: f32) -> Self {
-        let unmult = |c: Color32| {
-            let [r, g, b, a] = c.to_srgba_unmultiplied();
-            [r as f32, g as f32, b as f32, a as f32 / 255.0]
-        };
-        let (a, b) = (unmult(from), unmult(to));
+        let stops = [
+            Stop {
+                pos: 0.0,
+                color: from,
+            },
+            Stop {
+                pos: 1.0,
+                color: to,
+            },
+        ];
+        Self::from_stops(&stops, space, opacity)
+    }
+
+    /// Through `stops` (sorted by position, at least one), each pair mixed
+    /// in `space`; before the first and after the last, their colours.
+    pub fn from_stops(stops: &[Stop], space: BlendSpace, opacity: f32) -> Self {
+        assert!(!stops.is_empty(), "a gradient needs a colour");
         // Premultiplied, in the space colours mix in.
-        let to_space = |c: [f32; 4]| match space {
-            BlendSpace::Linear => [
-                srgb_to_linear(c[0]) * c[3],
-                srgb_to_linear(c[1]) * c[3],
-                srgb_to_linear(c[2]) * c[3],
-                c[3],
-            ],
-            BlendSpace::Gamma => [
-                c[0] / 255.0 * c[3],
-                c[1] / 255.0 * c[3],
-                c[2] / 255.0 * c[3],
-                c[3],
-            ],
+        let to_space = |c: Color32| {
+            let [r, g, b, a] = c.to_srgba_unmultiplied();
+            let a = a as f32 / 255.0;
+            match space {
+                BlendSpace::Linear => [
+                    srgb_to_linear(r as f32) * a,
+                    srgb_to_linear(g as f32) * a,
+                    srgb_to_linear(b as f32) * a,
+                    a,
+                ],
+                BlendSpace::Gamma => [
+                    r as f32 / 255.0 * a,
+                    g as f32 / 255.0 * a,
+                    b as f32 / 255.0 * a,
+                    a,
+                ],
+            }
         };
-        let (pa, pb) = (to_space(a), to_space(b));
+        let points: Vec<(f32, [f32; 4])> = stops
+            .iter()
+            .map(|s| (s.pos.clamp(0.0, 1.0), to_space(s.color)))
+            .collect();
         let opacity = opacity.clamp(0.0, 1.0);
+        let mut segment = 0;
         let unmultiplied: Vec<[f32; 4]> = (0..RAMP_SIZE)
             .map(|i| {
                 let t = i as f32 / (RAMP_SIZE - 1) as f32;
-                let m: [f32; 4] = std::array::from_fn(|k| pa[k] + (pb[k] - pa[k]) * t);
+                while segment + 1 < points.len() - 1 && t > points[segment + 1].0 {
+                    segment += 1;
+                }
+                let (p0, pa) = points[segment];
+                let (p1, pb) = points[(segment + 1).min(points.len() - 1)];
+                let u = if p1 > p0 {
+                    ((t - p0) / (p1 - p0)).clamp(0.0, 1.0)
+                } else if t < p0 {
+                    0.0
+                } else {
+                    1.0
+                };
+                let m: [f32; 4] = std::array::from_fn(|k| pa[k] + (pb[k] - pa[k]) * u);
                 let alpha = m[3];
                 // A fully transparent mix keeps the colour it fades from.
                 let (a_src, inv) = if alpha > 1e-6 {
                     (m, 1.0 / alpha)
+                } else if pa[3] > 1e-6 {
+                    (pa, 1.0 / pa[3])
                 } else {
-                    (pa, 1.0 / pa[3].max(1e-6))
+                    (pb, 1.0 / pb[3].max(1e-6))
                 };
                 let rgb: [f32; 3] = std::array::from_fn(|k| match space {
                     BlendSpace::Linear => linear_to_srgb(a_src[k] * inv),
@@ -220,8 +261,15 @@ impl Ramp {
             })
             .collect();
         let pixels = unmultiplied.iter().map(|&c| pixel(c)).collect();
+        // How far each channel travels along the whole gradient (over every
+        // stop), in 8-bit steps.
         let span = (0..4)
-            .map(|k| (unmultiplied[RAMP_SIZE - 1][k] - unmultiplied[0][k]).abs())
+            .map(|k| {
+                unmultiplied
+                    .windows(2)
+                    .map(|w| (w[1][k] - w[0][k]).abs())
+                    .sum::<f32>()
+            })
             .fold(0.0f32, f32::max);
         Self {
             unmultiplied,
@@ -327,6 +375,28 @@ mod tests {
         let lin = Ramp::new(black, white, BlendSpace::Linear, 1.0).unmultiplied[RAMP_SIZE / 2][0];
         let gam = Ramp::new(black, white, BlendSpace::Gamma, 1.0).unmultiplied[RAMP_SIZE / 2][0];
         assert!(lin > gam + 20.0, "linear {lin} vs gamma {gam}");
+    }
+
+    #[test]
+    fn ramp_passes_through_every_stop() {
+        let stop = |pos, color| Stop { pos, color };
+        let red = Color32::from_rgb(255, 0, 0);
+        let green = Color32::from_rgb(0, 255, 0);
+        let blue = Color32::from_rgb(0, 0, 255);
+        let ramp = Ramp::from_stops(
+            &[stop(0.2, red), stop(0.5, green), stop(1.0, blue)],
+            BlendSpace::Gamma,
+            1.0,
+        );
+        assert_eq!(ramp.pixel(0.0, None), red, "before the first stop");
+        assert_eq!(ramp.pixel(0.2, None), red);
+        assert_eq!(ramp.pixel(0.5, None), green);
+        assert_eq!(ramp.pixel(1.0, None), blue);
+        let between = ramp.pixel(0.75, None);
+        assert!(
+            (120..=135).contains(&between.g()) && (120..=135).contains(&between.b()),
+            "halfway from green to blue: {between:?}"
+        );
     }
 
     #[test]

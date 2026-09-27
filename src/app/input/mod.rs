@@ -1,6 +1,7 @@
 //! Input: this frame's pointer, pen and keyboard events, routed to the
 //! active tool. Touch gestures are in [`touch`], shortcuts in
 //! [`shortcuts`].
+pub(crate) mod keyboard;
 pub(crate) mod shortcuts;
 pub(crate) mod touch;
 

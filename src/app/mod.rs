@@ -4,16 +4,20 @@
 //! - [`painter`]: the `PainterApp` type and the frame loop (`update`).
 //! - [`state`]: the app state groups `PainterApp` is made of.
 //! - [`document`]: document settings, limits and tile types.
+//! - [`clipboard`]: copy, cut, paste and duplicating layers.
 //! - [`canvas_ops`], [`stroke_ops`]: operations on the document (new canvas,
 //!   layers, brush strokes through the stroke worker).
 //! - [`input`]: pointer, pen, touch and keyboard input, routed to tools.
 //! - [`tools`]: one module per tool (selection, fill, gradient, shapes...).
 //! - [`view`]: drawing the canvas (GPU atlases) and the screen mapping.
+//! - [`frame_stats`]: how long each stage of a frame takes (the readout).
 //! - [`layout`], [`init`], [`import`], [`brush_io`]: docks, startup, files
 //!   dropped or imported, brush tips on disk.
 pub(crate) mod brush_io;
 pub(crate) mod canvas_ops;
+pub(crate) mod clipboard;
 pub(crate) mod document;
+pub(crate) mod frame_stats;
 pub(crate) mod import;
 pub(crate) mod init;
 pub(crate) mod input;
@@ -22,6 +26,8 @@ pub(crate) mod painter;
 pub(crate) mod state;
 pub(crate) mod stroke_ops;
 pub(crate) mod tools;
+#[cfg(test)]
+mod undo_tests;
 pub(crate) mod view;
 
 pub use painter::PainterApp;

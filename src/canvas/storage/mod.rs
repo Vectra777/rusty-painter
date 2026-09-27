@@ -554,6 +554,19 @@ impl Canvas {
         self.layer_tile_cell(layer_idx, tx as i32, ty as i32)
     }
 
+    /// The tiles layer `layer_idx` holds (painted or not), in no order.
+    pub fn layer_tile_keys(&self, layer_idx: usize) -> Vec<(i32, i32)> {
+        self.layers.get(layer_idx).map_or_else(Vec::new, |layer| {
+            layer
+                .tiles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .copied()
+                .collect()
+        })
+    }
+
     /// Clone the raw pixel buffer for a tile in a given layer.
     pub fn get_layer_tile_data(&self, layer_idx: usize, tx: i32, ty: i32) -> Option<Vec<Color32>> {
         let cell = self.layer_tile_cell(layer_idx, tx, ty)?;
