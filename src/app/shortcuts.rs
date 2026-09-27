@@ -139,6 +139,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let lasso = pressed(none, Key::L);
     let wand = pressed(none, Key::Q);
     let flip = pressed(none, Key::H);
+    let content_fill = pressed(Modifiers::SHIFT, Key::F5);
     let gradient = pressed(Modifiers::SHIFT, Key::G);
     let shapes = pressed(none, Key::U);
     let ruler = pressed(none, Key::R);
@@ -219,6 +220,10 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         }
         app.modal_state.select_menu_open = false;
         app.modal_state.symmetry_menu_open = false;
+        repaint = true;
+    }
+    if content_fill {
+        app.content_aware_fill();
         repaint = true;
     }
     if flip {

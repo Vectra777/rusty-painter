@@ -160,6 +160,13 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ) {
         app.invert_selection();
     }
+    if menu_item(
+        ui,
+        "Content-Aware Fill",
+        Some(shortcut(ctx, Modifiers::SHIFT, Key::F5)),
+    ) {
+        app.content_aware_fill();
+    }
     if menu_item(ui, "Deselect", Some(shortcut(ctx, cmd, Key::D))) {
         app.deselect();
     }

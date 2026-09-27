@@ -260,14 +260,20 @@ impl eframe::App for PainterApp {
                 {
                     self.liquify_commit();
                 }
-                input_handler::handle_input(
-                    self,
-                    ctx,
-                    &view.response,
-                    view.origin,
-                    view.canvas_center,
-                    &pen,
-                );
+                // A content-aware fill in progress: the canvas waits for it.
+                if self.poll_patch() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Progress);
+                    needs_repaint = true;
+                } else {
+                    input_handler::handle_input(
+                        self,
+                        ctx,
+                        &view.response,
+                        view.origin,
+                        view.canvas_center,
+                        &pen,
+                    );
+                }
                 // Overlay first: on a drag's first frame it takes over at once,
                 // so the layer isn't CPU-rendered even once while dragging.
                 super::transform::update_float_overlay(self, ctx);

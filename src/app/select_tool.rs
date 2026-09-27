@@ -165,6 +165,12 @@ impl PainterApp {
             SelectionType::Wand | SelectionType::ColorRange => self.select_pick(pos, kind, mode),
             SelectionType::Magnetic => self.magnetic_press(pos, mode),
             _ => {
+                // A smart patch fills exactly what's painted.
+                let mode = if kind == SelectionType::Brush && self.workspace.patch.smart_patch {
+                    SelectionMode::Replace
+                } else {
+                    mode
+                };
                 self.workspace.select.before = Some(self.selection_manager.current_shape.clone());
                 self.selection_manager
                     .start_selection_with_mode(pos, kind, mode);
@@ -190,7 +196,18 @@ impl PainterApp {
         if !self.selection_manager.is_dragging {
             return;
         }
+        let brush = self.selection_manager.painting_brush();
         self.selection_manager.end_selection();
+        // Smart patch: what the selection brush painted is filled from its
+        // surroundings, and the selection goes back to what it was.
+        if brush && self.workspace.patch.smart_patch {
+            let painted = self.selection_manager.current_shape.take();
+            self.selection_manager.current_shape = self.workspace.select.before.take().flatten();
+            if let Some(crate::selection::SelectionShape::Mask(mask)) = painted {
+                self.fill_hole((*mask).clone());
+            }
+            return;
+        }
         if let Some(prev) = self.workspace.select.before.take() {
             self.record_selection_change(prev);
         }

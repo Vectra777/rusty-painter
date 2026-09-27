@@ -382,6 +382,8 @@ pub struct WorkspaceState {
     pub shapes: crate::app::shape_tool::ShapeToolState,
     /// Gradient tool settings and the gradient being placed.
     pub gradient: crate::app::gradient_tool::GradientToolState,
+    /// Content-aware fill (smart patch).
+    pub patch: crate::app::patch_tool::PatchState,
     /// Android's image picker (the photo library).
     pub gallery: crate::ui::image_gallery::GalleryState,
 }
@@ -422,6 +424,7 @@ impl WorkspaceState {
             guides: Default::default(),
             shapes: Default::default(),
             gradient: Default::default(),
+            patch: Default::default(),
         }
     }
 }

@@ -160,6 +160,15 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
             if ui.add_enabled(has, egui::Button::new("Deselect")).clicked() {
                 app.deselect();
             }
+            if ui
+                .add_enabled(
+                    has && !app.patch_running(),
+                    egui::Button::new("Fill from surroundings"),
+                )
+                .clicked()
+            {
+                app.content_aware_fill();
+            }
         }),
         Tool::Gradient => context_bar(ctx, area, |ui| {
             crate::ui::top_bar::gradient_options(app, ui, true);

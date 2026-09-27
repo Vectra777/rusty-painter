@@ -8,7 +8,11 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **Brush Engine**: Soft, hard, and pixel brushes with spacing, flow, jitter, and stabilizer options.
 - **Tablet Support**: Pen pressure and the eraser end on Windows (Windows Ink, via `octotablet`) and Android (every stylus sample, with a resting palm ignored while the pen is down). On Linux, Wayland tablets work with `RUSTY_PAINTER_ENABLE_WAYLAND_TABLET=1`; X11 has no pressure yet.
 - **Layers**: Full layer support with visibility, opacity, and blending.
-- **Selection Tools**: Rectangle, Circle, and Lasso selection modes.
+- **Selection Tools**: Rectangle, ellipse, lasso (with smoothing), magnetic lasso, magic wand, colour range and selection brush; replace, add, erase and intersect; invert; every change undoable.
+- **Mirror Painting**: Left/right, top/bottom, four-way or radial (mandala, optionally kaleidoscope) around a centre and angle you drag on the canvas; flip the view with H.
+- **Shapes & Ruler**: Line, rectangle, ellipse and polygon drawn with the brush, filled, or both, editable until applied; a ruler that straightens strokes along or parallel to it.
+- **Gradients**: Linear, radial, reflected and angle gradients, previewed live, dithered, clipped to the selection.
+- **Smart Patch**: Content-aware fill of the selection from its surroundings (PatchMatch), or paint over something with the selection brush to remove it.
 - **Transform Tools**: Move, rotate, and scale selections with non-destructive preview.
 - **History**: Robust Undo/redo system for pixels, selections, transformations, and layer add/remove/reorder/merge.
 - **Canvas**: Large canvas support (default 4000x4000) backed by tiled storage and GPU texture atlases.

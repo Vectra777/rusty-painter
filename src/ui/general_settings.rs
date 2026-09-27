@@ -172,6 +172,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Three-finger tap", "Redo"),
             ("Ctrl + D, Esc", "Deselect"),
             ("Ctrl + A", "Select all"),
+            ("Shift + F5", "Fill the selection from its surroundings"),
             ("Ctrl + Shift + I", "Invert selection"),
             ("Shift / Alt + drag", "Add to / erase from the selection"),
             ("Backspace", "Remove the last magnetic lasso point"),

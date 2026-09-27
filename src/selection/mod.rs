@@ -489,6 +489,11 @@ impl SelectionManager {
         self.current_shape = combined.map(|m| SelectionShape::Mask(Arc::new(m)));
     }
 
+    /// Whether the drag in progress is the selection brush.
+    pub fn painting_brush(&self) -> bool {
+        self.brush_mask.is_some()
+    }
+
     /// Combine `shape` with the current selection according to `mode`.
     pub fn apply_shape(&mut self, shape: SelectionShape, mode: SelectionMode) {
         if mode == SelectionMode::Replace {

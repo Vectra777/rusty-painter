@@ -14,6 +14,7 @@ pub(crate) mod painter;
 pub(crate) mod painter_helpers;
 pub(crate) mod painter_state;
 pub(crate) mod palette_tool;
+pub(crate) mod patch_tool;
 pub(crate) mod render_helper;
 pub(crate) mod select_tool;
 pub(crate) mod shape_tool;

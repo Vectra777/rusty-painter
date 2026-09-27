@@ -113,6 +113,11 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 egui::Slider::new(&mut sel.brush_hardness, 0.0..=1.0),
             );
             smoothing(app, ui, compact);
+            ui.checkbox(&mut app.workspace.patch.smart_patch, "Smart patch")
+                .on_hover_text("Paint over something to remove it: it's filled from its surroundings on release");
+            if app.workspace.patch.smart_patch {
+                ui.checkbox(&mut app.workspace.patch.sample_all, "Sample all layers");
+            }
         }
         SelectionType::Lasso => smoothing(app, ui, compact),
         SelectionType::Wand => {
@@ -225,6 +230,20 @@ pub(crate) fn selection_actions(app: &mut PainterApp, ui: &mut egui::Ui) {
     {
         app.deselect();
     }
+    if ui
+        .add_enabled(
+            has && !app.patch_running(),
+            egui::Button::new("Fill from surroundings"),
+        )
+        .on_hover_text(
+            "Content-aware fill: replace what's selected with texture from around it (Shift+F5)",
+        )
+        .clicked()
+    {
+        app.content_aware_fill();
+    }
+    ui.checkbox(&mut app.workspace.patch.sample_all, "All layers")
+        .on_hover_text("Fill from everything visible, not just this layer");
 }
 
 /// The menu sliding out from the toolbar's Select button (`anchor`).

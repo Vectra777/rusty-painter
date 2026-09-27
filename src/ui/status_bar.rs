@@ -120,6 +120,18 @@ fn document_info(app: &mut PainterApp, ui: &mut egui::Ui, width: f32, compact: b
         .map(|p| format!("{:.0}, {:.0}", p.x, p.y))
         .unwrap_or_else(|| "–".to_string());
 
+    // A content-aware fill in progress, with a way out.
+    if let Some(progress) = app.patch_progress() {
+        if small_button(ui, "✕", "Cancel the fill") {
+            app.patch_cancel();
+        }
+        ui.add(
+            egui::ProgressBar::new(progress)
+                .desired_width(120.0)
+                .text(RichText::new("Filling from surroundings").small()),
+        );
+        return;
+    }
     // A message (export done, errors) matters more than the rest.
     if let Some(message) = app.export_state.message.clone() {
         // Dismiss first: a long message truncates instead of hiding it.
