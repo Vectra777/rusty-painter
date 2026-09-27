@@ -18,4 +18,6 @@ pub enum Tool {
     Blur,
     /// Line, rectangle, ellipse or polygon, drawn with the brush.
     Shape(crate::app::shape_tool::ShapeKind),
+    /// Linear, radial, reflected or angle gradient.
+    Gradient,
 }

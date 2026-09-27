@@ -135,7 +135,7 @@ impl PainterApp {
         );
     }
 
-    fn convert_color_for_model(color: Color32, model: ColorModel) -> Color32 {
+    pub(crate) fn convert_color_for_model(color: Color32, model: ColorModel) -> Color32 {
         match model {
             ColorModel::Rgba => color,
             ColorModel::Grayscale => super::state::to_grayscale(color),

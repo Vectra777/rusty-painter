@@ -380,6 +380,8 @@ pub struct WorkspaceState {
     pub guides: crate::app::guides::GuideState,
     /// Shape tool settings and the shape being edited.
     pub shapes: crate::app::shape_tool::ShapeToolState,
+    /// Gradient tool settings and the gradient being placed.
+    pub gradient: crate::app::gradient_tool::GradientToolState,
     /// Android's image picker (the photo library).
     pub gallery: crate::ui::image_gallery::GalleryState,
 }
@@ -419,6 +421,7 @@ impl WorkspaceState {
             symmetry: Default::default(),
             guides: Default::default(),
             shapes: Default::default(),
+            gradient: Default::default(),
         }
     }
 }

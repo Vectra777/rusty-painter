@@ -2,6 +2,7 @@
 pub mod blend;
 pub mod blend_modes;
 pub mod fill;
+pub mod gradient;
 pub mod history;
 pub mod liquify;
 pub mod palette;

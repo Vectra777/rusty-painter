@@ -17,7 +17,7 @@ const MARGIN_Y: f32 = 6.0;
 
 /// Button side that fits every tool (and the colors) in `height`, if any.
 fn fitting_button_size(height: f32, touch: bool, preferred: f32) -> Option<f32> {
-    let buttons = if touch { 15.0 } else { 13.0 };
+    let buttons = if touch { 16.0 } else { 14.0 };
     let separators = if touch { 4.0 } else { 3.0 };
     // The color pair is about 1.22 buttons tall.
     let fixed = 2.0 * MARGIN_Y
@@ -175,6 +175,16 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         "Fill (G): bucket or enclose",
     ) {
         app.active_tool = Tool::Fill;
+    }
+    let gradient_active = matches!(app.active_tool, Tool::Gradient);
+    if tool_button(
+        ui,
+        app,
+        Icon::Gradient,
+        gradient_active,
+        "Gradient (Shift+G): linear, radial, reflected, angle",
+    ) {
+        app.active_tool = Tool::Gradient;
     }
     // One Shape button: it shows the current shape; clicking it picks the
     // tool, and again opens the menu of shapes.

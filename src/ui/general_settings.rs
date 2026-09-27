@@ -129,6 +129,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("L", "Lasso select (again: magnetic lasso)"),
             ("Q", "Magic wand (again: colour range)"),
             ("U", "Shapes (again: next shape)"),
+            ("Shift + G", "Gradient"),
             ("R", "Show / hide the ruler"),
             ("V or T", "Transform"),
             ("I", "Eyedropper"),

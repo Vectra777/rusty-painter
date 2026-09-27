@@ -15,10 +15,10 @@ pub(crate) fn symmetry_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
         &mut s.mode,
         &[
             (SymmetryMode::Off, "Off"),
-            (SymmetryMode::Vertical, "│"),
-            (SymmetryMode::Horizontal, "─"),
-            (SymmetryMode::Both, "┼"),
-            (SymmetryMode::Radial, "✳"),
+            (SymmetryMode::Vertical, "L | R"),
+            (SymmetryMode::Horizontal, "T | B"),
+            (SymmetryMode::Both, "4-way"),
+            (SymmetryMode::Radial, "Radial"),
         ],
         true,
     );

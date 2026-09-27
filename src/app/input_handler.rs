@@ -115,6 +115,7 @@ fn handle_pen_drag(
             }
         }
         Tool::Shape(_) => app.shape_move(raw, shape_mods(ctx)),
+        Tool::Gradient => app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift)),
     }
 }
 
@@ -261,7 +262,10 @@ fn handle_primary_press(
 ) {
     // The brush may start a stroke off the canvas (on the canvas panel);
     // other tools need a press on the canvas itself.
-    let brush = matches!(app.active_tool, Tool::Brush | Tool::Shape(_));
+    let brush = matches!(
+        app.active_tool,
+        Tool::Brush | Tool::Shape(_) | Tool::Gradient
+    );
     if app.viewport.is_panning || !over {
         return;
     }
@@ -302,6 +306,7 @@ fn handle_primary_press(
         Tool::Liquify => app.liquify_press(canvas_pos.0),
         Tool::Smudge | Tool::Blur => app.blend_press(raw, pressure),
         Tool::Shape(kind) => app.shape_press(kind, raw),
+        Tool::Gradient => app.gradient_press(raw),
     }
 }
 
@@ -321,6 +326,7 @@ fn handle_primary_release(app: &mut PainterApp) {
         Tool::Smudge | Tool::Blur => app.blend_release(),
         Tool::Transform(_) => transform::transform_release(app),
         Tool::Shape(_) => app.shape_release(),
+        Tool::Gradient => app.gradient_release(),
     }
 }
 
@@ -341,6 +347,7 @@ fn handle_keyboard(app: &mut PainterApp, key: egui::Key, pressed: bool) {
         } else {
             app.shape_commit();
         }
+        app.gradient_commit();
     }
 }
 
@@ -386,6 +393,12 @@ fn handle_pointer_move(
             let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
             app.shape_move(raw, shape_mods(ctx));
             ctx.request_repaint();
+        } else if matches!(app.active_tool, Tool::Gradient) {
+            if app.viewport.is_primary_down {
+                let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+                app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift));
+                ctx.request_repaint();
+            }
         } else {
             handle_tool_move(app, ctx, response, clamped, is_inside);
         }
@@ -430,7 +443,7 @@ fn handle_tool_move(
             transform::transform_drag(app, pos, keep_aspect);
             ctx.request_repaint();
         }
-        Tool::Shape(_) => {}
+        Tool::Shape(_) | Tool::Gradient => {}
     }
 }
 

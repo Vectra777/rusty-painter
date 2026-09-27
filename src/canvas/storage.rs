@@ -7,7 +7,7 @@ use eframe::egui::{Color32, ColorImage, Rgba};
 
 use crate::canvas::blend::{
     apply_opacity_scale, average_over, color32_to_linear, color32s_to_linear,
-    gamma_color32_to_rgba, gamma_rgba_to_color32, premultiply, rgba_to_color32_fast,
+    gamma_color32_to_rgba, gamma_rgba_to_color32, rgba_to_color32_fast,
 };
 use crate::canvas::blend_modes::{
     BlendSpace, LayerBlend, composite as blend_composite, pixel_noise,
@@ -591,6 +591,18 @@ impl Layer {
     }
 }
 
+/// Some of a layer's tiles as they were, for [`Canvas::paint_over_region`].
+pub struct Region {
+    /// The canvas area painted, `[x0, y0, x1, y1)`.
+    pub bounds: [i32; 4],
+    /// Each tile's pixels as they were, and the tile itself (looked up
+    /// once: the layer's tile map is behind one lock).
+    tiles: Vec<RegionTile>,
+}
+
+/// A tile's key, its pixels as they were, and the tile.
+type RegionTile = ((i32, i32), Vec<Color32>, Arc<Mutex<TileCell>>);
+
 /// Main drawing surface that owns tile grids and blending rules across layers.
 pub struct Canvas {
     width: usize,
@@ -771,7 +783,7 @@ impl Canvas {
             width,
             height,
             tile_size,
-            clear_color: premultiply(clear_color),
+            clear_color,
             layers: vec![bg_layer, layer1],
             active_layer_idx: 1,
             next_layer_id: 2,
@@ -1933,7 +1945,7 @@ impl Canvas {
 
     /// Clear the active layer to the provided color (or transparent for non-background).
     pub fn clear(&mut self, color: Color) {
-        self.clear_color = premultiply(color.to_color32());
+        self.clear_color = color.to_color32();
         if let Some(layer) = self.layers.get(self.active_layer_idx) {
             let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             for tile_arc in tiles.values() {
@@ -2507,11 +2519,12 @@ impl Canvas {
         }
         let tile_len = (ts * ts) as usize;
         let [r, g, b, a] = color.to_srgba_unmultiplied();
-        // The fill colour at every coverage level, premultiplied once.
+        // The fill colour at every coverage level, as pixels (egui colours
+        // are the canvas's pixel format).
         let colors: Vec<Color32> = (0..=255u32)
             .map(|cov| {
                 let alpha = ((a as u32 * cov + 127) / 255) as u8;
-                crate::canvas::blend::premultiply(Color32::from_rgba_unmultiplied(r, g, b, alpha))
+                Color32::from_rgba_unmultiplied(r, g, b, alpha)
             })
             .collect();
         let snapshots: Vec<TileSnapshot> = cells
@@ -2654,6 +2667,139 @@ impl Canvas {
             eframe::egui::pos2(bx0 as f32, by0 as f32),
             eframe::egui::pos2(bx1 as f32, by1 as f32),
         ))
+    }
+
+    /// The layer's tiles covering `bounds` (`[x0, y0, x1, y1)`), as they are
+    /// now: the originals a repeatedly previewed paint (the gradient) is
+    /// composited over. Missing tiles are created (as their empty colour).
+    pub fn capture_region(&self, layer_idx: usize, bounds: [i32; 4]) -> Region {
+        let ts = self.tile_size as i32;
+        let [bx0, by0, bx1, by1] = self.clip_bounds(bounds);
+        let mut keys = Vec::new();
+        if bx1 > bx0 && by1 > by0 {
+            for ty in by0 / ts..=(by1 - 1) / ts {
+                for tx in bx0 / ts..=(bx1 - 1) / ts {
+                    keys.push((tx, ty));
+                }
+            }
+        }
+        let tile_len = (ts * ts) as usize;
+        let cells: Vec<_> = keys
+            .iter()
+            .filter_map(|&(tx, ty)| Some(((tx, ty), self.ensure_layer_tile(layer_idx, tx, ty)?)))
+            .collect();
+        let tiles = cells
+            .into_par_iter()
+            .map(|(key, cell)| {
+                let data = cell
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .data
+                    .clone()
+                    .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_len]);
+                (key, data, cell)
+            })
+            .collect();
+        Region {
+            bounds: [bx0, by0, bx1, by1],
+            tiles,
+        }
+    }
+
+    fn clip_bounds(&self, [x0, y0, x1, y1]: [i32; 4]) -> [i32; 4] {
+        [
+            x0.max(0),
+            y0.max(0),
+            x1.min(self.width as i32),
+            y1.min(self.height as i32),
+        ]
+    }
+
+    /// Set the layer's pixels in `region` to its originals with
+    /// `row(x0, y, out)`'s premultiplied colours (one row of the region's
+    /// part of a tile at a time) painted over them. Alpha-locked layers only
+    /// recolour. Tiles are processed in parallel.
+    pub fn paint_over_region(
+        &self,
+        layer_idx: usize,
+        region: &Region,
+        row: impl Fn(i32, i32, &mut [Color32]) + Sync,
+    ) {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return;
+        };
+        let alpha_lock = layer.alpha_locked;
+        let ts = self.tile_size as i32;
+        let [bx0, by0, bx1, by1] = region.bounds;
+        region
+            .tiles
+            .par_iter()
+            .for_each(|((tx, ty), original, cell)| {
+                let (tx, ty) = (*tx, *ty);
+                let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
+                let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
+                let mut out = original.clone();
+                let mut src = vec![Color32::TRANSPARENT; (lx1 - lx0).max(0) as usize];
+                for ly in ly0..ly1 {
+                    row(tx * ts + lx0, ty * ts + ly, &mut src);
+                    let base = (ly * ts) as usize;
+                    for (lx, &s) in (lx0..lx1).zip(&src) {
+                        if s.a() == 0 {
+                            continue;
+                        }
+                        let i = base + lx as usize;
+                        let dst = original[i];
+                        if alpha_lock && dst.a() == 0 {
+                            continue;
+                        }
+                        let mut px = crate::canvas::blend::alpha_over(s, dst);
+                        if alpha_lock {
+                            px = crate::canvas::blend::with_alpha_of(px, dst.a());
+                        }
+                        out[i] = px;
+                    }
+                }
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                cell.is_empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
+                cell.data = Some(out);
+            });
+    }
+
+    /// Put the layer's pixels in `region` back to its originals.
+    pub fn restore_region(&self, region: &Region) {
+        region.tiles.par_iter().for_each(|(_, original, cell)| {
+            let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+            cell.is_empty = original.iter().all(|&p| p == Color32::TRANSPARENT);
+            cell.data = Some(original.clone());
+        });
+    }
+
+    /// Undo snapshots of the tiles in `region` whose pixels changed since it
+    /// was captured.
+    pub fn region_snapshots(&self, layer_idx: usize, region: &Region) -> Vec<TileSnapshot> {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return Vec::new();
+        };
+        let (layer_id, ts) = (layer.id, self.tile_size);
+        region
+            .tiles
+            .par_iter()
+            .filter_map(|((tx, ty), original, cell)| {
+                let (tx, ty) = (*tx, *ty);
+                let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let changed = cell.data.as_ref().is_some_and(|now| now != original);
+                changed.then(|| TileSnapshot {
+                    tx,
+                    ty,
+                    layer_id,
+                    x0: 0,
+                    y0: 0,
+                    width: ts,
+                    height: ts,
+                    data: original.clone().into(),
+                })
+            })
+            .collect()
     }
 
     /// Composite floating layer `float_idx` onto `target_idx` (normal blend,
@@ -3609,5 +3755,24 @@ mod tests {
         let none = canvas.paint_region(1, [0, 0, 64, 64], |_, _| Color32::TRANSPARENT, &mut undo);
         assert!(none.is_none());
         assert!(undo.tiles.is_empty());
+    }
+
+    #[test]
+    fn fills_and_backgrounds_keep_their_exact_colour() {
+        // A mid grey used to come out much lighter (converted to sRGB twice).
+        let grey = Color32::from_rgb(100, 100, 100);
+        let canvas = Canvas::new(8, 8, grey, 8);
+        // A background tile starts as the background colour.
+        canvas.ensure_layer_tile(0, 0, 0);
+        assert_eq!(canvas.get_layer_tile_data(0, 0, 0).unwrap()[0], grey);
+        let mut undo = empty_action();
+        let mut data = vec![0u8; 64];
+        data[0] = 255;
+        data[1] = 128;
+        let mask = crate::selection::SelectionMask::new(0, 0, 8, 8, data);
+        canvas.paint_mask(1, &mask, grey, &mut undo);
+        let tile = canvas.get_layer_tile_data(1, 0, 0).unwrap();
+        assert_eq!(tile[0], grey);
+        assert_eq!(tile[1], Color32::from_rgba_unmultiplied(100, 100, 100, 128));
     }
 }

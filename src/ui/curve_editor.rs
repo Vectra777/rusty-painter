@@ -228,7 +228,7 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool
                 "Release to remove".to_string()
             } else {
                 format!(
-                    "{:.0}% from center → {:.0}% opacity",
+                    "{:.0}% from center: {:.0}% opacity",
                     p.x * 100.0,
                     p.y * 100.0
                 )

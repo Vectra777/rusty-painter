@@ -681,17 +681,6 @@ pub(crate) fn apply_opacity_scale(color: Color32, opacity_scale: f32) -> Color32
     Color32::from(Rgba::from(color) * opacity_scale)
 }
 
-pub(crate) fn premultiply(color: Color32) -> Color32 {
-    let [r, g, b, a] = color.to_array();
-    let linear = Rgba::from_rgba_unmultiplied(
-        r as f32 / 255.0,
-        g as f32 / 255.0,
-        b as f32 / 255.0,
-        a as f32 / 255.0,
-    );
-    Color32::from(linear)
-}
-
 #[cfg(test)]
 mod unmultiply_tests {
     use super::*;

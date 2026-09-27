@@ -358,6 +358,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Liquify => liquify_options(app, ui, true),
         Tool::Smudge | Tool::Blur => blend_options(app, ui),
         Tool::Shape(kind) => shape_options(app, ui, kind),
+        Tool::Gradient => gradient_options(app, ui, true),
     };
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // Hints are optional: drop them rather than overlap the options.
@@ -501,6 +502,93 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     } else {
         "Paint over edges to soften them  ·  uses the brush's spacing & pressure"
     }
+}
+
+/// Gradient shape, colours, repetition, opacity, apply/cancel. `compact`
+/// lays it out in a row (bars).
+pub(crate) fn gradient_options(
+    app: &mut PainterApp,
+    ui: &mut egui::Ui,
+    compact: bool,
+) -> &'static str {
+    use crate::app::gradient_tool::GradientColors;
+    use crate::canvas::gradient::{GradientRepeat, GradientShape};
+    if compact {
+        tool_title(ui, "Gradient");
+    }
+    let s = &mut app.workspace.gradient.settings;
+    let mut changed = segmented(
+        ui,
+        &mut s.shape,
+        &[
+            (GradientShape::Linear, "Linear"),
+            (GradientShape::Radial, "Radial"),
+            (GradientShape::Reflected, "Reflected"),
+            (GradientShape::Angle, "Angle"),
+        ],
+        compact,
+    );
+    if compact {
+        vdivider(ui);
+    }
+    changed |= segmented(
+        ui,
+        &mut s.colors,
+        &[
+            (GradientColors::ForegroundToBackground, "To secondary"),
+            (GradientColors::ForegroundToTransparent, "To clear"),
+        ],
+        compact,
+    );
+    if compact {
+        vdivider(ui);
+    }
+    changed |= segmented(
+        ui,
+        &mut s.repeat,
+        &[
+            (GradientRepeat::None, "Once"),
+            (GradientRepeat::Repeat, "Repeat"),
+            (GradientRepeat::Mirror, "Mirror"),
+        ],
+        compact,
+    );
+    changed |= ui.checkbox(&mut s.reverse, "Reverse").changed();
+    if compact {
+        vdivider(ui);
+    }
+    changed |= bar_slider(
+        ui,
+        "Opacity",
+        90.0,
+        percent_of_unit(egui::Slider::new(&mut s.opacity, 0.0..=1.0)),
+    );
+    changed |= ui
+        .checkbox(&mut s.dither, "Dither")
+        .on_hover_text("Breaks up the bands of a smooth gradient")
+        .changed();
+    if changed {
+        app.gradient_settings_changed();
+    }
+    if compact {
+        vdivider(ui);
+    }
+    let placing = app.workspace.gradient.session.is_some();
+    if ui
+        .add_enabled(placing, egui::Button::new("Apply"))
+        .on_hover_text("Keep the gradient (Enter)")
+        .clicked()
+    {
+        app.gradient_commit();
+    }
+    if ui
+        .add_enabled(placing, egui::Button::new("Cancel"))
+        .on_hover_text("Take it back off (Esc)")
+        .clicked()
+    {
+        app.gradient_cancel();
+    }
+    "Drag from the first colour to the second  ·  Shift: 15° steps  ·  drag the ends to adjust  ·  Enter apply"
 }
 
 fn shape_options(

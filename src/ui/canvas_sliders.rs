@@ -161,6 +161,9 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
                 app.deselect();
             }
         }),
+        Tool::Gradient => context_bar(ctx, area, |ui| {
+            crate::ui::top_bar::gradient_options(app, ui, true);
+        }),
         Tool::Shape(_) => context_bar(ctx, area, |ui| {
             crate::ui::shape_menu::shape_controls(app, ui, true);
             crate::ui::widgets::vdivider(ui);

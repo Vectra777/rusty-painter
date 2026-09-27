@@ -139,6 +139,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let lasso = pressed(none, Key::L);
     let wand = pressed(none, Key::Q);
     let flip = pressed(none, Key::H);
+    let gradient = pressed(Modifiers::SHIFT, Key::G);
     let shapes = pressed(none, Key::U);
     let ruler = pressed(none, Key::R);
     let remove_anchor = pressed(none, Key::Backspace);
@@ -209,6 +210,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             app.liquify_cancel();
         } else if app.workspace.shapes.session.is_some() {
             app.shape_cancel();
+        } else if app.workspace.gradient.session.is_some() {
+            app.gradient_cancel();
         } else if app.selection_manager.is_dragging || app.workspace.select.magnetic.is_some() {
             app.select_cancel();
         } else {
@@ -298,6 +301,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
                 _ => SelectionType::Lasso,
             };
             app.set_select_tool(kind);
+        }
+        if gradient {
+            app.active_tool = Tool::Gradient;
         }
         if shapes {
             // Pressing U again goes to the next shape.

@@ -222,6 +222,10 @@ impl eframe::App for PainterApp {
                 {
                     super::transform::commit_floating_layer(self);
                 }
+                // Leaving the Gradient tool keeps the gradient.
+                if !matches!(self.active_tool, super::tools::Tool::Gradient) {
+                    self.gradient_commit();
+                }
                 // Leaving the Shape tool applies the shape; a double-click
                 // finishes a polygon.
                 if !matches!(self.active_tool, super::tools::Tool::Shape(_)) {
@@ -268,6 +272,8 @@ impl eframe::App for PainterApp {
                 // so the layer isn't CPU-rendered even once while dragging.
                 super::transform::update_float_overlay(self, ctx);
                 super::transform::flush_transform_preview(self);
+                // The gradient repaints at most once a frame while dragged.
+                self.gradient_update();
                 // Twirl / pinch / bloat keep working while the brush is held.
                 if self.liquify_is_holding() && self.workspace.liquify.mode.is_continuous() {
                     let dt = ctx.input(|i| i.stable_dt).min(0.1);
@@ -309,6 +315,7 @@ impl eframe::App for PainterApp {
                 super::select_tool::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
                 super::guides::draw_guides(self, ui.painter(), &map);
                 super::shape_tool::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
+                super::gradient_tool::draw_gradient(self, ui.painter(), &|p| map.to_screen(p));
                 // A hand over the guide handles: they can be dragged.
                 if let Some(canvas) = self.viewport.cursor_canvas
                     && (self.guides_dragging() || self.over_guide_handle(canvas))

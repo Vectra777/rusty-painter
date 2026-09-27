@@ -45,6 +45,7 @@ pub(crate) enum Icon {
     ShapeEllipse,
     ShapePolygon,
     Ruler,
+    Gradient,
 }
 
 /// Maps 16×16 icon-grid coordinates into a square centered in `rect`.
@@ -188,6 +189,17 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                 g.p(1.5, 6.5),
             ];
             painter.add(Shape::closed_line(pts, Stroke::new(g.w(1.5), color)));
+        }
+        Icon::Gradient => {
+            // A box filling from solid to empty in bands.
+            let r = Rect::from_min_max(g.p(1.5, 3.0), g.p(14.5, 13.0));
+            painter.rect_stroke(r, 0.0, thin);
+            for i in 0..5 {
+                let x0 = 1.5 + i as f32 * 2.6;
+                let band = Rect::from_min_max(g.p(x0, 3.0), g.p(x0 + 2.6, 13.0));
+                let alpha = 1.0 - i as f32 / 5.0;
+                painter.rect_filled(band, 0.0, color.gamma_multiply(alpha));
+            }
         }
         Icon::Ruler => {
             // A slanted ruler with ticks.
