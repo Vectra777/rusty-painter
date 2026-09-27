@@ -3094,6 +3094,7 @@ version = "0.0.1"
 dependencies = [
  "android_logger",
  "arboard",
+ "crc32fast",
  "criterion",
  "eframe",
  "egui_dock",

@@ -1,6 +1,9 @@
-//! `.rpainter` project files: a versioned header (JSON) plus a blob area
-//! for tiles and undo history. [`encode_project`] and [`decode_project`]
-//! are the two ends; save/open on the app wrap them.
+//! `.rpainter` project files. The file is an OpenRaster archive (a ZIP with
+//! a flattened image and a thumbnail, so file managers and other painting
+//! apps can show it), holding the project data as one extra entry: a
+//! versioned header (JSON) plus a blob area for tiles and undo history.
+//! [`encode_project`] and [`decode_project`] are the two ends; save/open on
+//! the app wrap them. Older saves are the bare project data, still read.
 
 use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
 use crate::{
@@ -23,14 +26,16 @@ mod blobs;
 mod convert;
 pub(crate) mod export;
 mod preview;
+mod zip;
 
 use blobs::{StoredBlob, push_blobs, read_blob};
 use convert::{
     StoredColor, StoredColorModel, StoredLayerHistoryOp, StoredSelectionShape, StoredTransformInfo,
 };
-use preview::{StoredPreview, preview_png_blob};
 
 const MAGIC: &[u8; 8] = b"RPNTV001";
+/// Where the project data sits inside the OpenRaster archive.
+const PROJECT_ENTRY: &str = "rusty-painter/project.rpnt";
 const PROJECT_FORMAT: &str = "rusty-painter-project";
 /// 3: one undo history for the document (2 kept one per layer).
 const PROJECT_VERSION: u32 = 3;
@@ -68,6 +73,36 @@ impl PainterApp {
 }
 
 pub(crate) fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
+    let data = encode_project_data(app)?;
+    let flat = app.canvas.flatten();
+    let thumbnail = preview::encode_png(preview::thumbnail(&flat, preview::THUMBNAIL_MAX_EDGE))?;
+    let [w, h] = flat.size;
+    let merged = preview::encode_png(flat)?;
+    // One layer: the flattened picture. Apps that read OpenRaster open that;
+    // the layers, undo and settings are in the project entry.
+    let stack = format!(
+        "<?xml version='1.0' encoding='UTF-8'?>\n\
+         <image version=\"0.0.3\" w=\"{w}\" h=\"{h}\">\n\
+         <stack>\n\
+         <layer name=\"{}\" src=\"mergedimage.png\" x=\"0\" y=\"0\" \
+         opacity=\"1.000\" visibility=\"visible\"/>\n\
+         </stack>\n\
+         </image>\n",
+        crate::APP_NAME
+    );
+
+    let mut zip = zip::ZipWriter::default();
+    // The type check reads "mimetype" as the first entry, uncompressed.
+    zip.add("mimetype", b"image/openraster")?;
+    zip.add("stack.xml", stack.as_bytes())?;
+    zip.add("mergedimage.png", &merged)?;
+    zip.add("Thumbnails/thumbnail.png", &thumbnail)?;
+    zip.add(PROJECT_ENTRY, &data)?;
+    zip.finish()
+}
+
+/// The project itself: the header and blob area.
+fn encode_project_data(app: &PainterApp) -> Result<Vec<u8>, String> {
     let mut blobs = Vec::new();
     let manifest = ProjectFile::from_app(app, &mut blobs)?;
     let manifest =
@@ -83,6 +118,14 @@ pub(crate) fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn decode_project(bytes: &[u8]) -> Result<LoadedProject, String> {
+    if bytes.starts_with(zip::SIGNATURE) {
+        decode_project_data(zip::read_entry(bytes, PROJECT_ENTRY)?)
+    } else {
+        decode_project_data(bytes)
+    }
+}
+
+fn decode_project_data(bytes: &[u8]) -> Result<LoadedProject, String> {
     if bytes.len() < MAGIC.len() + 8 || &bytes[..MAGIC.len()] != MAGIC {
         return Err("Unsupported project file".to_string());
     }
@@ -145,7 +188,6 @@ struct ProjectFile {
     #[serde(default)]
     blend_space: Option<String>,
     active_layer_idx: usize,
-    preview: Option<StoredPreview>,
     layers: Vec<StoredLayer>,
     /// Version 3: the one document history. Version 2: one per layer.
     histories: Vec<StoredHistory>,
@@ -166,7 +208,6 @@ impl ProjectFile {
                 BlendSpace::Gamma => Some("gamma".to_string()),
             },
             active_layer_idx: app.canvas.active_layer_idx,
-            preview: preview_png_blob(&app.canvas, blobs)?,
             layers: app
                 .canvas
                 .layer_snapshots()
@@ -1379,7 +1420,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn project_round_trips_compressed_tiles_history_and_preview() {
+    fn project_round_trips_tiles_and_history_old_and_new_format() {
         let canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
         let pixels = vec![Color32::from_rgb(255, 0, 0); TILE_SIZE * TILE_SIZE];
         canvas.set_layer_tile_data(1, 0, 0, pixels.clone());
@@ -1401,16 +1442,41 @@ pub(crate) mod tests {
             layer_action: None,
         });
 
-        let encoded = encode_project(&test_app(canvas, vec![History::new(), history])).unwrap();
-        assert!(encoded.starts_with(MAGIC));
+        let app = test_app(canvas, vec![History::new(), history]);
+        let encoded = encode_project(&app).unwrap();
         assert!(encoded.len() < TILE_SIZE * TILE_SIZE * 4);
 
-        let loaded = decode_project(&encoded).unwrap();
-        assert_eq!(
-            loaded.canvas.get_layer_tile_data(1, 0, 0).unwrap()[0],
-            Color32::from_rgb(255, 0, 0)
-        );
-        assert_eq!(loaded.history.stacks().0.len(), 1);
+        // Files saved before the OpenRaster container: the bare data.
+        let bare = encode_project_data(&app).unwrap();
+        assert!(bare.starts_with(MAGIC));
+        for bytes in [&encoded, &bare] {
+            let loaded = decode_project(bytes).unwrap();
+            assert_eq!(
+                loaded.canvas.get_layer_tile_data(1, 0, 0).unwrap()[0],
+                Color32::from_rgb(255, 0, 0)
+            );
+            assert_eq!(loaded.history.stacks().0.len(), 1);
+        }
+    }
+
+    #[test]
+    fn project_is_an_openraster_file() {
+        let canvas = Canvas::new(600, 300, Color32::WHITE, TILE_SIZE);
+        let encoded =
+            encode_project(&test_app(canvas, vec![History::new(), History::new()])).unwrap();
+        // What shared-mime-info matches to call a file image/openraster.
+        assert_eq!(&encoded[..4], b"PK\x03\x04");
+        assert_eq!(&encoded[30..38], b"mimetype");
+        assert_eq!(&encoded[38..54], b"image/openraster");
+
+        let stack = std::str::from_utf8(zip::read_entry(&encoded, "stack.xml").unwrap()).unwrap();
+        assert!(stack.contains(r#"w="600" h="300""#));
+        let png = |name| image::load_from_memory(zip::read_entry(&encoded, name).unwrap()).unwrap();
+        let merged = png("mergedimage.png");
+        assert_eq!((merged.width(), merged.height()), (600, 300));
+        assert_eq!(merged.to_rgba8().get_pixel(10, 10).0, [255, 255, 255, 255]);
+        let thumb = png("Thumbnails/thumbnail.png");
+        assert_eq!((thumb.width(), thumb.height()), (256, 128));
     }
 }
 

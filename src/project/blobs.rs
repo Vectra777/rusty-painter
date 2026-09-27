@@ -2,7 +2,6 @@
 //! parallel) or raw, addressed by offset and length.
 
 use serde::{Deserialize, Serialize};
-use std::io::Cursor;
 
 const ZSTD_LEVEL: i32 = 6;
 
@@ -17,13 +16,6 @@ pub(super) struct StoredBlob {
 
 fn default_compressed() -> bool {
     true
-}
-
-/// Store `raw` uncompressed. Use for payloads that are
-/// already compressed (e.g. PNG-encoded previews), where a second zstd pass
-/// only burns CPU for no size benefit.
-pub(super) fn push_blob_raw(blobs: &mut Vec<u8>, raw: &[u8]) -> Result<StoredBlob, String> {
-    push_blob_impl(blobs, raw, false)
 }
 
 /// Store zstd-compressed payloads: compressed in parallel, stored in
@@ -58,23 +50,6 @@ pub(super) fn push_blobs(blobs: &mut Vec<u8>, raws: &[Vec<u8>]) -> Result<Vec<St
             }
         })
         .collect())
-}
-
-fn push_blob_impl(blobs: &mut Vec<u8>, raw: &[u8], compress: bool) -> Result<StoredBlob, String> {
-    let payload = if compress {
-        zstd::stream::encode_all(Cursor::new(raw), ZSTD_LEVEL)
-            .map_err(|err| format!("Compression failed: {err}"))?
-    } else {
-        raw.to_vec()
-    };
-    let offset = blobs.len() as u64;
-    blobs.extend_from_slice(&payload);
-    Ok(StoredBlob {
-        offset,
-        len: payload.len() as u64,
-        raw_len: raw.len() as u64,
-        compressed: compress,
-    })
 }
 
 pub(super) fn read_blob(blobs: &[u8], blob: &StoredBlob) -> Result<Vec<u8>, String> {

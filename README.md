@@ -16,7 +16,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **Transform Tools**: Move, rotate, and scale selections with non-destructive preview.
 - **History**: One undo history for the whole document (pixels, selections, transforms, layer add/remove/reorder/merge), undone in the order things were done whichever layer is selected.
 - **Canvas**: Large canvas support (default 4000x4000) backed by tiled storage and GPU texture atlases.
-- **Project Files**: Save/open your work as a `.rpainter` project (compressed, includes undo history) via the Open/Save buttons in the top bar.
+- **Project Files**: Save/open your work as a `.rpainter` project (compressed, includes undo history) via the Open/Save buttons in the top bar. File managers show a preview of the drawing, and Krita, GIMP or MyPaint can open it as a flattened image.
 - **Export**: Save your work as PNG, JPEG, or TIFF.
 - **Performance**: Optional masked brush mode and zoom-out LOD for performance experiments.
 - **Android** (experimental): Runs on Android via a patched `winit` and native activity glue — see [Android (APK build)](#android-apk-build) below.
@@ -96,7 +96,7 @@ The full list is in **Help → Keyboard Shortcuts**, labelled for your keyboard 
 - **File**: `Ctrl+N` new, `Ctrl+O` open, `Ctrl+S` save, `Ctrl+E` export, `Ctrl+Shift+O` import an image as a layer.
 
 ## Project Files
-Work is saved as a single `.rpainter` file via **Open**/**Save** in the top bar — layers, tile data, and undo history all round-trip. Internally it's a versioned binary format (`src/project/`): tile pixel data is zstd-compressed per tile, layers are matched up by a stable id (not position) so undo stays correct even if you'd reordered layers before saving, and the thumbnail preview is stored uncompressed since it's already PNG-encoded. Older project files remain loadable after format additions — new fields default sensibly on read rather than breaking the load.
+Work is saved as a single `.rpainter` file via **Open**/**Save** in the top bar — layers, tile data, and undo history all round-trip. The file is an [OpenRaster](https://www.openraster.org/) archive: a ZIP with `mergedimage.png` (the flattened picture) and `Thumbnails/thumbnail.png`, which is what file managers such as Dolphin use for the preview. The project itself is one more entry, `rusty-painter/project.rpnt`, in a versioned binary format (`src/project/`): tile pixel data is zstd-compressed per tile, and layers are matched up by a stable id (not position) so undo stays correct even if you'd reordered layers before saving. Older project files (including the bare binary files saved before the OpenRaster container) remain loadable after format additions — new fields default sensibly on read rather than breaking the load.
 
 ## UI Panels
 - **Menus and options bar**: File/Edit/View/Help on desktop (a slide-up sheet on tablets); under them, the active tool's options.
