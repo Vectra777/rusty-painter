@@ -1,3 +1,7 @@
+//! `PainterApp` and its frame loop: `update` runs the
+//! frame as a fixed sequence of stages (setup, chrome, canvas, tools,
+//! pixels, windows), each a method below it.
+
 use crate::app::input;
 use crate::app::stroke_ops::exclusive;
 use crate::app::view::render;
@@ -49,23 +53,9 @@ impl eframe::App for PainterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut needs_repaint = false;
 
-        // Rebuild the style when touch mode changes (and on the first frame).
+        // 1. Frame setup: theme, panel sizes, shortcuts, finished background work.
         let touch = self.workspace.touch_mode;
-        if self.workspace.applied_touch_mode != Some(touch) {
-            let first_frame = self.workspace.applied_touch_mode.is_none();
-            crate::ui::theme::apply_style(ctx, touch);
-            // Small touch screens start with the brush panel tucked away,
-            // and phone-sized ones with both panels.
-            let width = ctx.screen_rect().width();
-            if first_frame && touch && width < 1280.0 {
-                self.workspace.show_left_panel = false;
-            }
-            if first_frame && width < layout::NARROW_WIDTH {
-                self.workspace.show_left_panel = false;
-                self.workspace.show_right_panel = false;
-            }
-            self.workspace.applied_touch_mode = Some(touch);
-        }
+        self.apply_touch_mode(ctx, touch);
         ui::style::set_touch_metrics(ctx, touch);
         layout::fit_panels_to_screen(self, ctx);
         let screen_size = ctx.screen_rect().size();
@@ -81,7 +71,147 @@ impl eframe::App for PainterApp {
             needs_repaint = true;
         }
 
-        // Poll export tasks
+        self.poll_export();
+
+        ui::layers::refresh_thumbnails(self, ctx);
+
+        // 2. Chrome. Bars first so they span the full window width; the tool strip is
+        // added before the docks so it sits at the far left.
+        // Tablets have the menus in a sheet over the bottom bar, and adjust
+        // size/opacity with the canvas faders instead of the options bar.
+        if !touch {
+            ui::menus::menu_bar(self, ctx);
+            ui::tool_options::options_bar(self, ctx);
+        }
+        ui::status_bar::status_bar(self, ctx);
+        if touch {
+            ui::menus::menu_sheet(self, ctx);
+        }
+        ui::toolbar::toolbar(self, ctx);
+
+        layout::show_tool_docks(self, ctx);
+
+        let canvas_frame = egui::Frame::none().fill(ui::style::BG_CANVAS);
+        egui::CentralPanel::default()
+            .frame(canvas_frame)
+            .show(ctx, |ui| {
+                // 3. Canvas: place and draw the view, gather pen/touch input.
+                self.place_view(ui, resized);
+
+                let view = render::draw_canvas(self, ui);
+                self.viewport.canvas_area = Some(view.response.rect);
+                // Pen samples first: touch handling needs to know the pen is
+                // down to tell a resting palm from a finger.
+                let pen = self
+                    .tablet
+                    .as_mut()
+                    .map(|t| t.poll(ctx))
+                    .unwrap_or_default();
+                self.viewport.touch.pen_active =
+                    !pen.is_empty() || self.tablet.as_ref().is_some_and(|t| t.pen_active());
+                if crate::app::input::touch::handle_touch(self, ctx, &view.response) {
+                    needs_repaint = true;
+                }
+                if !view.response.hovered() {
+                    self.viewport.cursor_canvas = None;
+                }
+                self.draw_pointer_hints(ctx, ui, &view);
+
+                // 4. Tools: end sessions of tools left, then route this
+                // frame's input to the active tool.
+                self.import_dropped_files(ctx);
+                self.settle_tool_sessions(ctx, &view.response);
+                // A content-aware fill in progress: the canvas waits for it.
+                if self.poll_patch() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Progress);
+                    needs_repaint = true;
+                } else {
+                    input::handle_input(
+                        self,
+                        ctx,
+                        &view.response,
+                        view.origin,
+                        view.canvas_center,
+                        &pen,
+                    );
+                }
+                // Overlay first: on a drag's first frame it takes over at once,
+                // so the layer isn't CPU-rendered even once while dragging.
+                crate::app::tools::transform::update_float_overlay(self, ctx);
+                crate::app::tools::transform::flush_transform_preview(self);
+                // The gradient repaints at most once a frame while dragged.
+                self.gradient_update();
+                // Twirl / pinch / bloat keep working while the brush is held.
+                if self.liquify_is_holding() && self.workspace.liquify.mode.is_continuous() {
+                    let dt = ctx.input(|i| i.stable_dt).min(0.1);
+                    self.liquify_hold(dt);
+                    needs_repaint = true;
+                }
+                // 5. Pixels: let the stroke worker catch up, upload dirty
+                // tiles, paint the canvas, then the overlays on top.
+                // Give the stroke worker a short budget to paint this frame's
+                // samples so they usually show this frame; a heavy brush can't
+                // stall the frame beyond it and simply shows up next frame.
+                if self.brush_state.is_drawing {
+                    self.stroke_worker.wait_idle_for(STROKE_FRAME_BUDGET);
+                }
+                if self.sync_stroke_worker() {
+                    needs_repaint = true;
+                }
+                if self.render_cache.tiles.iter().any(|t| t.dirty) {
+                    self.layer_state.thumbnails_dirty = true;
+                }
+                // Composite and paint after input, so this frame's dabs and any
+                // pan/zoom show up in this frame.
+                let (uploads, more_tiles) =
+                    render::update_dirty_textures(self, &view, ui.clip_rect());
+                if more_tiles {
+                    needs_repaint = true;
+                }
+                crate::app::tools::transform::float_overlay_uploaded(self, more_tiles);
+                render::paint_canvas(self, ui, &view, uploads);
+
+                if self.brush_state.is_drawing {
+                    needs_repaint = true;
+                }
+
+                self.draw_overlays(ctx, ui, &view);
+                ui::canvas_sliders::canvas_sliders(self, ctx, view.response.rect);
+            });
+
+        // 6. Modals and floating windows.
+        self.show_windows(ctx);
+
+        // Single consolidated repaint request
+        if needs_repaint {
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// Stages of `update`, in the order it runs them.
+impl PainterApp {
+    /// Rebuild the style when touch mode changes (and on the first frame).
+    fn apply_touch_mode(&mut self, ctx: &egui::Context, touch: bool) {
+        if self.workspace.applied_touch_mode != Some(touch) {
+            let first_frame = self.workspace.applied_touch_mode.is_none();
+            crate::ui::theme::apply_style(ctx, touch);
+            // Small touch screens start with the brush panel tucked away,
+            // and phone-sized ones with both panels.
+            let width = ctx.screen_rect().width();
+            if first_frame && touch && width < 1280.0 {
+                self.workspace.show_left_panel = false;
+            }
+            if first_frame && width < layout::NARROW_WIDTH {
+                self.workspace.show_left_panel = false;
+                self.workspace.show_right_panel = false;
+            }
+            self.workspace.applied_touch_mode = Some(touch);
+        }
+    }
+
+    /// Finish a background export: report its result and progress.
+    fn poll_export(&mut self) {
         if let Some(handle) = self.export_state.task.as_ref()
             && handle.is_finished()
         {
@@ -112,261 +242,186 @@ impl eframe::App for PainterApp {
                 }
             }
         }
+    }
 
-        ui::layers::refresh_thumbnails(self, ctx);
+    /// Keep the canvas fitted while the window settles, and still on screen
+    /// while panels slide or the window resizes.
+    fn place_view(&mut self, ui: &egui::Ui, resized: bool) {
+        // Keep the canvas fitted while the window settles (the window
+        // manager may resize it after the first frame), until the user
+        // moves the view themselves.
+        let available = ui.available_size();
+        if self.workspace.auto_fit && self.workspace.fitted_to != Some(available) {
+            let canvas_w = self.canvas.width() as f32;
+            let canvas_h = self.canvas.height() as f32;
 
-        // Bars first so they span the full window width; the tool strip is
-        // added before the docks so it sits at the far left.
-        // Tablets have the menus in a sheet over the bottom bar, and adjust
-        // size/opacity with the canvas faders instead of the options bar.
-        if !touch {
-            ui::menus::menu_bar(self, ctx);
-            ui::tool_options::options_bar(self, ctx);
+            let zoom_x = available.x / canvas_w;
+            let zoom_y = available.y / canvas_h;
+            self.viewport.zoom = zoom_x.min(zoom_y) * 0.9; // 90% fit
+            let canvas_size = egui::vec2(canvas_w, canvas_h) * self.viewport.zoom;
+            let offset = (available - canvas_size) * 0.5;
+            self.viewport.offset = Vec2 {
+                x: offset.x,
+                y: offset.y,
+            };
+            self.workspace.fitted_to = Some(available);
         }
-        ui::status_bar::status_bar(self, ctx);
-        if touch {
-            ui::menus::menu_sheet(self, ctx);
+
+        // Keep the canvas still on screen while a side panel slides
+        // (the view offset is relative to the canvas area's corner),
+        // and keep the view centered when the window is resized or
+        // the screen rotates.
+        let area = ui.max_rect();
+        if let Some(prev) = self.viewport.canvas_area
+            && !self.workspace.auto_fit
+        {
+            if resized {
+                self.viewport.offset += (area.size() - prev.size()) * 0.5;
+            } else {
+                self.viewport.offset -= area.min - prev.min;
+            }
         }
-        ui::toolbar::toolbar(self, ctx);
+    }
 
-        layout::show_tool_docks(self, ctx);
+    /// Cursor hints: a crosshair when picking colours, the brush ring for
+    /// the selection brush, liquify, smudge and blur.
+    fn draw_pointer_hints(&self, ctx: &egui::Context, ui: &egui::Ui, view: &render::CanvasView) {
+        let picking = matches!(
+            self.active_tool,
+            crate::app::tools::Tool::Eyedropper | crate::app::tools::Tool::Fill
+        ) || (matches!(self.active_tool, crate::app::tools::Tool::Brush)
+            && ctx.input(|i| i.modifiers.alt));
+        if picking && view.response.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        // Selection and liquify brushes: show their size under the pointer.
+        let ring = match self.active_tool {
+            crate::app::tools::Tool::Select(crate::selection::SelectionType::Brush) => {
+                Some(self.selection_manager.brush_radius)
+            }
+            crate::app::tools::Tool::Liquify => Some(self.workspace.liquify.radius),
+            crate::app::tools::Tool::Smudge | crate::app::tools::Tool::Blur => {
+                Some(self.brush_state.brush.brush_options.diameter * 0.5)
+            }
+            _ => None,
+        };
+        if let Some(radius) = ring
+            && let Some(pos) = view.response.hover_pos()
+        {
+            let r = radius * self.viewport.zoom;
+            let painter = ui.painter();
+            painter.circle_stroke(pos, r, egui::Stroke::new(2.0_f32, egui::Color32::BLACK));
+            painter.circle_stroke(pos, r, egui::Stroke::new(1.0_f32, egui::Color32::WHITE));
+        }
+    }
 
-        let canvas_frame = egui::Frame::none().fill(ui::style::BG_CANVAS);
-        egui::CentralPanel::default()
-            .frame(canvas_frame)
-            .show(ctx, |ui| {
-                // Keep the canvas fitted while the window settles (the window
-                // manager may resize it after the first frame), until the user
-                // moves the view themselves.
-                let available = ui.available_size();
-                if self.workspace.auto_fit && self.workspace.fitted_to != Some(available) {
-                    let canvas_w = self.canvas.width() as f32;
-                    let canvas_h = self.canvas.height() as f32;
+    /// Sessions end when their tool is left: a transform, gradient, shape
+    /// or liquify is applied, a magnetic outline dropped. A double-click
+    /// finishes a polygon or closes a magnetic outline.
+    fn settle_tool_sessions(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        // Leaving the Transform tool applies the running transform.
+        if self.layer_state.floating_layer_idx.is_some()
+            && !matches!(self.active_tool, crate::app::tools::Tool::Transform(_))
+        {
+            crate::app::tools::transform::commit_floating_layer(self);
+        }
+        // Leaving the Gradient tool keeps the gradient.
+        if !matches!(self.active_tool, crate::app::tools::Tool::Gradient) {
+            self.gradient_commit();
+        }
+        // Leaving the Shape tool applies the shape; a double-click
+        // finishes a polygon.
+        if !matches!(self.active_tool, crate::app::tools::Tool::Shape(_)) {
+            self.shape_commit();
+        } else if response.hovered()
+            && ctx.input(|i| {
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+            })
+        {
+            self.shape_finish_polygon();
+        }
+        // A magnetic outline in progress belongs to its tool; a
+        // double-click closes it.
+        let magnetic = matches!(
+            self.active_tool,
+            crate::app::tools::Tool::Select(crate::selection::SelectionType::Magnetic)
+        );
+        if !magnetic {
+            self.workspace.select.magnetic = None;
+        } else if response.hovered()
+            && ctx.input(|i| {
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+            })
+        {
+            self.magnetic_close();
+        }
+        // Likewise for liquify.
+        if self.layer_state.liquify.is_some()
+            && !matches!(self.active_tool, crate::app::tools::Tool::Liquify)
+        {
+            self.liquify_commit();
+        }
+    }
 
-                    let zoom_x = available.x / canvas_w;
-                    let zoom_y = available.y / canvas_h;
-                    self.viewport.zoom = zoom_x.min(zoom_y) * 0.9; // 90% fit
-                    let canvas_size = egui::vec2(canvas_w, canvas_h) * self.viewport.zoom;
-                    let offset = (available - canvas_size) * 0.5;
-                    self.viewport.offset = Vec2 {
-                        x: offset.x,
-                        y: offset.y,
-                    };
-                    self.workspace.fitted_to = Some(available);
-                }
-
-                // Keep the canvas still on screen while a side panel slides
-                // (the view offset is relative to the canvas area's corner),
-                // and keep the view centered when the window is resized or
-                // the screen rotates.
-                let area = ui.max_rect();
-                if let Some(prev) = self.viewport.canvas_area
-                    && !self.workspace.auto_fit
-                {
-                    if resized {
-                        self.viewport.offset += (area.size() - prev.size()) * 0.5;
-                    } else {
-                        self.viewport.offset -= area.min - prev.min;
-                    }
-                }
-
-                let view = render::draw_canvas(self, ui);
-                self.viewport.canvas_area = Some(view.response.rect);
-                // Pen samples first: touch handling needs to know the pen is
-                // down to tell a resting palm from a finger.
-                let pen = self
-                    .tablet
-                    .as_mut()
-                    .map(|t| t.poll(ctx))
-                    .unwrap_or_default();
-                self.viewport.touch.pen_active =
-                    !pen.is_empty() || self.tablet.as_ref().is_some_and(|t| t.pen_active());
-                if crate::app::input::touch::handle_touch(self, ctx, &view.response) {
-                    needs_repaint = true;
-                }
-                if !view.response.hovered() {
-                    self.viewport.cursor_canvas = None;
-                }
-                let picking = matches!(
-                    self.active_tool,
-                    crate::app::tools::Tool::Eyedropper | crate::app::tools::Tool::Fill
-                ) || (matches!(self.active_tool, crate::app::tools::Tool::Brush)
-                    && ctx.input(|i| i.modifiers.alt));
-                if picking && view.response.hovered() {
-                    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-                }
-                // Selection and liquify brushes: show their size under the pointer.
-                let ring = match self.active_tool {
-                    crate::app::tools::Tool::Select(crate::selection::SelectionType::Brush) => {
-                        Some(self.selection_manager.brush_radius)
-                    }
-                    crate::app::tools::Tool::Liquify => Some(self.workspace.liquify.radius),
-                    crate::app::tools::Tool::Smudge | crate::app::tools::Tool::Blur => {
-                        Some(self.brush_state.brush.brush_options.diameter * 0.5)
-                    }
-                    _ => None,
-                };
-                if let Some(radius) = ring
-                    && let Some(pos) = view.response.hover_pos()
-                {
-                    let r = radius * self.viewport.zoom;
-                    let painter = ui.painter();
-                    painter.circle_stroke(pos, r, egui::Stroke::new(2.0_f32, egui::Color32::BLACK));
-                    painter.circle_stroke(pos, r, egui::Stroke::new(1.0_f32, egui::Color32::WHITE));
-                }
-
-                self.import_dropped_files(ctx);
-                // Leaving the Transform tool applies the running transform.
-                if self.layer_state.floating_layer_idx.is_some()
-                    && !matches!(self.active_tool, crate::app::tools::Tool::Transform(_))
-                {
-                    crate::app::tools::transform::commit_floating_layer(self);
-                }
-                // Leaving the Gradient tool keeps the gradient.
-                if !matches!(self.active_tool, crate::app::tools::Tool::Gradient) {
-                    self.gradient_commit();
-                }
-                // Leaving the Shape tool applies the shape; a double-click
-                // finishes a polygon.
-                if !matches!(self.active_tool, crate::app::tools::Tool::Shape(_)) {
-                    self.shape_commit();
-                } else if view.response.hovered()
-                    && ctx.input(|i| {
-                        i.pointer
-                            .button_double_clicked(egui::PointerButton::Primary)
-                    })
-                {
-                    self.shape_finish_polygon();
-                }
-                // A magnetic outline in progress belongs to its tool; a
-                // double-click closes it.
-                let magnetic = matches!(
-                    self.active_tool,
-                    crate::app::tools::Tool::Select(crate::selection::SelectionType::Magnetic)
-                );
-                if !magnetic {
-                    self.workspace.select.magnetic = None;
-                } else if view.response.hovered()
-                    && ctx.input(|i| {
-                        i.pointer
-                            .button_double_clicked(egui::PointerButton::Primary)
-                    })
-                {
-                    self.magnetic_close();
-                }
-                // Likewise for liquify.
-                if self.layer_state.liquify.is_some()
-                    && !matches!(self.active_tool, crate::app::tools::Tool::Liquify)
-                {
-                    self.liquify_commit();
-                }
-                // A content-aware fill in progress: the canvas waits for it.
-                if self.poll_patch() {
-                    ctx.set_cursor_icon(egui::CursorIcon::Progress);
-                    needs_repaint = true;
-                } else {
-                    input::handle_input(
-                        self,
-                        ctx,
-                        &view.response,
-                        view.origin,
-                        view.canvas_center,
-                        &pen,
-                    );
-                }
-                // Overlay first: on a drag's first frame it takes over at once,
-                // so the layer isn't CPU-rendered even once while dragging.
-                crate::app::tools::transform::update_float_overlay(self, ctx);
-                crate::app::tools::transform::flush_transform_preview(self);
-                // The gradient repaints at most once a frame while dragged.
-                self.gradient_update();
-                // Twirl / pinch / bloat keep working while the brush is held.
-                if self.liquify_is_holding() && self.workspace.liquify.mode.is_continuous() {
-                    let dt = ctx.input(|i| i.stable_dt).min(0.1);
-                    self.liquify_hold(dt);
-                    needs_repaint = true;
-                }
-                // Give the stroke worker a short budget to paint this frame's
-                // samples so they usually show this frame; a heavy brush can't
-                // stall the frame beyond it and simply shows up next frame.
-                if self.brush_state.is_drawing {
-                    self.stroke_worker.wait_idle_for(STROKE_FRAME_BUDGET);
-                }
-                if self.sync_stroke_worker() {
-                    needs_repaint = true;
-                }
-                if self.render_cache.tiles.iter().any(|t| t.dirty) {
-                    self.layer_state.thumbnails_dirty = true;
-                }
-                // Composite and paint after input, so this frame's dabs and any
-                // pan/zoom show up in this frame.
-                let (uploads, more_tiles) =
-                    render::update_dirty_textures(self, &view, ui.clip_rect());
-                if more_tiles {
-                    needs_repaint = true;
-                }
-                crate::app::tools::transform::float_overlay_uploaded(self, more_tiles);
-                render::paint_canvas(self, ui, &view, uploads);
-
-                if self.brush_state.is_drawing {
-                    needs_repaint = true;
-                }
-
-                // Overlays follow the canvas exactly (zoom, pan and rotation).
-                let map = render::screen_map(self, &view);
-                if !matches!(self.active_tool, crate::app::tools::Tool::Transform(_)) {
-                    self.selection_manager
-                        .draw_overlay(ui.painter(), map.zoom(), &|p| map.to_screen(p));
-                }
-                crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
-                crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
-                crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
-                crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| {
-                    map.to_screen(p)
-                });
-                // A hand over the guide handles: they can be dragged.
-                if let Some(canvas) = self.viewport.cursor_canvas
-                    && (self.guides_dragging() || self.over_guide_handle(canvas))
-                {
-                    ctx.set_cursor_icon(if self.guides_dragging() {
-                        egui::CursorIcon::Grabbing
-                    } else {
-                        egui::CursorIcon::Grab
-                    });
-                }
-
-                crate::app::tools::transform::draw_float_overlay(self, ui.painter(), &map);
-                self.draw_transform_overlay(ui.painter(), &map);
-                // Enclose-and-fill lasso in progress.
-                if matches!(self.active_tool, crate::app::tools::Tool::Fill)
-                    && self.workspace.fill.path.len() > 1
-                {
-                    let pts: Vec<egui::Pos2> = self
-                        .workspace
-                        .fill
-                        .path
-                        .iter()
-                        .map(|&p| map.to_screen(p))
-                        .collect();
-                    let painter = ui.painter();
-                    painter.add(egui::Shape::line(
-                        pts.clone(),
-                        egui::Stroke::new(3.0_f32, egui::Color32::BLACK),
-                    ));
-                    painter.add(egui::Shape::line(
-                        pts.clone(),
-                        egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
-                    ));
-                    if let (Some(a), Some(b)) = (pts.first(), pts.last()) {
-                        painter.line_segment(
-                            [*a, *b],
-                            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(110)),
-                        );
-                    }
-                }
-                ui::canvas_sliders::canvas_sliders(self, ctx, view.response.rect);
+    /// Overlays drawn over the canvas; they follow it exactly (zoom, pan and
+    /// rotation).
+    fn draw_overlays(&mut self, ctx: &egui::Context, ui: &egui::Ui, view: &render::CanvasView) {
+        // Overlays follow the canvas exactly (zoom, pan and rotation).
+        let map = render::screen_map(self, view);
+        if !matches!(self.active_tool, crate::app::tools::Tool::Transform(_)) {
+            self.selection_manager
+                .draw_overlay(ui.painter(), map.zoom(), &|p| map.to_screen(p));
+        }
+        crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
+        crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
+        crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
+        crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| map.to_screen(p));
+        // A hand over the guide handles: they can be dragged.
+        if let Some(canvas) = self.viewport.cursor_canvas
+            && (self.guides_dragging() || self.over_guide_handle(canvas))
+        {
+            ctx.set_cursor_icon(if self.guides_dragging() {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
             });
+        }
 
+        crate::app::tools::transform::draw_float_overlay(self, ui.painter(), &map);
+        self.draw_transform_overlay(ui.painter(), &map);
+        // Enclose-and-fill lasso in progress.
+        if matches!(self.active_tool, crate::app::tools::Tool::Fill)
+            && self.workspace.fill.path.len() > 1
+        {
+            let pts: Vec<egui::Pos2> = self
+                .workspace
+                .fill
+                .path
+                .iter()
+                .map(|&p| map.to_screen(p))
+                .collect();
+            let painter = ui.painter();
+            painter.add(egui::Shape::line(
+                pts.clone(),
+                egui::Stroke::new(3.0_f32, egui::Color32::BLACK),
+            ));
+            painter.add(egui::Shape::line(
+                pts.clone(),
+                egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+            ));
+            if let (Some(a), Some(b)) = (pts.first(), pts.last()) {
+                painter.line_segment(
+                    [*a, *b],
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(110)),
+                );
+            }
+        }
+    }
+
+    /// Modal dialogs and floating windows, over everything else.
+    fn show_windows(&mut self, ctx: &egui::Context) {
         ui::canvas_creation::canvas_creation_modal(self, ctx);
         ui::general_settings::general_settings_modal(self, ctx);
         ui::palette_window::palette_window(self, ctx);
@@ -374,11 +429,6 @@ impl eframe::App for PainterApp {
         ui::general_settings::shortcuts_window(self, ctx);
         ui::brush_list::presets_window(self, ctx);
         ui::export_modal::export_modal(self, ctx);
-
-        // Single consolidated repaint request
-        if needs_repaint {
-            ctx.request_repaint();
-        }
     }
 }
 

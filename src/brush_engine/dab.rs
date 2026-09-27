@@ -1,3 +1,6 @@
+//! Dabs: one stamp of the brush, placed on the canvas and grouped by
+//! the tiles it touches.
+
 use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
 use rayon::ThreadPool;

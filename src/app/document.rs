@@ -1,3 +1,7 @@
+//! Document settings and limits: canvas size/unit/background for the New
+//! Canvas dialog, the colour model, tile and atlas sizes, and the
+//! per-tile redraw flags.
+
 use crate::canvas::Canvas;
 use eframe::egui::Color32;
 

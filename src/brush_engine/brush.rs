@@ -1,3 +1,6 @@
+//! The brush: its tip (Gaussian, custom image, pixel) and rendering a
+//! batch of dabs into canvas tiles in parallel.
+
 use super::brush_options::BrushOptions;
 use crate::{
     brush_engine::{
@@ -106,11 +109,11 @@ unsafe fn row_kernel_avx2(tip: &GaussianTip, pdy: f32, frac_x: f32, mx0: usize, 
     row_kernel(tip, pdy, frac_x, mx0, out);
 }
 
-/// [`GaussianTip::alpha`] for a run of columns, written as a straight loop
+/// `GaussianTip::alpha` for a run of columns, written as a straight loop
 /// with branch-free selects so the compiler vectorizes it to whatever width
 /// the enclosing function's target features allow. Each select mirrors the
 /// scalar branch (`x > 0 ? x : 0` is exactly SSE `maxps(x, 0)`, etc.), so
-/// every lane is bit-identical to [`GaussianTip::alpha`].
+/// every lane is bit-identical to `GaussianTip::alpha`.
 #[inline(always)]
 fn row_kernel(tip: &GaussianTip, pdy: f32, frac_x: f32, mx0: usize, out: &mut [f32]) {
     let r_ceil = tip.r_ceil as f32;

@@ -1,3 +1,7 @@
+//! The app's state, grouped by concern: brush, viewport, render cache,
+//! layers (histories, floating layer), modals, export and workspace
+//! (tool settings and panel layout).
+
 use crate::app::document::{CanvasTile, ColorModel, NewCanvasSettings, TILE_SIZE};
 use crate::app::view::gpu_canvas::TILES_PER_ATLAS;
 use crate::canvas::storage::LayerId;
@@ -16,11 +20,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 
-/// An in-progress stroke: the interpolation state plus the undo action that
-/// accumulates tile snapshots for it. These previously lived as two separate
-/// `Option`s (`BrushState.stroke` and `LayerState.current_undo_action`) kept
-/// `Some`/`None` in sync by convention across several call sites; bundling
-/// them here makes that pairing structural instead.
 /// Brush-related state and resources
 pub struct BrushState {
     pub brush: Brush,

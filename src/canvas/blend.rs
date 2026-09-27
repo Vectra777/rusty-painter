@@ -1,3 +1,6 @@
+//! Pixel maths shared by the canvas: sRGB/linear conversion (with lookup
+//! tables), alpha over, opacity, downsampling and dithering.
+
 use std::cell::Cell;
 use std::sync::OnceLock;
 
@@ -302,7 +305,7 @@ impl StrokeColor {
 /// coverage are left untouched, so they never go through a lossy round trip.
 ///
 /// `origin` is the canvas position of the first pixel (the slice is one
-/// row): it seeds the alpha dither, see [`alpha_dither`].
+/// row): it seeds the alpha dither, see [`dither_at`].
 pub(crate) fn resolve_stroke_normal(
     original: &[Color32],
     coverage: &[f32],

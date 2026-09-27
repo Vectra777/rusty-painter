@@ -1,3 +1,7 @@
+//! The Settings dialog (brush threads, colour blending, the brushes
+//! folder, finger painting, pen pressure curve) and the keyboard
+//! shortcuts window.
+
 use crate::PainterApp;
 use eframe::egui;
 use rayon::ThreadPoolBuilder;

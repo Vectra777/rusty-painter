@@ -1,3 +1,6 @@
+//! The Transform tool's state: offset, rotation, scale or four-corner
+//! distort, and its eight handles.
+
 use crate::canvas::storage::{Distort, TransformParams};
 use eframe::egui::Rect;
 use eframe::egui::Vec2;

@@ -1,3 +1,7 @@
+//! A stroke in progress: spacing and pressure between input samples,
+//! and the per-tile buffers dabs accumulate into before being resolved
+//! onto the layer.
+
 use crate::brush_engine::brush::Brush;
 use crate::brush_engine::stabilizer::Stabilizer;
 use crate::brush_engine::symmetry::{Copy2, Symmetry};

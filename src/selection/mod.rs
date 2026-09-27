@@ -1,3 +1,7 @@
+//! Selections: the shapes (rectangle, ellipse, lasso, per-pixel mask),
+//! how they combine, and the marching-ants overlay. [`SelectionManager`]
+//! holds the current selection.
+
 use eframe::egui::Vec2;
 use eframe::egui::{Color32, Painter, Pos2, Shape, Stroke};
 use std::sync::Arc;

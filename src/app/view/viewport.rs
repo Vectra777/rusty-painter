@@ -1,3 +1,7 @@
+//! The view transform: screen to canvas coordinates, zoom and rotate
+//! about a point, fit to window, the eyedropper, and the transform
+//! handles overlay.
+
 use crate::app::PainterApp;
 use eframe::egui::{self, Vec2};
 

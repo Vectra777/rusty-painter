@@ -1,3 +1,6 @@
+//! The Layers panel: the layer tree with folders and masks, drag to
+//! reorder, visibility, opacity, blend mode and locks.
+
 use crate::PainterApp;
 use crate::canvas::blend_modes::LayerBlend;
 use crate::canvas::storage::{LayerId, LayerKind};

@@ -1,3 +1,6 @@
+//! Conversions between in-memory types (colours, selections, transforms,
+//! undo steps) and their stored, serialisable forms.
+
 use crate::{
     app::document::ColorModel,
     canvas::blend_modes::LayerBlend,

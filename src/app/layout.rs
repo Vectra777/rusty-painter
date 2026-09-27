@@ -1,3 +1,6 @@
+//! The docked side panels (brush settings, colours, layers, tool panels)
+//! and fitting them to small screens.
+
 use crate::ui::style::BG_CANVAS;
 use crate::{PainterApp, ui};
 use eframe::egui;

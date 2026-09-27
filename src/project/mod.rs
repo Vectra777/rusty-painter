@@ -1,3 +1,7 @@
+//! `.rpainter` project files: a versioned header (JSON) plus a blob area
+//! for tiles and undo history. [`encode_project`] and [`decode_project`]
+//! are the two ends; save/open on the app wrap them.
+
 use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
 use crate::{
     PainterApp,

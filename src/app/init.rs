@@ -1,3 +1,6 @@
+//! Building the app at startup: default brushes and presets, workspace
+//! settings, the first canvas and the tablet input.
+
 use crate::app::{
     PainterApp,
     document::{ColorModel, NewCanvasSettings, TILE_SIZE},

@@ -1,3 +1,5 @@
+//! The Export dialog: format, file name and progress.
+
 use crate::{
     PainterApp,
     app::document::validate_canvas_size,

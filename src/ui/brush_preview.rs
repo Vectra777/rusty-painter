@@ -1,3 +1,5 @@
+//! Rendering the brush preview strip at the screen's pixel density.
+
 use crate::brush_engine::{brush::Brush, preview::stroke_preview_image};
 use eframe::egui;
 use rayon::ThreadPool;

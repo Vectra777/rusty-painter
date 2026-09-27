@@ -1,3 +1,6 @@
+//! The project file's blob area: payloads stored zstd-compressed (in
+//! parallel) or raw, addressed by offset and length.
+
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 

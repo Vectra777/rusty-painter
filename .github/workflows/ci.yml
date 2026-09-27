@@ -30,6 +30,10 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo check --locked --benches --features bench
+      - name: cargo doc (broken intra-doc links fail the build)
+        run: cargo doc --locked --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   android-check:
     # Android-only code (vendored winit patch, JNI glue) isn't compiled by the

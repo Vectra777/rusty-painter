@@ -1,3 +1,6 @@
+//! Tests for the canvas storage: compositing, pixel writers and
+//! transforms against reference results.
+
 use super::transform::*;
 use super::*;
 use crate::selection::SelectionManager;

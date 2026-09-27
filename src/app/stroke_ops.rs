@@ -1,3 +1,7 @@
+//! Brush strokes at the app level: starting, extending and finishing a
+//! stroke on the stroke worker, and getting the canvas back from it
+//! ([`PainterApp::canvas_mut`]).
+
 use crate::app::PainterApp;
 use crate::brush_engine::brush_options::BlendMode;
 use crate::brush_engine::stroke_worker::StrokeSetup;

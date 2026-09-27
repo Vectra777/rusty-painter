@@ -1,3 +1,5 @@
+//! The New Canvas dialog.
+
 use crate::app::document::{MAX_CANVAS_DIMENSION, MAX_CANVAS_DPI};
 use crate::canvas::blend_modes::BlendSpace;
 use crate::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation, PainterApp};

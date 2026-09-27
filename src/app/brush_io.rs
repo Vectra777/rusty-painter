@@ -1,3 +1,6 @@
+//! Loading brush tips: the grey images in the brushes folder become
+//! textured tips for the brush list.
+
 use crate::app::PainterApp;
 use crate::brush_engine::brush_options::PixelBrushShape;
 use eframe::egui::{self, Color32, TextureOptions};

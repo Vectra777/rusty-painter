@@ -1,3 +1,7 @@
+//! Undo history, one per layer: each step keeps the tiles as they were
+//! (compressed once older), plus selection and layer tree changes;
+//! undo and redo swap them back.
+
 use crate::canvas::Canvas;
 use crate::canvas::storage::LayerId;
 use crate::selection::SelectionShape;
@@ -244,7 +248,7 @@ impl History {
     }
 
     /// Push a new action onto the undo stack and clear redo, dropping the
-    /// oldest actions if the stack's tile snapshots exceed [`MAX_UNDO_BYTES`].
+    /// oldest actions if the stack's tile snapshots exceed `MAX_UNDO_BYTES`.
     pub fn push_action(&mut self, action: UndoAction) {
         self.undo_stack.push(action);
         self.pushed += 1;

@@ -1,3 +1,6 @@
+//! Brush softness: the falloff from the dab centre to its edge, as a
+//! preset or an editable curve.
+
 /// Option for how the brush softness falloff is calculated.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SoftnessSelector {

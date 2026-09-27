@@ -1,3 +1,5 @@
+//! The thumbnail stored in a project file (PNG, at most 256 px).
+
 use crate::canvas::Canvas;
 use eframe::egui::{Color32, ColorImage};
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};

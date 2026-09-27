@@ -1,3 +1,7 @@
+//! Document-level operations on the app: marking tiles for redraw,
+//! replacing the document (new canvas, opened project), and layer
+//! add/remove/move/merge with the per-layer state kept in step.
+
 use crate::app::{
     PainterApp,
     document::{CanvasTile, ColorModel, TILE_SIZE},

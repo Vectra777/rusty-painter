@@ -1,3 +1,5 @@
+//! A sample stroke rendered off-canvas, for the brush preview strip.
+
 use crate::brush_engine::brush::Brush;
 use crate::brush_engine::stroke::{StrokeContext, StrokeState, StrokeTiles};
 use crate::canvas::Canvas;

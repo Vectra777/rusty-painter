@@ -1,3 +1,6 @@
+//! Brush settings that are plain data: size, hardness, spacing, flow,
+//! pixel shapes and painting modes.
+
 use eframe::egui::Color32;
 
 use crate::brush_engine::hardness::SoftnessCurve;

@@ -1,3 +1,6 @@
+//! The Brush Settings panel: tip, size, hardness, spacing, dynamics and
+//! stabiliser.
+
 use crate::brush_engine::brush::{Brush, BrushType, StabilizerAlgorithm};
 use crate::brush_engine::brush_options::{PaintingMode, PixelBrushShape};
 use crate::brush_engine::hardness::SoftnessSelector;

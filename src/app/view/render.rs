@@ -1,3 +1,7 @@
+//! From tiles to screen: composite dirty tiles, upload them to the GPU
+//! atlases, place the canvas quad, and map canvas to screen coordinates
+//! ([`ScreenMap`]) for overlays.
+
 use crate::PainterApp;
 use crate::app::document::{ATLAS_SIZE, CanvasTile, TILE_SIZE};
 use crate::app::state::{BelowCache, RenderCache};

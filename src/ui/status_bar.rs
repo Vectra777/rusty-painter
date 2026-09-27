@@ -181,7 +181,7 @@ fn document_info(app: &mut PainterApp, ui: &mut egui::Ui, width: f32, compact: b
     }
 }
 
-/// Right-to-left: [flip] [1:1] [Fit] [+] [zoom%] [−]  rotation
+/// Right-to-left: `[flip] [1:1] [Fit] [+] [zoom%] [−]`, then rotation.
 fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui, compact: bool) {
     let flipped = app.viewport.flip_x;
     let size = (ui.available_height() - 2.0).clamp(18.0, 36.0);

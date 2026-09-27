@@ -1,3 +1,5 @@
+//! Sampling brush tip masks (custom images and the Gaussian falloff).
+
 use super::{
     brush_options::PixelBrushShape,
     hardness::{SoftnessCurve, SoftnessSelector},

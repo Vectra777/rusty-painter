@@ -1,3 +1,6 @@
+//! The colour panel: HSV triangle picker, opacity, hex entry and recent
+//! colours.
+
 use crate::ColorModel;
 use crate::app::state::BrushState;
 use crate::canvas::color::ColorManipulation;

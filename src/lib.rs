@@ -1,3 +1,6 @@
+//! Rusty Painter: a tiled, multithreaded painting app on egui/wgpu.
+//! The desktop binary calls [`run`]; Android enters at `android_main`.
+
 #[cfg(target_os = "android")]
 mod android;
 mod app;
