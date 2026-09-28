@@ -38,6 +38,12 @@ pub enum BrushType {
     /// A row of hairs, each painting its own line (see
     /// [`crate::brush_engine::bristle`]).
     Bristle,
+    /// Its line, and fine lines to earlier points of the stroke nearby (see
+    /// [`crate::brush_engine::sketch`]).
+    Sketch,
+    /// Parallel lines pinned to the canvas wherever it passes (see
+    /// [`crate::brush_engine::hatching`]).
+    Hatching,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -180,6 +186,10 @@ pub struct Brush {
     pub wet_edge_width: f32,
     /// The hairs of a [`BrushType::Bristle`] brush.
     pub bristles: crate::brush_engine::bristle::Bristles,
+    /// The joining lines of a [`BrushType::Sketch`] brush.
+    pub sketch: crate::brush_engine::sketch::Sketch,
+    /// The lines of a [`BrushType::Hatching`] brush.
+    pub hatching: crate::brush_engine::hatching::Hatching,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -217,6 +227,8 @@ struct BatchCtx<'a> {
     dual: Option<crate::brush_engine::dual::DualMode>,
     /// The dabs paint their tips' own colours.
     tip_colors: bool,
+    /// A hatching brush: its lines, over every dab.
+    hatch: Option<&'a crate::brush_engine::hatching::Hatching>,
 }
 
 /// Where a batch of dabs accumulates.
@@ -386,6 +398,14 @@ fn paint_batch(
                         overlap.min_x + first,
                         &alphas[span.clone()],
                         &mut color_row[..span.len()],
+                    );
+                }
+                if let Some(hatch) = ctx.hatch {
+                    hatch.apply_row(
+                        gy,
+                        overlap.min_x + first,
+                        dab.hatch,
+                        &mut alphas[span.clone()],
                     );
                 }
                 if let Some(texture) = ctx.texture {
@@ -681,7 +701,10 @@ impl Brush {
     pub fn varies_per_dab(&self) -> bool {
         self.dynamics.is_active()
             || self.brush_options.tip_count() > 1
-            || self.brush_type == BrushType::Bristle
+            || matches!(
+                self.brush_type,
+                BrushType::Bristle | BrushType::Sketch | BrushType::Hatching
+            )
             || self.paints_tip_colors()
     }
 
@@ -737,6 +760,8 @@ impl Brush {
             wet_edge: 0.0,
             wet_edge_width: 6.0,
             bristles: Default::default(),
+            sketch: Default::default(),
+            hatching: Default::default(),
         }
     }
 
@@ -761,6 +786,8 @@ impl Brush {
             wet_edge: 0.0,
             wet_edge_width: 6.0,
             bristles: Default::default(),
+            sketch: Default::default(),
+            hatching: Default::default(),
         }
     }
 
@@ -895,6 +922,7 @@ impl Brush {
                 dab.reach = reach;
                 dab.strength = var.strength;
                 dab.tip = var.tip.min(last_tip);
+                dab.hatch = var.hatch;
                 if colored {
                     let srgb =
                         crate::brush_engine::dynamics::shift_hsv(self.brush_options.color, var.hsv);
@@ -1237,6 +1265,7 @@ impl Brush {
             tail_newer,
             dual: self.dual.as_ref().map(|d| d.mode),
             tip_colors,
+            hatch: (self.brush_type == BrushType::Hatching).then_some(&self.hatching),
         }
     }
 
@@ -1261,10 +1290,10 @@ impl Brush {
             undo_action,
             stroke_tiles,
             |brush, ctx, buckets, work_pixels, strength| match brush.brush_type {
-                BrushType::Soft | BrushType::Bristle => {
+                BrushType::Pixel => brush.paint_pixel(pool, ctx, buckets, work_pixels, strength),
+                BrushType::Soft | BrushType::Bristle | BrushType::Sketch | BrushType::Hatching => {
                     brush.paint_soft(pool, ctx, buckets, work_pixels, strength)
                 }
-                BrushType::Pixel => brush.paint_pixel(pool, ctx, buckets, work_pixels, strength),
             },
         );
     }

@@ -411,6 +411,33 @@ impl PainterApp {
                 b.dynamics.random.size = 0.4;
                 b
             }),
+            preset("Sketchy Pencil", {
+                // A fine line that webs itself into shading.
+                let mut b = Brush::new(2.0, 80.0, Color32::from_rgb(45, 45, 50), 20.0);
+                b.brush_type = crate::brush_engine::brush::BrushType::Sketch;
+                b.brush_options.pressure_min_size = 0.5;
+                b.brush_options.opacity = 0.8;
+                b.sketch = crate::brush_engine::sketch::Sketch {
+                    reach: 45.0,
+                    density: 0.12,
+                    opacity: 0.3,
+                    thickness: 1.0,
+                };
+                b
+            }),
+            preset("Cross Hatch", {
+                // Ink hatching; press harder to cross it.
+                let mut b = Brush::new(40.0, 90.0, Color32::from_rgb(25, 25, 30), 10.0);
+                b.brush_type = crate::brush_engine::brush::BrushType::Hatching;
+                b.brush_options.pressure_size = false;
+                b.hatching = crate::brush_engine::hatching::Hatching {
+                    angle: 45.0,
+                    separation: 5.0,
+                    thickness: 1.2,
+                    crosshatch: true,
+                };
+                b
+            }),
             preset("Spatter", {
                 let mut b = Brush::new(40.0, 90.0, black, 90.0);
                 b.brush_options.pixel_shape = tip("Spatter");

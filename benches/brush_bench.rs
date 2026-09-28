@@ -612,6 +612,19 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.brush_options.spacing = 60.0;
         b
     }));
+    // Sketch and hatching engines.
+    cases.push(("sketch", {
+        let mut b = base();
+        b.brush_type = rusty_painter::brush_engine::brush::BrushType::Sketch;
+        b.brush_options.diameter = 3.0;
+        b.sketch.density = 0.3;
+        b
+    }));
+    cases.push(("hatching", {
+        let mut b = base();
+        b.brush_type = rusty_painter::brush_engine::brush::BrushType::Hatching;
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {

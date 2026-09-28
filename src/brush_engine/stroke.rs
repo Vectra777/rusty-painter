@@ -2,7 +2,7 @@
 //! and the per-tile buffers dabs accumulate into before being resolved
 //! onto the layer.
 
-use crate::brush_engine::brush::{Brush, RibbonSeg, Target};
+use crate::brush_engine::brush::{Brush, BrushType, RibbonSeg, Target};
 use crate::brush_engine::brush_options::{PixelBrushShape, TipOrder};
 use crate::brush_engine::dynamics::{DabVar, FAST_SPEED, PenTilt, direction, tip_orientation};
 use crate::brush_engine::stabilizer::Stabilizer;
@@ -302,6 +302,8 @@ pub struct StrokeState {
     next_tip: usize,
     /// A ribbon brush: the last point of its ribbon.
     ribbon_last: Option<RibbonPoint>,
+    /// A sketch brush: the stroke's points so far (the latest ones).
+    sketch_points: Vec<Vec2>,
     /// A dual brush's second tip: where its last dab went, and how far
     /// along the stroke the next one is.
     mask_last: Option<Vec2>,
@@ -349,6 +351,7 @@ impl StrokeState {
             next_tip: 0,
             mask_last: None,
             ribbon_last: None,
+            sketch_points: Vec::new(),
             mask_until_next: 0.0,
             #[cfg(test)]
             painted: Vec::new(),
@@ -473,6 +476,66 @@ impl StrokeState {
         (o.diameter, o.opacity, o.flow) = original;
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// A sketch brush: join each of `points` (this sample's dabs) to some
+    /// earlier points of the stroke nearby with fine lines.
+    fn sketch_lines(
+        &mut self,
+        brush: &mut Brush,
+        points: &[Vec2],
+        context: &mut StrokeContext<'_>,
+    ) {
+        use crate::brush_engine::sketch::{HISTORY, MAX_LINES};
+        let sketch = brush.sketch;
+        let base_r = (brush.brush_options.diameter * 0.5).max(0.25);
+        let scale = (sketch.thickness * 0.5).max(0.3) / base_r;
+        let step = sketch.step();
+        let spacing = sketch.point_spacing();
+        let mut centers = Vec::new();
+        let mut vars = Vec::new();
+        for &p in points {
+            if self
+                .sketch_points
+                .last()
+                .is_some_and(|&last| (p - last).length() < spacing)
+            {
+                continue;
+            }
+            let mut lines = 0;
+            for &q in self.sketch_points.iter().rev().take(HISTORY) {
+                let d = (q - p).length();
+                let strength = sketch.strength(d);
+                // Points right behind the pen would only draw over its line.
+                if d < spacing * 1.5
+                    || strength <= 0.0
+                    || self.rng.random::<f32>() >= sketch.density
+                {
+                    continue;
+                }
+                let n = (d / step).ceil().max(1.0) as usize;
+                for k in 0..=n {
+                    centers.push(p + (q - p) * (k as f32 / n as f32));
+                    vars.push(DabVar {
+                        scale,
+                        strength,
+                        ..DabVar::default()
+                    });
+                }
+                lines += 1;
+                if lines >= MAX_LINES {
+                    break;
+                }
+            }
+            self.sketch_points.push(p);
+        }
+        if self.sketch_points.len() > 2 * HISTORY {
+            let excess = self.sketch_points.len() - HISTORY;
+            self.sketch_points.drain(..excess);
+        }
+        if !centers.is_empty() {
+            context.dabs_varied(brush, &centers, &vars, Target::Stroke);
         }
     }
 
@@ -614,7 +677,16 @@ impl StrokeState {
                         }
                     })
                     .collect();
+                let points: Vec<Vec2> = if brush.brush_type == BrushType::Sketch {
+                    plans.iter().map(|p| p.pos).collect()
+                } else {
+                    Vec::new()
+                };
                 self.paint_dynamic(brush, original, plans, context);
+                if !points.is_empty() {
+                    apply_pressure(brush, original, p);
+                    self.sketch_lines(brush, &points, context);
+                }
                 self.pending = pending;
                 self.pending.clear();
                 return;
@@ -769,9 +841,15 @@ impl StrokeState {
     /// One dab's variation: start taper, speed, randomness, tip.
     fn dab_var(&mut self, brush: &Brush, dab: &Pending, pressure: f32) -> DabVar {
         let d = &brush.dynamics;
+        let hatch = if brush.brush_type == crate::brush_engine::brush::BrushType::Hatching {
+            brush.hatching.level(pressure)
+        } else {
+            1
+        };
         let mut v = DabVar {
             tip: self.pick_tip(brush, dab, pressure),
             along: dab.along,
+            hatch,
             ..DabVar::default()
         };
         if d.taper.is_active() && d.taper.start > 0.0 {

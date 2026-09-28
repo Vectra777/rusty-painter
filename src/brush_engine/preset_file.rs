@@ -196,6 +196,8 @@ struct StoredBrush {
     wet_edge: f32,
     wet_edge_width: f32,
     bristles: crate::brush_engine::bristle::Bristles,
+    sketch: crate::brush_engine::sketch::Sketch,
+    hatching: crate::brush_engine::hatching::Hatching,
 }
 
 impl Default for StoredBrush {
@@ -277,6 +279,8 @@ impl StoredBrush {
             wet_edge: b.wet_edge,
             wet_edge_width: b.wet_edge_width,
             bristles: b.bristles,
+            sketch: b.sketch,
+            hatching: b.hatching,
         }
     }
 
@@ -339,6 +343,8 @@ impl StoredBrush {
         b.wet_edge = self.wet_edge;
         b.wet_edge_width = self.wet_edge_width;
         b.bristles = self.bristles;
+        b.sketch = self.sketch;
+        b.hatching = self.hatching;
         Ok(b)
     }
 }

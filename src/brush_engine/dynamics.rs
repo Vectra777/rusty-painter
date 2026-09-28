@@ -218,6 +218,8 @@ pub struct DabVar {
     /// How far along the stroke the dab is, canvas pixels (for a bristle
     /// brush's hairs running dry).
     pub along: f32,
+    /// A hatching brush: how many directions it hatches in (1..=3).
+    pub hatch: u8,
 }
 
 impl Default for DabVar {
@@ -229,6 +231,7 @@ impl Default for DabVar {
             hsv: [0.0; 3],
             tip: 0,
             along: 0.0,
+            hatch: 1,
         }
     }
 }

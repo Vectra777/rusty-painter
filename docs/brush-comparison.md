@@ -51,7 +51,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
 | Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ✅ hairs fan out and run dry |
 | Decoration / ribbon brushes | ✅ | ✅ | ✅ | ✅ colour tips, ribbons |
-| Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ❌ |
+| Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ⚠️ sketch, hatching |
 | Smudge and blur tools | ✅ | ✅ | ✅ | ✅ |
 
 ## Stroke help and presets
@@ -119,7 +119,10 @@ below.
   colours and a brush can paint them (flowers, stitches); a ribbon lays the
   picture along the stroke, repeated, its height across it (lace, printed
   ribbons). Presets: Stitches, Chain, Lace Ribbon, Striped Ribbon, Flowers.
-- [ ] **Sketch and hatching engines.**
+- [x] **Sketch and hatching engines.** Sketch joins each point to earlier
+  points of the stroke nearby with fine lines; hatching paints parallel
+  lines pinned to the canvas, cross-hatching as you press harder. Presets:
+  Sketchy Pencil, Cross Hatch.
 - [ ] **Deform, filter and clone brushes.**
 - [ ] **Assistants:** vanishing point, perspective, ellipse, concentric.
 - [ ] **Wrap-around painting** for seamless tiles.

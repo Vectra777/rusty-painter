@@ -97,6 +97,8 @@ pub(super) struct PlacedDab {
     pub tip: u8,
     /// A ribbon's segment this dab paints (see `Brush::ribbon`).
     pub seg: u32,
+    /// A hatching brush: how many directions it hatches in (1..=3).
+    pub hatch: u8,
 }
 
 impl PlacedDab {
@@ -119,6 +121,7 @@ impl PlacedDab {
             color: [0.0; 3],
             tip: 0,
             seg: 0,
+            hatch: 1,
         }
     }
 

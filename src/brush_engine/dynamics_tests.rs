@@ -1526,3 +1526,90 @@ fn a_mirrored_ribbon_paints_its_mirror_image() {
         "{differ} of {painted}"
     );
 }
+
+fn hatch_brush() -> Brush {
+    let mut b = Brush::new(40.0, 100.0, Color32::BLACK, 10.0);
+    b.brush_type = crate::brush_engine::brush::BrushType::Hatching;
+    b.brush_options.pressure_size = false;
+    b.hatching = crate::brush_engine::hatching::Hatching {
+        angle: 0.0,
+        separation: 6.0,
+        thickness: 1.5,
+        crosshatch: true,
+    };
+    b
+}
+
+#[test]
+fn hatching_paints_lines_pinned_to_the_canvas() {
+    let light: Vec<(Vec2, f32)> = along_x(20.0, 236.0, 30)
+        .into_iter()
+        .map(|(p, _)| (p, 0.2))
+        .collect();
+    let canvas = stroke_with_pressure(&mut hatch_brush(), &light);
+    // Horizontal lines, 6 px apart, down the middle of the stroke.
+    let lines = runs(&canvas, 128, true);
+    assert!((5..=8).contains(&lines), "{lines} lines");
+    let column = |c: &Canvas, x: usize| (0..H).map(|y| alpha(c, x, y) > 100).collect::<Vec<_>>();
+    assert_eq!(
+        column(&canvas, 100),
+        column(&canvas, 160),
+        "the same lines all along"
+    );
+    // A second stroke a little lower: its lines fall on the same rows.
+    let lower: Vec<(Vec2, f32)> = light
+        .iter()
+        .map(|&(p, q)| (p + Vec2::new(0.0, 9.0), q))
+        .collect();
+    let other = stroke_with_pressure(&mut hatch_brush(), &lower);
+    // (Where both strokes cover fully, away from their soft edges.)
+    for y in 60..78 {
+        if alpha(&canvas, 128, y) > 100 && alpha(&other, 128, y) > 0 {
+            assert!(alpha(&other, 128, y) > 100, "row {y} off the shared lines");
+        }
+    }
+    // Pressing harder cross-hatches: more ink.
+    let hard = stroke_with_pressure(&mut hatch_brush(), &along_x(20.0, 236.0, 30));
+    let ink = |c: &Canvas| pixels(c).iter().map(|&a| a as u32).sum::<u32>();
+    assert!(ink(&hard) > ink(&canvas) * 3 / 2);
+}
+
+#[test]
+fn a_sketch_brush_webs_between_passes() {
+    let zigzag: Vec<(Vec2, f32)> = (0..=60)
+        .map(|i| {
+            let t = i as f32 / 60.0;
+            let x = 40.0 + 170.0 * t;
+            let y = if i % 20 < 10 {
+                40.0 + (i % 10) as f32 * 5.0
+            } else {
+                90.0 - (i % 10) as f32 * 5.0
+            };
+            (Vec2::new(x, y), 1.0)
+        })
+        .collect();
+    let mut sketch = Brush::new(2.0, 90.0, Color32::BLACK, 20.0);
+    sketch.brush_options.pressure_size = false;
+    sketch.brush_type = crate::brush_engine::brush::BrushType::Sketch;
+    sketch.sketch.density = 0.3;
+    let mut plain = sketch.clone();
+    plain.brush_type = crate::brush_engine::brush::BrushType::Soft;
+    let webbed = stroke_with_pressure(&mut sketch.clone(), &zigzag);
+    let line = stroke_with_pressure(&mut plain, &zigzag);
+    let painted = |c: &Canvas| pixels(c).iter().filter(|&&a| a > 10).count();
+    assert!(
+        painted(&webbed) > painted(&line) * 2,
+        "{} vs {}",
+        painted(&webbed),
+        painted(&line)
+    );
+    // Its own line is all there.
+    let missing = pixels(&line)
+        .iter()
+        .zip(pixels(&webbed))
+        .filter(|&(&p, w)| p > 100 && w < p / 2)
+        .count();
+    assert_eq!(missing, 0);
+    // Repeatable with the same seed.
+    assert!(pixels(&stroke_with_pressure(&mut sketch.clone(), &zigzag)) == pixels(&webbed));
+}

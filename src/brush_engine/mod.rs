@@ -8,9 +8,11 @@ pub mod dynamics;
 #[cfg(test)]
 mod dynamics_tests;
 pub mod hardness;
+pub mod hatching;
 pub(crate) mod masks;
 pub mod preset_file;
 pub mod preview;
+pub mod sketch;
 #[cfg(test)]
 mod smoothness_tests;
 pub mod stabilizer;

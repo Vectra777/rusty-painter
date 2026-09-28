@@ -127,16 +127,28 @@ fn brush_settings_contents(
     ui.add_space(6.0);
 
     property_row(ui, "Type", |ui| {
-        mask_changed |= segmented(
-            ui,
-            &mut brush.brush_type,
-            &[
-                (BrushType::Soft, "Soft"),
-                (BrushType::Pixel, "Pixel"),
-                (BrushType::Bristle, "Bristle"),
-            ],
-            false,
-        );
+        let label = |t: BrushType| match t {
+            BrushType::Soft => "Soft",
+            BrushType::Pixel => "Pixel",
+            BrushType::Bristle => "Bristle",
+            BrushType::Sketch => "Sketch",
+            BrushType::Hatching => "Hatching",
+        };
+        egui::ComboBox::from_id_salt("brush_type")
+            .selected_text(label(brush.brush_type))
+            .show_ui(ui, |ui| {
+                for t in [
+                    BrushType::Soft,
+                    BrushType::Pixel,
+                    BrushType::Bristle,
+                    BrushType::Sketch,
+                    BrushType::Hatching,
+                ] {
+                    mask_changed |= ui
+                        .selectable_value(&mut brush.brush_type, t, label(t))
+                        .changed();
+                }
+            });
     });
     ui.label(
         egui::RichText::new(match brush.brush_type {
@@ -150,12 +162,23 @@ fn brush_settings_contents(
                 "A row of hairs across the stroke, each painting its own line: streaky paint \
                  that fans out with pressure."
             }
+            BrushType::Sketch => {
+                "Its line, and fine lines to earlier points of the stroke nearby: going back and \
+                 forth builds up a web of shading."
+            }
+            BrushType::Hatching => {
+                "Parallel lines pinned to the canvas wherever it passes; pressing harder \
+                 cross-hatches."
+            }
         })
         .small()
         .color(TEXT_DIM),
     );
-    if brush.brush_type == BrushType::Bristle {
-        changed |= bristle_section(ui, &mut brush.bristles);
+    match brush.brush_type {
+        BrushType::Bristle => changed |= bristle_section(ui, &mut brush.bristles),
+        BrushType::Sketch => changed |= sketch_section(ui, &mut brush.sketch),
+        BrushType::Hatching => changed |= hatching_section(ui, &mut brush.hatching),
+        BrushType::Soft | BrushType::Pixel => {}
     }
     property_row(ui, "Painting", |ui| {
         changed |= segmented(
@@ -808,6 +831,95 @@ fn dynamics_sections(
 }
 
 /// Paper texture: which pattern, how it combines, its scale and strength.
+/// A sketch brush's joining lines.
+fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch) -> bool {
+    let mut changed = false;
+    section(ui, "Sketch", true, |ui| {
+        changed |= slider_row(
+            ui,
+            "Reach",
+            crate::ui::widgets::reset(&mut s.reach, |v| {
+                egui::Slider::new(v, 5.0..=300.0)
+                    .logarithmic(true)
+                    .max_decimals(0)
+                    .suffix(" px")
+            }),
+        )
+        .on_hover_text("How far earlier points can be to be joined.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Density",
+            crate::ui::widgets::reset(&mut s.density, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
+        )
+        .on_hover_text("How likely each point in reach is joined.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Line opacity",
+            crate::ui::widgets::reset(&mut s.opacity, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Line width",
+            crate::ui::widgets::reset(&mut s.thickness, |v| {
+                egui::Slider::new(v, 0.5..=8.0)
+                    .max_decimals(1)
+                    .suffix(" px")
+            }),
+        )
+        .changed();
+    });
+    changed
+}
+
+/// A hatching brush's lines.
+fn hatching_section(ui: &mut egui::Ui, h: &mut crate::brush_engine::hatching::Hatching) -> bool {
+    let mut changed = false;
+    section(ui, "Hatching", true, |ui| {
+        changed |= slider_row(
+            ui,
+            "Angle",
+            crate::ui::widgets::reset(&mut h.angle, |v| {
+                egui::Slider::new(v, -90.0..=90.0)
+                    .max_decimals(0)
+                    .suffix("°")
+            }),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Spacing",
+            crate::ui::widgets::reset(&mut h.separation, |v| {
+                egui::Slider::new(v, 2.0..=40.0)
+                    .max_decimals(1)
+                    .suffix(" px")
+            }),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Line width",
+            crate::ui::widgets::reset(&mut h.thickness, |v| {
+                egui::Slider::new(v, 0.5..=10.0)
+                    .max_decimals(1)
+                    .suffix(" px")
+            }),
+        )
+        .changed();
+        changed |= ui
+            .checkbox(&mut h.crosshatch, "Cross-hatch with pressure")
+            .on_hover_text("Pressing harder adds a second direction, then a third.")
+            .changed();
+    });
+    changed
+}
+
 /// A bristle brush's hairs.
 fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bristles) -> bool {
     let mut changed = false;
