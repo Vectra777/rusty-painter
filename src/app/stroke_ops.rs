@@ -29,6 +29,13 @@ impl PainterApp {
             .has_selection()
             .then(|| SelectionManager::with_shape(self.selection_manager.current_shape.clone()));
         let pos = self.ruler_begin_stroke(pos);
+        self.note_curve_start(pos, pressure);
+        let mut brush = self.brush_state.brush.clone();
+        if self.stroke_on_curve() {
+            // Smoothing would pull the stroke inside the curve it follows;
+            // the assistant keeps it steady anyway.
+            brush.stabilizer_algorithm = crate::brush_engine::brush::StabilizerAlgorithm::None;
+        }
         let mut symmetry = self.workspace.symmetry;
         // Pixel-perfect dabs sit on pixel centres; so do their mirror
         // images when the axes do (on a half-pixel grid).
@@ -37,7 +44,7 @@ impl PainterApp {
         }
         self.stroke_worker.begin(StrokeSetup {
             canvas: Arc::clone(&self.canvas),
-            brush: self.brush_state.brush.clone(),
+            brush,
             selection,
             pool: Arc::clone(&self.workspace.pool),
             layer_idx: self.canvas.active_layer_idx,
@@ -52,8 +59,10 @@ impl PainterApp {
     }
 
     pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
-        let pos = self.ruler_snap(pos);
-        if self.brush_state.is_drawing {
+        if !self.brush_state.is_drawing {
+            return;
+        }
+        for (pos, pressure) in self.guide_samples(pos, pressure) {
             self.stroke_worker
                 .sample_tilted(pos, pressure, self.viewport.touch.pen_tilt);
         }

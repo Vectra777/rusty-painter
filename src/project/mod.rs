@@ -46,6 +46,7 @@ pub(crate) struct LoadedProject {
     pub canvas: Canvas,
     pub color_model: ColorModel,
     pub history: History,
+    pub guides: Option<crate::app::tools::guides::StoredGuides>,
 }
 
 pub(crate) fn save_project(app: &PainterApp, path: impl AsRef<Path>) -> Result<(), String> {
@@ -67,6 +68,9 @@ impl PainterApp {
         let loaded = load_project(path)?;
         self.replace_document(loaded.canvas, loaded.history);
         self.workspace.color_model = loaded.color_model;
+        if let Some(guides) = loaded.guides {
+            guides.apply(self);
+        }
         self.active_tool = Tool::Brush;
         Ok(())
     }
@@ -191,6 +195,9 @@ struct ProjectFile {
     layers: Vec<StoredLayer>,
     /// Version 3: the one document history. Version 2: one per layer.
     histories: Vec<StoredHistory>,
+    /// The ruler, assistants and mirror painting; absent in older files.
+    #[serde(default)]
+    guides: Option<crate::app::tools::guides::StoredGuides>,
 }
 
 impl ProjectFile {
@@ -218,6 +225,7 @@ impl ProjectFile {
                 &app.layer_state.history,
                 blobs,
             )?],
+            guides: Some(crate::app::tools::guides::StoredGuides::from_app(app)),
         })
     }
 
@@ -265,6 +273,7 @@ impl ProjectFile {
             canvas,
             color_model: self.color_model.into(),
             history,
+            guides: self.guides,
         })
     }
 }

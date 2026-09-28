@@ -62,6 +62,42 @@ pub(crate) fn shape_actions(app: &mut PainterApp, ui: &mut egui::Ui) {
     }
 }
 
+/// The drawing assistants: add one, show or hide each, remove it.
+pub(crate) fn assistant_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
+    use crate::app::tools::assistants::AssistantKind;
+    ui.horizontal_wrapped(|ui| {
+        for kind in AssistantKind::ALL {
+            if ui
+                .button(format!("+ {}", kind.label()))
+                .on_hover_text(match kind {
+                    AssistantKind::VanishingPoint => "Strokes run towards the point",
+                    AssistantKind::Perspective => {
+                        "Drag the corners onto a rectangle seen at an angle: strokes run towards \
+                         its two vanishing points, or upright"
+                    }
+                    AssistantKind::Ellipse => "Strokes started near it run round it",
+                    AssistantKind::Concentric => "Strokes run round ellipses of its shape",
+                })
+                .clicked()
+            {
+                app.add_assistant(kind);
+            }
+        }
+    });
+    let mut remove = None;
+    for (i, a) in app.workspace.guides.assistants.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut a.enabled, a.kind.label());
+            if ui.small_button("Remove").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        app.workspace.guides.assistants.remove(i);
+    }
+}
+
 /// The ruler's switches.
 pub(crate) fn ruler_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     let mut enabled = app.workspace.guides.ruler.enabled;
@@ -97,6 +133,9 @@ pub fn show(app: &mut PainterApp, ctx: &egui::Context, anchor: egui::Rect) {
         ui.separator();
         ui.label(RichText::new("RULER").small().strong().color(TEXT_DIM));
         ruler_controls(app, ui);
+        ui.separator();
+        ui.label(RichText::new("ASSISTANTS").small().strong().color(TEXT_DIM));
+        assistant_controls(app, ui);
     });
     app.modal_state.shape_menu_open = open;
 }

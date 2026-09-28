@@ -59,7 +59,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Stabiliser | ✅ several kinds | ✅ + post-correction | ✅ + forced fade | ✅ simple + dynamic (mass/drag) |
-| Rulers / assistants (perspective, ellipse…) | ✅ | ✅ | ✅ | ⚠️ one straight ruler |
+| Rulers / assistants (perspective, ellipse…) | ✅ | ✅ | ✅ | ✅ ruler, vanishing point, perspective, ellipse, concentric |
 | Symmetry / radial mirror | ✅ | ✅ | ✅ | ✅ incl. kaleidoscope |
 | Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ❌ |
 | Pen eraser end switches to eraser | ✅ | ✅ | ✅ | ✅ |
@@ -127,7 +127,10 @@ below.
   deform (push, grow, shrink, swirl) or clone (Ctrl+click the source;
   aligned or not, this layer or all); the Blur tool can also sharpen or
   adjust hue, saturation and brightness under the brush.
-- [ ] **Assistants:** vanishing point, perspective, ellipse, concentric.
+- [x] **Assistants:** vanishing point, two-point perspective (drag a
+  rectangle's corners), ellipse and concentric ellipses; strokes snap to
+  them, following curves round rather than across. Saved with the project,
+  like the ruler and mirror painting now are.
 - [ ] **Wrap-around painting** for seamless tiles.
 - [ ] **Importing other apps' brushes:** GIMP (`.gbr`, `.gih`), Photoshop
   (`.abr`), Krita (`.kpp`, `.bundle`), MyPaint (`.myb`), Clip Studio

@@ -1,6 +1,7 @@
 //! The tools, one module each: what a press, drag and release do, their
 //! settings, and any session that lasts between presses (a shape being
 //! edited, a gradient being placed). `Tool` is the active tool.
+pub(crate) mod assistants;
 pub(crate) mod blend;
 pub(crate) mod fill;
 pub(crate) mod gradient;
