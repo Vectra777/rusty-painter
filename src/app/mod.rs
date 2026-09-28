@@ -11,8 +11,11 @@
 //! - [`tools`]: one module per tool (selection, fill, gradient, shapes...).
 //! - [`view`]: drawing the canvas (GPU atlases) and the screen mapping.
 //! - [`frame_stats`]: how long each stage of a frame takes (the readout).
+//! - [`timelapse`]: recording the painting and exporting it as a video.
+//! - [`autosave`]: autosave and recovering unsaved work after a crash.
 //! - [`layout`], [`init`], [`import`], [`brush_io`]: docks, startup, files
 //!   dropped or imported, brush tips on disk.
+pub(crate) mod autosave;
 pub(crate) mod brush_io;
 pub(crate) mod canvas_ops;
 pub(crate) mod clipboard;
@@ -25,6 +28,7 @@ pub(crate) mod layout;
 pub(crate) mod painter;
 pub(crate) mod state;
 pub(crate) mod stroke_ops;
+pub(crate) mod timelapse;
 pub(crate) mod tools;
 #[cfg(test)]
 mod undo_tests;

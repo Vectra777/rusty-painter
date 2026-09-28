@@ -1,5 +1,5 @@
 //! Frame timing: how long each stage of a frame takes on the main thread,
-//! for the readout in the status bar and the Frame Times window (View →
+//! for the readout in the top bar and the Frame Times window (View →
 //! Frame Times). Off by default; while off it costs nothing.
 //!
 //! The frame loop marks the end of each stage ([`FrameStats::mark`]); the
@@ -16,7 +16,7 @@ use std::time::Instant;
 pub enum Stage {
     /// Theme, shortcuts, finished background work, layer thumbnails.
     Setup,
-    /// Menus, options bar, status bar, toolbar, docked panels.
+    /// The top bar, tool strip, rails and side panels.
     Panels,
     /// Placing the view, pen and touch input, the active tool's work.
     Tools,
@@ -69,7 +69,7 @@ impl Stage {
     pub fn hint(self) -> &'static str {
         match self {
             Stage::Setup => "Theme, shortcuts, finished exports, layer thumbnails",
-            Stage::Panels => "Menus, options bar, status bar, toolbar, docked panels",
+            Stage::Panels => "Top bar, tool strip, rails, side panels",
             Stage::Tools => "Placing the view, pen and touch input, the active tool",
             Stage::Stroke => "Waiting for the stroke worker to paint this frame's dabs",
             Stage::Tiles => "Compositing dirty tiles for upload to the GPU",

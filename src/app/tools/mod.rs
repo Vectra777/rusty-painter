@@ -4,14 +4,17 @@
 pub(crate) mod assistants;
 pub(crate) mod blend;
 pub(crate) mod fill;
+pub(crate) mod filter;
 pub(crate) mod gradient;
 pub(crate) mod gradient_colors;
 pub(crate) mod guides;
 pub(crate) mod liquify;
 pub(crate) mod palette;
 pub(crate) mod patch;
+pub(crate) mod quickshape;
 pub(crate) mod select;
 pub(crate) mod shape;
+pub(crate) mod text;
 pub(crate) mod transform;
 
 use crate::selection::SelectionType;
@@ -40,4 +43,6 @@ pub enum Tool {
     Shape(crate::app::tools::shape::ShapeKind),
     /// Linear, radial, reflected or angle gradient.
     Gradient,
+    /// Type text onto a new layer.
+    Text,
 }

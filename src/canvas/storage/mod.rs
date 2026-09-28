@@ -71,6 +71,12 @@ pub struct Layer {
     pub expanded: bool,
     /// How this layer (or folder) combines with what's below it.
     pub blend: LayerBlend,
+    /// Clipping mask: shows only where the nearest unclipped layer below it
+    /// (in the same folder) has paint.
+    pub clipped: bool,
+    /// An adjustment layer: this filter applies to everything below it
+    /// (its own pixels aren't shown; its mask says where it applies).
+    pub adjustment: Option<crate::canvas::filters::Filter>,
     tiles: Mutex<TileMap>,
 }
 
@@ -94,10 +100,52 @@ pub struct CanvasLayerSnapshot {
     pub parent: Option<LayerId>,
     pub expanded: bool,
     pub blend: LayerBlend,
+    pub clipped: bool,
+    pub adjustment: Option<crate::canvas::filters::Filter>,
     pub tiles: Vec<CanvasTileSnapshot>,
 }
 
+/// A whole document's size and layers: what undo swaps back in after a
+/// canvas resize, crop or rotation (see [`Canvas::swap_document`]).
+pub struct DocumentState {
+    pub width: usize,
+    pub height: usize,
+    pub layers: Vec<Layer>,
+    pub active_layer_idx: usize,
+}
+
 impl Layer {
+    /// The same layer (id and settings) with no pixels.
+    pub(crate) fn shell(&self) -> Layer {
+        Layer {
+            id: self.id,
+            name: self.name.clone(),
+            visible: self.visible,
+            opacity: self.opacity,
+            locked: self.locked,
+            alpha_locked: self.alpha_locked,
+            kind: self.kind,
+            parent: self.parent,
+            expanded: self.expanded,
+            blend: self.blend,
+            clipped: self.clipped,
+            adjustment: self.adjustment,
+            tiles: Mutex::new(TileMap::default()),
+        }
+    }
+
+    /// Set tile `(tx, ty)`'s pixels.
+    pub(crate) fn set_tile(&self, tx: i32, ty: i32, data: Vec<Color32>) {
+        let is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
+        self.tiles.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            (tx, ty),
+            Arc::new(Mutex::new(TileCell {
+                data: Some(data),
+                is_empty,
+            })),
+        );
+    }
+
     /// Allocate a new layer backing store but keep tile data lazy.
     fn new(id: LayerId, name: String, _width: usize, _height: usize, _tile_size: usize) -> Self {
         Self {
@@ -111,6 +159,8 @@ impl Layer {
             parent: None,
             expanded: true,
             blend: LayerBlend::Normal,
+            clipped: false,
+            adjustment: None,
             tiles: Mutex::new(TileMap::default()),
         }
     }
@@ -137,6 +187,8 @@ impl Layer {
             parent: snapshot.parent,
             expanded: snapshot.expanded,
             blend: snapshot.blend,
+            clipped: snapshot.clipped,
+            adjustment: snapshot.adjustment,
             tiles: Mutex::new(tiles),
         }
     }
@@ -211,6 +263,14 @@ impl Canvas {
         }
     }
 
+    /// Exchange the document's size and layers with `doc`'s.
+    pub fn swap_document(&mut self, doc: &mut DocumentState) {
+        std::mem::swap(&mut self.width, &mut doc.width);
+        std::mem::swap(&mut self.height, &mut doc.height);
+        std::mem::swap(&mut self.layers, &mut doc.layers);
+        std::mem::swap(&mut self.active_layer_idx, &mut doc.active_layer_idx);
+    }
+
     /// Look up a layer's current position by its stable id. O(layer count);
     /// layer counts are small, and this is never called from a pixel-stamp
     /// hot path.
@@ -230,11 +290,15 @@ impl Canvas {
         self.blend_space != BlendSpace::Linear || !self.is_plain_stack()
     }
 
-    /// No folders, masks or blend modes: a plain stack of Normal layers
-    /// (in either blend space).
+    /// No folders, masks, clipping or blend modes: a plain stack of Normal
+    /// layers (in either blend space).
     fn is_plain_stack(&self) -> bool {
         self.layers.iter().all(|l| {
-            l.kind == LayerKind::Paint && l.parent.is_none() && l.blend == LayerBlend::Normal
+            l.kind == LayerKind::Paint
+                && l.parent.is_none()
+                && l.blend == LayerBlend::Normal
+                && !l.clipped
+                && l.adjustment.is_none()
         })
     }
 
@@ -321,6 +385,8 @@ impl Canvas {
         layer.kind = meta.kind;
         layer.parent = meta.parent;
         layer.blend = meta.blend;
+        layer.clipped = meta.clipped;
+        layer.adjustment = meta.adjustment;
         self.layers.insert(idx, layer);
         // `id` is a reused (previously-allocated) id, not a new one, but
         // guard against ever handing out a colliding id afterward.
@@ -371,6 +437,8 @@ impl Canvas {
             kind: layer.kind,
             parent: layer.parent,
             blend: layer.blend,
+            clipped: layer.clipped,
+            adjustment: layer.adjustment,
         })
     }
 
@@ -420,6 +488,8 @@ impl Canvas {
                     parent: layer.parent,
                     expanded: layer.expanded,
                     blend: layer.blend,
+                    clipped: layer.clipped,
+                    adjustment: layer.adjustment,
                     tiles,
                 }
             })
@@ -566,6 +636,17 @@ impl Canvas {
                 .copied()
                 .collect()
         })
+    }
+
+    /// Drop tile `(tx, ty)` of layer `layer_idx` (it reads as unpainted).
+    pub fn clear_layer_tile(&self, layer_idx: usize, tx: i32, ty: i32) {
+        if let Some(layer) = self.layers.get(layer_idx) {
+            layer
+                .tiles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&(tx, ty));
+        }
     }
 
     /// Clone the raw pixel buffer for a tile in a given layer.

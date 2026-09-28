@@ -33,7 +33,7 @@ pub(crate) const TEXT_STRONG: Color32 = Color32::from_gray(245);
 pub(crate) const ACCENT: Color32 = Color32::from_rgb(56, 132, 232);
 pub(crate) const ACCENT_DIM: Color32 = Color32::from_rgb(38, 78, 130);
 
-/// Height of the menu, options and status bars.
+/// Height of the top bar's controls.
 pub(crate) const BAR_HEIGHT: f32 = 30.0;
 /// Width of the vertical tool strip.
 pub(crate) const TOOLBAR_WIDTH: f32 = 44.0;
@@ -57,9 +57,8 @@ pub(crate) const CHECKERBOARD_DARK: Color32 = Color32::from_gray(150);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Metrics {
     pub touch: bool,
+    /// The one bar above the canvas (menus and tool options).
     pub menu_height: f32,
-    pub bar_height: f32,
-    pub status_height: f32,
     pub toolbar_width: f32,
     pub tool_button: f32,
     /// Icon buttons in panel headers (add/delete).
@@ -76,9 +75,8 @@ pub(crate) struct Metrics {
 
 const DESKTOP_METRICS: Metrics = Metrics {
     touch: false,
-    menu_height: 26.0,
-    bar_height: BAR_HEIGHT + 4.0,
-    status_height: 24.0,
+    // Tall enough for the tool options' sliders.
+    menu_height: BAR_HEIGHT + 2.0,
     toolbar_width: TOOLBAR_WIDTH,
     tool_button: TOOL_BUTTON_SIZE,
     header_button: 24.0,
@@ -93,9 +91,7 @@ const DESKTOP_METRICS: Metrics = Metrics {
 
 const TOUCH_METRICS: Metrics = Metrics {
     touch: true,
-    menu_height: 38.0,
-    bar_height: 52.0,
-    status_height: 34.0,
+    menu_height: 42.0,
     toolbar_width: 60.0,
     tool_button: 48.0,
     header_button: 38.0,

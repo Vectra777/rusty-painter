@@ -10,6 +10,8 @@ pub enum ExportFormat {
     Png,
     Jpeg,
     Tiff,
+    /// Layered: written from the document, not the flattened picture.
+    Psd,
 }
 
 impl ExportFormat {
@@ -18,6 +20,7 @@ impl ExportFormat {
             ExportFormat::Png => "PNG",
             ExportFormat::Jpeg => "JPEG",
             ExportFormat::Tiff => "TIFF",
+            ExportFormat::Psd => "PSD (layers)",
         }
     }
 
@@ -26,6 +29,7 @@ impl ExportFormat {
             ExportFormat::Png => "png",
             ExportFormat::Jpeg => "jpg",
             ExportFormat::Tiff => "tiff",
+            ExportFormat::Psd => "psd",
         }
     }
 
@@ -36,15 +40,18 @@ impl ExportFormat {
             ExportFormat::Png => "image/png",
             ExportFormat::Jpeg => "image/jpeg",
             ExportFormat::Tiff => "image/tiff",
+            ExportFormat::Psd => "image/vnd.adobe.photoshop",
         }
     }
 
-    fn image_format(&self) -> ImageFormat {
-        match self {
+    /// `None` for PSD, which is written from the layers (see [`save_psd`]).
+    fn image_format(&self) -> Option<ImageFormat> {
+        Some(match self {
             ExportFormat::Png => ImageFormat::Png,
             ExportFormat::Jpeg => ImageFormat::Jpeg,
             ExportFormat::Tiff => ImageFormat::Tiff,
-        }
+            ExportFormat::Psd => return None,
+        })
     }
 }
 
@@ -102,9 +109,12 @@ fn encode_into<W: std::io::Write + std::io::Seek>(
     format: ExportFormat,
     out: &mut W,
 ) -> Result<(), String> {
+    let Some(image_format) = format.image_format() else {
+        return Err("PSD is written from the layers, not a flattened picture".into());
+    };
     let result = match format {
-        ExportFormat::Jpeg => to_rgb_on_white(&img)?.write_to(out, format.image_format()),
-        _ => to_rgba_image(img)?.write_to(out, format.image_format()),
+        ExportFormat::Jpeg => to_rgb_on_white(&img)?.write_to(out, image_format),
+        _ => to_rgba_image(img)?.write_to(out, image_format),
     };
     result.map_err(|e| e.to_string())
 }
@@ -127,4 +137,14 @@ pub fn encode_color_image(img: ColorImage, format: ExportFormat) -> Result<Vec<u
     let mut bytes = Vec::new();
     encode_into(img, format, &mut std::io::Cursor::new(&mut bytes))?;
     Ok(bytes)
+}
+
+/// Write a layered PSD (built from the document on the UI thread, encoded
+/// here, off it).
+pub fn save_psd(
+    doc: &crate::project::psd::PsdDocument,
+    path: impl Into<PathBuf>,
+) -> Result<(), String> {
+    let bytes = crate::project::psd::encode_psd(doc)?;
+    std::fs::write(path.into(), bytes).map_err(|e| e.to_string())
 }

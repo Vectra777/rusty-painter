@@ -22,8 +22,6 @@ pub(crate) enum Icon {
     Plus,
     Undo,
     Redo,
-    PanelLeft,
-    PanelRight,
     Presets,
     Folder,
     Mask,
@@ -47,6 +45,9 @@ pub(crate) enum Icon {
     ShapePolygon,
     Ruler,
     Gradient,
+    Text,
+    Layers,
+    Sliders,
 }
 
 /// Maps 16×16 icon-grid coordinates into a square centered in `rect`.
@@ -215,6 +216,37 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                 let alpha = 1.0 - i as f32 / 5.0;
                 painter.rect_filled(band, 0.0, color.gamma_multiply(alpha));
             }
+        }
+        Icon::Layers => {
+            // Three stacked sheets.
+            for (i, y) in [4.0_f32, 7.5, 11.0].into_iter().enumerate() {
+                let sheet = vec![
+                    g.p(8.0, y - 2.5),
+                    g.p(14.0, y),
+                    g.p(8.0, y + 2.5),
+                    g.p(2.0, y),
+                ];
+                if i == 0 {
+                    painter.add(Shape::convex_polygon(sheet, color, Stroke::NONE));
+                } else {
+                    painter.add(Shape::closed_line(sheet, thin));
+                }
+            }
+        }
+        Icon::Sliders => {
+            // Three sliders with their knobs.
+            for (y, x) in [(4.0_f32, 5.0_f32), (8.0, 11.0), (12.0, 7.0)] {
+                line((2.0, y), (14.0, y), 1.2);
+                painter.circle_filled(g.p(x, y), g.w(1.9), color);
+            }
+        }
+        Icon::Text => {
+            // A serif T.
+            line((3.0, 3.0), (13.0, 3.0), 1.8);
+            line((8.0, 3.0), (8.0, 13.5), 1.8);
+            line((5.5, 13.5), (10.5, 13.5), 1.2);
+            line((3.0, 3.0), (3.0, 5.0), 1.2);
+            line((13.0, 3.0), (13.0, 5.0), 1.2);
         }
         Icon::Ruler => {
             // A slanted ruler with ticks.
@@ -482,16 +514,6 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                     painter.rect_stroke(tile, 0.0, thin);
                 }
             }
-        }
-        Icon::PanelLeft | Icon::PanelRight => {
-            let outer = Rect::from_min_max(g.p(1.5, 2.5), g.p(14.5, 13.5));
-            painter.rect_stroke(outer, 0.0, thin);
-            let strip = if icon == Icon::PanelLeft {
-                Rect::from_min_max(g.p(1.5, 2.5), g.p(6.0, 13.5))
-            } else {
-                Rect::from_min_max(g.p(10.0, 2.5), g.p(14.5, 13.5))
-            };
-            painter.rect_filled(strip, 0.0, color);
         }
         Icon::Menu => {
             for y in [4.0, 8.0, 12.0] {

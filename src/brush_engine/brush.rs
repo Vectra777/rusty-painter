@@ -169,6 +169,8 @@ pub struct Brush {
     /// What changes from dab to dab besides pressure: tip angle and squash,
     /// tapers, speed, randomness. All off by default.
     pub dynamics: crate::brush_engine::dynamics::BrushDynamics,
+    /// Inputs driving dab settings, each through its own curve.
+    pub inputs: Vec<crate::brush_engine::dynamics::InputMapping>,
     /// Paper grain taking paint away from each dab; `None` for none.
     pub texture: Option<crate::brush_engine::texture::BrushTexture>,
     /// How the paint blends onto the layer (multiply, screen, add…), like a
@@ -696,10 +698,15 @@ fn resolve_spans_in(
 }
 
 impl Brush {
+    /// Whether any dynamics are on (fixed ones or input mappings).
+    pub fn has_dynamics(&self) -> bool {
+        self.dynamics.is_active() || !self.inputs.is_empty()
+    }
+
     /// Whether dabs can differ from one another (dynamics, several tips),
     /// so each is planned on its own.
     pub fn varies_per_dab(&self) -> bool {
-        self.dynamics.is_active()
+        self.has_dynamics()
             || self.brush_options.tip_count() > 1
             || matches!(
                 self.brush_type,
@@ -765,6 +772,7 @@ impl Brush {
             stabilizer_drag: 0.5,
             is_changed: false,
             dynamics: Default::default(),
+            inputs: Vec::new(),
             texture: None,
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
@@ -791,6 +799,7 @@ impl Brush {
             stabilizer_drag: 0.5,
             is_changed: false,
             dynamics: Default::default(),
+            inputs: Vec::new(),
             texture: None,
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,

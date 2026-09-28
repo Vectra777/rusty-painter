@@ -24,6 +24,49 @@ pub struct Region {
 /// A tile's key, its pixels as they were, and the tile.
 type RegionTile = ((i32, i32), Vec<Color32>, Arc<Mutex<TileCell>>);
 
+impl Region {
+    /// The original pixels as one row-major buffer over `bounds`.
+    pub fn pixels(&self, tile_size: usize) -> Vec<Color32> {
+        let ts = tile_size as i32;
+        let [bx0, by0, bx1, by1] = self.bounds;
+        let (w, h) = ((bx1 - bx0).max(0) as usize, (by1 - by0).max(0) as usize);
+        let mut out = vec![Color32::TRANSPARENT; w * h];
+        for ((tx, ty), data, _) in &self.tiles {
+            let (ox, oy) = (tx * ts, ty * ts);
+            let (x0, x1) = (bx0.max(ox), bx1.min(ox + ts));
+            if x1 <= x0 {
+                continue;
+            }
+            for y in by0.max(oy)..by1.min(oy + ts) {
+                let src = ((y - oy) * ts + (x0 - ox)) as usize;
+                let dst = (y - by0) as usize * w + (x0 - bx0) as usize;
+                let n = (x1 - x0) as usize;
+                out[dst..dst + n].copy_from_slice(&data[src..src + n]);
+            }
+        }
+        out
+    }
+}
+
+/// `a` to `b` by `t` (0..=255), premultiplied.
+fn mix(a: Color32, b: Color32, t: u8) -> Color32 {
+    match t {
+        0 => a,
+        255 => b,
+        _ => {
+            let t = t as u32;
+            let f = |x: u8, y: u8| ((x as u32 * (255 - t) + y as u32 * t + 127) / 255) as u8;
+            let (a, b) = (a.to_array(), b.to_array());
+            Color32::from_rgba_premultiplied(
+                f(a[0], b[0]),
+                f(a[1], b[1]),
+                f(a[2], b[2]),
+                f(a[3], b[3]),
+            )
+        }
+    }
+}
+
 impl Canvas {
     /// Clear the active layer to the provided color (or transparent for non-background).
     pub fn clear(&mut self, color: Color) {
@@ -494,6 +537,54 @@ impl Canvas {
                             px = crate::canvas::blend::with_alpha_of(px, dst.a());
                         }
                         out[i] = px;
+                    }
+                }
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                cell.is_empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
+                cell.data = Some(out);
+            });
+    }
+
+    /// Set the layer's pixels in `region` to `pixels` (row-major over the
+    /// region's bounds), mixed with the originals by `coverage` where it's
+    /// given (the selection; 255 = all new). Alpha-locked layers keep their
+    /// transparency. Tiles are processed in parallel.
+    pub fn replace_region(
+        &self,
+        layer_idx: usize,
+        region: &Region,
+        pixels: &[Color32],
+        coverage: Option<&crate::selection::SelectionMask>,
+    ) {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return;
+        };
+        let alpha_lock = layer.alpha_locked;
+        let ts = self.tile_size as i32;
+        let [bx0, by0, bx1, by1] = region.bounds;
+        let w = (bx1 - bx0).max(0) as usize;
+        region
+            .tiles
+            .par_iter()
+            .for_each(|((tx, ty), original, cell)| {
+                let (tx, ty) = (*tx, *ty);
+                let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
+                let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
+                let mut out = original.clone();
+                for ly in ly0..ly1 {
+                    let y = ty * ts + ly;
+                    for lx in lx0..lx1 {
+                        let x = tx * ts + lx;
+                        let i = (ly * ts + lx) as usize;
+                        let old = original[i];
+                        let mut new = pixels[(y - by0) as usize * w + (x - bx0) as usize];
+                        if let Some(cov) = coverage {
+                            new = mix(old, new, cov.value(x, y));
+                        }
+                        if alpha_lock {
+                            new = crate::canvas::blend::with_alpha_of(new, old.a());
+                        }
+                        out[i] = new;
                     }
                 }
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());

@@ -391,12 +391,136 @@ fn bench_inpaint(c: &mut Criterion) {
     group.finish();
 }
 
+// --- Filters, image operations, text ---------------------------------------
+
+fn bench_filters(c: &mut Criterion) {
+    use rusty_painter::canvas::filters::Filter;
+    let pool = pool();
+    let size = 1024;
+    let px = picture(size);
+    let mut group = c.benchmark_group("filter_1024px");
+    for (name, f) in [
+        (
+            "hue_saturation",
+            Filter::HueSaturation {
+                hue: 30.0,
+                saturation: 0.2,
+                lightness: 0.0,
+            },
+        ),
+        (
+            "levels",
+            Filter::Levels {
+                black: 0.1,
+                white: 0.9,
+                gamma: 1.2,
+            },
+        ),
+        ("gaussian_r4", Filter::GaussianBlur { radius: 4.0 }),
+        ("gaussian_r30", Filter::GaussianBlur { radius: 30.0 }),
+        (
+            "motion_40px",
+            Filter::MotionBlur {
+                angle: 30.0,
+                distance: 40.0,
+            },
+        ),
+        (
+            "sharpen",
+            Filter::Sharpen {
+                radius: 2.0,
+                amount: 1.0,
+            },
+        ),
+        (
+            "noise",
+            Filter::Noise {
+                amount: 0.2,
+                mono: false,
+            },
+        ),
+        ("pixelate_16", Filter::Pixelate { size: 16 }),
+        (
+            "line_art",
+            Filter::LineArt {
+                black: 0.25,
+                white: 0.85,
+                keep_color: false,
+            },
+        ),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| pool.install(|| black_box(f.apply(&px, size, size, (0, 0)))))
+        });
+    }
+    group.finish();
+}
+
+fn bench_image_ops(c: &mut Criterion) {
+    use rusty_painter::canvas::geometry::ImageOp;
+    let size = 2048;
+    let px = picture(size);
+    let mut group = c.benchmark_group("image_op_2048px_layer");
+    for (name, op) in [
+        ("rotate_cw", ImageOp::RotateCw),
+        ("flip_horizontal", ImageOp::FlipHorizontal),
+        (
+            "crop_to_half",
+            ImageOp::Reframe {
+                x: 512,
+                y: 512,
+                w: 1024,
+                h: 1024,
+            },
+        ),
+        (
+            "resize_half_smooth",
+            ImageOp::Resize {
+                w: 1024,
+                h: 1024,
+                smooth: true,
+            },
+        ),
+        (
+            "resize_double_hard",
+            ImageOp::Resize {
+                w: 4096,
+                h: 4096,
+                smooth: false,
+            },
+        ),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| black_box(op.apply(&px, size, size, Color32::TRANSPARENT)))
+        });
+    }
+    group.finish();
+}
+
+fn bench_text(c: &mut Criterion) {
+    use rusty_painter::canvas::text::{self, TextStyle};
+    let font = text::builtin_fonts().remove(0).1;
+    let style = TextStyle {
+        size: 64.0,
+        ..Default::default()
+    };
+    let paragraph = "The quick brown fox jumps\nover the lazy dog, twice\nand then once more.";
+    let mut group = c.benchmark_group("text");
+    group.bench_function("render_3_lines_64px", |b| {
+        b.iter(|| black_box(text::render(&font, paragraph, &style, Vec2::splat(100.0))))
+    });
+    group.finish();
+}
+
 criterion_group!(
     tools,
     bench_symmetry,
     bench_shapes,
     bench_selection,
     bench_gradient,
-    bench_inpaint
+    bench_inpaint,
+    bench_filters,
+    bench_image_ops,
+    bench_text
 );
 criterion_main!(tools);

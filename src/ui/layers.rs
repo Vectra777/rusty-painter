@@ -249,12 +249,19 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     if let Some(layer) = app.canvas.layers.get(active_owner) {
         let mut blend = layer.blend;
         let mut alpha_locked = layer.alpha_locked;
+        let mut clipped = layer.clipped;
         let can_alpha_lock = layer.kind == LayerKind::Paint;
+        let can_clip = active_owner != 0;
         let changed = ui
             .horizontal(|ui| {
                 if can_alpha_lock {
                     ui.toggle_value(&mut alpha_locked, "α Lock").on_hover_text(
                         "Lock transparency (/): paint and fills only recolour what's already there",
+                    );
+                }
+                if can_clip {
+                    ui.toggle_value(&mut clipped, "Clip").on_hover_text(
+                        "Clip to the layer below (Ctrl+Alt+G): show only where it has paint",
                     );
                 }
                 ui.label(RichText::new("Blend").color(TEXT_DIM));
@@ -263,6 +270,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
             .inner;
         if changed {
             app.canvas_mut().layers[active_owner].blend = blend;
+            needs_refresh = true;
+        }
+        if clipped != app.canvas.layers[active_owner].clipped {
+            app.canvas_mut().layers[active_owner].clipped = clipped;
             needs_refresh = true;
         }
         if alpha_locked != app.canvas.layers[active_owner].alpha_locked {
@@ -290,6 +301,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     current.opacity,
                 );
                 let alpha_locked = current.alpha_locked;
+                let clipped = current.clipped;
+                let adjustment = current.adjustment.is_some();
                 let (id, kind, parent, expanded, blend) = (
                     current.id,
                     current.kind,
@@ -402,9 +415,17 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                             text = text.strong();
                         }
                         ui.horizontal(|ui| {
+                            if clipped {
+                                ui.label(RichText::new("↓").color(ACCENT))
+                                    .on_hover_text("Clipped to the layer below");
+                            }
                             ui.add(egui::Label::new(text).truncate());
                             if blend != LayerBlend::Normal {
                                 ui.label(RichText::new(blend.label()).small().color(ACCENT));
+                            }
+                            if adjustment {
+                                ui.label(egui::RichText::new("◐").color(ACCENT))
+                                    .on_hover_text("Adjustment layer: double-click to change it");
                             }
                             if alpha_locked {
                                 ui.label(RichText::new("α").small().color(ACCENT))
@@ -430,7 +451,11 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 // arrow).
                 if row_response.double_clicked() {
                     active_idx = i;
-                    renaming = Some(i);
+                    if adjustment {
+                        app.workspace.filter.editing = Some(id);
+                    } else {
+                        renaming = Some(i);
+                    }
                 }
                 // The background stays at the bottom.
                 if row_response.drag_started() && i != 0 {
@@ -441,6 +466,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     if ui.button("Rename").clicked() {
                         active_idx = i;
                         renaming = Some(i);
+                        ui.close_menu();
+                    }
+                    if adjustment && ui.button("Edit adjustment…").clicked() {
+                        app.workspace.filter.editing = Some(id);
                         ui.close_menu();
                     }
                     if !is_group && i != 0 && ui.button("Duplicate").clicked() {

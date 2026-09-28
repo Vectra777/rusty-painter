@@ -505,6 +505,7 @@ fn brush_settings_contents(
     });
 
     changed |= dynamics_sections(ui, &mut brush.dynamics);
+    changed |= inputs_section(ui, &mut brush.inputs);
     changed |= texture_section(ui, &mut brush.texture, textures);
     changed |= dual_section(ui, &mut brush.dual, loaded_tips);
     section(ui, "Watercolour", false, |ui| {
@@ -824,6 +825,95 @@ fn dynamics_sections(
         .changed()
         {
             r.count = count;
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// Inputs driving settings: any sensor to any dab setting, each with its
+/// own amount and curve.
+fn inputs_section(
+    ui: &mut egui::Ui,
+    inputs: &mut Vec<crate::brush_engine::dynamics::InputMapping>,
+) -> bool {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let mut changed = false;
+    section(ui, "Inputs", false, |ui| {
+        ui.label(
+            egui::RichText::new(
+                "Make any input drive any setting, each through its own curve (like pressure \
+                 does size).",
+            )
+            .small()
+            .color(TEXT_DIM),
+        );
+        let mut remove = None;
+        for (i, m) in inputs.iter_mut().enumerate() {
+            ui.push_id(("input", i), |ui| {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("sensor")
+                        .selected_text(m.sensor.label())
+                        .show_ui(ui, |ui| {
+                            for s in Sensor::ALL {
+                                changed |=
+                                    ui.selectable_value(&mut m.sensor, s, s.label()).changed();
+                            }
+                        });
+                    ui.label("→");
+                    egui::ComboBox::from_id_salt("setting")
+                        .selected_text(m.setting.label())
+                        .show_ui(ui, |ui| {
+                            for s in DabSetting::ALL {
+                                changed |=
+                                    ui.selectable_value(&mut m.setting, s, s.label()).changed();
+                            }
+                        });
+                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+                changed |= slider_row(
+                    ui,
+                    "Amount",
+                    percent_of_unit(egui::Slider::new(&mut m.amount, -1.0..=1.0)),
+                )
+                .on_hover_text(
+                    "Size and opacity: above 0 a high input keeps them full and a low one \
+                     reduces them; below 0 the other way. Others: how far a full input moves \
+                     them.",
+                )
+                .changed();
+                if m.sensor.has_length() {
+                    let (range, suffix) = match m.sensor {
+                        Sensor::Time => (0.1..=10.0, " s"),
+                        _ => (5.0..=2000.0, " px"),
+                    };
+                    changed |= slider_row(
+                        ui,
+                        "Over",
+                        egui::Slider::new(&mut m.length, range)
+                            .logarithmic(true)
+                            .suffix(suffix),
+                    )
+                    .on_hover_text("How far into the stroke the input reaches its full value.")
+                    .changed();
+                }
+                changed |= crate::ui::curve_editor::curve_editor_with(
+                    ui,
+                    &mut m.curve,
+                    &crate::ui::curve_editor::INPUT_PRESETS,
+                );
+            });
+        }
+        if let Some(i) = remove {
+            inputs.remove(i);
+            changed = true;
+        }
+        ui.separator();
+        if ui.button("+ Add input").clicked() {
+            inputs.push(InputMapping::default());
             changed = true;
         }
     });

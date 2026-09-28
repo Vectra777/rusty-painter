@@ -17,8 +17,9 @@ const MARGIN_Y: f32 = 6.0;
 
 /// Button side that fits every tool (and the colors) in `height`, if any.
 fn fitting_button_size(height: f32, touch: bool, preferred: f32) -> Option<f32> {
-    let buttons = if touch { 16.0 } else { 14.0 };
-    let separators = if touch { 4.0 } else { 3.0 };
+    // The tools and the brush-settings button.
+    let buttons = 16.0;
+    let separators = 3.0;
     // The color pair is about 1.22 buttons tall.
     let fixed = 2.0 * MARGIN_Y
         + separators * SEPARATOR_HEIGHT
@@ -56,16 +57,43 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
                 anchors = tool_buttons(app, ui, size, m.touch);
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     color_pair(app, ui, size);
+                    settings_button(app, ui, size);
                 });
             } else {
                 // The colors stay pinned at the bottom; the tools scroll.
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     color_pair(app, ui, size);
+                    settings_button(app, ui, size);
                     separator(ui, size);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            anchors = tool_buttons(app, ui, size, m.touch);
-                        });
+                        let out = egui::ScrollArea::vertical()
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                            )
+                            .show(ui, |ui| {
+                                anchors = tool_buttons(app, ui, size, m.touch);
+                            });
+                        // More tools below: say so (the strip scrolls by drag
+                        // or wheel, with no bar to see).
+                        let r = out.inner_rect;
+                        let hidden = out.content_size.y - out.state.offset.y - r.height();
+                        if hidden > 2.0 {
+                            let band = egui::Rect::from_min_max(
+                                egui::pos2(r.left(), r.bottom() - 12.0),
+                                r.right_bottom(),
+                            );
+                            ui.painter().rect_filled(band, 0.0, BG_PANEL);
+                            let c = egui::pos2(r.center().x, r.bottom() - 6.0);
+                            ui.painter().add(egui::Shape::convex_polygon(
+                                vec![
+                                    c + egui::vec2(-6.0, -4.0),
+                                    c + egui::vec2(6.0, -4.0),
+                                    c + egui::vec2(0.0, 3.0),
+                                ],
+                                ACCENT,
+                                Stroke::NONE,
+                            ));
+                        }
                     });
                 });
             }
@@ -186,6 +214,16 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     ) {
         app.active_tool = Tool::Gradient;
     }
+    let text_active = matches!(app.active_tool, Tool::Text);
+    if tool_button(
+        ui,
+        app,
+        Icon::Text,
+        text_active,
+        "Text: click the canvas to type",
+    ) {
+        app.active_tool = Tool::Text;
+    }
     // One Shape button: it shows the current shape; clicking it picks the
     // tool, and again opens the menu of shapes.
     let shape_active = matches!(app.active_tool, Tool::Shape(_));
@@ -239,20 +277,18 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     }
     let symmetry_anchor = Some(response.rect);
 
-    // No keyboard on a touch screen: undo/redo need buttons.
-    if touch {
-        separator(ui, size);
-        if icon_button(ui, Icon::Undo, size, false, "Undo (two-finger tap)").clicked() {
-            app.apply_history(false);
-        }
-        if icon_button(ui, Icon::Redo, size, false, "Redo (three-finger tap)").clicked() {
-            app.apply_history(true);
-        }
-    }
     Anchors {
         select: select_anchor,
         symmetry: symmetry_anchor,
         shape: shape_anchor,
+    }
+}
+
+/// Opens and closes the brush (tool settings) panel.
+fn settings_button(app: &mut PainterApp, ui: &mut egui::Ui, size: f32) {
+    let open = app.workspace.show_left_panel;
+    if icon_button(ui, Icon::Sliders, size, open, "Brush settings").clicked() {
+        app.workspace.show_left_panel = !open;
     }
 }
 
@@ -305,13 +341,13 @@ fn color_pair(app: &mut PainterApp, ui: &mut egui::Ui, width: f32) {
     };
     paint_icon(painter, swap_rect, Icon::Swap, swap_color);
 
-    // On a touch screen the brush color opens/closes the color & layers panel.
+    // On a touch screen the brush color opens/closes the colour panel.
     if touch {
         if primary_resp
-            .on_hover_text("Brush color — tap to show/hide colors & layers")
+            .on_hover_text("Brush color — tap to show/hide the colour panel")
             .clicked()
         {
-            app.workspace.show_right_panel = !app.workspace.show_right_panel;
+            app.workspace.show_color = !app.workspace.show_color;
         }
     } else {
         primary_resp.on_hover_text("Brush color");

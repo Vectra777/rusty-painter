@@ -166,3 +166,98 @@ fn a_removed_layer_comes_back_with_its_history() {
         "the painting before the removal is still undoable"
     );
 }
+
+#[test]
+fn image_menu_steps_undo_and_redo_with_the_canvas_size() {
+    use crate::canvas::geometry::ImageOp;
+    let mut app = app();
+    gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(256.0, 0.0));
+    let mut states = vec![(snapshot(&app), app.canvas.width(), app.canvas.height())];
+    for op in [
+        ImageOp::RotateCw,
+        ImageOp::Reframe {
+            x: 10,
+            y: 20,
+            w: 100,
+            h: 150,
+        },
+        ImageOp::Resize {
+            w: 50,
+            h: 75,
+            smooth: true,
+        },
+        ImageOp::FlipHorizontal,
+    ] {
+        app.apply_image_op(op);
+        states.push((snapshot(&app), app.canvas.width(), app.canvas.height()));
+        assert_eq!(app.render_cache.tiles_x, app.canvas.width().div_ceil(64));
+    }
+    assert_eq!((app.canvas.width(), app.canvas.height()), (50, 75));
+    let last = states.len() - 1;
+    for i in (0..last).rev() {
+        app.apply_history(false);
+        let now = (snapshot(&app), app.canvas.width(), app.canvas.height());
+        assert!(now == states[i], "undo back to state {i}");
+    }
+    for (i, state) in states.iter().enumerate().skip(1) {
+        app.apply_history(true);
+        let now = (snapshot(&app), app.canvas.width(), app.canvas.height());
+        assert!(now == *state, "redo to state {i}");
+    }
+}
+
+#[test]
+fn a_saved_file_keeps_the_steps_after_a_resize_only() {
+    let mut app = app();
+    gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(256.0, 0.0));
+    app.apply_image_op(crate::canvas::geometry::ImageOp::Rotate180);
+    gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(0.0, 128.0));
+    let bytes = crate::project::encode_project(&app).unwrap();
+    let loaded = crate::project::decode_project(&bytes).unwrap();
+    assert_eq!(loaded.history.stacks().0.len(), 1, "the gradient after it");
+}
+
+#[test]
+fn an_adjustment_layer_undoes_redoes_and_saves_with_its_filter() {
+    use crate::canvas::filters::Filter;
+    let mut app = app();
+    let filter = Filter::HueSaturation {
+        hue: 40.0,
+        saturation: 0.1,
+        lightness: 0.0,
+    };
+    app.add_adjustment_layer(filter);
+    let idx = app.canvas.active_layer_idx;
+    assert_eq!(app.canvas.layers[idx].adjustment, Some(filter));
+    assert_eq!(
+        app.workspace.filter.editing,
+        app.canvas.layer_id_at(idx),
+        "settings open"
+    );
+    let bytes = crate::project::encode_project(&app).unwrap();
+    let loaded = crate::project::decode_project(&bytes).unwrap();
+    assert!(
+        loaded
+            .canvas
+            .layers
+            .iter()
+            .any(|l| l.adjustment == Some(filter))
+    );
+    app.remove_layer(idx);
+    app.apply_history(false);
+    let idx = app.canvas.active_layer_idx;
+    assert_eq!(
+        app.canvas.layers[idx].adjustment,
+        Some(filter),
+        "undoing the delete"
+    );
+    app.apply_history(false);
+    app.apply_history(true);
+    assert!(
+        app.canvas
+            .layers
+            .iter()
+            .any(|l| l.adjustment == Some(filter)),
+        "redoing the add"
+    );
+}

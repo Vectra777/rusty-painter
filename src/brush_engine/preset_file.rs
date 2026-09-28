@@ -188,6 +188,8 @@ struct StoredBrush {
     stabilizer_mass: f32,
     stabilizer_drag: f32,
     dynamics: BrushDynamics,
+    #[serde(default)]
+    inputs: Vec<crate::brush_engine::dynamics::InputMapping>,
     texture: Option<StoredBrushTexture>,
     /// A [`LayerBlend::key`].
     paint_blend: String,
@@ -266,6 +268,7 @@ impl StoredBrush {
             stabilizer_mass: b.stabilizer_mass,
             stabilizer_drag: b.stabilizer_drag,
             dynamics: b.dynamics,
+            inputs: b.inputs.clone(),
             texture: b.texture.as_ref().map(|t| StoredBrushTexture {
                 pattern: res.texture(&t.pattern),
                 mode: t.mode,
@@ -323,6 +326,7 @@ impl StoredBrush {
         b.stabilizer_mass = self.stabilizer_mass;
         b.stabilizer_drag = self.stabilizer_drag;
         b.dynamics = self.dynamics;
+        b.inputs = self.inputs;
         b.texture = match self.texture {
             None => None,
             Some(t) => Some(BrushTexture {

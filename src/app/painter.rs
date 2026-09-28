@@ -8,7 +8,6 @@ use crate::app::stroke_ops::exclusive;
 use crate::app::view::render;
 use crate::app::{
     layout,
-    layout::ToolTab,
     state::{
         BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState, WorkspaceState,
     },
@@ -17,7 +16,6 @@ use crate::brush_engine::stroke_worker::StrokeWorker;
 use crate::{canvas::Canvas, tablet::TabletInput, ui};
 use eframe::egui;
 use eframe::egui::{Color32, Vec2};
-use egui_dock::DockState;
 use std::sync::Arc;
 
 use crate::selection::SelectionManager;
@@ -47,12 +45,14 @@ pub struct PainterApp {
     // Standalone components
     pub(crate) active_tool: crate::app::tools::Tool,
     pub(crate) selection_manager: SelectionManager,
-    pub(crate) dock_left: DockState<ToolTab>,
-    pub(crate) dock_right: DockState<ToolTab>,
     pub(crate) tablet: Option<TabletInput>,
 }
 
 impl eframe::App for PainterApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.autosave_on_exit();
+    }
+
     /// Handle UI, input, painting updates, and tile uploads each frame.
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.workspace.frame_stats.begin(frame.info().cpu_usage);
@@ -66,7 +66,6 @@ impl eframe::App for PainterApp {
         let touch = self.workspace.touch_mode;
         self.apply_touch_mode(ctx, touch);
         ui::style::set_touch_metrics(ctx, touch);
-        layout::fit_panels_to_screen(self, ctx);
         let screen_size = ctx.screen_rect().size();
         let resized = self
             .workspace
@@ -88,18 +87,14 @@ impl eframe::App for PainterApp {
         // 2. Chrome. Bars first so they span the full window width; the tool strip is
         // added before the docks so it sits at the far left.
         // Tablets have the menus in a sheet over the bottom bar, and adjust
-        // size/opacity with the canvas faders instead of the options bar.
-        if !touch {
-            ui::menus::menu_bar(self, ctx);
-            ui::tool_options::options_bar(self, ctx);
-        }
-        ui::status_bar::status_bar(self, ctx);
+        // size/opacity with the canvas faders instead of the tool options.
+        ui::menus::top_bar(self, ctx);
         if touch {
             ui::menus::menu_sheet(self, ctx);
         }
         ui::toolbar::toolbar(self, ctx);
-
-        layout::show_tool_docks(self, ctx);
+        layout::right_rail(self, ctx);
+        layout::show_panels(self, ctx);
         self.workspace.frame_stats.mark(Stage::Panels);
 
         let canvas_frame = egui::Frame::none().fill(ui::style::BG_CANVAS);
@@ -132,10 +127,14 @@ impl eframe::App for PainterApp {
                 // frame's input to the active tool.
                 self.import_dropped_files(ctx);
                 self.settle_tool_sessions(ctx, &view.response);
+                // A tap that closes a floating panel paints nothing.
+                let closing = layout::close_floating_panels(self, ctx, &view.response);
                 // A content-aware fill in progress: the canvas waits for it.
                 if self.poll_patch() {
                     ctx.set_cursor_icon(egui::CursorIcon::Progress);
                     needs_repaint = true;
+                } else if closing || self.workspace.filter.session.is_some() {
+                    // A filter dialog is open: the layer shows its preview.
                 } else {
                     input::handle_input(
                         self,
@@ -153,6 +152,9 @@ impl eframe::App for PainterApp {
                 // The gradient repaints at most once a frame while dragged,
                 // and only once its last repaint is all on screen.
                 self.gradient_update();
+                self.quickshape_tick();
+                self.text_update();
+                self.filter_update(ctx.input(|i| i.pointer.any_down()));
                 // Twirl / pinch / bloat keep working while the brush is held.
                 if self.liquify_is_holding() && self.workspace.liquify.mode.is_continuous() {
                     let dt = ctx.input(|i| i.stable_dt).min(0.1);
@@ -200,6 +202,7 @@ impl eframe::App for PainterApp {
 
                 self.draw_overlays(ctx, ui, &view);
                 ui::canvas_sliders::canvas_sliders(self, ctx, view.response.rect);
+                layout::notices(self, ctx, view.response.rect);
                 self.workspace.frame_stats.mark(Stage::Canvas);
             });
 
@@ -209,6 +212,8 @@ impl eframe::App for PainterApp {
         if std::mem::take(&mut self.brush_state.swatches_dirty) {
             self.save_swatches();
         }
+        self.autosave_tick(ctx);
+        self.timelapse_tick();
 
         // Single consolidated repaint request
         if needs_repaint {
@@ -222,18 +227,7 @@ impl PainterApp {
     /// Rebuild the style when touch mode changes (and on the first frame).
     fn apply_touch_mode(&mut self, ctx: &egui::Context, touch: bool) {
         if self.workspace.applied_touch_mode != Some(touch) {
-            let first_frame = self.workspace.applied_touch_mode.is_none();
             crate::ui::theme::apply_style(ctx, touch);
-            // Small touch screens start with the brush panel tucked away,
-            // and phone-sized ones with both panels.
-            let width = ctx.screen_rect().width();
-            if first_frame && touch && width < 1280.0 {
-                self.workspace.show_left_panel = false;
-            }
-            if first_frame && width < layout::NARROW_WIDTH {
-                self.workspace.show_left_panel = false;
-                self.workspace.show_right_panel = false;
-            }
             self.workspace.applied_touch_mode = Some(touch);
         }
     }
@@ -353,9 +347,12 @@ impl PainterApp {
         {
             crate::app::tools::transform::commit_floating_layer(self);
         }
-        // Leaving the Gradient tool keeps the gradient.
+        // Leaving the Gradient tool keeps the gradient; the Text tool, the text.
         if !matches!(self.active_tool, crate::app::tools::Tool::Gradient) {
             self.gradient_commit();
+        }
+        if !matches!(self.active_tool, crate::app::tools::Tool::Text) {
+            self.text_commit();
         }
         // Leaving the Shape tool applies the shape; a double-click
         // finishes a polygon.
@@ -479,6 +476,11 @@ impl PainterApp {
         ui::export_modal::export_modal(self, ctx);
         ui::frame_times::frame_times_window(self, ctx);
         ui::gradient_editor::gradient_editor_window(self, ctx);
+        ui::filter_dialog::filter_dialog(self, ctx);
+        ui::filter_dialog::adjustment_dialog(self, ctx);
+        crate::app::autosave::recovery_dialog(self, ctx);
+        ui::image_menu::size_dialog(self, ctx);
+        ui::text_dialog::text_dialog(self, ctx);
     }
 }
 
@@ -511,6 +513,8 @@ impl PainterApp {
             return;
         }
         self.forget_last_pick();
+        self.filter_cancel();
+        self.text_commit();
         // A running liquify or transform session becomes a normal step first,
         // so undo takes it back and redo brings it again (cancelling it
         // outright left nothing to redo).
@@ -563,6 +567,7 @@ impl PainterApp {
                 Some(LayerHistoryOp::Moved { from, to, .. }) => {
                     self.reorder_layer_state(*from, *to);
                 }
+                Some(LayerHistoryOp::Document(_)) => self.after_document_swap(),
                 None => {}
             }
 

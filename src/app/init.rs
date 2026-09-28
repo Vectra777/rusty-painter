@@ -4,7 +4,6 @@
 use crate::app::{
     PainterApp,
     document::{ColorModel, NewCanvasSettings, TILE_SIZE},
-    layout,
     state::{
         BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState, WorkspaceState,
     },
@@ -40,8 +39,6 @@ impl PainterApp {
         } else {
             log::error!("No wgpu render state: the canvas cannot be displayed");
         }
-        let dock_left = layout::default_left_dock();
-        let dock_right = layout::default_right_dock();
 
         let brush_state = BrushState::new(
             Brush::new(24.0, 20.0, black, 25.0),
@@ -66,8 +63,6 @@ impl PainterApp {
             workspace,
             active_tool: crate::app::tools::Tool::Brush,
             selection_manager: crate::selection::SelectionManager::new(),
-            dock_left,
-            dock_right,
             tablet: crate::tablet::TabletInput::new(cc),
         };
 
@@ -81,6 +76,7 @@ impl PainterApp {
         app.workspace.gradient.library =
             crate::app::tools::gradient::GradientLibrary::load(gradients);
         app.load_swatches();
+        app.workspace.autosave = crate::app::autosave::AutosaveState::new(&app.autosave_path());
         app
     }
 

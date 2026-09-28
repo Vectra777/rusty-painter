@@ -230,6 +230,7 @@ const SHORTCUTS: &[ShortcutGroup] = &[
             ("Ctrl + Shift + N", "New layer"),
             ("Ctrl + J", "Duplicate layer"),
             ("Ctrl + G", "New folder"),
+            ("Ctrl + Alt + G", "Clip to the layer below"),
             ("Double-click a layer", "Rename it (folders too)"),
             ("Two-finger tap", "Undo"),
             ("Three-finger tap", "Redo"),

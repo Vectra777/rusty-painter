@@ -201,6 +201,191 @@ impl BrushDynamics {
     }
 }
 
+/// An input a brush setting can follow (see [`InputMapping`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Sensor {
+    Pressure,
+    /// Stroke speed (0 still, 1 at [`FAST_SPEED`] and above).
+    Speed,
+    /// How far the pen leans (0 upright, 1 flat).
+    Tilt,
+    /// Which way the pen leans, once round the circle.
+    TiltDirection,
+    /// Which way the stroke is going, once round the circle.
+    Direction,
+    /// Distance along the stroke, up to the mapping's length (px).
+    Distance,
+    /// Time since the stroke started, up to the mapping's length (s).
+    Time,
+    /// A new random value for each dab.
+    RandomDab,
+    /// One random value for the whole stroke.
+    RandomStroke,
+}
+
+impl Sensor {
+    pub const ALL: [Sensor; 9] = [
+        Sensor::Pressure,
+        Sensor::Speed,
+        Sensor::Tilt,
+        Sensor::TiltDirection,
+        Sensor::Direction,
+        Sensor::Distance,
+        Sensor::Time,
+        Sensor::RandomDab,
+        Sensor::RandomStroke,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sensor::Pressure => "Pressure",
+            Sensor::Speed => "Speed",
+            Sensor::Tilt => "Tilt",
+            Sensor::TiltDirection => "Tilt direction",
+            Sensor::Direction => "Stroke direction",
+            Sensor::Distance => "Distance",
+            Sensor::Time => "Time",
+            Sensor::RandomDab => "Random (each dab)",
+            Sensor::RandomStroke => "Random (each stroke)",
+        }
+    }
+
+    /// Whether the mapping's length applies (distance in px, time in s).
+    pub fn has_length(self) -> bool {
+        matches!(self, Sensor::Distance | Sensor::Time)
+    }
+}
+
+/// A setting an input can drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DabSetting {
+    Size,
+    Opacity,
+    /// Turns the tip, up to 180° at full amount.
+    Angle,
+    /// Flattens the tip.
+    Squash,
+    /// Turns the hue, up to 180° at full amount.
+    Hue,
+    Saturation,
+    Value,
+}
+
+impl DabSetting {
+    pub const ALL: [DabSetting; 7] = [
+        DabSetting::Size,
+        DabSetting::Opacity,
+        DabSetting::Angle,
+        DabSetting::Squash,
+        DabSetting::Hue,
+        DabSetting::Saturation,
+        DabSetting::Value,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DabSetting::Size => "Size",
+            DabSetting::Opacity => "Opacity",
+            DabSetting::Angle => "Angle",
+            DabSetting::Squash => "Squash",
+            DabSetting::Hue => "Hue",
+            DabSetting::Saturation => "Saturation",
+            DabSetting::Value => "Value",
+        }
+    }
+}
+
+/// "This input drives that setting": any sensor to any dab setting, through
+/// its own curve, like Krita's and MyPaint's dynamics. They stack with
+/// the brush's fixed dynamics (pressure, tapers, speed, randomness).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct InputMapping {
+    pub sensor: Sensor,
+    pub setting: DabSetting,
+    /// -1..1. For size and opacity, positive: a high input keeps it full
+    /// and a low one reduces it; negative: a high input reduces it. For the
+    /// rest, how far a full input moves it (negative: the other way).
+    pub amount: f32,
+    /// Input (0..1) to how much of it counts (0..1).
+    pub curve: crate::brush_engine::hardness::SoftnessCurve,
+    /// Distance (px) or time (s) that counts as the full input.
+    pub length: f32,
+}
+
+impl Default for InputMapping {
+    fn default() -> Self {
+        Self {
+            sensor: Sensor::Pressure,
+            setting: DabSetting::Size,
+            amount: 1.0,
+            curve: crate::brush_engine::hardness::SoftnessCurve {
+                points: vec![
+                    crate::brush_engine::hardness::CurvePoint::new(0.0, 0.0),
+                    crate::brush_engine::hardness::CurvePoint::new(1.0, 1.0),
+                ],
+            },
+            length: 200.0,
+        }
+    }
+}
+
+/// Every sensor's reading (0..1) for one dab.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SensorValues {
+    pub pressure: f32,
+    pub speed: f32,
+    pub tilt: f32,
+    pub tilt_direction: f32,
+    pub direction: f32,
+    /// Raw, in px and s: the mapping's length scales them.
+    pub distance: f32,
+    pub time: f32,
+    pub random_dab: f32,
+    pub random_stroke: f32,
+}
+
+impl InputMapping {
+    /// The input after its curve, 0..1.
+    pub fn input(&self, s: &SensorValues) -> f32 {
+        let len = self.length.max(1e-3);
+        let raw = match self.sensor {
+            Sensor::Pressure => s.pressure,
+            Sensor::Speed => s.speed,
+            Sensor::Tilt => s.tilt,
+            Sensor::TiltDirection => s.tilt_direction,
+            Sensor::Direction => s.direction,
+            Sensor::Distance => s.distance / len,
+            Sensor::Time => s.time / len,
+            Sensor::RandomDab => s.random_dab,
+            Sensor::RandomStroke => s.random_stroke,
+        };
+        self.curve.eval(raw.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+    }
+
+    /// Apply this mapping to `v` given the sensors.
+    pub fn apply(&self, v: &mut DabVar, s: &SensorValues) {
+        let x = self.input(s);
+        let a = self.amount.clamp(-1.0, 1.0);
+        // Size and opacity scale: full at one end of the input, reduced
+        // by the amount at the other.
+        let factor = if a >= 0.0 {
+            1.0 - a * (1.0 - x)
+        } else {
+            1.0 + a * x
+        };
+        match self.setting {
+            DabSetting::Size => v.scale *= factor.max(0.0),
+            DabSetting::Opacity => v.strength *= factor.max(0.0),
+            DabSetting::Angle => v.turn += a * x * std::f32::consts::PI,
+            DabSetting::Squash => v.squash *= (1.0 - a.abs() * x).max(0.05),
+            DabSetting::Hue => v.hsv[0] += a * x * 180.0,
+            DabSetting::Saturation => v.hsv[1] += a * x,
+            DabSetting::Value => v.hsv[2] += a * x,
+        }
+    }
+}
+
 /// How one dab differs from the plain brush.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DabVar {
@@ -220,6 +405,10 @@ pub struct DabVar {
     pub along: f32,
     /// A hatching brush: how many directions it hatches in (1..=3).
     pub hatch: u8,
+    /// Extra turn of the tip (radians) and squash factor from the brush's
+    /// input mappings, folded into `orient`.
+    pub turn: f32,
+    pub squash: f32,
 }
 
 impl Default for DabVar {
@@ -232,6 +421,8 @@ impl Default for DabVar {
             tip: 0,
             along: 0.0,
             hatch: 1,
+            turn: 0.0,
+            squash: 1.0,
         }
     }
 }

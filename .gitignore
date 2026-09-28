@@ -2,6 +2,8 @@
 /brushes
 /gradients.json
 /swatches.json
+/autosave.rpainter
+/autosave.rpainter.tmp
 perf.data
 perf.data.old
 flamegraph.svg

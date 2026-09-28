@@ -152,6 +152,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     if ctx.wants_keyboard_input() {
         return false;
     }
+    // A filter dialog takes Enter and Esc; nothing else may change the
+    // layer under its preview.
+    if app.workspace.filter.session.is_some() {
+        return false;
+    }
     use crate::app::input::keyboard::consume_at;
     // Before the keys below consume V (the Transform tool).
     let clipboard = app.clipboard_keys(ctx);
@@ -165,6 +170,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let redo = pressed(cmd_shift, Key::Z) || pressed(cmd, Key::Y);
     let undo = !redo && pressed(cmd, Key::Z);
     let new_layer = pressed(cmd_shift, Key::N);
+    // Before Ctrl+G, which would match it too (extra Alt is allowed).
+    let clip = pressed(cmd | Modifiers::ALT, Key::G);
     let new_folder = pressed(cmd, Key::G);
     let duplicate = pressed(cmd, Key::J);
     let new_canvas = !new_layer && pressed(cmd, Key::N);
@@ -219,6 +226,10 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     if new_folder {
         app.add_folder();
+        repaint = true;
+    }
+    if clip {
+        app.toggle_clip_active();
         repaint = true;
     }
     if new_layer {

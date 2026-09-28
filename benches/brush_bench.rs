@@ -255,6 +255,25 @@ fn bench_zoomed_out_preview(c: &mut Criterion) {
             })
         });
     });
+    // A gamma document (new canvases blend in gamma space): the general
+    // compositor, averaging in linear light.
+    let mut gamma = Canvas::new(4000, 4000, Color32::WHITE, 64);
+    gamma.blend_space = rusty_painter::canvas::blend_modes::BlendSpace::Gamma;
+    for &(tx, ty) in &tiles {
+        let data = canvas.get_layer_tile_data(1, tx as i32, ty as i32).unwrap();
+        gamma.set_layer_tile_data(1, tx as i32, ty as i32, data);
+    }
+    group.bench_function("fused_gamma", |b| {
+        b.iter(|| {
+            pool.install(|| {
+                tiles.par_iter().for_each(|&(tx, ty)| {
+                    let mut img = ColorImage::new([0, 0], Color32::TRANSPARENT);
+                    gamma.write_tile_rect_downsampled(tx, ty, [0, 0, 64, 64], 4, &mut img, None);
+                    std::hint::black_box(img);
+                })
+            })
+        });
+    });
     group.finish();
 }
 
@@ -292,6 +311,100 @@ fn bench_composite_modes(c: &mut Criterion) {
         ("gamma_soft_light", BlendSpace::Gamma, LayerBlend::SoftLight),
     ] {
         let canvas = painted(space, blend);
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                pool.install(|| {
+                    tiles.par_iter().for_each(|&(tx, ty)| {
+                        let mut img = ColorImage::new([0, 0], Color32::TRANSPARENT);
+                        canvas.write_tile_rect_to_color_image(
+                            tx,
+                            ty,
+                            [0, 0, 64, 64],
+                            &mut img,
+                            None,
+                        );
+                    })
+                })
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Compositing with the layer features: a clipped layer, adjustment layers
+/// (masked or not), against the same two plain layers.
+fn bench_composite_layer_features(c: &mut Criterion) {
+    use eframe::egui::ColorImage;
+    use rayon::prelude::*;
+    use rusty_painter::canvas::blend_modes::BlendSpace;
+    use rusty_painter::canvas::filters::Filter;
+    use rusty_painter::canvas::storage::LayerKind;
+    let pool = ThreadPoolBuilder::new().build().unwrap();
+    let tiles: Vec<(usize, usize)> = (20..44)
+        .flat_map(|ty| (20..44).map(move |tx| (tx, ty)))
+        .collect();
+    let paint = |canvas: &Canvas, idx: usize, rgb: (u8, u8, u8)| {
+        for &(tx, ty) in &tiles {
+            let data = (0..64 * 64)
+                .map(|i| {
+                    Color32::from_rgba_unmultiplied(rgb.0, rgb.1, rgb.2, ((i * 7 + tx) % 256) as u8)
+                })
+                .collect();
+            canvas.set_layer_tile_data(idx, tx as i32, ty as i32, data);
+        }
+    };
+    let two_layers = || {
+        let mut canvas = Canvas::new(4000, 4000, Color32::WHITE, 64);
+        canvas.blend_space = BlendSpace::Gamma;
+        paint(&canvas, 1, (200, 80, 40));
+        let top = canvas.insert_new_layer(2, "top".into(), LayerKind::Paint, None);
+        let ti = canvas.layer_index_of(top).unwrap();
+        paint(&canvas, ti, (40, 90, 200));
+        (canvas, ti)
+    };
+    let hue = Filter::HueSaturation {
+        hue: 30.0,
+        saturation: 0.2,
+        lightness: 0.0,
+    };
+    let cases: Vec<(&str, Canvas)> = vec![
+        ("two_plain_layers", two_layers().0),
+        ("clipped_layer", {
+            let (mut canvas, ti) = two_layers();
+            canvas.layers[ti].clipped = true;
+            canvas
+        }),
+        ("adjustment_layer", {
+            let (mut canvas, _) = two_layers();
+            let a = canvas.insert_new_layer(3, "adj".into(), LayerKind::Paint, None);
+            let ai = canvas.layer_index_of(a).unwrap();
+            canvas.layers[ai].adjustment = Some(hue);
+            canvas
+        }),
+        ("levels_adjustment_layer", {
+            let (mut canvas, _) = two_layers();
+            let a = canvas.insert_new_layer(3, "adj".into(), LayerKind::Paint, None);
+            let ai = canvas.layer_index_of(a).unwrap();
+            canvas.layers[ai].adjustment = Some(Filter::Levels {
+                black: 0.1,
+                white: 0.9,
+                gamma: 1.3,
+            });
+            canvas
+        }),
+        ("masked_adjustment_layer", {
+            let (mut canvas, _) = two_layers();
+            let a = canvas.insert_new_layer(3, "adj".into(), LayerKind::Paint, None);
+            let ai = canvas.layer_index_of(a).unwrap();
+            canvas.layers[ai].adjustment = Some(hue);
+            let m = canvas.insert_new_layer(4, "mask".into(), LayerKind::Mask { owner: a }, None);
+            let mi = canvas.layer_index_of(m).unwrap();
+            paint(&canvas, mi, (255, 255, 255));
+            canvas
+        }),
+    ];
+    let mut group = c.benchmark_group("composite_layer_features_576_tiles");
+    for (name, canvas) in cases {
         group.bench_function(name, |b| {
             b.iter(|| {
                 pool.install(|| {
@@ -625,6 +738,24 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.brush_type = rusty_painter::brush_engine::brush::BrushType::Hatching;
         b
     }));
+    // Brush inputs: four sensor → setting mappings with their curves.
+    cases.push(("input_mappings", {
+        use rusty_painter::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+        let mut b = base();
+        let map = |sensor, setting, amount| InputMapping {
+            sensor,
+            setting,
+            amount,
+            ..Default::default()
+        };
+        b.inputs = vec![
+            map(Sensor::Pressure, DabSetting::Size, 0.8),
+            map(Sensor::Speed, DabSetting::Opacity, -0.5),
+            map(Sensor::Direction, DabSetting::Angle, 0.5),
+            map(Sensor::RandomStroke, DabSetting::Hue, 0.2),
+        ];
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {
@@ -661,6 +792,7 @@ criterion_group!(
     bench_composite_dirty_tiles,
     bench_composite_damaged_rects,
     bench_zoomed_out_preview,
-    bench_composite_modes
+    bench_composite_modes,
+    bench_composite_layer_features
 );
 criterion_main!(benches);

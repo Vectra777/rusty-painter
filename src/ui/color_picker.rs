@@ -44,7 +44,8 @@ fn gradient_slider(
             egui::vec2(14.0, 18.0),
             egui::Label::new(RichText::new(label).small().color(TEXT_DIM)),
         );
-        let value_width = 36.0;
+        // No narrower than egui draws a number box, or the row overflows.
+        let value_width = ui.spacing().interact_size.x.max(36.0);
         let width = (ui.available_width() - value_width - ui.spacing().item_spacing.x).max(40.0);
         let bar_height = if metrics(ui.ctx()).touch { 26.0 } else { 14.0 };
         let (rect, response) =

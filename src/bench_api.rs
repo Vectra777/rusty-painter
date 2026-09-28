@@ -86,8 +86,7 @@ fn headless(canvas: Canvas) -> PainterApp {
         workspace: WorkspaceState::new(threads, threads, pool, ColorModel::Rgba),
         active_tool: Tool::Brush,
         selection_manager: crate::selection::SelectionManager::new(),
-        dock_left: egui_dock::DockState::new(Vec::new()),
-        dock_right: egui_dock::DockState::new(Vec::new()),
+
         tablet: None,
     };
     app.selection_manager.canvas_size = [w, h];
@@ -347,4 +346,79 @@ pub fn import_image(app: &mut PainterApp, bytes: &[u8]) {
 /// Undo steps on the active layer.
 pub fn undo_depth(app: &PainterApp) -> usize {
     app.layer_state.history.stacks().0.len()
+}
+
+/// Run a filter on the active layer and keep it (one undo step).
+pub fn apply_filter(app: &mut PainterApp, filter: crate::canvas::filters::Filter) {
+    app.filter_open(filter);
+    app.filter_commit();
+}
+
+/// Resize, crop, turn or flip the document (one undo step).
+pub fn image_op(app: &mut PainterApp, op: crate::canvas::geometry::ImageOp) {
+    app.apply_image_op(op);
+}
+
+/// The document as a layered PSD file.
+pub fn psd_bytes(app: &mut PainterApp) -> Vec<u8> {
+    app.release_canvas();
+    crate::project::psd::encode_psd(&crate::project::psd::PsdDocument::from_canvas(&app.canvas))
+        .expect("encode")
+}
+
+/// Read a PSD file into a canvas; returns its layer count.
+pub fn open_psd(bytes: &[u8]) -> usize {
+    crate::project::psd::decode_psd(bytes)
+        .and_then(|d| d.into_canvas())
+        .expect("decode")
+        .layers
+        .len()
+}
+
+/// Record one time-lapse frame of the canvas as it is.
+pub fn timelapse_frame(app: &mut PainterApp) -> usize {
+    app.set_timelapse_recording(true);
+    app.workspace.timelapse.frame_count()
+}
+
+/// Type `text` at `pos` with the Text tool and keep it as a layer.
+pub fn type_text(app: &mut PainterApp, text: &str, size: f32, pos: Vec2) {
+    app.active_tool = Tool::Text;
+    app.workspace.text.style.size = size;
+    app.text_press(pos);
+    if let Some(s) = app.workspace.text.session.as_mut() {
+        s.text = text.to_string();
+    }
+    app.text_commit();
+}
+
+/// Add an adjustment layer over the painted one.
+pub fn add_adjustment_layer(app: &mut PainterApp, filter: crate::canvas::filters::Filter) {
+    app.add_adjustment_layer(filter);
+}
+
+/// Composite every tile of the canvas (what the screen shows after a
+/// change to the layer stack), at full resolution.
+pub fn composite_all(app: &PainterApp) -> usize {
+    use rayon::prelude::*;
+    let c = &app.canvas;
+    let ts = c.tile_size();
+    let tiles: Vec<(usize, usize)> = (0..c.height().div_ceil(ts))
+        .flat_map(|ty| (0..c.width().div_ceil(ts)).map(move |tx| (tx, ty)))
+        .collect();
+    app.workspace.pool.install(|| {
+        tiles
+            .par_iter()
+            .map(|&(tx, ty)| {
+                let mut img = eframe::egui::ColorImage::new([0, 0], Color32::TRANSPARENT);
+                c.write_tile_to_color_image(tx, ty, &mut img, 1, None);
+                img.pixels.len()
+            })
+            .sum()
+    })
+}
+
+/// QuickShape's guess for a hand-drawn stroke.
+pub fn fit_shape(points: &[Vec2]) -> Option<ShapeKind> {
+    crate::app::tools::quickshape::fit_shape(points).map(|(kind, _)| kind)
 }

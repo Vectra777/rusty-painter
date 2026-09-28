@@ -128,7 +128,7 @@ pub struct ViewportState {
     pub is_panning: bool,
     pub is_rotating: bool,
     pub is_primary_down: bool,
-    /// Canvas-space position under the pointer, for the status bar.
+    /// Canvas-space position under the pointer.
     pub cursor_canvas: Option<Vec2>,
     /// Screen rect of the canvas area last frame, for zooming from the UI.
     pub canvas_area: Option<egui::Rect>,
@@ -314,6 +314,8 @@ pub struct ModalState {
     pub menu_sheet_open: bool,
     /// Section the menu sheet shows when it is too narrow for all of them.
     pub menu_sheet_section: crate::ui::menus::MenuSection,
+    /// The Canvas Size or Image Size dialog, while open.
+    pub size_dialog: Option<crate::ui::image_menu::SizeDialog>,
 }
 
 impl ModalState {
@@ -328,6 +330,7 @@ impl ModalState {
             shape_menu_open: false,
             menu_sheet_open: false,
             menu_sheet_section: Default::default(),
+            size_dialog: None,
         }
     }
 }
@@ -388,10 +391,11 @@ pub struct WorkspaceState {
     /// The pen's last raw pressure and what the curve made of it, for the
     /// live readout in Settings.
     pub last_pressure: Option<(f32, f32)>,
+    /// The brush (tool settings) panel is open.
     pub show_left_panel: bool,
-    pub show_right_panel: bool,
-    /// Panel visibility last frame, to tell which one was just opened.
-    pub panels_last_frame: (bool, bool),
+    /// The colour and layers panels are open (they share the right side).
+    pub show_color: bool,
+    pub show_layers: bool,
     /// Window size last frame, to notice resizes and screen rotations.
     pub screen_size: Option<egui::Vec2>,
     /// Selection type the Select tool uses (last one picked).
@@ -421,6 +425,16 @@ pub struct WorkspaceState {
     pub gradient: crate::app::tools::gradient::GradientToolState,
     /// Content-aware fill (smart patch).
     pub patch: crate::app::tools::patch::PatchState,
+    /// The filter being previewed (Filter menu).
+    pub filter: crate::app::tools::filter::FilterState,
+    /// Autosave and the recovery offer.
+    pub autosave: crate::app::autosave::AutosaveState,
+    /// Time-lapse recording.
+    pub timelapse: crate::app::timelapse::TimelapseState,
+    /// Text tool settings and the text being typed.
+    pub text: crate::app::tools::text::TextToolState,
+    /// Hold a stroke still to turn it into a clean shape.
+    pub quickshape: crate::app::tools::quickshape::QuickShapeState,
     /// Android's image picker (the photo library).
     pub gallery: crate::ui::image_gallery::GalleryState,
     /// Textures dropped this frame, kept until the next one. egui-wgpu frees
@@ -463,9 +477,10 @@ impl WorkspaceState {
                 ],
             },
             last_pressure: None,
-            show_left_panel: true,
-            show_right_panel: true,
-            panels_last_frame: (true, true),
+            // Closed: the canvas gets the screen; the rails open them.
+            show_left_panel: false,
+            show_color: false,
+            show_layers: false,
             screen_size: None,
             select_type: crate::selection::SelectionType::Rectangle,
             fill: Default::default(),
@@ -481,6 +496,11 @@ impl WorkspaceState {
             shapes: Default::default(),
             gradient: Default::default(),
             patch: Default::default(),
+            filter: Default::default(),
+            autosave: crate::app::autosave::AutosaveState::new(std::path::Path::new("")),
+            timelapse: Default::default(),
+            text: Default::default(),
+            quickshape: Default::default(),
             retired_textures: Vec::new(),
             frame_stats: Default::default(),
             clipboard: Default::default(),

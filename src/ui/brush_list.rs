@@ -27,7 +27,7 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
     }
     let m = metrics(ctx);
     let mut open = true;
-    let default_pos = egui::pos2(m.toolbar_width + 8.0, m.menu_height + m.bar_height + 8.0);
+    let default_pos = egui::pos2(m.toolbar_width + 8.0, m.menu_height + 8.0);
     egui::Window::new("Brush Presets")
         .open(&mut open)
         .collapsible(false)

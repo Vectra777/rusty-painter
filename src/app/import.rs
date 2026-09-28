@@ -75,7 +75,7 @@ impl PainterApp {
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case(ext))
             };
-            let project = path.filter(|_| extension("rpainter"));
+            let project = path.filter(|_| extension("rpainter") || extension("psd"));
             let result = if let Some(project) = project {
                 // Projects open.
                 self.load_project_from_path(project)

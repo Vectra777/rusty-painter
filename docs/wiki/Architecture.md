@@ -33,7 +33,7 @@ project   brush_engine   selection   tablet
 | `project` | The `.rpainter` format (`encode_project` / `decode_project`) and image export. |
 | `tablet` | Pen samples with pressure, from octotablet (Windows Ink, Wayland). |
 | `app` | `PainterApp`: its state (`state.rs`), the frame loop (`painter.rs`), input routing (`input/`), one module per tool (`tools/`), and display (`view/`). |
-| `ui` | Menus, the tool options bar, the toolbar, docked panels and dialogs. Style tokens are in `ui/style.rs`; `ui/theme.rs` applies them. |
+| `ui` | The top bar (menus, tool options, view controls), the tool strip, panels and dialogs; `app/layout.rs` places the right rail and the side panels. Style tokens are in `ui/style.rs`; `ui/theme.rs` applies them. |
 
 ## Data model
 
@@ -87,7 +87,7 @@ project   brush_engine   selection   tablet
    - Keyboard shortcuts are handled.
    - `poll_export` checks the export task.
    - Layer thumbnails are refreshed.
-2. **Chrome.** The menu bar and options bar (desktop) or the menu sheet (touch), the status bar, the toolbar, and the docked panels.
+2. **Chrome.** The top bar (and the menu sheet on touch screens), the tool strip, the right rail, and the side panels that are open.
 3. **Canvas.**
    - `place_view` keeps the view fitted and centred.
    - `render::draw_canvas` allocates the canvas area.

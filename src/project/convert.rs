@@ -363,6 +363,10 @@ pub(super) struct StoredLayerMeta {
     /// Blend mode key (`LayerBlend::key`); absent in older files = Normal.
     #[serde(default)]
     blend: Option<String>,
+    #[serde(default)]
+    clipped: bool,
+    #[serde(default)]
+    adjustment: Option<crate::canvas::filters::Filter>,
 }
 
 impl From<&LayerMeta> for StoredLayerMeta {
@@ -376,6 +380,8 @@ impl From<&LayerMeta> for StoredLayerMeta {
             kind: meta.kind.into(),
             parent: meta.parent.map(|p| p.0),
             blend: Some(meta.blend.key().to_string()),
+            clipped: meta.clipped,
+            adjustment: meta.adjustment,
         }
     }
 }
@@ -395,6 +401,8 @@ impl StoredLayerMeta {
                 .as_deref()
                 .and_then(LayerBlend::from_key)
                 .unwrap_or_default(),
+            clipped: self.clipped,
+            adjustment: self.adjustment,
         }
     }
 }
@@ -496,6 +504,9 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                 active_before: *active_before,
                 active_after: *active_after,
             },
+            LayerHistoryOp::Document(_) => {
+                unreachable!("steps across a canvas resize aren't saved (StoredHistory)")
+            }
         }
     }
 }

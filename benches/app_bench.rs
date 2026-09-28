@@ -441,6 +441,124 @@ fn history_and_files(c: &mut Criterion) {
     g.finish();
 }
 
+fn new_features(c: &mut Criterion) {
+    use rusty_painter::canvas::filters::Filter;
+    use rusty_painter::canvas::geometry::ImageOp;
+    let mut g = group(c, "new_features");
+    let hue = Filter::HueSaturation {
+        hue: 30.0,
+        saturation: 0.2,
+        lightness: 0.0,
+    };
+    bench(
+        &mut g,
+        "filter_hue_saturation_4k",
+        |_| {},
+        |a| b::apply_filter(a, hue),
+    );
+    bench(
+        &mut g,
+        "filter_gaussian_blur_r8_4k",
+        |_| {},
+        |a| b::apply_filter(a, Filter::GaussianBlur { radius: 8.0 }),
+    );
+    bench(
+        &mut g,
+        "filter_gaussian_blur_r8_in_selection",
+        |a| b::select_rect(a, Vec2::splat(1000.0), Vec2::splat(2000.0)),
+        |a| b::apply_filter(a, Filter::GaussianBlur { radius: 8.0 }),
+    );
+    bench(
+        &mut g,
+        "rotate_canvas_4k",
+        |_| {},
+        |a| b::image_op(a, ImageOp::RotateCw),
+    );
+    bench(
+        &mut g,
+        "resize_canvas_4k_to_2k",
+        |_| {},
+        |a| {
+            b::image_op(
+                a,
+                ImageOp::Resize {
+                    w: 2000,
+                    h: 2000,
+                    smooth: true,
+                },
+            )
+        },
+    );
+    bench(
+        &mut g,
+        "undo_canvas_rotation",
+        |a| b::image_op(a, ImageOp::RotateCw),
+        b::undo,
+    );
+    bench(
+        &mut g,
+        "export_psd",
+        |_| {},
+        |a| {
+            black_box(b::psd_bytes(a));
+        },
+    );
+    let psd = b::psd_bytes(&mut app());
+    g.bench_function("open_psd", |bencher| {
+        bencher.iter(|| black_box(b::open_psd(&psd)))
+    });
+    bench(
+        &mut g,
+        "timelapse_frame",
+        |_| {},
+        |a| {
+            black_box(b::timelapse_frame(a));
+        },
+    );
+    bench(
+        &mut g,
+        "text_layer_64px_paragraph",
+        |_| {},
+        |a| {
+            b::type_text(
+                a,
+                "The quick brown fox\njumps over the lazy dog",
+                64.0,
+                Vec2::splat(500.0),
+            )
+        },
+    );
+    bench(
+        &mut g,
+        "composite_4k_plain",
+        |_| {},
+        |a| {
+            black_box(b::composite_all(a));
+        },
+    );
+    bench(
+        &mut g,
+        "composite_4k_with_adjustment_layer",
+        |a| b::add_adjustment_layer(a, hue),
+        |a| {
+            black_box(b::composite_all(a));
+        },
+    );
+    let circle: Vec<Vec2> = (0..=300)
+        .map(|i| {
+            let a = i as f32 / 300.0 * std::f32::consts::TAU;
+            Vec2::new(
+                500.0 + 300.0 * a.cos() + (i as f32 * 1.3).sin() * 4.0,
+                400.0 + 200.0 * a.sin(),
+            )
+        })
+        .collect();
+    g.bench_function("quickshape_fit_300_points", |bencher| {
+        bencher.iter(|| black_box(b::fit_shape(&circle)))
+    });
+    g.finish();
+}
+
 criterion_group!(
     app_benches,
     painting,
@@ -448,6 +566,7 @@ criterion_group!(
     fills,
     shapes,
     transforms,
-    history_and_files
+    history_and_files,
+    new_features
 );
 criterion_main!(app_benches);

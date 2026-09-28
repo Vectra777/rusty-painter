@@ -1,5 +1,5 @@
 //! The frame-time readout: frames per second and milliseconds per frame in
-//! the status bar, and the Frame Times window with where each frame's time
+//! the top bar, and the Frame Times window with where each frame's time
 //! goes (see [`crate::app::frame_stats`]).
 
 use crate::PainterApp;
@@ -25,7 +25,7 @@ const RATES: [f32; 4] = [60.0, 144.0, 240.0, 260.0];
 /// Those whose budget is drawn on the graph (240 and 260 Hz would overlap).
 const LINE_RATES: [f32; 3] = [60.0, 144.0, 260.0];
 
-/// `240 fps · 3.1 ms` in the status bar while frame times are on; a click
+/// `240 fps · 3.1 ms` in the top bar while frame times are on; a click
 /// opens the breakdown.
 pub fn status_readout(app: &mut PainterApp, ui: &mut egui::Ui) {
     let stats = &mut app.workspace.frame_stats;

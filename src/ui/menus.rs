@@ -2,9 +2,8 @@
 //! touch menu sheet, and the file/panel actions they and the shortcuts run.
 
 use crate::PainterApp;
-use crate::ui::icons::Icon;
 use crate::ui::style::*;
-use crate::ui::widgets::{bar_frame, icon_button};
+use crate::ui::widgets::bar_frame;
 use eframe::egui::{self, Key, Modifiers, RichText};
 
 /// As printed on this keyboard (see [`crate::app::input::keyboard`]).
@@ -51,14 +50,22 @@ pub(crate) enum MenuSection {
     #[default]
     File,
     Edit,
+    Image,
+    Layer,
+    Select,
+    Filter,
     View,
     Help,
 }
 
 impl MenuSection {
-    const ALL: [(MenuSection, &'static str); 4] = [
+    const ALL: [(MenuSection, &'static str); 8] = [
         (MenuSection::File, "File"),
         (MenuSection::Edit, "Edit"),
+        (MenuSection::Image, "Image"),
+        (MenuSection::Layer, "Layer"),
+        (MenuSection::Select, "Select"),
+        (MenuSection::Filter, "Filter"),
         (MenuSection::View, "View"),
         (MenuSection::Help, "Help"),
     ];
@@ -67,30 +74,61 @@ impl MenuSection {
         match self {
             MenuSection::File => file_menu(app, ui),
             MenuSection::Edit => edit_menu(app, ui),
+            MenuSection::Image => {
+                crate::ui::image_menu::image_menu(app, ui, |ui, label| menu_item(ui, label, None))
+            }
+            MenuSection::Layer => layer_menu(app, ui),
+            MenuSection::Select => select_menu(app, ui),
+            MenuSection::Filter => filter_menu(app, ui),
             MenuSection::View => view_menu(app, ui),
             MenuSection::Help => help_menu(app, ui),
         }
     }
 }
 
-/// File / Edit / View / Help menus. Touch mode has the bottom menu sheet
-/// instead (see [`menu_sheet`]).
-pub fn menu_bar(app: &mut PainterApp, ctx: &egui::Context) {
-    egui::TopBottomPanel::top("menu_bar")
-        .exact_height(metrics(ctx).menu_height)
-        .frame(bar_frame(BG_CANVAS))
+/// The one bar above the canvas. Desktop: the menus, the active tool's
+/// options, then the view controls on the right. Touch: the menu sheet
+/// button and finger painting, then the view controls (tool options float
+/// on the canvas instead).
+pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
+    let m = metrics(ctx);
+    egui::TopBottomPanel::top("top_bar")
+        .exact_height(m.menu_height)
+        .frame(bar_frame(BG_PANEL))
         .show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
-                for (section, title) in MenuSection::ALL {
-                    ui.menu_button(title, |ui| section.items(app, ui));
+                ui.spacing_mut().button_padding = egui::vec2(7.0, 3.0);
+                if m.touch {
+                    crate::ui::status_bar::touch_buttons(app, ui, m.menu_height);
+                } else {
+                    for (section, title) in MenuSection::ALL {
+                        ui.menu_button(title, |ui| section.items(app, ui));
+                    }
                 }
-
-                // Show/hide the side panels (also Tab on desktop).
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let size = (metrics(ctx).menu_height - 4.0).min(40.0);
-                    panel_toggles(app, ui, size);
-                });
+                crate::ui::widgets::vdivider(ui);
+                // The view controls go on the right; the tool options get
+                // what's left (their width is measured the frame before).
+                let right_id = ui.id().with("top_bar_right");
+                let right: f32 = ui.data(|d| d.get_temp(right_id)).unwrap_or(0.0);
+                let middle = (ui.available_width() - right - 8.0).max(0.0);
+                let height = ui.available_height();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(middle, height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        if !m.touch {
+                            crate::ui::tool_options::options_inline(app, ui);
+                        }
+                    },
+                );
+                let right = ui
+                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        crate::ui::frame_times::status_readout(app, ui);
+                        crate::ui::status_bar::view_controls(app, ui);
+                        ui.min_rect().width()
+                    })
+                    .inner;
+                ui.data_mut(|d| d.insert_temp(right_id, right));
             });
         });
 }
@@ -115,6 +153,39 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Export Image…", Some(shortcut(ctx, cmd, Key::E))) {
         open_export_dialog(app);
     }
+    ui.separator();
+    let recording = app.workspace.timelapse.recording;
+    let title = if recording {
+        "Time-lapse (recording)"
+    } else {
+        "Time-lapse"
+    };
+    ui.menu_button(title, |ui| {
+        let mut on = recording;
+        if ui
+            .checkbox(&mut on, "Record")
+            .on_hover_text("Keep a frame after each change, to export as a video of the painting")
+            .changed()
+        {
+            app.set_timelapse_recording(on);
+        }
+        let frames = app.workspace.timelapse.frame_count();
+        if ui
+            .add_enabled_ui(frames > 1, |ui| {
+                menu_item(ui, &format!("Export… ({frames} frames)"), None)
+            })
+            .inner
+            && let Some(path) = timelapse_dialog()
+        {
+            app.export_timelapse(path);
+        }
+        if ui
+            .add_enabled_ui(frames > 0, |ui| menu_item(ui, "Clear", None))
+            .inner
+        {
+            app.clear_timelapse();
+        }
+    });
     ui.separator();
     if menu_item(ui, "Settings…", None) {
         app.modal_state.show_general_settings = true;
@@ -144,31 +215,8 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Paste", Some(shortcut(ctx, cmd, Key::V))) {
         app.paste();
     }
-    ui.separator();
-    if menu_item(ui, "New Layer", Some(shortcut(ctx, cmd_shift, Key::N))) {
-        app.add_layer_and_select();
-    }
-    if menu_item(ui, "Duplicate Layer", Some(shortcut(ctx, cmd, Key::J))) {
-        app.duplicate_layer();
-    }
-    if menu_item(ui, "Palette…", None) {
-        app.workspace.palette.open = true;
-    }
-    if menu_item(ui, "New Folder", Some(shortcut(ctx, cmd, Key::G))) {
-        app.add_folder();
-    }
-    if menu_item(ui, "Add Layer Mask", None) {
-        app.add_mask_to_active();
-    }
-    if menu_item(ui, "Select All", Some(shortcut(ctx, cmd, Key::A))) {
-        app.select_all();
-    }
-    if menu_item(
-        ui,
-        "Invert Selection",
-        Some(shortcut(ctx, cmd_shift, Key::I)),
-    ) {
-        app.invert_selection();
+    if menu_item(ui, "Delete Selected Pixels", Some("Delete".into())) {
+        app.delete_selection_contents();
     }
     if menu_item(
         ui,
@@ -177,11 +225,16 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ) {
         app.content_aware_fill();
     }
-    if menu_item(ui, "Delete Selected Pixels", Some("Delete".into())) {
-        app.delete_selection_contents();
+    ui.separator();
+    if menu_item(ui, "Define Brush Tip from Selection", None) {
+        let ctx = ui.ctx().clone();
+        app.export_state.message = Some(match app.define_tip_from_selection(&ctx) {
+            Ok(name) => format!("New brush tip: {name} (the brush uses it now)"),
+            Err(err) => err,
+        });
     }
-    if menu_item(ui, "Deselect", Some(shortcut(ctx, cmd, Key::D))) {
-        app.deselect();
+    if menu_item(ui, "Palette…", None) {
+        app.workspace.palette.open = true;
     }
     if menu_item(ui, "Swap Colors", Some("X".into())) {
         app.swap_colors();
@@ -189,6 +242,77 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ui.separator();
     if menu_item(ui, "Clear Canvas (not undoable)", None) {
         app.clear_canvas();
+    }
+}
+
+fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let ctx = &ui.ctx().clone();
+    let cmd = Modifiers::COMMAND;
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    if menu_item(ui, "New Layer", Some(shortcut(ctx, cmd_shift, Key::N))) {
+        app.add_layer_and_select();
+    }
+    if menu_item(ui, "New Folder", Some(shortcut(ctx, cmd, Key::G))) {
+        app.add_folder();
+    }
+    ui.menu_button("New Adjustment Layer", |ui| {
+        for filter in crate::canvas::filters::Filter::ADJUSTMENTS {
+            if menu_item(ui, filter.name(), None) {
+                app.add_adjustment_layer(filter);
+            }
+        }
+    });
+    if menu_item(ui, "Duplicate Layer", Some(shortcut(ctx, cmd, Key::J))) {
+        app.duplicate_layer();
+    }
+    ui.separator();
+    if menu_item(ui, "Add Layer Mask", None) {
+        app.add_mask_to_active();
+    }
+    if menu_item(
+        ui,
+        "Clip to Layer Below",
+        Some(shortcut(ctx, cmd | Modifiers::ALT, Key::G)),
+    ) {
+        app.toggle_clip_active();
+    }
+}
+
+fn select_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let ctx = &ui.ctx().clone();
+    let cmd = Modifiers::COMMAND;
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    if menu_item(ui, "Select All", Some(shortcut(ctx, cmd, Key::A))) {
+        app.select_all();
+    }
+    if menu_item(ui, "Deselect", Some(shortcut(ctx, cmd, Key::D))) {
+        app.deselect();
+    }
+    if menu_item(
+        ui,
+        "Invert Selection",
+        Some(shortcut(ctx, cmd_shift, Key::I)),
+    ) {
+        app.invert_selection();
+    }
+}
+
+/// Filters on the active layer (inside the selection, if any).
+fn filter_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
+    for (i, group) in crate::canvas::filters::Filter::MENU.iter().enumerate() {
+        if i > 0 {
+            ui.separator();
+        }
+        for filter in *group {
+            let label = if filter.has_settings() {
+                format!("{}…", filter.name())
+            } else {
+                filter.name().to_string()
+            };
+            if menu_item(ui, &label, None) {
+                app.filter_open(*filter);
+            }
+        }
     }
 }
 
@@ -221,6 +345,11 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ui.menu_button("Assistants", |ui| {
         crate::ui::shape_menu::assistant_controls(app, ui);
     });
+    ui.checkbox(&mut app.workspace.quickshape.enabled, "QuickShape")
+        .on_hover_text(
+            "Hold the pen still at the end of a stroke to turn it into a clean line, \
+             ellipse, rectangle or polygon, editable until you press elsewhere.",
+        );
     if ui
         .checkbox(&mut app.workspace.wrap_around, "Wrap Around")
         .on_hover_text(
@@ -233,10 +362,11 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     }
     ui.separator();
     if menu_item(ui, "Show / Hide Panels", Some("Tab".into())) {
-        toggle_all_panels(app);
+        app.toggle_all_panels();
     }
     ui.checkbox(&mut app.workspace.show_left_panel, "Brush panel");
-    ui.checkbox(&mut app.workspace.show_right_panel, "Color & layers panel");
+    ui.checkbox(&mut app.workspace.show_color, "Colour panel");
+    ui.checkbox(&mut app.workspace.show_layers, "Layers panel");
     ui.checkbox(&mut app.workspace.touch_mode, "Touch mode");
     if app.workspace.touch_mode {
         ui.checkbox(&mut app.workspace.finger_painting, "Paint with one finger")
@@ -245,15 +375,10 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     let stats = &mut app.workspace.frame_stats;
     if ui
         .checkbox(&mut stats.enabled, "Frame times")
-        .on_hover_text("Frames per second and time per frame in the status bar")
+        .on_hover_text("Frames per second and time per frame, top right")
         .changed()
     {
         stats.window_open = stats.enabled;
-    }
-    ui.separator();
-    if menu_item(ui, "Reset Panel Layout", None) {
-        app.dock_left = crate::app::layout::default_left_dock();
-        app.dock_right = crate::app::layout::default_right_dock();
     }
 }
 
@@ -279,10 +404,10 @@ pub fn menu_sheet(app: &mut PainterApp, ctx: &egui::Context) {
     if t <= 0.0 {
         return;
     }
-    // Everything above the bottom bar (the status bar is already placed).
+    // Everything below the top bar.
     let area = ctx.available_rect();
     let width = area.width();
-    let columns = (width - 16.0) >= SHEET_COLUMN_WIDTH * 4.0;
+    let columns = (width - 16.0) >= SHEET_COLUMN_WIDTH * MenuSection::ALL.len() as f32;
     let height_id = egui::Id::new("menu_sheet_height");
     let height: f32 = ctx
         .data(|d| d.get_temp(height_id))
@@ -366,42 +491,8 @@ fn sheet_tabs(app: &mut PainterApp, ui: &mut egui::Ui) {
     });
 }
 
-fn toggle_all_panels(app: &mut PainterApp) {
-    let ws = &mut app.workspace;
-    let show = !(ws.show_left_panel || ws.show_right_panel);
-    ws.show_left_panel = show;
-    ws.show_right_panel = show;
-}
-
-/// Buttons that show/hide the side docks (more canvas on small screens).
-pub(crate) fn panel_toggles(app: &mut PainterApp, ui: &mut egui::Ui, size: f32) {
-    let ws = &mut app.workspace;
-    if icon_button(
-        ui,
-        Icon::PanelRight,
-        size,
-        ws.show_right_panel,
-        "Color & layers panel (Tab toggles both)",
-    )
-    .clicked()
-    {
-        ws.show_right_panel = !ws.show_right_panel;
-    }
-    if icon_button(
-        ui,
-        Icon::PanelLeft,
-        size,
-        ws.show_left_panel,
-        "Brush panel (Tab toggles both)",
-    )
-    .clicked()
-    {
-        ws.show_left_panel = !ws.show_left_panel;
-    }
-}
-
 pub(crate) fn toggle_panels(app: &mut PainterApp) {
-    toggle_all_panels(app);
+    app.toggle_all_panels();
 }
 
 pub(crate) fn open_new_canvas_dialog(app: &mut PainterApp) {
@@ -437,7 +528,7 @@ pub(crate) fn save_project(app: &mut PainterApp) {
 #[cfg(not(target_os = "android"))]
 fn open_project_dialog() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("Rusty Painter", &["rpainter"])
+        .add_filter("Rusty Painter or Photoshop", &["rpainter", "psd", "PSD"])
         .pick_file()
 }
 
@@ -452,6 +543,20 @@ fn save_project_dialog() -> Option<std::path::PathBuf> {
         .add_filter("Rusty Painter", &["rpainter"])
         .set_file_name("project.rpainter")
         .save_file()
+}
+
+#[cfg(not(target_os = "android"))]
+fn timelapse_dialog() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Video (MP4)", &["mp4"])
+        .add_filter("Animated GIF", &["gif"])
+        .set_file_name("timelapse.mp4")
+        .save_file()
+}
+
+#[cfg(target_os = "android")]
+fn timelapse_dialog() -> Option<std::path::PathBuf> {
+    None
 }
 
 #[cfg(target_os = "android")]

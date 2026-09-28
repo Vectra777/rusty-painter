@@ -5,9 +5,15 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 ![](/imgs/2025-12-1118-06-17-ezgif.com-video-to-gif-converter.gif)
 
 ## Features
-- **Brush Engine**: Soft, hard, pixel, bristle, sketch, hatching and image-tip brushes (mipmapped, any picture; several tips per brush, taken in turn, at random, or by pressure or direction) with spacing, flow, scatter, stabilizer and airbrush (keeps painting while the pen rests). Dynamics: tapers in and out (no lag), stroke speed, tip angle / squash / follow the stroke or the pen's tilt, size, opacity, spray and colour randomness, a pressure curve per setting, tilt → size and opacity. Paper textures (multiply, subtract, height), a dual brush (a second tip masking the first), watercolour edges, decoration brushes in the picture's own colours, ribbons laid along the stroke, all 27 blend modes per brush, and a wet mixing smudge. Ready-made brushes (pencil, ink, calligraphy, charcoal, chalk, bristles, spray, foliage, glow…). Save your own presets and share them as `.rpbrush` files; import brushes from GIMP (`.gbr`, `.gih`), Photoshop (`.abr`), Krita (`.kpp`, `.bundle`), MyPaint (`.myb`) and Clip Studio (`.sut`). See [docs/brush-comparison.md](docs/brush-comparison.md) for how it compares with Krita, Clip Studio and ibisPaint.
+- **Brush Engine**: Soft, hard, pixel, bristle, sketch, hatching and image-tip brushes (mipmapped, any picture; several tips per brush, taken in turn, at random, or by pressure or direction) with spacing, flow, scatter, stabilizer and airbrush (keeps painting while the pen rests). Dynamics: tapers in and out (no lag), stroke speed, tip angle / squash / follow the stroke or the pen's tilt, size, opacity, spray and colour randomness, a pressure curve per setting, tilt → size and opacity. Paper textures (multiply, subtract, height), a dual brush (a second tip masking the first), watercolour edges, decoration brushes in the picture's own colours, ribbons laid along the stroke, all 27 blend modes per brush, and a wet mixing smudge. Ready-made brushes (pencil, ink, calligraphy, charcoal, chalk, bristles, spray, foliage, glow…). Any input (pressure, speed, tilt, direction, distance, time, randomness per dab or per stroke) can drive size, opacity, angle, squash, hue, saturation or value through its own curve (Brush → Inputs). Make a tip from the selection (Edit → Define Brush Tip from Selection). Save your own presets and share them as `.rpbrush` files; import brushes from GIMP (`.gbr`, `.gih`), Photoshop (`.abr`), Krita (`.kpp`, `.bundle`), MyPaint (`.myb`) and Clip Studio (`.sut`). See [docs/brush-comparison.md](docs/brush-comparison.md) for how it compares with Krita, Clip Studio and ibisPaint.
 - **Tablet Support**: Pen pressure, tilt and the eraser end on Windows (Windows Ink, via `octotablet`) and Android (every stylus sample, with a resting palm ignored while the pen is down). On Linux, Wayland tablets work with `RUSTY_PAINTER_ENABLE_WAYLAND_TABLET=1`; X11 has no pressure yet.
-- **Layers**: Full layer support with visibility, opacity, and blending.
+- **Layers**: Full layer support with visibility, opacity, blending, folders, masks, clipping masks (Ctrl+Alt+G: a layer shows only where the one below has paint) and adjustment layers (Filter → New Adjustment Layer: brightness/contrast, hue/saturation, levels, invert, desaturate, posterize or threshold over everything below, live).
+- **Filters**: Brightness/contrast, hue/saturation, levels, invert, desaturate, posterize, threshold, Gaussian and motion blur, sharpen, noise, pixelate, and Extract Line Art (a scanned drawing's paper turns transparent), previewed live on the layer or the selection.
+- **Image menu**: canvas size (with an anchor), image size (smooth or hard pixels), crop to selection, rotate and flip the whole document, each one undo step.
+- **Text**: the Text tool types onto a new layer in any shipped or system font, with size, alignment and spacing; drag it into place before keeping it.
+- **QuickShape**: hold the pen still at the end of a stroke and it becomes a clean line, ellipse, rectangle or polygon, editable before it's applied.
+- **Time-lapse**: File → Record Time-lapse keeps a frame after each change; export it as MP4 (with `ffmpeg` installed) or GIF.
+- **Autosave**: unsaved work is kept once the app is idle, and offered back after a crash or a quit without saving.
 - **Selection Tools**: Rectangle, ellipse, lasso (with smoothing), polygon, magnetic lasso, magic wand, colour range and selection brush; replace, add, erase and intersect; invert; every change undoable. The Transform tool moves, scales, rotates, puts in perspective or distorts the selection outline itself when there's nothing under it.
 - **Wrap Around**: View → Wrap Around paints across the canvas's edges and shows it repeated, for seamless tiles.
 - **Mirror Painting**: Left/right, top/bottom, four-way or radial (mandala, optionally kaleidoscope) around a centre and angle you drag on the canvas; flip the view with H.
@@ -18,7 +24,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **History**: One undo history for the whole document (pixels, selections, transforms, layer add/remove/reorder/merge), undone in the order things were done whichever layer is selected.
 - **Canvas**: Large canvas support (default 4000x4000) backed by tiled storage and GPU texture atlases.
 - **Project Files**: Save/open your work as a `.rpainter` project (compressed, includes undo history) via the Open/Save buttons in the top bar. File managers show a preview of the drawing, and Krita, GIMP or MyPaint can open it as a flattened image.
-- **Export**: Save your work as PNG, JPEG, or TIFF.
+- **Export**: Save your work as PNG, JPEG, TIFF, or a layered PSD. Photoshop files (`.psd`, 8-bit RGB or grayscale) open with their layers, folders, masks, blend modes and clipping.
 - **Performance**: Optional masked brush mode and zoom-out LOD for performance experiments.
 - **Android** (experimental): Runs on Android via a patched `winit` and native activity glue — see [Android (APK build)](#android-apk-build) below.
 
@@ -68,6 +74,12 @@ cargo bench --bench tools_bench -- --baseline before         # ...and compare a 
 ```
 Heavier single-shot timings live in ignored tests: `cargo test --release -- --ignored --nocapture`.
 
+Wall-clock timings drift with the machine's state (a few percent, sometimes much more). To compare two builds exactly, count instructions on the fixed workloads in `examples/fixed_workloads.rs`, ideally in single-codegen-unit builds so inlining doesn't shift between them:
+```bash
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --example fixed_workloads
+perf stat -e instructions:u target/release/examples/fixed_workloads plain_stroke
+```
+
 ## Profiling
 ```bash
 scripts/flamegraph.sh            # use the app, close the window -> flamegraph.svg
@@ -100,8 +112,11 @@ The full list is in **Help → Keyboard Shortcuts**, labelled for your keyboard 
 Work is saved as a single `.rpainter` file via **Open**/**Save** in the top bar — layers, tile data, and undo history all round-trip. The file is an [OpenRaster](https://www.openraster.org/) archive: a ZIP with `mergedimage.png` (the flattened picture) and `Thumbnails/thumbnail.png`, which is what file managers such as Dolphin use for the preview. The project itself is one more entry, `rusty-painter/project.rpnt`, in a versioned binary format (`src/project/`): tile pixel data is zstd-compressed per tile, and layers are matched up by a stable id (not position) so undo stays correct even if you'd reordered layers before saving. Older project files (including the bare binary files saved before the OpenRaster container) remain loadable after format additions — new fields default sensibly on read rather than breaking the load.
 
 ## UI Panels
-- **Menus and options bar**: File/Edit/View/Help on desktop (a slide-up sheet on tablets); under them, the active tool's options.
-- **Toolbar**: the tools on the left edge.
+The canvas gets the screen: everything else is one thin bar and two rails, with panels that slide out when you want them.
+- **Top bar**: the menus (File, Edit, Image, Layer, Select, Filter, View, Help), the active tool's options, and zoom / fit / ruler / flip on the right. In touch mode: the menu sheet, finger painting, undo and redo.
+- **Tool strip** (left edge): the tools; its bottom button opens the brush settings panel.
+- **Right rail**: the brush colour (opens the colour panel) and layers. Tab hides or shows every panel. On a phone-sized window panels float over the canvas, one at a time, and a tap on the canvas closes them.
+- **Notices**: messages (export done, errors) appear briefly over the canvas's corner.
 - **Brush Settings**: Brush type (soft, pixel, bristle, sketch, hatching), size, hardness, flow, spacing, jitter, airbrush, tips (several, colour, ribbon), dynamics, texture, dual brush, watercolour edges, pressure and tilt, stabilizer, pixel-perfect mode, AA.
 - **Color Picker**: Triangle HSVA picker with opacity slider.
 - **Brush Presets**: Quick presets; selecting one keeps your current color. Right-click a preset to export or delete it; the ☰ menu imports and exports sets.

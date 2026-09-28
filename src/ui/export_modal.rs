@@ -33,6 +33,13 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                         ui.selectable_value(&mut settings.format, ExportFormat::Png, "PNG");
                         ui.selectable_value(&mut settings.format, ExportFormat::Jpeg, "JPEG");
                         ui.selectable_value(&mut settings.format, ExportFormat::Tiff, "TIFF");
+                        // Android saves to the photo library, which takes pictures only.
+                        #[cfg(not(target_os = "android"))]
+                        ui.selectable_value(
+                            &mut settings.format,
+                            ExportFormat::Psd,
+                            ExportFormat::Psd.label(),
+                        );
                     });
             });
 
@@ -84,7 +91,17 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     // Flatten on the UI thread, then save on a worker thread.
                     // The shared canvas is not cloned across threads; size limits keep this bounded.
                     app.stroke_worker.wait_idle();
-                    let img = app.canvas.flatten();
+                    enum Data {
+                        Image(egui::ColorImage),
+                        Layers(Box<crate::project::psd::PsdDocument>),
+                    }
+                    let data = if format == ExportFormat::Psd {
+                        Data::Layers(Box::new(crate::project::psd::PsdDocument::from_canvas(
+                            &app.canvas,
+                        )))
+                    } else {
+                        Data::Image(app.canvas.flatten())
+                    };
 
                     app.export_state.in_progress = true;
                     app.export_state.progress = 0.05;
@@ -96,8 +113,13 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                             progress: 0.2,
                             message: Some("Saving file...".to_string()),
                         });
-                        let result =
-                            save_color_image(img, target.clone(), format).map(|_| target.clone());
+                        let result = match data {
+                            Data::Image(img) => save_color_image(img, target.clone(), format),
+                            Data::Layers(doc) => {
+                                crate::project::export::save_psd(&doc, target.clone())
+                            }
+                        }
+                        .map(|_| target.clone());
                         match result {
                             Ok(path) => {
                                 let msg = format!("Saved to {}", path.display());

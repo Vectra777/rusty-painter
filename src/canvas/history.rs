@@ -110,6 +110,8 @@ pub struct LayerMeta {
     pub kind: crate::canvas::storage::LayerKind,
     pub parent: Option<LayerId>,
     pub blend: crate::canvas::blend_modes::LayerBlend,
+    pub clipped: bool,
+    pub adjustment: Option<crate::canvas::filters::Filter>,
 }
 
 /// A layer removed alongside the main one of a `Removed` op (its mask, or
@@ -153,6 +155,10 @@ pub enum LayerHistoryOp {
         active_before: usize,
         active_after: usize,
     },
+    /// The canvas was resized, cropped or turned: the whole document (its
+    /// size and every layer) as it is on the other side of this step.
+    /// Shared so the op stays `Clone`; undo and redo swap it in place.
+    Document(std::sync::Arc<std::sync::Mutex<crate::canvas::storage::DocumentState>>),
 }
 
 impl LayerHistoryOp {
@@ -418,6 +424,10 @@ impl History {
                     active_after: *active_before,
                 })
             }
+            Some(op @ LayerHistoryOp::Document(doc)) => {
+                canvas.swap_document(&mut doc.lock().unwrap_or_else(|e| e.into_inner()));
+                Some(op.clone())
+            }
             None => None,
         }
     }
@@ -461,6 +471,8 @@ impl History {
                 kind: Default::default(),
                 parent: None,
                 blend: Default::default(),
+                clipped: false,
+                adjustment: None,
             });
             canvas.insert_layer_with_meta(*index, *id, &meta);
         }
@@ -545,6 +557,10 @@ impl History {
                     active_before: *active_before,
                     active_after: *active_after,
                 })
+            }
+            Some(op @ LayerHistoryOp::Document(doc)) => {
+                canvas.swap_document(&mut doc.lock().unwrap_or_else(|e| e.into_inner()));
+                Some(op.clone())
             }
             None => None,
         }

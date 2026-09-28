@@ -97,6 +97,19 @@ pub struct ShapeToolState {
     pub last_kind: ShapeKind,
 }
 
+impl ShapeToolState {
+    /// Start editing a finished shape (QuickShape hands one over).
+    pub(crate) fn start_editing(&mut self, kind: ShapeKind, points: Vec<Vec2>) {
+        self.session = Some(ShapeSession {
+            kind,
+            points,
+            drag: None,
+            building: false,
+            cursor: None,
+        });
+    }
+}
+
 impl Default for ShapeToolState {
     fn default() -> Self {
         Self {
@@ -259,8 +272,13 @@ impl PainterApp {
                 session.drag = Some(ShapeDrag::Move { last: pos });
                 return;
             }
-            // Pressing elsewhere applies this shape and starts the next.
+            // Pressing elsewhere applies this shape and starts the next
+            // (or, for a QuickShape, goes back to the brush).
+            let quick = self.workspace.quickshape.from_stroke;
             self.shape_commit();
+            if quick {
+                return;
+            }
         }
         self.workspace.shapes.session = Some(match kind {
             ShapeKind::Polygon => ShapeSession {
@@ -379,6 +397,7 @@ impl PainterApp {
 
     pub(crate) fn shape_cancel(&mut self) {
         self.workspace.shapes.session = None;
+        self.quickshape_done();
     }
 
     /// Paint the shape (if any) as one undo step and end it.
@@ -386,6 +405,7 @@ impl PainterApp {
         let Some(mut session) = self.workspace.shapes.session.take() else {
             return;
         };
+        self.quickshape_done();
         session.building = false;
         let settings = self.workspace.shapes.settings;
         if session.is_tiny(self.shape_zoom()) || session.points.len() < 2 {

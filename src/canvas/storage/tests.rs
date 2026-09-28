@@ -927,6 +927,100 @@ fn paint_region_respects_alpha_lock_and_skips_unchanged_tiles() {
     assert!(undo.tiles.is_empty());
 }
 
+/// Pixel `(x, 0)` of the composite.
+fn pixel_x(canvas: &Canvas, x: usize) -> Color32 {
+    let mut img = ColorImage::new([1, 1], Color32::TRANSPARENT);
+    canvas.write_region_to_color_image(x, 0, 1, 1, &mut img, 1);
+    img.pixels[0]
+}
+
+#[test]
+fn a_clipped_layer_shows_only_over_its_base() {
+    let mut canvas = one_tile_canvas();
+    // The base covers the left half; the clipped layer covers everything.
+    let mut base = vec![Color32::TRANSPARENT; T * T];
+    for y in 0..T {
+        for x in 0..T / 2 {
+            base[y * T + x] = Color32::RED;
+        }
+    }
+    canvas.set_layer_tile_data(1, 0, 0, base);
+    canvas.insert_new_layer(2, "shade".into(), LayerKind::Paint, None);
+    fill(&canvas, 2, Color32::BLUE);
+    canvas.layers[2].clipped = true;
+    assert_eq!(pixel_x(&canvas, 1), Color32::BLUE, "over the base");
+    assert_eq!(pixel_x(&canvas, 6), Color32::WHITE, "outside it: nothing");
+    // Unclipped, it covers everything again.
+    canvas.layers[2].clipped = false;
+    assert_eq!(pixel_x(&canvas, 6), Color32::BLUE);
+}
+
+#[test]
+fn clipping_takes_the_base_alpha_and_hides_with_it() {
+    let mut canvas = one_tile_canvas();
+    canvas.blend_space = BlendSpace::Gamma;
+    fill(&canvas, 1, Color32::from_rgba_unmultiplied(255, 0, 0, 128));
+    canvas.insert_new_layer(2, "a".into(), LayerKind::Paint, None);
+    fill(&canvas, 2, Color32::BLUE);
+    canvas.layers[2].clipped = true;
+    // Blue at the base's half alpha over white.
+    let px = pixel(&canvas);
+    assert!(px.b() > 250 && (125..=130).contains(&px.r()), "{px:?}");
+    // Several clipped layers stack on the same base.
+    canvas.insert_new_layer(3, "b".into(), LayerKind::Paint, None);
+    fill(&canvas, 3, Color32::GREEN);
+    canvas.layers[3].clipped = true;
+    let px = pixel(&canvas);
+    assert!(px.g() > 250 && px.b() < 130, "{px:?}");
+    // A hidden base hides what's clipped to it.
+    canvas.layers[1].visible = false;
+    assert_eq!(pixel(&canvas), Color32::WHITE);
+}
+
+#[test]
+fn a_clipped_layer_first_in_its_folder_shows_as_usual() {
+    let mut canvas = one_tile_canvas();
+    let folder = canvas.insert_new_layer(2, "folder".into(), LayerKind::Group, None);
+    fill(&canvas, 1, Color32::BLUE);
+    canvas.layers[1].parent = Some(folder);
+    canvas.layers[1].clipped = true;
+    assert_eq!(pixel(&canvas), Color32::BLUE);
+}
+
+#[test]
+fn an_adjustment_layer_changes_what_is_below_it() {
+    use crate::canvas::filters::Filter;
+    let mut canvas = one_tile_canvas();
+    canvas.blend_space = BlendSpace::Gamma;
+    fill(&canvas, 1, Color32::RED);
+    let adj = canvas.insert_new_layer(2, "invert".into(), LayerKind::Paint, None);
+    let ai = canvas.layer_index_of(adj).unwrap();
+    canvas.layers[ai].adjustment = Some(Filter::Invert);
+    assert_eq!(pixel(&canvas), Color32::from_rgb(0, 255, 255));
+    // Half opacity: half way.
+    canvas.layers[ai].opacity = 0.5;
+    let px = pixel(&canvas);
+    assert!(
+        (126..=129).contains(&px.r()) && (126..=129).contains(&px.g()),
+        "{px:?}"
+    );
+    canvas.layers[ai].opacity = 1.0;
+    // A black mask keeps it off; hidden, it does nothing.
+    let m = canvas.insert_new_layer(3, "m".into(), LayerKind::Mask { owner: adj }, None);
+    let mi = canvas.layer_index_of(m).unwrap();
+    fill(&canvas, mi, Color32::BLACK);
+    assert_eq!(pixel(&canvas), Color32::RED);
+    canvas.layers[mi].visible = false;
+    canvas.layers[ai].visible = false;
+    assert_eq!(pixel(&canvas), Color32::RED);
+    // Layers above it aren't touched.
+    canvas.layers[ai].visible = true;
+    let top = canvas.insert_new_layer(4, "top".into(), LayerKind::Paint, None);
+    let ti = canvas.layer_index_of(top).unwrap();
+    fill(&canvas, ti, Color32::BLUE);
+    assert_eq!(pixel(&canvas), Color32::BLUE);
+}
+
 #[test]
 fn fills_and_backgrounds_keep_their_exact_colour() {
     // A mid grey used to come out much lighter (converted to sRGB twice).
@@ -944,4 +1038,44 @@ fn fills_and_backgrounds_keep_their_exact_colour() {
     let tile = canvas.get_layer_tile_data(1, 0, 0).unwrap();
     assert_eq!(tile[0], grey);
     assert_eq!(tile[1], Color32::from_rgba_unmultiplied(100, 100, 100, 128));
+}
+
+/// Zoomed out, a stroke shows as tiles averaged on the CPU; once it ends,
+/// as full tiles the GPU averages (in linear light). Both must look the
+/// same, or the grain and soft edges shift when the pen lifts.
+#[test]
+fn a_gamma_documents_zoomed_out_preview_matches_the_final_picture() {
+    use crate::canvas::blend::downsample;
+    let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+    canvas.blend_space = BlendSpace::Gamma;
+    // Grainy half-transparent paint, like a textured brush.
+    let tile: Vec<Color32> = (0..64 * 64)
+        .map(|i| {
+            let a = if (i * 7919) % 3 == 0 { 40 } else { 200 };
+            Color32::from_rgba_unmultiplied(30, 60, 160, a)
+        })
+        .collect();
+    canvas.set_layer_tile_data(1, 0, 0, tile);
+    for level in 1..=3u32 {
+        let mut full = ColorImage::new([0, 0], Color32::TRANSPARENT);
+        canvas.write_tile_rect_to_color_image(0, 0, [0, 0, 64, 64], &mut full, None);
+        let expected = downsample(&full, level);
+        let mut preview = ColorImage::new([0, 0], Color32::TRANSPARENT);
+        canvas.write_tile_rect_downsampled(0, 0, [0, 0, 64, 64], 1 << level, &mut preview, None);
+        let worst = preview
+            .pixels
+            .iter()
+            .zip(&expected.pixels)
+            .map(|(a, b)| {
+                a.to_array()
+                    .iter()
+                    .zip(b.to_array())
+                    .map(|(x, y)| x.abs_diff(y))
+                    .max()
+                    .unwrap()
+            })
+            .max()
+            .unwrap();
+        assert!(worst <= 1, "level {level}: preview off by {worst}");
+    }
 }

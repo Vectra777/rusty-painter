@@ -422,6 +422,10 @@ pub struct StrokeState {
     /// along the stroke the next one is.
     mask_last: Option<Vec2>,
     mask_until_next: f32,
+    /// The stroke's own random value (for "random each stroke"), and
+    /// when it started (for "time").
+    stroke_random: f32,
+    start_time: Option<f64>,
     /// Every dab's variation as painted, for tests.
     #[cfg(test)]
     pub(crate) painted: Vec<DabVar>,
@@ -467,6 +471,8 @@ impl StrokeState {
             ribbon_last: None,
             sketch_points: Vec::new(),
             mask_until_next: 0.0,
+            stroke_random: SmallRng::seed_from_u64(seed ^ 0x5eed).random(),
+            start_time: None,
             #[cfg(test)]
             painted: Vec::new(),
         }
@@ -508,7 +514,10 @@ impl StrokeState {
         let from = self.last_pressure.unwrap_or(p);
         self.prev_sample_time = self.sample_time;
         self.sample_time = time;
-        let dynamic = brush.dynamics.is_active();
+        if self.start_time.is_none() {
+            self.start_time = time;
+        }
+        let dynamic = brush.has_dynamics();
         if dynamic {
             self.update_speed(raw_pos, time);
             self.update_lean(time);
@@ -566,7 +575,7 @@ impl StrokeState {
         }
         let o = &brush.brush_options;
         let original = (o.diameter, o.opacity, o.flow);
-        let dynamic = brush.dynamics.is_active();
+        let dynamic = brush.has_dynamics();
         if dynamic {
             // Held still: the speed settles to nothing.
             self.prev_speed = self.speed;
@@ -1000,7 +1009,38 @@ impl StrokeState {
             let mut spread = |amount: f32| (self.rng.random::<f32>() * 2.0 - 1.0) * amount;
             v.hsv = [spread(r.hue), spread(r.saturation), spread(r.value)];
         }
+        if !brush.inputs.is_empty() {
+            let sensors = self.sensors(dab, pressure);
+            for mapping in &brush.inputs {
+                mapping.apply(&mut v, &sensors);
+            }
+        }
         self.orient(brush, v, dab.dir, dab.t)
+    }
+
+    /// Every input a mapping can read, for one dab.
+    fn sensors(
+        &mut self,
+        dab: &Pending,
+        pressure: f32,
+    ) -> crate::brush_engine::dynamics::SensorValues {
+        let turn = |a: f32| a.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
+        let speed = self.prev_speed + (self.speed - self.prev_speed) * dab.t;
+        let tilt = self.tilt_at(dab.t);
+        crate::brush_engine::dynamics::SensorValues {
+            pressure: pressure.clamp(0.0, 1.0),
+            speed: (speed / FAST_SPEED).clamp(0.0, 1.0),
+            tilt: tilt.map_or(0.0, |t| t.lean),
+            tilt_direction: tilt.map_or(0.0, |t| turn(t.direction)),
+            direction: dab.dir.or(self.dir).map_or(0.0, turn),
+            distance: dab.along,
+            time: match (self.start_time, self.sample_time) {
+                (Some(t0), Some(t)) => (t - t0) as f32,
+                _ => 0.0,
+            },
+            random_dab: self.rng.random(),
+            random_stroke: self.stroke_random,
+        }
     }
 
     /// Which of the brush's tips a dab uses.
@@ -1029,8 +1069,8 @@ impl StrokeState {
     /// The tip's turn and squash for a dab going in direction `dir`.
     fn orient(&mut self, brush: &Brush, mut v: DabVar, dir: Option<f32>, t: f32) -> DabVar {
         let tip = &brush.dynamics.tip;
-        if tip.is_active() || brush.follows_stroke() {
-            let mut angle = tip.angle.to_radians();
+        if tip.is_active() || brush.follows_stroke() || v.turn != 0.0 || v.squash != 1.0 {
+            let mut angle = tip.angle.to_radians() + v.turn;
             if brush.follows_stroke() {
                 angle += dir.or(self.dir).unwrap_or(0.0);
             }
@@ -1042,7 +1082,7 @@ impl StrokeState {
             if tip.random_angle > 0.0 {
                 angle += (self.rng.random::<f32>() * 2.0 - 1.0) * tip.random_angle.to_radians();
             }
-            v.orient = tip_orientation(angle, tip.ratio);
+            v.orient = tip_orientation(angle, tip.ratio * v.squash);
         }
         v
     }

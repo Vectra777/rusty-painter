@@ -43,6 +43,12 @@ CI also compiles the library for `aarch64-linux-android`. Android-only code, suc
 | Writing pixels with undo | `src/canvas/storage/pixels.rs` (`paint_mask`, `paint_region`, `map_layer_pixels`, `write_layer_region`) |
 | Layer operations | `src/app/canvas_ops.rs` (keeps per-layer histories in step) |
 | The project file format | `src/project/mod.rs`, `src/project/convert.rs` |
+| Photoshop files | `src/project/psd.rs` (`PsdDocument` ↔ `Canvas`, then `encode_psd` / `decode_psd`) |
+| A filter or adjustment | `src/canvas/filters.rs` (pure, on a pixel buffer); the previewed session is `src/app/tools/filter.rs` |
+| Canvas size, crop, rotate | `src/canvas/geometry.rs`; undo swaps the whole document (`LayerHistoryOp::Document`) |
+| Brush inputs (sensor → setting) | `InputMapping` in `src/brush_engine/dynamics.rs`, applied in `StrokeState::dab_var` |
+| Text, QuickShape | `src/canvas/text.rs`, `src/app/tools/text.rs`, `src/app/tools/quickshape.rs` |
+| Autosave, time-lapse | `src/app/autosave.rs`, `src/app/timelapse.rs` |
 
 ## Adding a tool, step by step
 

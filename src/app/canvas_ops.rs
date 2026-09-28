@@ -2,6 +2,7 @@
 //! replacing the document (new canvas, opened project), and layer
 //! add/remove/move/merge with the per-layer state kept in step.
 
+use crate::app::stroke_ops::exclusive;
 use crate::app::{
     PainterApp,
     document::{CanvasTile, ColorModel, TILE_SIZE},
@@ -125,6 +126,7 @@ impl PainterApp {
         self.selection_manager.clear_selection();
         self.selection_manager.canvas_size = [width, height];
         self.reset_viewport_state();
+        self.mark_saved();
     }
 
     /// Drop every in-progress tool session without applying it.
@@ -136,6 +138,9 @@ impl PainterApp {
         let ws = &mut self.workspace;
         ws.shapes.session = None;
         ws.gradient.session = None;
+        ws.filter.session = None;
+        ws.filter.editing = None;
+        ws.text.session = None;
         ws.fill.path.clear();
         ws.guides.end_drag();
         self.viewport.touch.pen_on_canvas = false;
@@ -184,6 +189,68 @@ impl PainterApp {
             ColorModel::Rgba => color,
             ColorModel::Grayscale => crate::app::document::to_grayscale(color),
         }
+    }
+
+    /// Resize, crop, turn or flip the whole document (the Image menu), as
+    /// one undo step. Refused (with a message) past the size limits.
+    pub(crate) fn apply_image_op(&mut self, op: crate::canvas::geometry::ImageOp) {
+        let (w, h) = op.new_size(self.canvas.width(), self.canvas.height());
+        if let Err(err) = crate::app::document::validate_canvas_size(w, h) {
+            self.export_state.message = Some(err);
+            return;
+        }
+        // Sessions hold tiles or coordinates of the document as it is now.
+        crate::app::tools::transform::commit_floating_layer(self);
+        self.liquify_commit();
+        self.gradient_commit();
+        self.shape_commit();
+        self.filter_cancel();
+        self.release_canvas();
+        let before = exclusive(&mut self.canvas).apply_image_op(op);
+        self.layer_state.history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Document(std::sync::Arc::new(
+                std::sync::Mutex::new(before),
+            ))),
+        });
+        self.after_document_swap();
+    }
+
+    /// The document's size or layers were swapped wholesale (an Image menu
+    /// step, or its undo): rebuild what depends on them.
+    pub(crate) fn after_document_swap(&mut self) {
+        let (w, h) = (self.canvas.width(), self.canvas.height());
+        self.recreate_render_cache(w, h);
+        // The selection's coordinates belong to the old geometry.
+        self.selection_manager.clear_selection();
+        self.selection_manager.canvas_size = [w, h];
+        let count = self.canvas.layers.len();
+        self.layer_state
+            .layer_ui_colors
+            .resize(count, Color32::from_gray(40));
+        self.layer_state.thumbnails_dirty = true;
+        self.workspace.auto_fit = true;
+        self.workspace.fitted_to = None;
+    }
+
+    /// Clip the active layer (or folder) to the layer below, or unclip it
+    /// (Ctrl+Alt+G). A selected mask stands for its layer.
+    pub(crate) fn toggle_clip_active(&mut self) {
+        let idx = self.canvas.active_layer_idx;
+        let idx = match self.canvas.layers.get(idx).map(|l| l.kind) {
+            Some(LayerKind::Mask { owner }) => self.canvas.layer_index_of(owner),
+            Some(_) => Some(idx),
+            None => None,
+        };
+        let Some(idx) = idx.filter(|&i| i != 0) else {
+            return;
+        };
+        let layer = &mut self.canvas_mut().layers[idx];
+        layer.clipped = !layer.clipped;
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
     }
 
     pub(crate) fn mark_all_tiles_dirty(&mut self) {
@@ -428,11 +495,26 @@ impl PainterApp {
         parent: Option<LayerId>,
         select: bool,
     ) -> usize {
+        self.insert_entry_with(index, name, kind, parent, select, |_| {})
+    }
+
+    /// [`Self::insert_entry`], with `setup` adjusting the entry before it's
+    /// recorded (so undo and redo bring it back as set up).
+    pub(crate) fn insert_entry_with(
+        &mut self,
+        index: usize,
+        name: String,
+        kind: LayerKind,
+        parent: Option<LayerId>,
+        select: bool,
+        setup: impl FnOnce(&mut crate::canvas::storage::Layer),
+    ) -> usize {
         let active_before = self.canvas.active_layer_idx;
         let id = self
             .canvas_mut()
             .insert_new_layer(index, name, kind, parent);
         let idx = self.canvas.layer_index_of(id).unwrap_or(index);
+        setup(&mut self.canvas_mut().layers[idx]);
         self.insert_layer_state(idx);
         let active_after = if select {
             idx
@@ -467,6 +549,19 @@ impl PainterApp {
         let (index, parent) = self.insertion_point(true);
         let name = self.next_layer_name("Layer");
         self.insert_entry(index, name, LayerKind::Paint, parent, true);
+    }
+
+    /// Add an adjustment layer (`filter` over everything below it) above the
+    /// selected layer, select it and open its settings. It's locked: its own
+    /// pixels don't show (add a mask to limit where it applies).
+    pub(crate) fn add_adjustment_layer(&mut self, filter: crate::canvas::filters::Filter) {
+        let (index, parent) = self.insertion_point(true);
+        let name = filter.name().to_string();
+        let idx = self.insert_entry_with(index, name, LayerKind::Paint, parent, true, |l| {
+            l.adjustment = Some(filter);
+            l.locked = true;
+        });
+        self.workspace.filter.editing = self.canvas.layer_id_at(idx);
     }
 
     /// Add an empty folder above the selected layer and select it.

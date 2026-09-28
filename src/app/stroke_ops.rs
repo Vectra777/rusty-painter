@@ -30,6 +30,7 @@ impl PainterApp {
             .then(|| SelectionManager::with_shape(self.selection_manager.current_shape.clone()));
         let pos = self.ruler_begin_stroke(pos);
         self.note_curve_start(pos, pressure);
+        self.workspace.quickshape.begin(pos);
         let mut brush = self.brush_state.brush.clone();
         if self.stroke_on_curve() {
             // Smoothing would pull the stroke inside the curve it follows;
@@ -63,6 +64,7 @@ impl PainterApp {
         if !self.brush_state.is_drawing {
             return;
         }
+        self.workspace.quickshape.sample(pos, self.viewport.zoom);
         for (pos, pressure) in self.guide_samples(pos, pressure) {
             self.stroke_worker
                 .sample_tilted(pos, pressure, self.viewport.touch.pen_tilt);

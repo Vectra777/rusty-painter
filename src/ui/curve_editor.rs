@@ -32,6 +32,15 @@ const PRESETS: [CurvePreset; 4] = [
     ("Hard", &[(0.0, 1.0), (0.75, 0.97), (0.92, 0.4), (1.0, 0.0)]),
 ];
 
+/// Input responses for brush inputs: a direction's "Peak" makes one way of
+/// travel the strongest and the opposite the weakest.
+pub(crate) const INPUT_PRESETS: [CurvePreset; 4] = [
+    ("Linear", &[(0.0, 0.0), (1.0, 1.0)]),
+    ("Reverse", &[(0.0, 1.0), (1.0, 0.0)]),
+    ("Soft", &[(0.0, 0.0), (0.55, 0.2), (1.0, 1.0)]),
+    ("Peak", &[(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]),
+];
+
 #[derive(Clone, Copy, Default)]
 struct DragState {
     /// Index of the grabbed point (kept up to date as points pass each other).

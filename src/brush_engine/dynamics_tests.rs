@@ -1655,3 +1655,119 @@ fn with_wrap_around_a_dab_past_an_edge_comes_in_at_the_other() {
     let plain = dabs_at(&[Vec2::new(w - 5.0, 40.0)], false);
     assert_eq!(alpha(&plain, 3, 40), 0);
 }
+
+fn mapped(mappings: Vec<crate::brush_engine::dynamics::InputMapping>) -> Brush {
+    let mut b = brush(BrushDynamics::default());
+    b.inputs = mappings;
+    b
+}
+
+#[test]
+fn a_distance_mapping_fades_the_size_in() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let mut b = mapped(vec![InputMapping {
+        sensor: Sensor::Distance,
+        setting: DabSetting::Size,
+        amount: 1.0,
+        length: 150.0,
+        ..Default::default()
+    }]);
+    let (canvas, _) = paint(&mut b, &line(64.0, 0.5), 1, true);
+    let (early, late) = (thickness(&canvas, 40), thickness(&canvas, 220));
+    assert!(
+        early < late / 2,
+        "thin at first, full later: {early} vs {late}"
+    );
+}
+
+#[test]
+fn a_negative_amount_works_the_other_way() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let mut b = mapped(vec![InputMapping {
+        sensor: Sensor::Distance,
+        setting: DabSetting::Size,
+        amount: -0.8,
+        length: 200.0,
+        ..Default::default()
+    }]);
+    let (canvas, _) = paint(&mut b, &line(64.0, 0.5), 1, true);
+    assert!(thickness(&canvas, 40) > thickness(&canvas, 220));
+}
+
+#[test]
+fn random_per_stroke_is_one_value_for_the_whole_stroke() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let mapping = |sensor| InputMapping {
+        sensor,
+        setting: DabSetting::Opacity,
+        amount: 1.0,
+        ..Default::default()
+    };
+    let strengths = |sensor| {
+        let mut b = mapped(vec![mapping(sensor)]);
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+        canvas.active_layer_idx = 1;
+        let (mut undo, mut tiles) = (empty_undo(), StrokeTiles::default());
+        let mut stroke = StrokeState::with_seed(7);
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        for (p, t) in line(64.0, 0.5) {
+            stroke.add_sample(&mut b, p, 1.0, Some(t), &mut ctx);
+        }
+        stroke.finish(&mut b, &mut ctx);
+        stroke
+            .painted
+            .iter()
+            .map(|v| v.strength)
+            .collect::<Vec<f32>>()
+    };
+    let per_stroke = strengths(Sensor::RandomStroke);
+    assert!(per_stroke.windows(2).all(|w| w[0] == w[1]), "one value");
+    let per_dab = strengths(Sensor::RandomDab);
+    assert!(per_dab.windows(2).any(|w| w[0] != w[1]), "each dab its own");
+}
+
+#[test]
+fn an_angle_mapping_turns_the_tip_and_hue_shifts_the_colour() {
+    use crate::brush_engine::dynamics::{DabSetting, DabVar, InputMapping, Sensor, SensorValues};
+    let s = SensorValues {
+        pressure: 1.0,
+        ..Default::default()
+    };
+    let mut v = DabVar::default();
+    for (setting, amount) in [
+        (DabSetting::Angle, 0.5),
+        (DabSetting::Hue, -0.5),
+        (DabSetting::Squash, 0.5),
+    ] {
+        InputMapping {
+            sensor: Sensor::Pressure,
+            setting,
+            amount,
+            ..Default::default()
+        }
+        .apply(&mut v, &s);
+    }
+    assert!((v.turn - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    assert_eq!(v.hsv[0], -90.0);
+    assert_eq!(v.squash, 0.5);
+}
+
+#[test]
+fn mappings_survive_a_preset_file() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let b = mapped(vec![InputMapping {
+        sensor: Sensor::Speed,
+        setting: DabSetting::Value,
+        amount: -0.3,
+        ..Default::default()
+    }]);
+    let preset = crate::brush_engine::brush::BrushPreset {
+        name: "mapped".into(),
+        brush: b.clone(),
+        file: None,
+    };
+    let bytes = crate::brush_engine::preset_file::encode(&[preset]).unwrap();
+    let back = crate::brush_engine::preset_file::decode(&bytes).unwrap();
+    assert_eq!(back[0].brush.inputs, b.inputs);
+}

@@ -32,7 +32,36 @@ pub fn handle_input(
         center: canvas_center,
     };
     handle_pen(app, ctx, response, placement, pen);
+    settle_lost_release(app, ctx);
     handle_events(app, ctx, response, placement, !pen.is_empty());
+    settle_lost_release(app, ctx);
+}
+
+/// The canvas thinks the mouse button is down but it isn't: the release
+/// went to a frame that didn't pass input to the canvas (a dialog opened by
+/// that very click, a fill running). End the press now, before a pointer
+/// move could paint with a button that's up.
+fn settle_lost_release(app: &mut PainterApp, ctx: &egui::Context) {
+    if !app.viewport.is_primary_down {
+        return;
+    }
+    let (down, button_event) = ctx.input(|i| {
+        let event = i.events.iter().any(|e| {
+            matches!(
+                e,
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    ..
+                }
+            )
+        });
+        (i.pointer.primary_down(), event)
+    });
+    // A release among this frame's events is handled with them.
+    if !down && !button_event {
+        app.viewport.is_primary_down = false;
+        handle_primary_release(app);
+    }
 }
 
 /// Pen contact samples (with pressure), in order.
@@ -132,6 +161,7 @@ fn handle_pen_drag(
         }
         Tool::Shape(_) => app.shape_move(raw, shape_mods(ctx)),
         Tool::Gradient => app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift)),
+        Tool::Text => app.text_drag(raw),
     }
 }
 
@@ -241,7 +271,9 @@ fn handle_primary_button(
     raw: Vec2,
     pressed: bool,
 ) {
-    app.viewport.is_primary_down = pressed;
+    // Only a press on the canvas holds it down: one on a menu, panel or
+    // dialog is theirs (and its release may never reach the canvas).
+    app.viewport.is_primary_down = pressed && response.hovered();
 
     let (space_down, secondary_down) = ctx.input(|i| {
         (
@@ -280,7 +312,7 @@ fn handle_primary_press(
     // other tools need a press on the canvas itself.
     let brush = matches!(
         app.active_tool,
-        Tool::Brush | Tool::Shape(_) | Tool::Gradient
+        Tool::Brush | Tool::Shape(_) | Tool::Gradient | Tool::Text
     );
     if app.viewport.is_panning || !over {
         return;
@@ -330,6 +362,7 @@ fn handle_primary_press(
         Tool::Smudge | Tool::Blur => app.blend_press(raw, pressure),
         Tool::Shape(kind) => app.shape_press(kind, raw),
         Tool::Gradient => app.gradient_press(raw),
+        Tool::Text => app.text_press(raw),
     }
 }
 
@@ -350,6 +383,7 @@ fn handle_primary_release(app: &mut PainterApp) {
         Tool::Transform(_) => transform::transform_release(app),
         Tool::Shape(_) => app.shape_release(),
         Tool::Gradient => app.gradient_release(),
+        Tool::Text => app.text_release(),
     }
 }
 
@@ -422,6 +456,12 @@ fn handle_pointer_move(
                 app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift));
                 ctx.request_repaint();
             }
+        } else if matches!(app.active_tool, Tool::Text) {
+            if app.viewport.is_primary_down {
+                let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+                app.text_drag(raw);
+                ctx.request_repaint();
+            }
         } else {
             handle_tool_move(app, ctx, response, clamped, is_inside);
         }
@@ -466,7 +506,7 @@ fn handle_tool_move(
             transform::transform_drag(app, pos, keep_aspect);
             ctx.request_repaint();
         }
-        Tool::Shape(_) | Tool::Gradient => {}
+        Tool::Shape(_) | Tool::Gradient | Tool::Text => {}
     }
 }
 
@@ -508,5 +548,101 @@ fn handle_mouse_wheel(
             .unwrap_or(response.rect.center());
         app.zoom_about(anchor, response.rect.min, app.viewport.zoom * factor);
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::canvas::Canvas;
+    use eframe::egui::{self, Color32};
+
+    /// One frame: `events` go in, the canvas fills the window (unless
+    /// `covered`, when a window lies over it), and input is handled.
+    fn frame(
+        app: &mut crate::PainterApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        covered: bool,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response =
+                    ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
+                if covered {
+                    egui::Window::new("dialog")
+                        .fixed_pos(egui::pos2(100.0, 100.0))
+                        .fixed_size(egui::vec2(400.0, 300.0))
+                        .show(ctx, |ui| ui.label("OK"));
+                }
+                let rect = response.rect;
+                super::handle_input(app, ctx, &response, rect.min, rect.center(), &[]);
+            });
+        });
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn app() -> crate::PainterApp {
+        let mut app =
+            crate::project::tests::test_app_pub(Canvas::new(400, 300, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        app
+    }
+
+    #[test]
+    fn a_release_the_canvas_never_saw_doesnt_leave_it_painting() {
+        let (mut app, ctx) = (app(), egui::Context::default());
+        let at = egui::pos2(300.0, 300.0);
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at)], false);
+        // The press reached the canvas; its release went to a frame the
+        // canvas didn't get (a dialog opened by it, say).
+        frame(&mut app, &ctx, vec![press(at, true)], false);
+        app.finish_stroke();
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![press(at, false)],
+                ..Default::default()
+            },
+            |_| {},
+        );
+        // Later: the mouse moves over the canvas, button up.
+        frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(320.0, 310.0))],
+            false,
+        );
+        assert!(!app.viewport.is_primary_down, "the press is over");
+        assert!(!app.brush_state.is_drawing, "moving doesn't paint");
+    }
+
+    #[test]
+    fn a_press_on_a_dialog_isnt_a_press_on_the_canvas() {
+        let (mut app, ctx) = (app(), egui::Context::default());
+        let on_dialog = egui::pos2(200.0, 200.0);
+        frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(on_dialog)],
+            true,
+        );
+        frame(&mut app, &ctx, vec![press(on_dialog, true)], true);
+        assert!(!app.viewport.is_primary_down);
+        assert!(!app.brush_state.is_drawing);
     }
 }

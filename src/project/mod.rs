@@ -26,6 +26,7 @@ mod blobs;
 mod convert;
 pub(crate) mod export;
 mod preview;
+pub(crate) mod psd;
 pub(crate) mod zip;
 
 use blobs::{StoredBlob, push_blobs, read_blob};
@@ -61,10 +62,23 @@ impl PainterApp {
     pub(crate) fn save_project_to_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         // Saves every painted pixel and files the stroke into undo history.
         self.release_canvas();
-        save_project(self, with_project_extension(path.as_ref()))
+        save_project(self, with_project_extension(path.as_ref()))?;
+        self.saved_by_user();
+        Ok(())
     }
 
     pub(crate) fn load_project_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        let is_psd = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("psd"));
+        if is_psd {
+            let bytes = fs::read(path).map_err(|err| format!("Open failed: {err}"))?;
+            let canvas = psd::decode_psd(&bytes)?.into_canvas()?;
+            self.replace_document(canvas, History::new());
+            self.active_tool = Tool::Brush;
+            return Ok(());
+        }
         let loaded = load_project(path)?;
         self.replace_document(loaded.canvas, loaded.history);
         self.workspace.color_model = loaded.color_model;
@@ -302,6 +316,12 @@ struct StoredLayer {
     /// Blend mode key (`LayerBlend::key`); absent in older files = Normal.
     #[serde(default)]
     blend: Option<String>,
+    /// Clipping mask; absent in older files.
+    #[serde(default)]
+    clipped: bool,
+    /// Adjustment layer's filter; absent in older files.
+    #[serde(default)]
+    adjustment: Option<crate::canvas::filters::Filter>,
     tiles: Vec<StoredTile>,
 }
 
@@ -322,6 +342,8 @@ impl StoredLayer {
             parent: layer.parent.map(|p| p.0),
             expanded: layer.expanded,
             blend: Some(layer.blend.key().to_string()),
+            clipped: layer.clipped,
+            adjustment: layer.adjustment,
             tiles: {
                 use rayon::prelude::*;
                 let raws: Vec<Vec<u8>> = layer
@@ -365,6 +387,8 @@ impl StoredLayer {
                 .as_deref()
                 .and_then(LayerBlend::from_key)
                 .unwrap_or_default(),
+            clipped: self.clipped,
+            adjustment: self.adjustment,
             tiles: self
                 .tiles
                 .into_iter()
@@ -402,8 +426,25 @@ struct StoredHistory {
 }
 
 impl StoredHistory {
+    /// Steps from before a canvas resize, crop or rotation aren't saved:
+    /// each would need a copy of the whole document. Undo in a reopened
+    /// file stops at the resize.
     fn from_history(history: &History, blobs: &mut Vec<u8>) -> Result<Self, String> {
         let (undo, redo) = history.stacks();
+        // Both stacks are taken from the end: keep what comes before the
+        // first resize reached that way.
+        let reachable = |stack: &'_ [UndoAction]| -> usize {
+            stack
+                .iter()
+                .rposition(|a| {
+                    matches!(
+                        a.layer_action,
+                        Some(crate::canvas::history::LayerHistoryOp::Document(_))
+                    )
+                })
+                .map_or(0, |i| i + 1)
+        };
+        let (undo, redo) = (&undo[reachable(undo)..], &redo[reachable(redo)..]);
         Ok(Self {
             undo: undo
                 .iter()
@@ -584,8 +625,7 @@ pub(crate) mod tests {
             ),
             active_tool: Tool::Brush,
             selection_manager: crate::selection::SelectionManager::new(),
-            dock_left: egui_dock::DockState::new(Vec::new()),
-            dock_right: egui_dock::DockState::new(Vec::new()),
+
             tablet: None,
         }
     }

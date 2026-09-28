@@ -152,6 +152,69 @@ impl PainterApp {
         Some(TipMask::from_image(&img))
     }
 
+    /// Make the selected part of the picture (everything visible) a brush
+    /// tip: dark paints, light doesn't, as in Photoshop's Define Brush. It's
+    /// saved in the brushes folder, joins the tip list, and the brush uses
+    /// it at once. Returns the tip's file name.
+    pub(crate) fn define_tip_from_selection(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Result<String, String> {
+        self.release_canvas();
+        let sel = &self.selection_manager;
+        let bounds = sel
+            .get_bounds()
+            .filter(|_| sel.has_selection())
+            .ok_or("Select the part of the picture to make a tip from")?;
+        let [x0, y0, x1, y1] = self.pixel_bounds(bounds);
+        let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+        if w < 2 || h < 2 || w * h > MAX_BRUSH_TIP_PIXELS as usize {
+            return Err("The selection is too small or too big for a tip".into());
+        }
+        let pixels = self.canvas.render_reference(None, x0, y0, w, h);
+        let coverage = crate::selection::SelectionMask::rasterize([x0, y0, x1, y1], |y, x, out| {
+            sel.row_coverage(y, x, out)
+        });
+        // On white, the unselected part white too: only what's drawn paints.
+        let mut rgb = image::RgbImage::new(w as u32, h as u32);
+        for (i, p) in rgb.pixels_mut().enumerate() {
+            let c = pixels[i];
+            let cov = coverage.data[i] as u32;
+            let [r, g, b, a] = crate::canvas::blend::unmultiply(c).map(|v| v as u32);
+            let on_white = |v: u32| (v * a + 255 * (255 - a)) / 255;
+            let keep = |v: u32| ((on_white(v) * cov + 255 * (255 - cov)) / 255) as u8;
+            *p = image::Rgb([keep(r), keep(g), keep(b)]);
+        }
+        let img = image::DynamicImage::ImageRgb8(rgb);
+        let tip = TipMask::from_image(&img);
+        self.ensure_brushes_directory_exists();
+        let taken: Vec<String> = self
+            .brush_state
+            .loaded_brush_tips
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        let name = (1..)
+            .map(|n| format!("Custom tip {n}"))
+            .find(|n| !taken.contains(n))
+            .unwrap_or_default();
+        let path = self.brush_state.brushes_path.join(format!("{name}.png"));
+        img.save(&path)
+            .map_err(|e| format!("Couldn't save the tip: {e}"))?;
+        self.brush_state.loaded_brush_tips.push(LoadedTip {
+            name: name.clone(),
+            texture: Some(Self::create_brush_texture(&tip, ctx)),
+            shape: PixelBrushShape::Custom(tip.clone()),
+            extra: Vec::new(),
+        });
+        let b = &mut self.brush_state.brush;
+        b.brush_options.pixel_shape = PixelBrushShape::Custom(tip);
+        b.brush_options.extra_tips.clear();
+        b.is_changed = true;
+        self.brush_state.brush_preview.dirty = true;
+        Ok(name)
+    }
+
     fn is_valid_image_extension(path: &std::path::Path) -> bool {
         path.extension()
             .and_then(|s| s.to_str())
@@ -472,5 +535,46 @@ mod tests {
         );
         assert_eq!(parse_hex("FF8000"), None);
         assert_eq!(parse_hex("#GG0000"), None);
+    }
+
+    #[test]
+    fn a_selection_becomes_a_brush_tip_the_brush_uses() {
+        use crate::canvas::Canvas;
+        use crate::selection::{SelectionMode, SelectionShape};
+        let dir = std::env::temp_dir().join(format!("rp-tip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app =
+            crate::project::tests::test_app_pub(Canvas::new(128, 128, Color32::WHITE, 64));
+        app.brush_state.brushes_path = dir.join("brushes");
+        app.selection_manager.canvas_size = [128, 128];
+        // A black dot in the middle of the selection.
+        let mut tile = vec![Color32::TRANSPARENT; 64 * 64];
+        for y in 20..40 {
+            for x in 20..40 {
+                tile[y * 64 + x] = Color32::BLACK;
+            }
+        }
+        app.canvas_mut().set_layer_tile_data(1, 0, 0, tile);
+        let ctx = egui::Context::default();
+        assert!(
+            app.define_tip_from_selection(&ctx).is_err(),
+            "needs a selection"
+        );
+        app.selection_manager.apply_shape(
+            SelectionShape::Rectangle {
+                start: eframe::egui::Vec2::new(10.0, 10.0),
+                end: eframe::egui::Vec2::new(50.0, 50.0),
+            },
+            SelectionMode::Replace,
+        );
+        let name = app.define_tip_from_selection(&ctx).unwrap();
+        assert!(dir.join("brushes").join(format!("{name}.png")).exists());
+        let PixelBrushShape::Custom(tip) = &app.brush_state.brush.brush_options.pixel_shape else {
+            panic!("the brush uses the new tip");
+        };
+        let r = tip.width.max(tip.height) as f32 / 2.0;
+        assert!(tip.sample(0.0, 0.0, r) > 0.9, "the dot paints");
+        assert_eq!((tip.width, tip.height), (20, 20), "trimmed to what's drawn");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

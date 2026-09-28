@@ -1,6 +1,7 @@
 //! Touch-mode overlays on the canvas: slim brush size / opacity faders on
 //! the left edge (a thumb's reach away, like Procreate), and a contextual
-//! action button (Deselect, Commit) since tablets have no options bar.
+//! action button (Deselect, Commit) since touch mode shows no tool options
+//! in the top bar.
 
 use crate::PainterApp;
 use crate::app::tools::Tool;
@@ -214,7 +215,9 @@ pub fn canvas_sliders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
         || m.show_new_canvas_modal
         || m.show_general_settings
         || m.show_shortcuts
-        || app.export_state.show_modal;
+        || app.export_state.show_modal
+        // A panel floating over the canvas (a phone).
+        || (ctx.screen_rect().width() < crate::app::layout::NARROW_WIDTH && app.any_panel_open());
     if !app.workspace.touch_mode || covered {
         return;
     }

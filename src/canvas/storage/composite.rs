@@ -44,6 +44,54 @@ enum CompositeNode {
         children: Vec<CompositeNode>,
         blend: LayerBlend,
     },
+    /// An adjustment layer: changes what's composited so far, as much as
+    /// its opacity (and mask) say.
+    Adjust {
+        filter: crate::canvas::filters::Filter,
+        /// Its per-channel table, if it has one (built once per tile).
+        lut: Option<Box<[u8; 256]>>,
+        opacity: f32,
+        mask: Option<MaskInput>,
+        space: BlendSpace,
+    },
+    /// A layer with clipping masks over it: the clipped layers are
+    /// composited over the base's colour made opaque, and the result takes
+    /// the base's alpha, then blends with the base's blend mode.
+    Clip {
+        base: Box<CompositeNode>,
+        clipped: Vec<CompositeNode>,
+        blend: LayerBlend,
+    },
+}
+
+impl CompositeNode {
+    fn blend(&self) -> LayerBlend {
+        match self {
+            CompositeNode::Layer { blend, .. }
+            | CompositeNode::Group { blend, .. }
+            | CompositeNode::Clip { blend, .. } => *blend,
+            CompositeNode::Adjust { .. } => LayerBlend::Normal,
+        }
+    }
+
+    /// Clip `node` to this one (which becomes, or already is, a clip group).
+    fn clip(&mut self, node: CompositeNode) {
+        if let CompositeNode::Clip { clipped, .. } = self {
+            clipped.push(node);
+            return;
+        }
+        let placeholder = CompositeNode::Group {
+            opacity: 0.0,
+            children: Vec::new(),
+            blend: LayerBlend::Normal,
+        };
+        let base = std::mem::replace(self, placeholder);
+        *self = CompositeNode::Clip {
+            blend: base.blend(),
+            base: Box::new(base),
+            clipped: vec![node],
+        };
+    }
 }
 
 /// A mask's coverage (0..=1) per pixel of one tile; `None` means the tile
@@ -70,46 +118,139 @@ fn mask_coverage(px: Color32) -> f32 {
 /// blend mode. `noise` is the pixel's Dissolve threshold.
 fn composite_nodes(nodes: &[CompositeNode], idx: usize, mut composite: Rgba, noise: f32) -> Rgba {
     for node in nodes {
-        let (src, blend) = match node {
-            CompositeNode::Layer { input, mask, blend } => {
-                let mut src = input.linear.as_ref().map_or(input.fill, |data| data[idx]);
-                if src.a() == 0.0 {
-                    continue;
-                }
-                if input.opacity < 1.0 {
-                    src = src * input.opacity;
-                }
-                if let Some(mask) = mask {
-                    let coverage = mask.values.as_ref().map_or(1.0, |v| v[idx]);
-                    if coverage <= 0.0 {
-                        continue;
-                    }
-                    if coverage < 1.0 {
-                        src = src * coverage;
-                    }
-                }
-                (src, *blend)
-            }
-            CompositeNode::Group {
-                opacity,
-                children,
-                blend,
-            } => {
-                let inner = composite_nodes(children, idx, Rgba::TRANSPARENT, noise);
-                if inner.a() == 0.0 {
-                    continue;
-                }
-                let inner = if *opacity < 1.0 {
-                    inner * *opacity
-                } else {
-                    inner
-                };
-                (inner, *blend)
-            }
+        // Paint layers, the common case, stay in this loop; the rest (folders,
+        // clip groups, adjustments) go out of line.
+        let CompositeNode::Layer { input, mask, blend } = node else {
+            composite = composite_other(node, idx, composite, noise);
+            continue;
         };
-        composite = blend_composite(blend, src, composite, noise);
+        let mut src = input.linear.as_ref().map_or(input.fill, |data| data[idx]);
+        if src.a() == 0.0 {
+            continue;
+        }
+        if input.opacity < 1.0 {
+            src = src * input.opacity;
+        }
+        if let Some(mask) = mask {
+            let coverage = mask.values.as_ref().map_or(1.0, |v| v[idx]);
+            if coverage <= 0.0 {
+                continue;
+            }
+            if coverage < 1.0 {
+                src = src * coverage;
+            }
+        }
+        composite = blend_composite(*blend, src, composite, noise);
     }
     composite
+}
+
+/// A folder, clip group or adjustment layer over `composite` (one pixel).
+#[inline(never)]
+fn composite_other(node: &CompositeNode, idx: usize, composite: Rgba, noise: f32) -> Rgba {
+    let (src, blend) = match node {
+        CompositeNode::Layer { .. } => {
+            return composite_nodes(std::slice::from_ref(node), idx, composite, noise);
+        }
+        CompositeNode::Group {
+            opacity,
+            children,
+            blend,
+        } => {
+            let inner = composite_nodes(children, idx, Rgba::TRANSPARENT, noise);
+            if inner.a() == 0.0 {
+                return composite;
+            }
+            let inner = if *opacity < 1.0 {
+                inner * *opacity
+            } else {
+                inner
+            };
+            (inner, *blend)
+        }
+        CompositeNode::Adjust {
+            filter,
+            lut,
+            opacity,
+            mask,
+            space,
+        } => {
+            return adjust(
+                filter,
+                lut.as_deref(),
+                *opacity,
+                mask.as_ref(),
+                *space,
+                idx,
+                composite,
+            );
+        }
+        CompositeNode::Clip {
+            base,
+            clipped,
+            blend,
+        } => match clip(base, clipped, idx, noise) {
+            Some(inner) => (inner, *blend),
+            None => return composite,
+        },
+    };
+    blend_composite(blend, src, composite, noise)
+}
+
+// The rare nodes out of line, so the loop the common ones take stays small
+// enough to be optimised as it was.
+
+/// An adjustment layer applied to `composite` (one pixel).
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn adjust(
+    filter: &crate::canvas::filters::Filter,
+    lut: Option<&[u8; 256]>,
+    opacity: f32,
+    mask: Option<&MaskInput>,
+    space: BlendSpace,
+    idx: usize,
+    composite: Rgba,
+) -> Rgba {
+    let coverage = mask.map_or(1.0, |m| m.values.as_ref().map_or(1.0, |v| v[idx]));
+    let amount = opacity * coverage;
+    if amount <= 0.0 || composite.a() <= 0.0 {
+        return composite;
+    }
+    let after = match space {
+        BlendSpace::Linear => {
+            color32_to_linear(filter.adjust(rgba_to_color32_fast(composite), lut))
+        }
+        // Gamma space holds sRGB values times alpha: the filter works on
+        // them directly, with no trip through 8-bit colour.
+        BlendSpace::Gamma => {
+            let a = composite.a().min(1.0);
+            let inv = 1.0 / a;
+            let rgb = [
+                composite.r() * inv,
+                composite.g() * inv,
+                composite.b() * inv,
+            ];
+            let [r, g, b] = filter.adjust_rgb(rgb, lut);
+            Rgba::from_rgba_premultiplied(r * a, g * a, b * a, a)
+        }
+    };
+    composite * (1.0 - amount) + after * amount
+}
+
+/// A clip group for one pixel: the clipped layers over the base's colour
+/// made opaque, scaled back by the base's alpha (keeping them inside it);
+/// `None` where the base has no paint.
+#[inline(never)]
+fn clip(base: &CompositeNode, clipped: &[CompositeNode], idx: usize, noise: f32) -> Option<Rgba> {
+    let b = composite_nodes(std::slice::from_ref(base), idx, Rgba::TRANSPARENT, noise);
+    if b.a() <= 0.0 {
+        return None;
+    }
+    let inv = 1.0 / b.a();
+    let opaque = Rgba::from_rgba_premultiplied(b.r() * inv, b.g() * inv, b.b() * inv, 1.0);
+    // Over an opaque backdrop the result stays opaque.
+    Some(composite_nodes(clipped, idx, opaque, noise) * b.a())
 }
 
 /// Source-over composite of `layers` (bottom to top) onto `composite` for one pixel.
@@ -333,6 +474,7 @@ impl Canvas {
     /// Downsampled counterpart of [`Self::try_write_single_tile_fast`]: the
     /// same background + one opaque paint layer case, blended per pixel and
     /// averaged per block in one pass.
+    #[inline(never)]
     fn try_write_downsampled_fast(
         &self,
         tx: i32,
@@ -499,42 +641,86 @@ impl Canvas {
         masks: &HashMap<LayerId, usize>,
         depth: usize,
     ) -> Vec<CompositeNode> {
-        let mut nodes = Vec::new();
+        let mut nodes: Vec<CompositeNode> = Vec::new();
         if depth > self.layers.len() {
             return nodes; // a parent cycle; never expected
         }
+        /// What clipped layers clip to: nothing yet (they show as usual), a
+        /// base showing nothing in this tile (neither do they), or a node.
+        enum Base {
+            None,
+            Empty,
+            Node(usize),
+        }
+        let mut base = Base::None;
         for (i, layer) in self.layers.iter().enumerate() {
-            if layer.parent != parent || !(layer.visible && layer.opacity > 0.0) {
+            if layer.parent != parent || matches!(layer.kind, LayerKind::Mask { .. }) {
                 continue;
             }
-            match layer.kind {
-                LayerKind::Mask { .. } => {}
-                LayerKind::Group => {
-                    let children = self.child_nodes(tx, ty, Some(layer.id), masks, depth + 1);
-                    if !children.is_empty() {
-                        nodes.push(CompositeNode::Group {
-                            opacity: layer.opacity,
-                            children,
-                            blend: layer.blend,
-                        });
-                    }
+            let node = if layer.visible && layer.opacity > 0.0 {
+                self.layer_node(i, tx, ty, masks, depth)
+            } else {
+                None
+            };
+            if layer.clipped && !matches!(base, Base::None) {
+                if let (Base::Node(b), Some(node)) = (&base, node) {
+                    nodes[*b].clip(node);
                 }
-                LayerKind::Paint => {
-                    let Some(input) = self.layer_input(i, tx, ty, self.blend_space) else {
-                        continue;
-                    };
-                    let mask = masks
-                        .get(&layer.id)
-                        .and_then(|&m| self.mask_input(m, tx, ty));
-                    nodes.push(CompositeNode::Layer {
-                        input,
-                        mask,
-                        blend: layer.blend,
-                    });
-                }
+                continue;
             }
+            base = match node {
+                Some(node) => {
+                    nodes.push(node);
+                    Base::Node(nodes.len() - 1)
+                }
+                None => Base::Empty,
+            };
         }
         nodes
+    }
+
+    /// Layer `i` (a folder or paint layer) as a node for one tile, or `None`
+    /// when it shows nothing there.
+    fn layer_node(
+        &self,
+        i: usize,
+        tx: i32,
+        ty: i32,
+        masks: &HashMap<LayerId, usize>,
+        depth: usize,
+    ) -> Option<CompositeNode> {
+        let layer = &self.layers[i];
+        match layer.kind {
+            LayerKind::Mask { .. } => None,
+            LayerKind::Group => {
+                let children = self.child_nodes(tx, ty, Some(layer.id), masks, depth + 1);
+                (!children.is_empty()).then_some(CompositeNode::Group {
+                    opacity: layer.opacity,
+                    children,
+                    blend: layer.blend,
+                })
+            }
+            LayerKind::Paint if layer.adjustment.is_some() => Some(CompositeNode::Adjust {
+                filter: layer.adjustment?,
+                lut: layer.adjustment?.channel_lut(),
+                opacity: layer.opacity,
+                mask: masks
+                    .get(&layer.id)
+                    .and_then(|&m| self.mask_input(m, tx, ty)),
+                space: self.blend_space,
+            }),
+            LayerKind::Paint => {
+                let input = self.layer_input(i, tx, ty, self.blend_space)?;
+                let mask = masks
+                    .get(&layer.id)
+                    .and_then(|&m| self.mask_input(m, tx, ty));
+                Some(CompositeNode::Layer {
+                    input,
+                    mask,
+                    blend: layer.blend,
+                })
+            }
+        }
     }
 
     /// Mask coverage for one tile, or `None` when the mask is disabled.
@@ -557,7 +743,10 @@ impl Canvas {
     /// Composite a region that lies entirely within one tile. Used when
     /// `try_write_single_tile_fast`'s stricter fast path doesn't apply
     /// (several layers, partial opacity, or `step != 1` downsampling).
+    // Out of line: inlined into its callers, it changed how their fast paths
+    // compiled (measured: 4% more instructions in the zoomed-out preview).
     #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
     fn write_single_tile_region(
         &self,
         x: usize,
@@ -599,6 +788,18 @@ impl Canvas {
                 rgba_to_color32_fast(c)
             }
         };
+        // Downsampling averages in linear light, as the GPU's mips do, so a
+        // zoomed-out preview shows what the full-resolution upload will. A
+        // gamma-space composite is decoded (through its 8-bit value, exactly
+        // as the full-resolution path stores it) before it's averaged.
+        let gamma_tree = nodes.is_some() && self.blend_space == BlendSpace::Gamma;
+        let linear = |c: Rgba| {
+            if gamma_tree {
+                color32_to_linear(self.encode_tree(c))
+            } else {
+                c
+            }
+        };
 
         for dst_y in 0..dst_h {
             let global_y_start = y + dst_y * step;
@@ -635,7 +836,7 @@ impl Canvas {
                             }
                             let local_x = global_x % self.tile_size;
                             let src_idx = local_y * self.tile_size + local_x;
-                            let sub_composite = composite_at(src_idx, global_x, global_y);
+                            let sub_composite = linear(composite_at(src_idx, global_x, global_y));
 
                             r_acc += sub_composite.r();
                             g_acc += sub_composite.g();
@@ -647,12 +848,13 @@ impl Canvas {
 
                     if count > 0.0 {
                         let inv = 1.0 / count;
-                        out.pixels[row_start + dst_x] = encode(Rgba::from_rgba_premultiplied(
-                            r_acc * inv,
-                            g_acc * inv,
-                            b_acc * inv,
-                            a_acc * inv,
-                        ));
+                        out.pixels[row_start + dst_x] =
+                            rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
+                                r_acc * inv,
+                                g_acc * inv,
+                                b_acc * inv,
+                                a_acc * inv,
+                            ));
                     }
                 }
             }

@@ -1,34 +1,29 @@
-//! The options bar under the menus: one row of controls per tool. Some
-//! rows (fill, liquify, gradient, transform) are reused by the side panels
-//! and the touch context bar.
+//! The active tool's options, one row of controls per tool, shown in the
+//! top bar beside the menus. Some rows (fill, liquify, gradient,
+//! transform) are reused by the side panels and the touch context bar.
 
 use crate::PainterApp;
 use crate::app::tools::Tool;
 use crate::app::tools::transform;
 use crate::selection::SelectionType;
 use crate::ui::style::*;
-use crate::ui::widgets::{bar_frame, percent_of_unit, segmented, vdivider};
+use crate::ui::widgets::{percent_of_unit, segmented, vdivider};
 use eframe::egui::{self, RichText};
 
-/// Context bar under the menus showing the active tool's options.
-pub fn options_bar(app: &mut PainterApp, ctx: &egui::Context) {
-    egui::TopBottomPanel::top("tool_options")
-        .exact_height(metrics(ctx).bar_height)
-        .frame(bar_frame(BG_PANEL))
-        .show(ctx, |ui| {
-            // Options wider than the window scroll sideways instead of
-            // being cut off.
-            let height = ui.available_height();
-            egui::ScrollArea::horizontal()
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), height),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| options_row(app, ui),
-                    );
-                });
+/// The active tool's options in the space `ui` has; wider than that, they
+/// scroll sideways instead of being cut off.
+pub fn options_inline(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let height = ui.available_height();
+    egui::ScrollArea::horizontal()
+        .id_salt("tool_options")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| options_row(app, ui),
+            );
         });
 }
 
@@ -44,6 +39,11 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Smudge | Tool::Blur => blend_options(app, ui),
         Tool::Shape(kind) => shape_options(app, ui, kind),
         Tool::Gradient => gradient_options(app, ui, true),
+        Tool::Text => {
+            tool_title(ui, "Text");
+            crate::ui::text_dialog::text_controls(app, ui);
+            "Click to type; drag the text to move it; Ctrl+Enter keeps it"
+        }
     };
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // Hints are optional: drop them rather than overlap the options.
