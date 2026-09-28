@@ -15,7 +15,7 @@
 
 use crate::brush_engine::brush::{Brush, BrushPreset, BrushType, StabilizerAlgorithm};
 use crate::brush_engine::brush_options::{
-    BlendMode, PaintingMode, PixelBrushShape, PressureCurves,
+    BlendMode, PaintingMode, PixelBrushShape, PressureCurves, TipOrder,
 };
 use crate::brush_engine::dynamics::BrushDynamics;
 use crate::brush_engine::hardness::{SoftnessCurve, SoftnessSelector};
@@ -92,6 +92,9 @@ struct StoredBrush {
     softness_selector: SoftnessSelector,
     softness_curve: SoftnessCurve,
     shape: StoredShape,
+    /// More tips the dabs alternate with, from the file's `tips`.
+    extra_tips: Vec<usize>,
+    tip_order: TipOrder,
     /// Premultiplied RGBA, as the brush holds it.
     color: [u8; 4],
     spacing: f32,
@@ -165,6 +168,8 @@ impl StoredBrush {
                 PixelBrushShape::Square => StoredShape::Square,
                 PixelBrushShape::Custom(tip) => StoredShape::Tip(res.tip(tip)),
             },
+            extra_tips: o.extra_tips.iter().map(|t| res.tip(t)).collect(),
+            tip_order: o.tip_order,
             color: o.color.to_array(),
             spacing: o.spacing,
             flow: o.flow,
@@ -212,6 +217,17 @@ impl StoredBrush {
                     .ok_or_else(|| format!("Missing brush tip {i}"))?,
             ),
         };
+        o.extra_tips = self
+            .extra_tips
+            .iter()
+            .map(|&i| {
+                res.tips
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| format!("Missing brush tip {i}"))
+            })
+            .collect::<Result<_, _>>()?;
+        o.tip_order = self.tip_order;
         let [r, g, bl, a] = self.color;
         o.color = Color32::from_rgba_premultiplied(r, g, bl, a);
         o.flow = self.flow;

@@ -580,6 +580,12 @@ fn resolve_spans_in(
 }
 
 impl Brush {
+    /// Whether dabs can differ from one another (dynamics, several tips),
+    /// so each is planned on its own.
+    pub fn varies_per_dab(&self) -> bool {
+        self.dynamics.is_active() || self.brush_options.tip_count() > 1
+    }
+
     /// The stroke smoothing this brush asks for.
     pub fn stabilizer_settings(&self) -> crate::brush_engine::stabilizer::StabilizerSettings {
         crate::brush_engine::stabilizer::StabilizerSettings {
@@ -722,11 +728,16 @@ impl Brush {
         let linear = canvas.blend_space == BlendSpace::Linear;
         // How far past its radius a turned tip reaches: a square's (or an
         // image's) corners.
-        let corner_reach = match &self.brush_options.pixel_shape {
-            PixelBrushShape::Circle => 1.0,
-            PixelBrushShape::Square => std::f32::consts::SQRT_2,
-            PixelBrushShape::Custom(tip) => tip.corner_reach(),
-        };
+        let tips = self.brush_options.tip_shapes();
+        let corner_reach = tips
+            .iter()
+            .map(|shape| match shape {
+                PixelBrushShape::Circle => 1.0,
+                PixelBrushShape::Square => std::f32::consts::SQRT_2,
+                PixelBrushShape::Custom(tip) => tip.corner_reach(),
+            })
+            .fold(1.0, f32::max);
+        let last_tip = (tips.len() - 1) as u8;
         let dabs: Vec<PlacedDab> = centers
             .iter()
             .enumerate()
@@ -749,6 +760,7 @@ impl Brush {
                 dab.rigid = is_rigid(orient);
                 dab.reach = reach;
                 dab.strength = var.strength;
+                dab.tip = var.tip.min(last_tip);
                 if colored {
                     let srgb =
                         crate::brush_engine::dynamics::shift_hsv(self.brush_options.color, var.hsv);
@@ -1019,8 +1031,9 @@ impl Brush {
         work_pixels: usize,
         strength: f32,
     ) {
-        let pixel_shape = &self.brush_options.pixel_shape;
+        let tips = self.brush_options.tip_shapes();
         let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+            let pixel_shape = &tips[dab.tip as usize];
             let r = dab.r;
             let r_sq = r * r;
             let strength = (strength * dab.strength).min(1.0);
@@ -1067,11 +1080,13 @@ impl Brush {
         let softness_selector = o.softness_selector;
         let softness_curve = &o.softness_curve;
         let pixel_shape = &o.pixel_shape;
+        let tips = o.tip_shapes();
         let anti_aliasing = self.anti_aliasing;
         let custom = matches!(pixel_shape, PixelBrushShape::Custom(_));
 
         // Any tip, any dab: per pixel, in the tip's (turned, squashed) frame.
         let general = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+            let pixel_shape = &tips[dab.tip as usize];
             let r = dab.r;
             let r_sq = r * r;
             // 1.5 pixel outer anti-aliasing fade
@@ -1145,8 +1160,11 @@ impl Brush {
 
         // Smooth image tips: a whole row at a time, the mip levels chosen
         // once per row rather than per pixel.
-        if anti_aliasing && let PixelBrushShape::Custom(tip) = pixel_shape {
+        if anti_aliasing && custom {
             let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+                let PixelBrushShape::Custom(tip) = &tips[dab.tip as usize] else {
+                    unreachable!("extra tips go with an image tip");
+                };
                 let sampler = tip.sampler(dab.r);
                 let strength = (strength * dab.strength).min(1.0);
                 let pdy = gy as f32 + 0.5 - dab.center.y;

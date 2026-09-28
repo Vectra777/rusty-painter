@@ -542,6 +542,20 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.airbrush_rate = 60.0;
         b
     }));
+    // Three image tips taken at random.
+    cases.push(("three_tips", {
+        use rusty_painter::brush_engine::brush_options::{PixelBrushShape, TipOrder};
+        let tips: Vec<_> = rusty_painter::brush_engine::tip::builtin()
+            .iter()
+            .take(3)
+            .map(|(_, t)| t.clone())
+            .collect();
+        let mut b = base();
+        b.brush_options.pixel_shape = PixelBrushShape::Custom(tips[0].clone());
+        b.brush_options.extra_tips = tips[1..].to_vec();
+        b.brush_options.tip_order = TipOrder::Random;
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {

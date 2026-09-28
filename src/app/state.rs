@@ -26,7 +26,7 @@ pub struct BrushState {
     pub brush_preview: BrushPreviewState,
     pub presets: Vec<BrushPreset>,
     pub preset_previews: HashMap<String, egui::TextureHandle>,
-    pub loaded_brush_tips: Vec<(String, PixelBrushShape, Option<egui::TextureHandle>)>,
+    pub loaded_brush_tips: Vec<LoadedTip>,
     /// Paper textures from `brushes/textures/` (besides the built-in ones).
     pub loaded_textures: Vec<Arc<crate::brush_engine::texture::Pattern>>,
     pub brushes_path: PathBuf,
@@ -53,6 +53,16 @@ pub struct BrushState {
     pub show_presets: bool,
     /// The smudge / blur stroke in progress.
     pub blend_stroke: Option<crate::app::tools::blend::BlendStroke>,
+}
+
+/// A tip in the brush settings' tip list: one tip, or a set the dabs take
+/// in turn (a folder of pictures in `brushes/`).
+pub struct LoadedTip {
+    pub name: String,
+    pub shape: PixelBrushShape,
+    /// The set's other tips (empty for a single tip).
+    pub extra: Vec<Arc<crate::brush_engine::tip::TipMask>>,
+    pub texture: Option<egui::TextureHandle>,
 }
 
 /// How many colors the recent-colors strip remembers.

@@ -343,8 +343,40 @@ pub fn builtin() -> &'static [(&'static str, Arc<TipMask>)] {
                     (v * 6.0).clamp(0.0, 1.0)
                 }),
             ),
+            (
+                "Round leaf",
+                make(&|x, y| {
+                    // Wide and blunt, with a vein down the middle.
+                    let half = (1.0 - x * x).max(0.0).sqrt() * 0.6;
+                    let v = 1.0 - (y.abs() / half.max(1e-3));
+                    let vein = (y.abs() * 40.0).min(1.0) * 0.4 + 0.6;
+                    (v * 5.0).clamp(0.0, 1.0) * if x.abs() < 0.8 { vein } else { 1.0 }
+                }),
+            ),
+            (
+                "Long leaf",
+                make(&|x, y| {
+                    // A thin blade, pointed at the far end.
+                    let t = (x + 1.0) * 0.5;
+                    let half = (t * (1.0 - t) * 4.0).max(0.0).powf(0.7) * 0.22 * (1.2 - t);
+                    let v = 1.0 - (y.abs() / half.max(1e-3));
+                    (v * 6.0).clamp(0.0, 1.0)
+                }),
+            ),
         ]
     })
+}
+
+/// Tip sets that come with the app: the dabs take the tips in turn.
+pub fn builtin_sets() -> Vec<(&'static str, Vec<Arc<TipMask>>)> {
+    let named = |names: &[&str]| {
+        names
+            .iter()
+            .filter_map(|n| builtin().iter().find(|(name, _)| name == n))
+            .map(|(_, tip)| tip.clone())
+            .collect()
+    };
+    vec![("Mixed leaves", named(&["Leaf", "Round leaf", "Long leaf"]))]
 }
 
 /// A repeatable pseudo-random value in 0..1.

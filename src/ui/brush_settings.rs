@@ -2,7 +2,7 @@
 //! stabiliser.
 
 use crate::brush_engine::brush::{Brush, BrushType, StabilizerAlgorithm};
-use crate::brush_engine::brush_options::{PaintingMode, PixelBrushShape};
+use crate::brush_engine::brush_options::{PaintingMode, PixelBrushShape, TipOrder};
 use crate::brush_engine::hardness::SoftnessSelector;
 use crate::ui::style::*;
 use crate::ui::widgets::{percent_of_unit, property_row, section, segmented, slider_row};
@@ -62,7 +62,7 @@ pub fn brush_settings_panel(
     brush: &mut Brush,
     preview: &mut BrushPreviewState,
     pool: &ThreadPool,
-    loaded_tips: &[(String, PixelBrushShape, Option<egui::TextureHandle>)],
+    loaded_tips: &[crate::app::state::LoadedTip],
     textures: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
 ) {
     egui::ScrollArea::vertical()
@@ -86,7 +86,7 @@ fn brush_settings_contents(
     brush: &mut Brush,
     preview: &mut BrushPreviewState,
     pool: &ThreadPool,
-    loaded_tips: &[(String, PixelBrushShape, Option<egui::TextureHandle>)],
+    loaded_tips: &[crate::app::state::LoadedTip],
     textures: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
 ) -> (bool, bool) {
     let mut changed = false;
@@ -175,7 +175,8 @@ fn brush_settings_contents(
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                     let side = metrics(ui.ctx()).tip_swatch;
                     let size = egui::vec2(side, side);
-                    let shape = &mut brush.brush_options.pixel_shape;
+                    let o = &mut brush.brush_options;
+                    let (shape, extras) = (&mut o.pixel_shape, &mut o.extra_tips);
 
                     let selected = matches!(shape, PixelBrushShape::Circle);
                     if tip_swatch(ui, size, selected, "Circle", |painter, rect| {
@@ -184,6 +185,7 @@ fn brush_settings_contents(
                     .clicked()
                     {
                         *shape = PixelBrushShape::Circle;
+                        extras.clear();
                         mask_changed = true;
                     }
 
@@ -194,18 +196,28 @@ fn brush_settings_contents(
                     .clicked()
                     {
                         *shape = PixelBrushShape::Square;
+                        extras.clear();
                         mask_changed = true;
                     }
 
-                    for (name, tip_shape, texture_opt) in loaded_tips {
-                        let Some(texture) = texture_opt else { continue };
-                        let selected = &*shape == tip_shape;
+                    for loaded in loaded_tips {
+                        let Some(texture) = &loaded.texture else {
+                            continue;
+                        };
+                        let tip_shape = &loaded.shape;
+                        let selected = &*shape == tip_shape && *extras == loaded.extra;
                         let texture_id = texture.id();
                         let (fw, fh) = match tip_shape {
                             PixelBrushShape::Custom(tip) => tip.extent(),
                             _ => (1.0, 1.0),
                         };
-                        if tip_swatch(ui, size, selected, name, |painter, rect| {
+                        let set = loaded.extra.len() + 1;
+                        let hover = if set > 1 {
+                            format!("{}: {set} tips, taken in turn", loaded.name)
+                        } else {
+                            format!("{}\nRight-click: add to this brush's tips", loaded.name)
+                        };
+                        let response = tip_swatch(ui, size, selected, &hover, |painter, rect| {
                             // At the tip's own proportions.
                             let inner = rect.shrink(3.0);
                             let fit = egui::vec2(inner.width() * fw, inner.height() * fh);
@@ -218,10 +230,29 @@ fn brush_settings_contents(
                                 ),
                                 Color32::WHITE,
                             );
-                        })
-                        .clicked()
-                        {
+                            if set > 1 {
+                                // A set: its count in the corner.
+                                painter.text(
+                                    rect.right_bottom() - egui::vec2(3.0, 2.0),
+                                    egui::Align2::RIGHT_BOTTOM,
+                                    format!("×{set}"),
+                                    egui::FontId::proportional(10.0),
+                                    ACCENT,
+                                );
+                            }
+                        });
+                        if response.clicked() {
                             *shape = tip_shape.clone();
+                            *extras = loaded.extra.clone();
+                            mask_changed = true;
+                        }
+                        // Right-click adds a tip to an image-tip brush's own.
+                        if response.secondary_clicked()
+                            && matches!(shape, PixelBrushShape::Custom(_))
+                            && let PixelBrushShape::Custom(tip) = tip_shape
+                        {
+                            extras.push(tip.clone());
+                            extras.extend(loaded.extra.iter().cloned());
                             mask_changed = true;
                         }
                     }
@@ -233,8 +264,49 @@ fn brush_settings_contents(
                 .on_hover_text("Paint with what the picture leaves empty, and the other way round.")
                 .clicked()
         {
-            brush.brush_options.pixel_shape = PixelBrushShape::Custom(tip.inverted());
+            let inverted = tip.inverted();
+            let o = &mut brush.brush_options;
+            o.pixel_shape = PixelBrushShape::Custom(inverted);
+            for extra in &mut o.extra_tips {
+                *extra = extra.inverted();
+            }
             mask_changed = true;
+        }
+        let tips = brush.brush_options.tip_count();
+        if tips > 1 {
+            let o = &mut brush.brush_options;
+            property_row(ui, &format!("{tips} tips"), |ui| {
+                egui::ComboBox::from_id_salt("brush_tip_order")
+                    .selected_text(o.tip_order.label())
+                    .show_ui(ui, |ui| {
+                        for order in TipOrder::ALL {
+                            changed |= ui
+                                .selectable_value(&mut o.tip_order, order, order.label())
+                                .changed();
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "How each dab picks its tip: in turn, at random, by pen pressure (light \
+                         the first tip, full the last) or by the stroke's direction.",
+                    );
+                if ui
+                    .button("One tip")
+                    .on_hover_text("Keep only the first tip")
+                    .clicked()
+                {
+                    o.extra_tips.clear();
+                    mask_changed = true;
+                }
+            });
+        } else if matches!(brush.brush_options.pixel_shape, PixelBrushShape::Custom(_)) {
+            ui.label(
+                egui::RichText::new(
+                    "Right-click more tips to have the dabs alternate between them.",
+                )
+                .small()
+                .color(TEXT_DIM),
+            );
         }
         ui.add_space(4.0);
 

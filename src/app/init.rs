@@ -276,6 +276,31 @@ impl PainterApp {
                 };
                 b
             }),
+            preset("Mixed Leaves", {
+                // Three leaf shapes, a different one at each dab.
+                let mut b = Brush::new(30.0, 90.0, Color32::from_rgb(70, 125, 45), 70.0);
+                if let Some((_, tips)) = crate::brush_engine::tip::builtin_sets()
+                    .into_iter()
+                    .find(|(n, _)| *n == "Mixed leaves")
+                    && let Some((first, rest)) = tips.split_first()
+                {
+                    b.brush_options.pixel_shape = PixelBrushShape::Custom(first.clone());
+                    b.brush_options.extra_tips = rest.to_vec();
+                    b.brush_options.tip_order =
+                        crate::brush_engine::brush_options::TipOrder::Random;
+                }
+                b.brush_options.pressure_size = false;
+                b.jitter = 80.0;
+                b.dynamics.tip.random_angle = 180.0;
+                b.dynamics.random = Randomness {
+                    size: 0.4,
+                    count: 2,
+                    hue: 15.0,
+                    value: 0.12,
+                    ..Default::default()
+                };
+                b
+            }),
             preset("Spatter", {
                 let mut b = Brush::new(40.0, 90.0, black, 90.0);
                 b.brush_options.pixel_shape = tip("Spatter");

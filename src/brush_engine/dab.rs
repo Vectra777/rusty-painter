@@ -93,6 +93,8 @@ pub(super) struct PlacedDab {
     /// The dab's colour, unmultiplied in the document's blend space (only
     /// read for strokes whose dabs differ in colour).
     pub color: [f32; 3],
+    /// Which of the brush's tips it uses.
+    pub tip: u8,
 }
 
 impl PlacedDab {
@@ -113,6 +115,7 @@ impl PlacedDab {
             strength: 1.0,
             rigid: true,
             color: [0.0; 3],
+            tip: 0,
         }
     }
 

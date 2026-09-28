@@ -2,12 +2,16 @@
 //! textured tips for the brush list.
 
 use crate::app::PainterApp;
+use crate::app::state::LoadedTip;
 use crate::brush_engine::brush::BrushPreset;
 use crate::brush_engine::brush_options::PixelBrushShape;
 use crate::brush_engine::preset_file;
+use crate::brush_engine::tip::TipMask;
 use eframe::egui::{self, Color32, TextureOptions};
 
 const MAX_BRUSH_TIP_PIXELS: u32 = 4_194_304;
+/// Most tips taken from one folder.
+const MAX_TIPS_PER_SET: usize = 64;
 
 impl PainterApp {
     pub fn load_brush_tips(&mut self, ctx: egui::Context) {
@@ -15,18 +19,28 @@ impl PainterApp {
         self.brush_state.loaded_brush_tips.clear();
         self.scan_and_load_brush_images(ctx.clone());
         self.sort_loaded_brushes();
-        // The built-in tips first, then the folder's.
-        let builtin: Vec<_> = crate::brush_engine::tip::builtin()
+        // The built-in tips and sets first, then the folder's.
+        let mut builtin: Vec<LoadedTip> = crate::brush_engine::tip::builtin()
             .iter()
-            .map(|(name, tip)| {
-                let texture = Self::create_brush_texture(tip, &ctx);
-                (
-                    name.to_string(),
-                    PixelBrushShape::Custom(tip.clone()),
-                    Some(texture),
-                )
+            .map(|(name, tip)| LoadedTip {
+                name: name.to_string(),
+                shape: PixelBrushShape::Custom(tip.clone()),
+                extra: Vec::new(),
+                texture: Some(Self::create_brush_texture(tip, &ctx)),
             })
             .collect();
+        for (name, mut tips) in crate::brush_engine::tip::builtin_sets() {
+            if tips.is_empty() {
+                continue;
+            }
+            let first = tips.remove(0);
+            builtin.push(LoadedTip {
+                name: name.to_string(),
+                texture: Some(Self::create_brush_texture(&first, &ctx)),
+                shape: PixelBrushShape::Custom(first),
+                extra: tips,
+            });
+        }
         self.brush_state.loaded_brush_tips.splice(0..0, builtin);
         self.load_textures();
     }
@@ -64,25 +78,68 @@ impl PainterApp {
         }
     }
 
+    /// Pictures in the brushes folder become tips; a folder of pictures
+    /// (other than `textures` and `presets`) becomes a set of tips the dabs
+    /// take in turn, in file-name order.
     fn scan_and_load_brush_images(&mut self, ctx: egui::Context) {
-        if let Ok(entries) = std::fs::read_dir(&self.brush_state.brushes_path) {
-            for entry in entries.flatten() {
-                if let Some(brush_tip) = self.try_load_brush_from_path(entry.path(), &ctx) {
-                    self.brush_state.loaded_brush_tips.push(brush_tip);
+        let Ok(entries) = std::fs::read_dir(&self.brush_state.brushes_path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let skip = path
+                    .file_name()
+                    .is_some_and(|n| n == "textures" || n == "presets");
+                if !skip && let Some(set) = Self::try_load_tip_set(&path, &ctx) {
+                    self.brush_state.loaded_brush_tips.push(set);
                 }
+            } else if let Some(tip) = Self::try_load_tip(&path) {
+                let name = path.file_stem().map_or_else(
+                    || format!("{}×{}", tip.width, tip.height),
+                    |s| s.to_string_lossy().into_owned(),
+                );
+                self.brush_state.loaded_brush_tips.push(LoadedTip {
+                    name,
+                    texture: Some(Self::create_brush_texture(&tip, &ctx)),
+                    shape: PixelBrushShape::Custom(tip),
+                    extra: Vec::new(),
+                });
             }
         }
     }
 
-    fn try_load_brush_from_path(
-        &self,
-        path: std::path::PathBuf,
-        ctx: &egui::Context,
-    ) -> Option<(String, PixelBrushShape, Option<egui::TextureHandle>)> {
-        if !path.is_file() || !Self::is_valid_image_extension(&path) {
+    fn try_load_tip_set(dir: &std::path::Path, ctx: &egui::Context) -> Option<LoadedTip> {
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        paths.sort();
+        let mut tips: Vec<_> = paths
+            .iter()
+            .filter_map(|p| Self::try_load_tip(p))
+            .take(MAX_TIPS_PER_SET)
+            .collect();
+        if tips.is_empty() {
             return None;
         }
-        let reader = image::ImageReader::open(&path)
+        let first = tips.remove(0);
+        Some(LoadedTip {
+            name: dir
+                .file_name()
+                .map_or_else(|| "Tips".into(), |s| s.to_string_lossy().into_owned()),
+            texture: Some(Self::create_brush_texture(&first, ctx)),
+            shape: PixelBrushShape::Custom(first),
+            extra: tips,
+        })
+    }
+
+    fn try_load_tip(path: &std::path::Path) -> Option<std::sync::Arc<TipMask>> {
+        if !path.is_file() || !Self::is_valid_image_extension(path) {
+            return None;
+        }
+        let reader = image::ImageReader::open(path)
             .ok()?
             .with_guessed_format()
             .ok()?;
@@ -91,14 +148,8 @@ impl PainterApp {
             log::warn!("Skipping oversized brush tip: {}", path.display());
             return None;
         }
-        let img = image::open(&path).ok()?;
-        let tip = crate::brush_engine::tip::TipMask::from_image(&img);
-        let texture = Self::create_brush_texture(&tip, ctx);
-        let name = path.file_stem().map_or_else(
-            || format!("{}×{}", tip.width, tip.height),
-            |s| s.to_string_lossy().into_owned(),
-        );
-        Some((name, PixelBrushShape::Custom(tip), Some(texture)))
+        let img = image::open(path).ok()?;
+        Some(TipMask::from_image(&img))
     }
 
     fn is_valid_image_extension(path: &std::path::Path) -> bool {
@@ -108,10 +159,7 @@ impl PainterApp {
             .unwrap_or(false)
     }
 
-    fn create_brush_texture(
-        tip: &crate::brush_engine::tip::TipMask,
-        ctx: &egui::Context,
-    ) -> egui::TextureHandle {
+    fn create_brush_texture(tip: &TipMask, ctx: &egui::Context) -> egui::TextureHandle {
         let pixels: Vec<Color32> = tip
             .pixels
             .iter()
@@ -127,7 +175,7 @@ impl PainterApp {
     fn sort_loaded_brushes(&mut self) {
         self.brush_state
             .loaded_brush_tips
-            .sort_by(|a, b| a.0.cmp(&b.0));
+            .sort_by(|a, b| a.name.cmp(&b.name));
     }
 }
 

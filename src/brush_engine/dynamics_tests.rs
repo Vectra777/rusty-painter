@@ -1008,3 +1008,149 @@ fn a_long_stall_does_not_bank_airbrush_dabs() {
     // Each 5% dab adds about 13 levels near white-on-black; 8 at most.
     assert!(after > start && after - start < 8 * 16, "{start} → {after}");
 }
+
+/// Tips that paint in different places: a dot left, centre or right of
+/// the dab's centre.
+fn marker_tips() -> Vec<std::sync::Arc<crate::brush_engine::tip::TipMask>> {
+    (0..3)
+        .map(|k| {
+            let pixels = (0..32 * 32i32)
+                .map(|i| {
+                    let (x, y) = (i % 32, i / 32);
+                    let cx = 6 + k * 10;
+                    if (x - cx).abs() <= 2 && (14..18).contains(&y) {
+                        255
+                    } else {
+                        // A faint frame (just above what trimming drops)
+                        // keeps every tip the same size.
+                        if x == 0 || x == 31 || y == 0 || y == 31 {
+                            3
+                        } else {
+                            0
+                        }
+                    }
+                })
+                .collect();
+            crate::brush_engine::tip::TipMask::from_mask(32, 32, pixels)
+        })
+        .collect()
+}
+
+fn multi_tip(order: crate::brush_engine::brush_options::TipOrder) -> Brush {
+    use crate::brush_engine::brush_options::PixelBrushShape;
+    let tips = marker_tips();
+    let mut b = Brush::new(32.0, 100.0, Color32::BLACK, 100.0);
+    b.brush_options.pressure_size = false;
+    b.brush_options.pixel_shape = PixelBrushShape::Custom(tips[0].clone());
+    b.brush_options.extra_tips = tips[1..].to_vec();
+    b.brush_options.tip_order = order;
+    b
+}
+
+/// The tip each dab of a stroke through `points` (position, pressure) used.
+fn tips_used(brush: &mut Brush, points: &[(Vec2, f32)], seed: u64) -> Vec<u8> {
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(seed);
+    let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+    for (i, &(p, pressure)) in points.iter().enumerate() {
+        stroke.add_sample(brush, p, pressure, Some(i as f64 * 0.01), &mut ctx);
+    }
+    stroke.finish(brush, &mut ctx);
+    stroke.painted.iter().map(|v| v.tip).collect()
+}
+
+fn along_x(from: f32, to: f32, steps: usize) -> Vec<(Vec2, f32)> {
+    (0..=steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32;
+            (Vec2::new(from + (to - from) * t, 64.0), 1.0)
+        })
+        .collect()
+}
+
+#[test]
+fn several_tips_are_taken_in_turn() {
+    use crate::brush_engine::brush_options::TipOrder;
+    let used = tips_used(
+        &mut multi_tip(TipOrder::Sequence),
+        &along_x(40.0, 200.0, 20),
+        1,
+    );
+    assert!(used.len() >= 5);
+    for (i, &t) in used.iter().enumerate() {
+        assert_eq!(t as usize, i % 3, "{used:?}");
+    }
+}
+
+#[test]
+fn random_tips_use_every_tip_and_repeat_with_the_seed() {
+    use crate::brush_engine::brush_options::TipOrder;
+    let mut b = multi_tip(TipOrder::Random);
+    b.brush_options.spacing = 10.0;
+    let a = tips_used(&mut b.clone(), &along_x(20.0, 230.0, 30), 5);
+    let c = tips_used(&mut b.clone(), &along_x(20.0, 230.0, 30), 5);
+    assert_eq!(a, c);
+    for k in 0..3 {
+        assert!(a.contains(&k), "tip {k} never used: {a:?}");
+    }
+}
+
+#[test]
+fn pressure_and_direction_pick_the_tip() {
+    use crate::brush_engine::brush_options::TipOrder;
+    let mut b = multi_tip(TipOrder::Pressure);
+    let light: Vec<_> = along_x(40.0, 200.0, 10)
+        .into_iter()
+        .map(|(p, _)| (p, 0.1))
+        .collect();
+    let full: Vec<_> = along_x(40.0, 200.0, 10);
+    assert!(tips_used(&mut b.clone(), &light, 1).iter().all(|&t| t == 0));
+    assert!(tips_used(&mut b, &full, 1).iter().all(|&t| t == 2));
+
+    let mut b = multi_tip(TipOrder::Direction);
+    // Rightwards is 0°: the first tip; leftwards 180°: the middle one of
+    // three (120°..240°).
+    let right = tips_used(&mut b.clone(), &along_x(40.0, 200.0, 10), 1);
+    let left = tips_used(&mut b, &along_x(200.0, 40.0, 10), 1);
+    assert!(right[1..].iter().all(|&t| t == 0), "{right:?}");
+    assert!(left[1..].iter().all(|&t| t == 1), "{left:?}");
+}
+
+#[test]
+fn each_dab_paints_with_its_own_tip() {
+    use crate::brush_engine::brush_options::TipOrder;
+    // Three dabs 50 px apart, in turn: the marks sit left, centre, right
+    // of each dab's centre.
+    let mut b = multi_tip(TipOrder::Sequence);
+    b.brush_options.spacing = 50.0 / 32.0 * 100.0;
+    let points = [(Vec2::new(60.0, 64.0), 0.0), (Vec2::new(160.0, 64.0), 0.1)];
+    let (canvas, _) = paint(&mut b, &points, 1, true);
+    for (k, centre) in [60, 110, 160].into_iter().enumerate() {
+        let mark = centre - 10 + k as i32 * 10;
+        assert!(
+            alpha(&canvas, mark as usize, 64) > 200,
+            "dab {k}: no mark at {mark}"
+        );
+        for other in (0..3).filter(|&j| j != k) {
+            let x = centre - 10 + other as i32 * 10;
+            assert!(alpha(&canvas, x as usize, 64) < 30, "dab {k}: mark at {x}");
+        }
+    }
+}
+
+#[test]
+fn a_set_of_the_same_tip_paints_like_the_tip_alone() {
+    use crate::brush_engine::brush_options::{PixelBrushShape, TipOrder};
+    let tip = marker_tips().remove(1);
+    let mut one = Brush::new(32.0, 100.0, Color32::BLACK, 20.0);
+    one.brush_options.pixel_shape = PixelBrushShape::Custom(tip.clone());
+    let mut two = one.clone();
+    two.brush_options.extra_tips = vec![tip.clone(), tip];
+    two.brush_options.tip_order = TipOrder::Random;
+    let (a, _) = paint(&mut one, &line(64.0, 0.5), 1, true);
+    let (b, _) = paint(&mut two, &line(64.0, 0.5), 1, true);
+    assert!(pixels(&a) == pixels(&b));
+}

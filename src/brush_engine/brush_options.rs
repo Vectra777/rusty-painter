@@ -25,6 +25,39 @@ impl PartialEq for PixelBrushShape {
     }
 }
 
+/// Which of a brush's tips each dab uses, when it has several (like
+/// Krita's animated brushes and GIMP's image hoses).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TipOrder {
+    /// One after the other, over and over.
+    #[default]
+    Sequence,
+    /// A tip at random for each dab.
+    Random,
+    /// Light pressure the first tip, full pressure the last.
+    Pressure,
+    /// By the direction the stroke goes, the turn split between the tips.
+    Direction,
+}
+
+impl TipOrder {
+    pub const ALL: [TipOrder; 4] = [
+        Self::Sequence,
+        Self::Random,
+        Self::Pressure,
+        Self::Direction,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sequence => "In turn",
+            Self::Random => "Random",
+            Self::Pressure => "Pressure",
+            Self::Direction => "Direction",
+        }
+    }
+}
+
 /// Blending strategy for how source color affects the destination.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
@@ -49,6 +82,11 @@ pub struct BrushOptions {
     pub softness_selector: SoftnessSelector,
     pub softness_curve: SoftnessCurve,
     pub pixel_shape: PixelBrushShape,
+    /// More image tips the dabs alternate with (after `pixel_shape`, when
+    /// that's an image tip too); empty for one tip.
+    pub extra_tips: Vec<std::sync::Arc<crate::brush_engine::tip::TipMask>>,
+    /// How the dabs pick among the tips.
+    pub tip_order: TipOrder,
     pub color: Color32,
     pub spacing: f32, // Percentage of diameter (0..100+)
     pub flow: f32,    // 0..100
@@ -97,6 +135,24 @@ impl PressureCurves {
 }
 
 impl BrushOptions {
+    /// How many tips the dabs pick from (extra tips go with an image tip).
+    pub fn tip_count(&self) -> usize {
+        match self.pixel_shape {
+            PixelBrushShape::Custom(_) => 1 + self.extra_tips.len(),
+            _ => 1,
+        }
+    }
+
+    /// Tip `i` of [`Self::tip_count`] (0 is `pixel_shape`).
+    pub fn tip_shapes(&self) -> std::borrow::Cow<'_, [PixelBrushShape]> {
+        if self.tip_count() == 1 {
+            return std::borrow::Cow::Borrowed(std::slice::from_ref(&self.pixel_shape));
+        }
+        std::iter::once(self.pixel_shape.clone())
+            .chain(self.extra_tips.iter().cloned().map(PixelBrushShape::Custom))
+            .collect()
+    }
+
     /// Create a standard soft brush with the given radius, hardness, base color and spacing.
     pub fn new(diameter: f32, hardness: f32, color: Color32, spacing: f32) -> Self {
         Self {
@@ -105,6 +161,8 @@ impl BrushOptions {
             softness_selector: SoftnessSelector::Gaussian,
             softness_curve: SoftnessCurve::default(),
             pixel_shape: PixelBrushShape::Circle,
+            extra_tips: Vec::new(),
+            tip_order: TipOrder::Sequence,
             color,
             spacing,
             flow: 100.0,

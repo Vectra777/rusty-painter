@@ -17,7 +17,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Image tips (custom shapes) | ✅ PNG, GBR, ABR import | ✅ | ✅ brush patterns | ✅ PNGs in `brushes/` |
 | Image tips sampled cleanly when small (mipmaps) | ✅ | ✅ | ✅ | ✅ trilinear |
 | Image tips keep their proportions | ✅ | ✅ | ✅ | ✅ |
-| Several tips per brush (random or in sequence) | ✅ animated GIH | ✅ | ⚠️ | ❌ |
+| Several tips per brush (random or in sequence) | ✅ animated GIH | ✅ | ⚠️ | ✅ in turn, random, pressure, direction |
 | Tip squash (ratio) and fixed angle | ✅ | ✅ | ✅ | ✅ |
 | Tip turns with the stroke direction | ✅ | ✅ | ✅ start/end angle | ✅ |
 | Random tip rotation | ✅ | ✅ | ✅ | ✅ |
@@ -63,7 +63,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Symmetry / radial mirror | ✅ | ✅ | ✅ | ✅ incl. kaleidoscope |
 | Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ❌ |
 | Pen eraser end switches to eraser | ✅ | ✅ | ✅ | ✅ |
-| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ✅ 16 built-in + your own, kept and shared as `.rpbrush` files |
+| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ✅ built-in presets + your own, kept and shared as `.rpbrush` files |
 
 ## Roadmap
 
@@ -102,8 +102,9 @@ below.
   window's menu or by dropping a file on the window.
 - [x] **Airbrush.** Paint keeps building while the pen is held still, at
   a rate in dabs per second (Stroke → Airbrush; the Soft Airbrush preset).
-- [ ] **Several tips per brush**, in sequence, at random, or by pressure or
-  direction.
+- [x] **Several tips per brush**, in turn, at random, or by pressure or
+  direction. A folder of pictures in `brushes/` is a tip set; right-click
+  tips to add them to a brush. The Mixed Leaves preset uses three.
 - [ ] **Dual brush.** A second tip masks the first.
 - [ ] **Watercolour edges.** Paint pools at the rim of the stroke.
 - [ ] **Bristle engine.**

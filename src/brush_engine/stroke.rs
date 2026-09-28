@@ -3,6 +3,7 @@
 //! onto the layer.
 
 use crate::brush_engine::brush::{Brush, Target};
+use crate::brush_engine::brush_options::TipOrder;
 use crate::brush_engine::dynamics::{DabVar, FAST_SPEED, PenTilt, direction, tip_orientation};
 use crate::brush_engine::stabilizer::Stabilizer;
 use crate::brush_engine::symmetry::{Copy2, Symmetry};
@@ -244,6 +245,8 @@ pub struct StrokeState {
     prev_sample_time: Option<f64>,
     /// When the airbrush's next dab is due (seconds), if it has one.
     airbrush_due: Option<f64>,
+    /// The next tip of a brush that uses its tips in turn.
+    next_tip: usize,
     /// Every dab's variation as painted, for tests.
     #[cfg(test)]
     pub(crate) painted: Vec<DabVar>,
@@ -284,6 +287,7 @@ impl StrokeState {
             sample_time: None,
             prev_sample_time: None,
             airbrush_due: None,
+            next_tip: 0,
             #[cfg(test)]
             painted: Vec::new(),
         }
@@ -418,16 +422,18 @@ impl StrokeState {
         context: &mut StrokeContext<'_>,
     ) {
         {
-            let dynamic = brush.dynamics.is_active();
             let pending = std::mem::take(&mut self.pending);
-            if dynamic {
+            if brush.varies_per_dab() {
                 let plans: Vec<Plan> = pending
                     .iter()
-                    .map(|d| Plan {
-                        pos: d.pos,
-                        level: pressure_level(from + (p - from) * d.t),
-                        var: self.dab_var(brush, d),
-                        along: d.along,
+                    .map(|d| {
+                        let pressure = from + (p - from) * d.t;
+                        Plan {
+                            pos: d.pos,
+                            level: pressure_level(pressure),
+                            var: self.dab_var(brush, d, pressure),
+                            along: d.along,
+                        }
                     })
                     .collect();
                 self.paint_dynamic(brush, original, plans, context);
@@ -579,9 +585,12 @@ impl StrokeState {
     }
 
     /// One dab's variation: start taper, speed, randomness, tip.
-    fn dab_var(&mut self, brush: &Brush, dab: &Pending) -> DabVar {
+    fn dab_var(&mut self, brush: &Brush, dab: &Pending, pressure: f32) -> DabVar {
         let d = &brush.dynamics;
-        let mut v = DabVar::default();
+        let mut v = DabVar {
+            tip: self.pick_tip(brush, dab, pressure),
+            ..DabVar::default()
+        };
         if d.taper.is_active() && d.taper.start > 0.0 {
             let f = d.taper.factor(dab.along, d.taper.start);
             if d.taper.size {
@@ -617,6 +626,29 @@ impl StrokeState {
             v.hsv = [spread(r.hue), spread(r.saturation), spread(r.value)];
         }
         self.orient(brush, v, dab.dir, dab.t)
+    }
+
+    /// Which of the brush's tips a dab uses.
+    fn pick_tip(&mut self, brush: &Brush, dab: &Pending, pressure: f32) -> u8 {
+        let n = brush.brush_options.tip_count().min(u8::MAX as usize + 1);
+        if n <= 1 {
+            return 0;
+        }
+        let share = |x: f32| ((x * n as f32) as usize).min(n - 1);
+        let tip = match brush.brush_options.tip_order {
+            TipOrder::Sequence => {
+                let tip = self.next_tip % n;
+                self.next_tip = self.next_tip.wrapping_add(1);
+                tip
+            }
+            TipOrder::Random => self.rng.random_range(0..n),
+            TipOrder::Pressure => share(pressure.clamp(0.0, 1.0)),
+            TipOrder::Direction => {
+                let dir = dab.dir.or(self.dir).unwrap_or(0.0);
+                share(dir.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU)
+            }
+        };
+        tip as u8
     }
 
     /// The tip's turn and squash for a dab going in direction `dir`.

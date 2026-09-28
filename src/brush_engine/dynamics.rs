@@ -213,6 +213,8 @@ pub struct DabVar {
     pub orient: [f32; 4],
     /// Colour shift: hue (degrees), saturation and value offsets.
     pub hsv: [f32; 3],
+    /// Which of the brush's tips (see `BrushOptions::tip_count`).
+    pub tip: u8,
 }
 
 impl Default for DabVar {
@@ -222,6 +224,7 @@ impl Default for DabVar {
             strength: 1.0,
             orient: IDENTITY,
             hsv: [0.0; 3],
+            tip: 0,
         }
     }
 }
