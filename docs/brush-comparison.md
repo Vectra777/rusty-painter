@@ -174,6 +174,16 @@ below.
   3.8 ms, taper 5.3 ms, turned and squashed tip 5–6 ms, paper texture
   6.9 ms, hue randomness 8.5 ms, multiply blend 9.1 ms, image tip 14 ms.
 - **Every built-in brush:** under 5 ms for an 80-sample stroke.
+- **After the second round of features** (preset files through wrap-around
+  and importing): the same fixed workloads, counted with `perf stat` in a
+  single-codegen-unit build, run within ±0.4% of the instructions they did
+  before (plain round, turned and squashed, image tip), and +2.7% for a 3 px
+  pixel-art stroke, whose tiny batches feel the per-batch bookkeeping most.
+- **The new features' own cost**, same 60-sample stroke of a 60 px brush
+  (`feature_stroke_60_samples`; plain about 4.6 ms): airbrush resting 50 ms
+  per sample 6.7 ms, dual brush 7.3 ms, wet edges 6.5 ms, colour tip
+  8.5 ms, sketch 8.9 ms, bristle (30 hairs) 11 ms, three image tips 14 ms,
+  hatching 20 ms, ribbon 21 ms.
 
 ## Sources
 

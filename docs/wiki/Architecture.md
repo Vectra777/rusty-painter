@@ -28,7 +28,7 @@ project   brush_engine   selection   tablet
 | `canvas::storage` | `Canvas`, made of `Layer`s, which are made of lazily allocated 64 px tiles. `composite` blends layers for display and export, `pixels` holds the pixel writers that record undo, and `transform` holds affine and perspective moves plus floating selections. |
 | `canvas::history` | Undo history, one per layer. `UndoAction` holds tile snapshots plus changes to the selection, the transform and the layer tree. |
 | `canvas::{fill, gradient, inpaint, liquify, palette, blend, blend_modes}` | Pure pixel algorithms and colour maths. They don't know about the app. |
-| `brush_engine` | Dabs, tips, spacing and pressure (`stroke`), the stabiliser, mirror painting (`symmetry`), and the stroke worker thread. |
+| `brush_engine` | Dabs, tips, spacing and pressure (`stroke`), the stabiliser, mirror painting (`symmetry`), and the stroke worker thread. The engines beside the plain dab: `bristle`, `sketch`, `hatching`, ribbons (`Brush::ribbon`); `dual` (a second tip masking the first), `wet_edge` (watercolour edges when the pen lifts). `preset_file` reads and writes `.rpbrush` files; `import` reads other apps' brushes. |
 | `selection` | Selection shapes and per-pixel masks, how they combine, the magnetic lasso, and transform handles. |
 | `project` | The `.rpainter` format (`encode_project` / `decode_project`) and image export. |
 | `tablet` | Pen samples with pressure, from octotablet (Windows Ink, Wayland). |
@@ -109,12 +109,13 @@ project   brush_engine   selection   tablet
 1. **Start.** `input` calls `PainterApp::start_stroke_with_pressure` (`app/stroke_ops.rs`).
    - This captures a `StrokeSetup`: the canvas `Arc`, the brush, the selection, the thread pool, the layer and the symmetry settings.
    - It hands the setup to `StrokeWorker::begin`.
-2. **Samples.** Each sample goes to the worker thread through `add_stroke_point`, after the ruler snaps it.
+2. **Samples.** Each sample goes to the worker thread through `add_stroke_point`, after the ruler or an assistant snaps it (`app/tools/guides.rs`, `assistants.rs`; a stroke round an ellipse gets extra samples along the curve).
 3. **Dabs.** On the worker:
-   - `StrokeState` spaces the dabs and interpolates pressure.
+   - `StrokeState` spaces the dabs and interpolates pressure. An airbrush brush also gets dabs from the worker's timer while the pen rests (`StrokeState::airbrush`).
    - The stabiliser smooths the path.
-   - `StrokeContext::dabs` expands mirror copies and paints them all as one batch with `Brush`. Tiles are painted in parallel on the pool.
-   - Dabs build up coverage in per-tile `StrokeBuffer`s, which are resolved over the tile as it was before the stroke, so pixels aren't quantised again between dabs.
+   - Brushes whose dabs differ (dynamics, several tips, bristles, sketch, hatching, colour tips) plan each dab (`DabVar`: size, strength, turn, tip, colour); a ribbon brush makes segments instead.
+   - `StrokeContext` expands mirror copies (and, with wrap-around, copies across the canvas edges) and paints them all as one batch with `Brush`. Tiles are painted in parallel on the pool.
+   - Dabs build up coverage in per-tile `StrokeBuffer`s, which are resolved over the tile as it was before the stroke, so pixels aren't quantised again between dabs. A dual brush's second tip builds a mask there too, combined with the coverage when resolving; watercolour edges rework the whole stroke's coverage when the pen lifts.
 4. **Hand-off.** Each frame, `sync_stroke_worker` marks the painted tiles for redraw. When the stroke ends, it pushes the stroke's `UndoAction` onto that layer's history.
 
 ### Undo and redo

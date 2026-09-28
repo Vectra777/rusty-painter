@@ -34,7 +34,10 @@ CI also compiles the library for `aarch64-linux-android`. Android-only code, suc
 | Toolbar buttons and icons | `src/ui/toolbar.rs`, `src/ui/icons.rs` |
 | Touch controls on the canvas | `src/ui/canvas_sliders.rs` |
 | Colours, spacing, sizes | `src/ui/style.rs` (tokens); `src/ui/theme.rs` applies them to egui |
-| Brush rendering | `src/brush_engine/` (`brush.rs` for tips and dabs, `stroke.rs` for spacing and pressure) |
+| Brush rendering | `src/brush_engine/` (`brush.rs` for tips and dabs, `stroke.rs` for spacing and pressure; one module per engine or feature: `bristle`, `sketch`, `hatching`, `dual`, `wet_edge`) |
+| Brush presets and importing | `src/brush_engine/preset_file.rs` (`.rpbrush`), `src/brush_engine/import/` (one module per app), `src/app/brush_io.rs` (the user's library) |
+| Smudge, blur, deform, clone | `src/app/tools/blend.rs` |
+| Ruler and assistants | `src/app/tools/guides.rs`, `src/app/tools/assistants.rs` |
 | A pixel algorithm (fill, gradient, inpaint...) | `src/canvas/<algorithm>.rs`, as a pure function |
 | How layers are blended | `src/canvas/storage/composite.rs`, `src/canvas/blend_modes.rs` |
 | Writing pixels with undo | `src/canvas/storage/pixels.rs` (`paint_mask`, `paint_region`, `map_layer_pixels`, `write_layer_region`) |
