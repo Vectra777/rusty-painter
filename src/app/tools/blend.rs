@@ -3,6 +3,12 @@
 //! soften the paint already on the layer instead of adding colour (like
 //! Clip Studio's Blend tools).
 //!
+//! Each has more modes: Smudge can instead **deform** (push the paint
+//! along, grow, shrink or swirl it, like Krita's deform brush) or
+//! **clone** (paint with the pixels from another place, set with
+//! Ctrl+click); Blur can instead **sharpen** or **adjust** colours (hue,
+//! saturation, brightness) under the brush, like Krita's filter brush.
+//!
 //! Smudge carries a patch of paint along the stroke: every dab mixes the
 //! carried paint into the canvas under the tip, then picks up some of the
 //! result (how much it keeps is the smudge length). With a colour rate it
@@ -29,6 +35,28 @@ pub struct BlendToolSettings {
     /// Smudge: how much of the brush colour is mixed into the carried paint
     /// per brush width travelled (0 = a plain smudge, 1 = all brush colour).
     pub color_rate: f32,
+    /// What the Smudge tool does.
+    pub smudge_mode: SmudgeMode,
+    /// What the Blur tool does.
+    pub filter_mode: FilterMode,
+    /// Deform: how it moves the paint, and how far (0..1).
+    pub deform_mode: DeformMode,
+    pub deform_amount: f32,
+    /// Sharpen: how much edges are strengthened (0..2).
+    pub sharpen_amount: f32,
+    /// Adjust: hue turn (degrees), saturation and brightness change (-1..1).
+    pub adjust_hue: f32,
+    pub adjust_saturation: f32,
+    pub adjust_value: f32,
+    /// Clone: where to copy from (canvas), set with Ctrl+click.
+    pub clone_source: Option<Vec2>,
+    /// Clone: keep the same offset from stroke to stroke (else each stroke
+    /// starts again from the source).
+    pub clone_aligned: bool,
+    /// Clone: copy what's visible (all layers) rather than this layer.
+    pub clone_merged: bool,
+    /// Clone: the offset kept while aligned, from the first stroke.
+    clone_offset: Option<Vec2>,
 }
 
 impl Default for BlendToolSettings {
@@ -37,8 +65,102 @@ impl Default for BlendToolSettings {
             smudge_length: 0.8,
             blur_size: 0.35,
             color_rate: 0.0,
+            smudge_mode: SmudgeMode::Smudge,
+            filter_mode: FilterMode::Blur,
+            deform_mode: DeformMode::Push,
+            deform_amount: 0.5,
+            sharpen_amount: 0.8,
+            adjust_hue: 30.0,
+            adjust_saturation: 0.0,
+            adjust_value: 0.0,
+            clone_source: None,
+            clone_aligned: true,
+            clone_merged: false,
+            clone_offset: None,
         }
     }
+}
+
+impl BlendToolSettings {
+    /// Set where Clone copies from (a new source forgets the old offset).
+    pub fn set_clone_source(&mut self, at: Vec2) {
+        self.clone_source = Some(at);
+        self.clone_offset = None;
+    }
+}
+
+/// What the Smudge tool does.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SmudgeMode {
+    /// Carry the paint along (and mix in the brush colour).
+    #[default]
+    Smudge,
+    /// Move the pixels under the brush (see [`DeformMode`]).
+    Deform,
+    /// Paint with the pixels from the clone source.
+    Clone,
+}
+
+/// What the Blur tool does.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum FilterMode {
+    #[default]
+    Blur,
+    /// Strengthen edges (an unsharp mask).
+    Sharpen,
+    /// Shift hue, saturation and brightness.
+    Adjust,
+}
+
+/// How Deform moves the paint.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum DeformMode {
+    /// Along with the brush.
+    #[default]
+    Push,
+    /// Out from the middle (magnify).
+    Grow,
+    /// In towards the middle.
+    Shrink,
+    /// Round the middle, counter-clockwise or clockwise.
+    SwirlLeft,
+    SwirlRight,
+}
+
+impl DeformMode {
+    pub const ALL: [DeformMode; 5] = [
+        Self::Push,
+        Self::Grow,
+        Self::Shrink,
+        Self::SwirlLeft,
+        Self::SwirlRight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Push => "Push",
+            Self::Grow => "Grow",
+            Self::Shrink => "Shrink",
+            Self::SwirlLeft => "Swirl ↺",
+            Self::SwirlRight => "Swirl ↻",
+        }
+    }
+}
+
+/// What one blend stroke does, fixed when it starts.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum BlendKind {
+    Smudge,
+    Blur,
+    Sharpen(f32),
+    Adjust([f32; 3]),
+    Deform(DeformMode, f32),
+    /// Copy from `offset` pixels away (whole pixels), from all layers when
+    /// `merged`.
+    Clone {
+        offset: (i32, i32),
+        merged: bool,
+    },
 }
 
 /// A patch of carried paint (linear premultiplied, 0..1 per channel).
@@ -49,7 +171,9 @@ struct Carry {
 
 pub struct BlendStroke {
     layer_id: LayerId,
-    smudge: bool,
+    kind: BlendKind,
+    /// The way the brush last moved (unit), for Deform's push.
+    dir: Vec2,
     /// Tiles as they were before the stroke first changed them.
     before: HashMap<(i32, i32), Vec<Color32>>,
     last: Option<Vec2>,
@@ -86,6 +210,40 @@ fn to_c(v: [f32; 4]) -> Color32 {
         c(v[1]),
         c(v[2]),
         a,
+    ))
+}
+
+/// `px` (a `side`×`side` patch) at `p` (texel centres at +0.5), bilinear;
+/// outside it reads its nearest edge.
+fn sample_bilinear(px: &[[f32; 4]], side: usize, p: Vec2) -> [f32; 4] {
+    let max = (side - 1) as f32;
+    let (x, y) = ((p.x - 0.5).clamp(0.0, max), (p.y - 0.5).clamp(0.0, max));
+    let (ix, iy) = (x as usize, y as usize);
+    let (fx, fy) = (x - ix as f32, y - iy as f32);
+    let (jx, jy) = ((ix + 1).min(side - 1), (iy + 1).min(side - 1));
+    let at = |x: usize, y: usize| px[y * side + x];
+    let (a, b, c, d) = (at(ix, iy), at(jx, iy), at(ix, jy), at(jx, jy));
+    std::array::from_fn(|k| {
+        let top = a[k] + (b[k] - a[k]) * fx;
+        let bottom = c[k] + (d[k] - c[k]) * fx;
+        top + (bottom - top) * fy
+    })
+}
+
+/// A pixel (linear premultiplied) with its hue turned by `hsv[0]` degrees
+/// and its saturation and brightness moved by `hsv[1]`, `hsv[2]`.
+fn adjust_hsv(v: [f32; 4], hsv: [f32; 3]) -> [f32; 4] {
+    let c = to_c(v);
+    if c.a() == 0 {
+        return v;
+    }
+    let srgb = crate::brush_engine::dynamics::shift_hsv(c, hsv);
+    let byte = |x: f32| (x * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    to_f(Color32::from_rgba_unmultiplied(
+        byte(srgb[0]),
+        byte(srgb[1]),
+        byte(srgb[2]),
+        c.a(),
     ))
 }
 
@@ -157,13 +315,45 @@ impl PainterApp {
             return;
         }
         let layer_id = layer.id;
+        let b = &mut self.workspace.blend;
+        let kind = match (self.active_tool, b.smudge_mode, b.filter_mode) {
+            (Tool::Smudge, SmudgeMode::Smudge, _) => BlendKind::Smudge,
+            (Tool::Smudge, SmudgeMode::Deform, _) => {
+                BlendKind::Deform(b.deform_mode, b.deform_amount.clamp(0.0, 1.0))
+            }
+            (Tool::Smudge, SmudgeMode::Clone, _) => {
+                let Some(source) = b.clone_source else {
+                    // Nothing to copy from yet: Ctrl+click sets it.
+                    return;
+                };
+                let offset = match (b.clone_aligned, b.clone_offset) {
+                    (true, Some(offset)) => offset,
+                    _ => (source - pos).round(),
+                };
+                if b.clone_aligned {
+                    b.clone_offset = Some(offset);
+                }
+                BlendKind::Clone {
+                    offset: (offset.x as i32, offset.y as i32),
+                    merged: b.clone_merged,
+                }
+            }
+            (_, _, FilterMode::Blur) => BlendKind::Blur,
+            (_, _, FilterMode::Sharpen) => BlendKind::Sharpen(b.sharpen_amount.clamp(0.0, 2.0)),
+            (_, _, FilterMode::Adjust) => BlendKind::Adjust([
+                b.adjust_hue.clamp(-180.0, 180.0),
+                b.adjust_saturation.clamp(-1.0, 1.0),
+                b.adjust_value.clamp(-1.0, 1.0),
+            ]),
+        };
         self.release_canvas();
         // Like a brush stroke: a second press ends the running one first.
         self.blend_release();
         self.mark_action();
         self.brush_state.blend_stroke = Some(BlendStroke {
             layer_id,
-            smudge: matches!(self.active_tool, Tool::Smudge),
+            kind,
+            dir: Vec2::ZERO,
             before: HashMap::new(),
             last: Some(pos),
             last_pressure: pressure,
@@ -203,6 +393,7 @@ impl PainterApp {
         stroke.travelled = length - (t - spacing);
         stroke.last = Some(pos);
         stroke.last_pressure = pressure;
+        stroke.dir = dir;
         for (p, pr) in dabs {
             self.blend_mirrored(p, pr);
         }
@@ -338,7 +529,81 @@ impl PainterApp {
             .into_iter()
             .map(to_f)
             .collect();
-        let target: Vec<[f32; 4]> = if stroke.smudge {
+        // Deform moves the pixels themselves: each takes its colour from
+        // where the displacement says, at full weight (the mask sets how
+        // far it moves).
+        let mut weights_are_mask = true;
+        let target: Vec<[f32; 4]> = if let BlendKind::Deform(mode, amount) = stroke.kind {
+            weights_are_mask = false;
+            let dir = if copy == 0 {
+                stroke.dir
+            } else {
+                let s = &stroke.symmetry;
+                s.map(&stroke.copies[copy - 1], s.center + stroke.dir) - s.center
+            };
+            let step = (diameter * self.brush_state.brush.brush_options.spacing / 100.0).max(1.0);
+            let margin = (r * amount * 0.6).max(step).ceil() as i32 + 2;
+            let big_side = side + 2 * margin as usize;
+            let big: Vec<[f32; 4]> = self
+                .canvas
+                .render_reference(Some(idx), x0 - margin, y0 - margin, big_side, big_side)
+                .into_iter()
+                .map(to_f)
+                .collect();
+            let local_center = center - Vec2::new(x0 as f32, y0 as f32);
+            (0..side * side)
+                .map(|i| {
+                    let m = mask[i];
+                    if m <= 0.0 {
+                        return under[i];
+                    }
+                    let p = Vec2::new((i % side) as f32 + 0.5, (i / side) as f32 + 0.5);
+                    let off = p - local_center;
+                    let src = match mode {
+                        // As far as the brush moved since the last dab: at
+                        // full amount the paint keeps up with the brush.
+                        DeformMode::Push => p - dir * (amount * m * step),
+                        DeformMode::Grow => local_center + off * (1.0 - amount * m * 0.5),
+                        DeformMode::Shrink => local_center + off * (1.0 + amount * m * 0.5),
+                        DeformMode::SwirlLeft | DeformMode::SwirlRight => {
+                            let turn = amount * m * 0.8;
+                            let a = if mode == DeformMode::SwirlLeft {
+                                turn
+                            } else {
+                                -turn
+                            };
+                            let (s, c) = a.sin_cos();
+                            local_center + Vec2::new(c * off.x + s * off.y, -s * off.x + c * off.y)
+                        }
+                    };
+                    sample_bilinear(&big, big_side, src + Vec2::splat(margin as f32))
+                })
+                .collect()
+        } else if let BlendKind::Clone { offset, merged } = stroke.kind {
+            let source = if merged { None } else { Some(idx) };
+            self.canvas
+                .render_reference(source, x0 + offset.0, y0 + offset.1, side, side)
+                .into_iter()
+                .map(to_f)
+                .collect()
+        } else if let BlendKind::Sharpen(amount) = stroke.kind {
+            let radius = ((r * blur_size).round() as usize).max(1);
+            let soft = box_blur(&under, side, radius);
+            under
+                .iter()
+                .zip(&soft)
+                .map(|(u, b)| {
+                    let a = u[3];
+                    let mut v = *u;
+                    for k in 0..3 {
+                        v[k] = (u[k] + (u[k] - b[k]) * amount).clamp(0.0, a);
+                    }
+                    v
+                })
+                .collect()
+        } else if let BlendKind::Adjust(hsv) = stroke.kind {
+            under.iter().map(|&u| adjust_hsv(u, hsv)).collect()
+        } else if stroke.kind == BlendKind::Smudge {
             // The carried paint, resized if pressure changed the tip size.
             if stroke.carries.len() <= copy {
                 stroke.carries.resize_with(copy + 1, || None);
@@ -382,7 +647,14 @@ impl PainterApp {
         let mut result = Vec::with_capacity(side * side);
         let mut changed = false;
         for i in 0..side * side {
-            let (u, t, m) = (under[i], target[i], mask[i]);
+            let (u, t) = (under[i], target[i]);
+            let m = if weights_are_mask {
+                mask[i]
+            } else if mask[i] > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
             let mut v = [0.0; 4];
             for c in 0..4 {
                 v[c] = u[c] + (t[c] - u[c]) * m;
@@ -417,6 +689,43 @@ impl PainterApp {
             Some(&mut stroke.before),
         );
         self.mark_rect_damage([x0, y0, x0 + side as i32, y0 + side as i32]);
+    }
+}
+
+/// Clone: a cross where it copies from (following the brush during a
+/// stroke).
+pub(crate) fn draw_clone_source(
+    app: &PainterApp,
+    painter: &eframe::egui::Painter,
+    to_screen: &dyn Fn(Vec2) -> eframe::egui::Pos2,
+) {
+    use eframe::egui::{Stroke, vec2};
+    let b = &app.workspace.blend;
+    if !matches!(app.active_tool, Tool::Smudge) || b.smudge_mode != SmudgeMode::Clone {
+        return;
+    }
+    let at = match (&app.brush_state.blend_stroke, app.viewport.cursor_canvas) {
+        (
+            Some(BlendStroke {
+                kind: BlendKind::Clone { offset, .. },
+                ..
+            }),
+            Some(cursor),
+        ) => cursor + Vec2::new(offset.0 as f32, offset.1 as f32),
+        _ => match b.clone_source {
+            Some(source) => source,
+            None => return,
+        },
+    };
+    let c = to_screen(at);
+    for (width, color) in [
+        (3.0_f32, Color32::from_black_alpha(160)),
+        (1.0_f32, Color32::WHITE),
+    ] {
+        let stroke = Stroke::new(width, color);
+        painter.line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], stroke);
+        painter.line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], stroke);
+        painter.circle_stroke(c, 5.0, stroke);
     }
 }
 
@@ -596,5 +905,185 @@ mod mix_tests {
             red,
             "smudging one colour changes nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::{DeformMode, FilterMode, SmudgeMode};
+    use crate::canvas::Canvas;
+    use eframe::egui::{Color32, Vec2};
+
+    /// A 128×64 layer: `paint(x, y)` for each pixel.
+    fn app(paint: impl Fn(i32, i32) -> Color32) -> crate::PainterApp {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        for tx in 0..2 {
+            let tile = (0..64 * 64)
+                .map(|i| paint(tx * 64 + i % 64, i / 64))
+                .collect();
+            app.canvas_mut().set_layer_tile_data(1, tx, 0, tile);
+        }
+        let o = &mut app.brush_state.brush.brush_options;
+        o.diameter = 30.0;
+        o.hardness = 100.0;
+        o.flow = 100.0;
+        o.opacity = 1.0;
+        o.pressure_size = false;
+        o.spacing = 10.0;
+        app
+    }
+
+    fn px(app: &crate::PainterApp, x: i32, y: i32) -> Color32 {
+        app.canvas
+            .get_layer_tile_data(1, x / 64, y / 64)
+            .map_or(Color32::TRANSPARENT, |t| {
+                t[((y % 64) * 64 + x % 64) as usize]
+            })
+    }
+
+    fn all(app: &crate::PainterApp) -> Vec<Color32> {
+        (0..64)
+            .flat_map(|y| (0..128).map(move |x| (x, y)))
+            .map(|(x, y)| px(app, x, y))
+            .collect()
+    }
+
+    fn stroke(app: &mut crate::PainterApp, from: Vec2, to: Vec2) {
+        app.blend_press(from, 1.0);
+        for i in 1..=10 {
+            app.blend_drag(from + (to - from) * (i as f32 / 10.0), 1.0);
+        }
+        app.blend_release();
+    }
+
+    fn undo(app: &mut crate::PainterApp) {
+        let mut tool = app.active_tool;
+        let canvas = std::sync::Arc::get_mut(&mut app.canvas).unwrap();
+        app.layer_state
+            .history
+            .undo(canvas, &mut app.selection_manager, &mut tool);
+    }
+
+    fn dot(x: i32, y: i32) -> Color32 {
+        if (x - 64).pow(2) + (y - 32).pow(2) <= 36 {
+            Color32::BLACK
+        } else {
+            Color32::WHITE
+        }
+    }
+
+    fn dark(app: &crate::PainterApp) -> usize {
+        all(app).iter().filter(|c| c.r() < 128).count()
+    }
+
+    #[test]
+    fn deform_grows_shrinks_and_undoes_exactly() {
+        let deformed = |mode, amount| {
+            let mut a = app(dot);
+            a.active_tool = crate::app::tools::Tool::Smudge;
+            a.workspace.blend.smudge_mode = SmudgeMode::Deform;
+            a.workspace.blend.deform_mode = mode;
+            a.workspace.blend.deform_amount = amount;
+            let c = Vec2::new(64.0, 32.0);
+            stroke(&mut a, c, c + Vec2::new(0.5, 0.0));
+            a
+        };
+        let before = dark(&app(dot));
+        let still = deformed(DeformMode::Grow, 0.0);
+        assert_eq!(all(&still), all(&app(dot)), "no amount, no change");
+        assert!(dark(&deformed(DeformMode::Grow, 0.8)) > before * 3 / 2);
+        assert!(dark(&deformed(DeformMode::Shrink, 0.8)) < before * 2 / 3);
+        let mut grown = deformed(DeformMode::Grow, 0.8);
+        undo(&mut grown);
+        assert_eq!(all(&grown), all(&app(dot)));
+    }
+
+    #[test]
+    fn deform_pushes_the_paint_along_the_stroke() {
+        // A black bar at x 40..44, pushed right.
+        let bar = |x: i32, _| {
+            if (40..44).contains(&x) {
+                Color32::BLACK
+            } else {
+                Color32::WHITE
+            }
+        };
+        let mut a = app(bar);
+        a.active_tool = crate::app::tools::Tool::Smudge;
+        a.workspace.blend.smudge_mode = SmudgeMode::Deform;
+        a.workspace.blend.deform_mode = DeformMode::Push;
+        a.workspace.blend.deform_amount = 1.0;
+        stroke(&mut a, Vec2::new(30.0, 32.0), Vec2::new(90.0, 32.0));
+        // At full amount the bar keeps up with the brush: from 40 to 100.
+        let dark: Vec<i32> = (30..128).filter(|&x| px(&a, x, 32).r() < 128).collect();
+        assert!(
+            !dark.is_empty() && dark.iter().all(|&x| (96..108).contains(&x)),
+            "{dark:?}"
+        );
+        // Rows away from the stroke keep the bar where it was.
+        assert!(px(&a, 42, 2).r() < 50 && px(&a, 60, 2).r() > 200);
+    }
+
+    #[test]
+    fn clone_copies_the_source_pixel_for_pixel() {
+        let pattern =
+            |x: i32, y: i32| Color32::from_rgb((x * 7 % 256) as u8, (y * 11 % 256) as u8, 90);
+        let mut a = app(pattern);
+        a.active_tool = crate::app::tools::Tool::Smudge;
+        a.workspace.blend.smudge_mode = SmudgeMode::Clone;
+        // Nothing happens before a source is set.
+        stroke(&mut a, Vec2::new(90.0, 32.0), Vec2::new(100.0, 32.0));
+        assert_eq!(a.layer_state.history.push_count(), 0);
+        a.workspace.blend.set_clone_source(Vec2::new(30.0, 32.0));
+        stroke(&mut a, Vec2::new(90.0, 32.0), Vec2::new(100.0, 32.0));
+        for x in 88..102 {
+            let (got, want) = (px(&a, x, 32), pattern(x - 60, 32));
+            for (g, w) in got.to_array().iter().zip(want.to_array()) {
+                assert!(g.abs_diff(w) <= 1, "x {x}: {got:?} vs {want:?}");
+            }
+        }
+        // Aligned: the next stroke keeps the offset.
+        stroke(&mut a, Vec2::new(70.0, 20.0), Vec2::new(71.0, 20.0));
+        let (got, want) = (px(&a, 70, 20), pattern(10, 20));
+        assert!(got.r().abs_diff(want.r()) <= 1, "{got:?} vs {want:?}");
+        undo(&mut a);
+        undo(&mut a);
+        assert_eq!(all(&a), all(&app(pattern)));
+    }
+
+    #[test]
+    fn sharpen_strengthens_an_edge_and_adjust_turns_the_hue() {
+        let edge = |x: i32, _| {
+            if x < 64 {
+                Color32::from_gray(90)
+            } else {
+                Color32::from_gray(170)
+            }
+        };
+        let mut a = app(edge);
+        a.active_tool = crate::app::tools::Tool::Blur;
+        a.workspace.blend.filter_mode = FilterMode::Sharpen;
+        a.workspace.blend.sharpen_amount = 1.5;
+        stroke(&mut a, Vec2::new(64.0, 20.0), Vec2::new(64.0, 44.0));
+        assert!(
+            px(&a, 62, 32).r() < 90,
+            "darker beside the edge: {:?}",
+            px(&a, 62, 32)
+        );
+        assert!(
+            px(&a, 65, 32).r() > 170,
+            "lighter beside it: {:?}",
+            px(&a, 65, 32)
+        );
+
+        let red = |_, _| Color32::from_rgb(220, 30, 30);
+        let mut a = app(red);
+        a.active_tool = crate::app::tools::Tool::Blur;
+        a.workspace.blend.filter_mode = FilterMode::Adjust;
+        a.workspace.blend.adjust_hue = 120.0;
+        stroke(&mut a, Vec2::new(40.0, 32.0), Vec2::new(80.0, 32.0));
+        let c = px(&a, 60, 32);
+        assert!(c.g() > 150 && c.r() < 80, "red turned green: {c:?}");
     }
 }

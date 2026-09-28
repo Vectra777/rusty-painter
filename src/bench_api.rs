@@ -140,6 +140,27 @@ pub fn blend_stroke(app: &mut PainterApp, path: &[(Vec2, f32)], smudge: bool) {
     app.blend_release();
 }
 
+/// The smudge / blur tools' modes: Smudge becomes Deform (`deform`) or
+/// Clone from 100 px to the left (`clone`); Blur becomes Sharpen.
+pub fn set_blend_modes(app: &mut PainterApp, deform: bool, clone: bool, sharpen: bool) {
+    use crate::app::tools::blend::{FilterMode, SmudgeMode};
+    let b = &mut app.workspace.blend;
+    b.smudge_mode = match (deform, clone) {
+        (true, _) => SmudgeMode::Deform,
+        (_, true) => SmudgeMode::Clone,
+        _ => SmudgeMode::Smudge,
+    };
+    b.filter_mode = if sharpen {
+        FilterMode::Sharpen
+    } else {
+        FilterMode::Blur
+    };
+    let centre = Vec2::new(app.canvas.width() as f32, app.canvas.height() as f32) * 0.5;
+    app.workspace
+        .blend
+        .set_clone_source(centre - Vec2::new(100.0, 0.0));
+}
+
 pub fn set_symmetry(app: &mut PainterApp, mode: SymmetryMode, count: u32, mirrored: bool) {
     app.workspace.symmetry.mode = mode;
     app.workspace.symmetry.count = count;

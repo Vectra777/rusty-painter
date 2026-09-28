@@ -91,7 +91,7 @@ The full list is in **Help → Keyboard Shortcuts**, labelled for your keyboard 
 
 - **Paint**: left drag (pen pressure where supported). `B` brush, `E` eraser, `[` / `]` size.
 - **View**: `Space` + drag or right drag to pan, middle drag to rotate, wheel to zoom, `Ctrl+0` fit, `Ctrl+1` actual pixels, `H` flip. Two fingers pan, pinch and twist.
-- **Tools**: `M` rectangle/ellipse select, `L` lasso (again: polygon, magnetic), `Q` magic wand, `U` shapes, `Shift+G` gradient, `V`/`T` transform, `I` eyedropper, `G` fill (again: enclose, lasso delete), `W` liquify, `S` smudge/blur, `R` ruler.
+- **Tools**: `M` rectangle/ellipse select, `L` lasso (again: polygon, magnetic), `Q` magic wand, `U` shapes, `Shift+G` gradient, `V`/`T` transform, `I` eyedropper, `G` fill (again: enclose, lasso delete), `W` liquify, `S` smudge/blur (smudge also deforms or clones: Ctrl+click the clone source; blur also sharpens or adjusts colour), `R` ruler.
 - **Edit**: `Ctrl+Z` undo, `Ctrl+Shift+Z` / `Ctrl+Y` redo (one history for the whole document), `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut / copy / paste (pastes as a new layer, ready to transform; images from other programs too), `Ctrl+Shift+C` copy merged, `Ctrl+J` duplicate layer, `Ctrl+A` select all, `Ctrl+D` / `Esc` deselect, `Ctrl+Shift+I` invert, `Delete` erase the selected pixels, `Shift+F5` content-aware fill, `Enter` / `Esc` apply / cancel a transform.
 - **File**: `Ctrl+N` new, `Ctrl+O` open, `Ctrl+S` save, `Ctrl+E` export, `Ctrl+Shift+O` import an image as a layer, or drop image files on the window (on the Palette window, a dropped picture gives its colours instead).
 

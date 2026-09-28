@@ -418,6 +418,7 @@ impl PainterApp {
         crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
         crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| map.to_screen(p));
+        crate::app::tools::blend::draw_clone_source(self, ui.painter(), &|p| map.to_screen(p));
         // A hand over the guide handles: they can be dragged.
         if let Some(canvas) = self.viewport.cursor_canvas
             && (self.guides_dragging() || self.over_guide_handle(canvas))

@@ -320,6 +320,13 @@ fn handle_primary_press(
         Tool::Eyedropper => app.pick_color(canvas_pos.0),
         Tool::Fill => app.fill_press(canvas_pos.0),
         Tool::Liquify => app.liquify_press(canvas_pos.0),
+        Tool::Smudge
+            if app.workspace.blend.smudge_mode == crate::app::tools::blend::SmudgeMode::Clone
+                && response.ctx.input(|i| i.modifiers.command) =>
+        {
+            // Ctrl+click: where to clone from.
+            app.workspace.blend.set_clone_source(canvas_pos.0);
+        }
         Tool::Smudge | Tool::Blur => app.blend_press(raw, pressure),
         Tool::Shape(kind) => app.shape_press(kind, raw),
         Tool::Gradient => app.gradient_press(raw),

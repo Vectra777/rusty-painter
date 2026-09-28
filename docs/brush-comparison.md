@@ -51,7 +51,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
 | Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ✅ hairs fan out and run dry |
 | Decoration / ribbon brushes | ✅ | ✅ | ✅ | ✅ colour tips, ribbons |
-| Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ⚠️ sketch, hatching |
+| Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ✅ sketch, hatching, deform, sharpen/adjust, clone |
 | Smudge and blur tools | ✅ | ✅ | ✅ | ✅ |
 
 ## Stroke help and presets
@@ -123,7 +123,10 @@ below.
   points of the stroke nearby with fine lines; hatching paints parallel
   lines pinned to the canvas, cross-hatching as you press harder. Presets:
   Sketchy Pencil, Cross Hatch.
-- [ ] **Deform, filter and clone brushes.**
+- [x] **Deform, filter and clone brushes.** The Smudge tool can also
+  deform (push, grow, shrink, swirl) or clone (Ctrl+click the source;
+  aligned or not, this layer or all); the Blur tool can also sharpen or
+  adjust hue, saturation and brightness under the brush.
 - [ ] **Assistants:** vanishing point, perspective, ellipse, concentric.
 - [ ] **Wrap-around painting** for seamless tiles.
 - [ ] **Importing other apps' brushes:** GIMP (`.gbr`, `.gih`), Photoshop

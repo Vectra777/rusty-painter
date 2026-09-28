@@ -126,8 +126,50 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
 /// Smudge / Blur: the brush's size, strength (flow) and softness, plus the
 /// tool's own setting. The rest (spacing, pressure...) is in the brush panel.
 fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
+    use crate::app::tools::blend::{DeformMode, FilterMode, SmudgeMode};
     let smudge = matches!(app.active_tool, Tool::Smudge);
-    tool_title(ui, if smudge { "Smudge" } else { "Blur" });
+    let (smudge_mode, filter_mode) = (
+        app.workspace.blend.smudge_mode,
+        app.workspace.blend.filter_mode,
+    );
+    tool_title(
+        ui,
+        match (smudge, smudge_mode, filter_mode) {
+            (true, SmudgeMode::Smudge, _) => "Smudge",
+            (true, SmudgeMode::Deform, _) => "Deform",
+            (true, SmudgeMode::Clone, _) => "Clone",
+            (false, _, FilterMode::Blur) => "Blur",
+            (false, _, FilterMode::Sharpen) => "Sharpen",
+            (false, _, FilterMode::Adjust) => "Adjust",
+        },
+    );
+    {
+        let b = &mut app.workspace.blend;
+        if smudge {
+            segmented(
+                ui,
+                &mut b.smudge_mode,
+                &[
+                    (SmudgeMode::Smudge, "Smudge"),
+                    (SmudgeMode::Deform, "Deform"),
+                    (SmudgeMode::Clone, "Clone"),
+                ],
+                true,
+            );
+        } else {
+            segmented(
+                ui,
+                &mut b.filter_mode,
+                &[
+                    (FilterMode::Blur, "Blur"),
+                    (FilterMode::Sharpen, "Sharpen"),
+                    (FilterMode::Adjust, "Adjust"),
+                ],
+                true,
+            );
+        }
+    }
+    vdivider(ui);
     let o = &mut app.brush_state.brush.brush_options;
     let size_changed = bar_slider(
         ui,
@@ -164,42 +206,124 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     );
     vdivider(ui);
     let b = &mut app.workspace.blend;
-    if smudge {
-        bar_slider(
-            ui,
-            "Length",
-            100.0,
-            crate::ui::widgets::reset(&mut b.smudge_length, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
-            }),
-        );
-        ui.add_space(6.0);
-        bar_slider(
-            ui,
-            "Colour",
-            80.0,
-            crate::ui::widgets::reset(&mut b.color_rate, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
-            }),
-        );
-    } else {
-        bar_slider(
-            ui,
-            "Blur size",
-            100.0,
-            crate::ui::widgets::reset(&mut b.blur_size, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.05..=1.0))
-            }),
-        );
-    }
+    let hint = match (smudge, b.smudge_mode, b.filter_mode) {
+        (true, SmudgeMode::Smudge, _) => {
+            bar_slider(
+                ui,
+                "Length",
+                100.0,
+                crate::ui::widgets::reset(&mut b.smudge_length, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                }),
+            );
+            ui.add_space(6.0);
+            bar_slider(
+                ui,
+                "Colour",
+                80.0,
+                crate::ui::widgets::reset(&mut b.color_rate, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                }),
+            );
+            "Drag to smear the paint  ·  Length: how far colour is carried  ·  Colour above 0: a wet brush mixing in the brush colour"
+        }
+        (true, SmudgeMode::Deform, _) => {
+            egui::ComboBox::from_id_salt("deform_mode")
+                .selected_text(b.deform_mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in DeformMode::ALL {
+                        ui.selectable_value(&mut b.deform_mode, mode, mode.label());
+                    }
+                });
+            ui.add_space(6.0);
+            bar_slider(
+                ui,
+                "Amount",
+                100.0,
+                crate::ui::widgets::reset(&mut b.deform_amount, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                }),
+            );
+            "Push the paint along, grow or shrink it from the middle, or swirl it round"
+        }
+        (true, SmudgeMode::Clone, _) => {
+            ui.checkbox(&mut b.clone_aligned, "Aligned")
+                .on_hover_text("Keep the same offset from stroke to stroke");
+            ui.checkbox(&mut b.clone_merged, "All layers")
+                .on_hover_text("Copy what's visible, not only this layer");
+            if b.clone_source.is_none() {
+                "Ctrl+click where to copy from, then paint"
+            } else {
+                "Paint with the pixels from the source  ·  Ctrl+click to move it"
+            }
+        }
+        (false, _, FilterMode::Blur) => {
+            bar_slider(
+                ui,
+                "Blur size",
+                100.0,
+                crate::ui::widgets::reset(&mut b.blur_size, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.05..=1.0))
+                }),
+            );
+            "Paint over edges to soften them  ·  uses the brush's spacing & pressure"
+        }
+        (false, _, FilterMode::Sharpen) => {
+            bar_slider(
+                ui,
+                "Amount",
+                100.0,
+                crate::ui::widgets::reset(&mut b.sharpen_amount, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=2.0))
+                }),
+            );
+            ui.add_space(6.0);
+            bar_slider(
+                ui,
+                "Radius",
+                80.0,
+                crate::ui::widgets::reset(&mut b.blur_size, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.05..=1.0))
+                }),
+            );
+            "Paint over details to crisp them up"
+        }
+        (false, _, FilterMode::Adjust) => {
+            bar_slider(
+                ui,
+                "Hue",
+                90.0,
+                crate::ui::widgets::reset(&mut b.adjust_hue, |v| {
+                    egui::Slider::new(v, -180.0..=180.0)
+                        .max_decimals(0)
+                        .suffix("°")
+                }),
+            );
+            ui.add_space(6.0);
+            bar_slider(
+                ui,
+                "Saturation",
+                90.0,
+                crate::ui::widgets::reset(&mut b.adjust_saturation, |v| {
+                    egui::Slider::new(v, -1.0..=1.0).max_decimals(2)
+                }),
+            );
+            ui.add_space(6.0);
+            bar_slider(
+                ui,
+                "Brightness",
+                90.0,
+                crate::ui::widgets::reset(&mut b.adjust_value, |v| {
+                    egui::Slider::new(v, -1.0..=1.0).max_decimals(2)
+                }),
+            );
+            "Paint to shift the colours under the brush"
+        }
+    };
     if size_changed {
         app.brush_state.brush.is_changed = true;
     }
-    if smudge {
-        "Drag to smear the paint  ·  Length: how far colour is carried  ·  Colour above 0: a wet brush mixing in the brush colour"
-    } else {
-        "Paint over edges to soften them  ·  uses the brush's spacing & pressure"
-    }
+    hint
 }
 
 /// Gradient shape, colours, repetition, opacity, apply/cancel. `compact`

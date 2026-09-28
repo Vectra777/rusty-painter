@@ -109,6 +109,33 @@ fn painting(c: &mut Criterion) {
     );
     bench(
         &mut g,
+        "deform_60_samples_80px",
+        |a| {
+            b::set_brush(a, 80.0);
+            b::set_blend_modes(a, true, false, false);
+        },
+        |a| b::blend_stroke(a, &short, true),
+    );
+    bench(
+        &mut g,
+        "clone_60_samples_80px",
+        |a| {
+            b::set_brush(a, 80.0);
+            b::set_blend_modes(a, false, true, false);
+        },
+        |a| b::blend_stroke(a, &short, true),
+    );
+    bench(
+        &mut g,
+        "sharpen_60_samples_80px",
+        |a| {
+            b::set_brush(a, 80.0);
+            b::set_blend_modes(a, false, false, true);
+        },
+        |a| b::blend_stroke(a, &short, false),
+    );
+    bench(
+        &mut g,
         "eyedropper_x100",
         |_| {},
         |a| {
