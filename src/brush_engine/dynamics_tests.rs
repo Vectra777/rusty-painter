@@ -1613,3 +1613,45 @@ fn a_sketch_brush_webs_between_passes() {
     // Repeatable with the same seed.
     assert!(pixels(&stroke_with_pressure(&mut sketch.clone(), &zigzag)) == pixels(&webbed));
 }
+
+/// Dabs at `centers` (each on its own), with wrap-around or not.
+fn dabs_at(centers: &[Vec2], wrap: bool) -> Canvas {
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut brush = Brush::new(30.0, 50.0, Color32::BLACK, 10.0);
+    {
+        let mut ctx =
+            StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles).with_wrap(wrap);
+        for &c in centers {
+            let mut stroke = StrokeState::with_seed(1);
+            stroke.add_sample(&mut brush, c, 1.0, Some(0.0), &mut ctx);
+            stroke.finish(&mut brush, &mut ctx);
+        }
+    }
+    canvas
+}
+
+#[test]
+fn with_wrap_around_a_dab_past_an_edge_comes_in_at_the_other() {
+    let (w, h) = (W as f32, H as f32);
+    // Across the right edge: the same as its two halves painted plainly.
+    let wrapped = dabs_at(&[Vec2::new(w - 5.0, 40.0)], true);
+    let halves = dabs_at(&[Vec2::new(w - 5.0, 40.0), Vec2::new(-5.0, 40.0)], false);
+    assert!(pixels(&wrapped) == pixels(&halves));
+    assert!(alpha(&wrapped, 3, 40) > 200, "came in on the left");
+    // A corner reaches all four corners.
+    let corner = dabs_at(&[Vec2::new(2.0, 2.0)], true);
+    for (x, y) in [(0, 0), (W - 1, 0), (0, H - 1), (W - 1, H - 1)] {
+        assert!(alpha(&corner, x, y) > 100, "({x}, {y})");
+    }
+    // Far off the canvas: whole canvases away, the same dab.
+    let far = dabs_at(&[Vec2::new(2.0 * w + 50.0, -3.0 * h + 60.0)], true);
+    let home = dabs_at(&[Vec2::new(50.0, 60.0)], true);
+    assert!(pixels(&far) == pixels(&home));
+    // Without wrap-around nothing comes round.
+    let plain = dabs_at(&[Vec2::new(w - 5.0, 40.0)], false);
+    assert_eq!(alpha(&plain, 3, 40), 0);
+}

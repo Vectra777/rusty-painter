@@ -75,6 +75,8 @@ pub struct StrokeContext<'a> {
     stroke_tiles: &'a mut StrokeTiles,
     /// Mirror painting: the settings and their precomputed copy maps.
     symmetry: Option<(&'a Symmetry, &'a [Copy2])>,
+    /// Wrap-around: dabs past an edge also paint at the other.
+    wrap: bool,
 }
 
 impl<'a> StrokeContext<'a> {
@@ -92,7 +94,47 @@ impl<'a> StrokeContext<'a> {
             undo_action,
             stroke_tiles,
             symmetry: None,
+            wrap: false,
         }
+    }
+
+    /// Wrap-around painting: a dab reaching past an edge of the canvas is
+    /// painted again the canvas's width (or height) the other way.
+    pub fn with_wrap(mut self, wrap: bool) -> Self {
+        self.wrap = wrap;
+        self
+    }
+
+    /// With wrap-around: each of `centers` put on the canvas (whole canvas
+    /// sizes away), plus a copy across each edge it comes within `reach`
+    /// of; the source index of each (for its variation) and its mirror map.
+    fn wrapped(
+        &self,
+        centers: &[Vec2],
+        orients: Option<&[[f32; 4]]>,
+        reach: f32,
+    ) -> (Vec<Vec2>, Vec<usize>, Option<Vec<[f32; 4]>>) {
+        let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
+        let mut out = Vec::with_capacity(centers.len());
+        let mut sources = Vec::with_capacity(centers.len());
+        let mut out_orients = orients.map(|_| Vec::with_capacity(centers.len()));
+        for (i, c) in centers.iter().enumerate() {
+            let c = Vec2::new(c.x.rem_euclid(w), c.y.rem_euclid(h));
+            for dy in [0.0, -h, h] {
+                for dx in [0.0, -w, w] {
+                    let p = c + Vec2::new(dx, dy);
+                    let inside = p.x > -reach && p.x < w + reach && p.y > -reach && p.y < h + reach;
+                    if (dx, dy) == (0.0, 0.0) || inside {
+                        out.push(p);
+                        sources.push(i);
+                        if let (Some(o), Some(all)) = (out_orients.as_mut(), orients) {
+                            o.push(all[i]);
+                        }
+                    }
+                }
+            }
+        }
+        (out, sources, out_orients)
     }
 
     /// Repeat every dab with `symmetry` (whose copy maps are `copies`).
@@ -111,6 +153,31 @@ impl<'a> StrokeContext<'a> {
         vars: &[DabVar],
         target: Target,
     ) {
+        if self.wrap {
+            // Mirror copies first, then each wrapped round the canvas.
+            let (mirrored, orients, sources) = match self.symmetry {
+                Some((symmetry, copies)) => {
+                    let (all, orients, sources) = symmetry.expand_indexed(copies, centers);
+                    (all, Some(orients), sources)
+                }
+                None => (centers.to_vec(), None, (0..centers.len()).collect()),
+            };
+            let (all, wrap_sources, orients) =
+                self.wrapped(&mirrored, orients.as_deref(), brush.wrap_reach());
+            let vars: Vec<DabVar> = wrap_sources.iter().map(|&i| vars[sources[i]]).collect();
+            brush.dabs_varied(
+                self.pool,
+                self.canvas,
+                self.selection,
+                &all,
+                &vars,
+                orients.as_deref(),
+                target,
+                self.undo_action,
+                self.stroke_tiles,
+            );
+            return;
+        }
         if let Some((symmetry, copies)) = self.symmetry {
             let (all, orients, sources) = symmetry.expand_indexed(copies, centers);
             let vars: Vec<DabVar> = sources.iter().map(|&i| vars[i]).collect();
@@ -161,6 +228,33 @@ impl<'a> StrokeContext<'a> {
                 }));
             }
         }
+        if self.wrap {
+            // Each segment moved onto the canvas, and copied across the
+            // edges it reaches.
+            let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
+            let mut wrapped = Vec::with_capacity(all.len());
+            for s in &all {
+                let mid = (s.p0 + s.p1) * 0.5;
+                let home = Vec2::new(mid.x.rem_euclid(w), mid.y.rem_euclid(h)) - mid;
+                let reach = (s.p1 - s.p0).length() * 0.5 + s.w0.max(s.w1) + 2.0;
+                for dy in [0.0, -h, h] {
+                    for dx in [0.0, -w, w] {
+                        let shift = home + Vec2::new(dx, dy);
+                        let m = mid + shift;
+                        let inside =
+                            m.x > -reach && m.x < w + reach && m.y > -reach && m.y < h + reach;
+                        if (dx, dy) == (0.0, 0.0) || inside {
+                            wrapped.push(RibbonSeg {
+                                p0: s.p0 + shift,
+                                p1: s.p1 + shift,
+                                ..*s
+                            });
+                        }
+                    }
+                }
+            }
+            all = wrapped;
+        }
         brush.ribbon(
             self.pool,
             self.canvas,
@@ -187,6 +281,26 @@ impl<'a> StrokeContext<'a> {
     }
 
     fn dabs(&mut self, brush: &mut Brush, centers: &[Vec2]) {
+        if self.wrap {
+            let (mirrored, orients) = match self.symmetry {
+                Some((symmetry, copies)) => {
+                    let (all, orients) = symmetry.expand(copies, centers);
+                    (all, Some(orients))
+                }
+                None => (centers.to_vec(), None),
+            };
+            let (all, _, orients) = self.wrapped(&mirrored, orients.as_deref(), brush.wrap_reach());
+            brush.dabs_oriented(
+                self.pool,
+                self.canvas,
+                self.selection,
+                &all,
+                orients.as_deref(),
+                self.undo_action,
+                self.stroke_tiles,
+            );
+            return;
+        }
         if let Some((symmetry, copies)) = self.symmetry {
             let (centers, orients) = symmetry.expand(copies, centers);
             brush.dabs_oriented(

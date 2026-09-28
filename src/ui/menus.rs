@@ -221,6 +221,16 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ui.menu_button("Assistants", |ui| {
         crate::ui::shape_menu::assistant_controls(app, ui);
     });
+    if ui
+        .checkbox(&mut app.workspace.wrap_around, "Wrap Around")
+        .on_hover_text(
+            "Paint past an edge and it comes in at the other; the canvas shows repeated. For \
+             seamless tiles and patterns.",
+        )
+        .changed()
+    {
+        app.mark_all_tiles_dirty();
+    }
     ui.separator();
     if menu_item(ui, "Show / Hide Panels", Some("Tab".into())) {
         toggle_all_panels(app);

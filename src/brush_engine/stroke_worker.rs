@@ -33,6 +33,8 @@ pub struct StrokeSetup {
     pub symmetry: Symmetry,
     /// Canvas pixels → screen points (the view zoom), for stroke speed.
     pub view_scale: f32,
+    /// Wrap-around painting.
+    pub wrap: bool,
 }
 
 /// A completed stroke's undo record.
@@ -347,10 +349,12 @@ impl Session {
             selection,
             pool,
             symmetry,
+            wrap,
             ..
         } = setup;
         let mut context = StrokeContext::new(pool, canvas, selection.as_ref(), undo, tiles)
-            .with_symmetry(symmetry, copies);
+            .with_symmetry(symmetry, copies)
+            .with_wrap(*wrap);
         f(stroke, brush, &mut context);
         let touched = std::mem::take(&mut tiles.dirty);
         let mut shared = shared.lock();
@@ -434,6 +438,7 @@ mod tests {
             layer_idx: 1,
             symmetry: Default::default(),
             view_scale: 1.0,
+            wrap: false,
         });
         for (pos, pressure) in samples() {
             worker.sample(pos, pressure);
@@ -472,6 +477,7 @@ mod tests {
                 layer_idx: 1,
                 symmetry: Default::default(),
                 view_scale: 1.0,
+                wrap: false,
             });
             worker.sample(Vec2::new(64.0, 64.0), 1.0);
             std::thread::sleep(std::time::Duration::from_millis(300));

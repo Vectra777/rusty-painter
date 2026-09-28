@@ -406,6 +406,9 @@ pub struct WorkspaceState {
     pub select: crate::app::tools::select::SelectToolState,
     /// Mirror painting.
     pub symmetry: crate::brush_engine::symmetry::Symmetry,
+    /// Wrap-around: painting past one edge comes in at the other, and the
+    /// view shows the canvas repeated (seamless tiles).
+    pub wrap_around: bool,
     /// On-canvas guides and their handles.
     pub guides: crate::app::tools::guides::GuideState,
     /// Shape tool settings and the shape being edited.
@@ -469,6 +472,7 @@ impl WorkspaceState {
             transform_pick_layer: true,
             select: Default::default(),
             symmetry: Default::default(),
+            wrap_around: false,
             guides: Default::default(),
             shapes: Default::default(),
             gradient: Default::default(),

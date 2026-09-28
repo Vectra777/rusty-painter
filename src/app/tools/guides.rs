@@ -80,6 +80,7 @@ pub(crate) struct StoredGuides {
     symmetry_angle: f32,
     symmetry_count: u32,
     symmetry_mirrored: bool,
+    wrap_around: bool,
 }
 
 impl StoredGuides {
@@ -103,6 +104,7 @@ impl StoredGuides {
             symmetry_angle: s.angle,
             symmetry_count: s.count,
             symmetry_mirrored: s.mirrored,
+            wrap_around: app.workspace.wrap_around,
         }
     }
 
@@ -133,6 +135,7 @@ impl StoredGuides {
                 .min(crate::brush_engine::symmetry::MAX_COUNT);
         }
         s.mirrored = self.symmetry_mirrored;
+        app.workspace.wrap_around = self.wrap_around;
         app.keep_guides_on_canvas();
     }
 }
@@ -850,6 +853,7 @@ mod tests {
         app.set_ruler(true);
         app.workspace.symmetry.mode = SymmetryMode::Radial;
         app.workspace.symmetry.count = 5;
+        app.workspace.wrap_around = true;
         let saved = StoredGuides::from_app(&app);
         let json = serde_json::to_string(&saved).unwrap();
         let mut other = assistant_app();
@@ -863,6 +867,7 @@ mod tests {
         assert_eq!(other.workspace.guides.ruler, app.workspace.guides.ruler);
         assert_eq!(other.workspace.symmetry.mode, SymmetryMode::Radial);
         assert_eq!(other.workspace.symmetry.count, 5);
+        assert!(other.workspace.wrap_around);
         // Older files have none: nothing changes.
         let empty: StoredGuides = serde_json::from_str("{}").unwrap();
         assert!(empty.assistants.is_empty());

@@ -50,6 +50,7 @@ impl PainterApp {
             layer_idx: self.canvas.active_layer_idx,
             symmetry,
             view_scale: self.viewport.zoom,
+            wrap: self.workspace.wrap_around,
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;

@@ -61,7 +61,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Stabiliser | ✅ several kinds | ✅ + post-correction | ✅ + forced fade | ✅ simple + dynamic (mass/drag) |
 | Rulers / assistants (perspective, ellipse…) | ✅ | ✅ | ✅ | ✅ ruler, vanishing point, perspective, ellipse, concentric |
 | Symmetry / radial mirror | ✅ | ✅ | ✅ | ✅ incl. kaleidoscope |
-| Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ❌ |
+| Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ✅ brushes, smudge and blur |
 | Pen eraser end switches to eraser | ✅ | ✅ | ✅ | ✅ |
 | Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ✅ built-in presets + your own, kept and shared as `.rpbrush` files |
 
@@ -131,7 +131,11 @@ below.
   rectangle's corners), ellipse and concentric ellipses; strokes snap to
   them, following curves round rather than across. Saved with the project,
   like the ruler and mirror painting now are.
-- [ ] **Wrap-around painting** for seamless tiles.
+- [x] **Wrap-around painting** for seamless tiles (View → Wrap Around):
+  brush strokes and the Smudge and Blur tools (every mode) carry on across
+  the edges, and the view shows the canvas repeated. Fill, liquify,
+  gradients and paper textures don't wrap, and the textures' grain only
+  meets up at the seam when the canvas is a multiple of its size.
 - [ ] **Importing other apps' brushes:** GIMP (`.gbr`, `.gih`), Photoshop
   (`.abr`), Krita (`.kpp`, `.bundle`), MyPaint (`.myb`), Clip Studio
   (`.sut`). ibisPaint brushes can't be imported: they're only shared as QR

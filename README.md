@@ -9,6 +9,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **Tablet Support**: Pen pressure, tilt and the eraser end on Windows (Windows Ink, via `octotablet`) and Android (every stylus sample, with a resting palm ignored while the pen is down). On Linux, Wayland tablets work with `RUSTY_PAINTER_ENABLE_WAYLAND_TABLET=1`; X11 has no pressure yet.
 - **Layers**: Full layer support with visibility, opacity, and blending.
 - **Selection Tools**: Rectangle, ellipse, lasso (with smoothing), polygon, magnetic lasso, magic wand, colour range and selection brush; replace, add, erase and intersect; invert; every change undoable. The Transform tool moves, scales, rotates, puts in perspective or distorts the selection outline itself when there's nothing under it.
+- **Wrap Around**: View → Wrap Around paints across the canvas's edges and shows it repeated, for seamless tiles.
 - **Mirror Painting**: Left/right, top/bottom, four-way or radial (mandala, optionally kaleidoscope) around a centre and angle you drag on the canvas; flip the view with H.
 - **Shapes, Ruler & Assistants**: Line, rectangle, ellipse and polygon drawn with the brush, filled, or both, editable until applied; a ruler that straightens strokes along or parallel to it; vanishing-point, perspective, ellipse and concentric assistants strokes snap to (View → Assistants, or the Shape menu). Guides are saved with the project.
 - **Gradients**: Linear, radial, reflected and angle gradients, previewed live, dithered, clipped to the selection.

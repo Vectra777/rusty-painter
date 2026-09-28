@@ -708,6 +708,18 @@ impl Brush {
             || self.paints_tip_colors()
     }
 
+    /// How far from its centre a dab can paint, generously (for copying it
+    /// across the canvas's edges with wrap-around): turned tips' corners,
+    /// dynamics growing it, a bristle brush's hairs.
+    pub fn wrap_reach(&self) -> f32 {
+        let spread = match self.brush_type {
+            BrushType::Bristle => self.bristles.spread.max(1.0) + self.bristles.thickness,
+            BrushType::Sketch => self.sketch.reach,
+            _ => 1.0,
+        };
+        self.brush_options.diameter * 1.5 * spread + 4.0
+    }
+
     /// The brush lays its image tip along the stroke as a ribbon.
     pub fn is_ribbon(&self) -> bool {
         self.brush_options.placement == crate::brush_engine::brush_options::Placement::Ribbon

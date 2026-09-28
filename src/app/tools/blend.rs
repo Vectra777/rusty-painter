@@ -213,6 +213,48 @@ fn to_c(v: [f32; 4]) -> Color32 {
     ))
 }
 
+/// The pixels of layer `source` (all visible layers when `None`) over the
+/// `w`×`h` canvas rectangle at `origin`; with `wrap`, what's past an edge
+/// comes from the other side.
+fn read_patch(
+    canvas: &crate::canvas::Canvas,
+    source: Option<usize>,
+    (x0, y0): (i32, i32),
+    w: usize,
+    h: usize,
+    wrap: bool,
+) -> Vec<Color32> {
+    if !wrap {
+        return canvas.render_reference(source, x0, y0, w, h);
+    }
+    let (cw, ch) = (canvas.width() as i32, canvas.height() as i32);
+    let mut out = vec![Color32::TRANSPARENT; w * h];
+    for (sx, dx, pw) in wrap_pieces(x0, w, cw) {
+        for (sy, dy, ph) in wrap_pieces(y0, h, ch) {
+            let part = canvas.render_reference(source, sx, sy, pw, ph);
+            for row in 0..ph {
+                let at = (dy + row) * w + dx;
+                out[at..at + pw].copy_from_slice(&part[row * pw..(row + 1) * pw]);
+            }
+        }
+    }
+    out
+}
+
+/// The span `start..start + len` on a canvas `size` long that wraps round:
+/// its pieces as `(canvas start, offset in the span, length)`.
+fn wrap_pieces(start: i32, len: usize, size: i32) -> Vec<(i32, usize, usize)> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while offset < len {
+        let at = (start + offset as i32).rem_euclid(size);
+        let run = ((size - at) as usize).min(len - offset);
+        out.push((at, offset, run));
+        offset += run;
+    }
+    out
+}
+
 /// `px` (a `side`×`side` patch) at `p` (texel centres at +0.5), bilinear;
 /// outside it reads its nearest edge.
 fn sample_bilinear(px: &[[f32; 4]], side: usize, p: Vec2) -> [f32; 4] {
@@ -450,7 +492,15 @@ impl PainterApp {
             return;
         };
         let positions = stroke.symmetry.positions(&stroke.copies, center);
+        let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
         for (copy, p) in positions {
+            // Wrap-around: the dab put on the canvas (its patch then wraps
+            // round the edges).
+            let p = if self.workspace.wrap_around {
+                Vec2::new(p.x.rem_euclid(w), p.y.rem_euclid(h))
+            } else {
+                p
+            };
             self.blend_dab(p, pressure, copy);
         }
     }
@@ -523,9 +573,8 @@ impl PainterApp {
             }
         }
 
-        let under: Vec<[f32; 4]> = self
-            .canvas
-            .render_reference(Some(idx), x0, y0, side, side)
+        let wrap = self.workspace.wrap_around;
+        let under: Vec<[f32; 4]> = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap)
             .into_iter()
             .map(to_f)
             .collect();
@@ -544,12 +593,17 @@ impl PainterApp {
             let step = (diameter * self.brush_state.brush.brush_options.spacing / 100.0).max(1.0);
             let margin = (r * amount * 0.6).max(step).ceil() as i32 + 2;
             let big_side = side + 2 * margin as usize;
-            let big: Vec<[f32; 4]> = self
-                .canvas
-                .render_reference(Some(idx), x0 - margin, y0 - margin, big_side, big_side)
-                .into_iter()
-                .map(to_f)
-                .collect();
+            let big: Vec<[f32; 4]> = read_patch(
+                &self.canvas,
+                Some(idx),
+                (x0 - margin, y0 - margin),
+                big_side,
+                big_side,
+                wrap,
+            )
+            .into_iter()
+            .map(to_f)
+            .collect();
             let local_center = center - Vec2::new(x0 as f32, y0 as f32);
             (0..side * side)
                 .map(|i| {
@@ -581,11 +635,17 @@ impl PainterApp {
                 .collect()
         } else if let BlendKind::Clone { offset, merged } = stroke.kind {
             let source = if merged { None } else { Some(idx) };
-            self.canvas
-                .render_reference(source, x0 + offset.0, y0 + offset.1, side, side)
-                .into_iter()
-                .map(to_f)
-                .collect()
+            read_patch(
+                &self.canvas,
+                source,
+                (x0 + offset.0, y0 + offset.1),
+                side,
+                side,
+                wrap,
+            )
+            .into_iter()
+            .map(to_f)
+            .collect()
         } else if let BlendKind::Sharpen(amount) = stroke.kind {
             let radius = ((r * blur_size).round() as usize).max(1);
             let soft = box_blur(&under, side, radius);
@@ -682,13 +742,39 @@ impl PainterApp {
         if !changed {
             return;
         }
-        self.canvas.write_layer_region(
-            idx,
-            (x0, y0, side, side),
-            &result,
-            Some(&mut stroke.before),
-        );
-        self.mark_rect_damage([x0, y0, x0 + side as i32, y0 + side as i32]);
+        if !wrap {
+            self.canvas.write_layer_region(
+                idx,
+                (x0, y0, side, side),
+                &result,
+                Some(&mut stroke.before),
+            );
+            self.mark_rect_damage([x0, y0, x0 + side as i32, y0 + side as i32]);
+            return;
+        }
+        // Wrap-around: each piece of the patch where it lands on the canvas.
+        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let mut damage = Vec::new();
+        for (sx, dx, w) in wrap_pieces(x0, side, cw) {
+            for (sy, dy, h) in wrap_pieces(y0, side, ch) {
+                let piece: Vec<Color32> = (0..h)
+                    .flat_map(|row| {
+                        let start = (dy + row) * side + dx;
+                        result[start..start + w].iter().copied()
+                    })
+                    .collect();
+                self.canvas.write_layer_region(
+                    idx,
+                    (sx, sy, w, h),
+                    &piece,
+                    Some(&mut stroke.before),
+                );
+                damage.push([sx, sy, sx + w as i32, sy + h as i32]);
+            }
+        }
+        for rect in damage {
+            self.mark_rect_damage(rect);
+        }
     }
 }
 
@@ -1050,6 +1136,35 @@ mod mode_tests {
         undo(&mut a);
         undo(&mut a);
         assert_eq!(all(&a), all(&app(pattern)));
+    }
+
+    #[test]
+    fn with_wrap_around_blur_mixes_across_the_edge() {
+        // Black on the left edge, white elsewhere; blurred at the edge.
+        let left = |x: i32, _| {
+            if x < 4 {
+                Color32::BLACK
+            } else {
+                Color32::WHITE
+            }
+        };
+        let blurred = |wrap: bool| {
+            let mut a = app(left);
+            a.workspace.wrap_around = wrap;
+            a.active_tool = crate::app::tools::Tool::Blur;
+            a.workspace.blend.blur_size = 0.5;
+            stroke(&mut a, Vec2::new(1.0, 20.0), Vec2::new(1.0, 44.0));
+            a
+        };
+        let (wrapped, plain) = (blurred(true), blurred(false));
+        // The thin band spreads out evenly both sides of the edge.
+        assert!(px(&wrapped, 126, 32).r() < 250, "darkened across the edge");
+        assert!(px(&wrapped, 126, 32).r().abs_diff(px(&wrapped, 5, 32).r()) <= 3);
+        assert_eq!(px(&plain, 126, 32), Color32::WHITE);
+        // One undo step takes both sides back.
+        let mut wrapped = wrapped;
+        undo(&mut wrapped);
+        assert_eq!(all(&wrapped), all(&app(left)));
     }
 
     #[test]

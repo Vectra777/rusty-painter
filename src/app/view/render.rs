@@ -263,15 +263,20 @@ pub fn update_dirty_textures(
     let (cos, sin) = (app.viewport.rotation.cos(), app.viewport.rotation.sin());
     let zoom = app.viewport.zoom;
     let flip = app.viewport.flip_x.then_some(app.canvas.width() as f32);
-    let (visible_x, visible_y) = visible_tile_range(
-        clip.intersect(view.rect),
-        |p| {
-            let c = (PainterApp::rotate_point(p, center, cos, -sin) - origin).to_pos2() / zoom;
-            flip.map_or(c, |w| egui::pos2(w - c.x, c.y))
-        },
-        app.render_cache.tiles_x,
-        app.render_cache.tiles_y,
-    );
+    let (visible_x, visible_y) = if app.workspace.wrap_around {
+        // Every tile may show in one of the repeats.
+        (0..app.render_cache.tiles_x, 0..app.render_cache.tiles_y)
+    } else {
+        visible_tile_range(
+            clip.intersect(view.rect),
+            |p| {
+                let c = (PainterApp::rotate_point(p, center, cos, -sin) - origin).to_pos2() / zoom;
+                flip.map_or(c, |w| egui::pos2(w - c.x, c.y))
+            },
+            app.render_cache.tiles_x,
+            app.render_cache.tiles_y,
+        )
+    };
     let visible = |t: &CanvasTile| visible_x.contains(&t.tx) && visible_y.contains(&t.ty);
 
     refresh_below_cache(app, &visible);
@@ -412,6 +417,7 @@ pub fn draw_canvas(app: &mut PainterApp, ui: &mut egui::Ui) -> CanvasView {
 }
 
 /// Everything needed to place the canvas atlases on screen.
+#[derive(Clone, Copy)]
 struct Placement {
     canvas_size: egui::Vec2,
     zoom: f32,
@@ -422,6 +428,8 @@ struct Placement {
     flip: bool,
     /// The paint callback's area; quad corners are in its NDC.
     target: egui::Rect,
+    /// Wrap-around: the canvas repeated all round.
+    wrap: bool,
 }
 
 /// One quad per atlas, covering the canvas block that atlas holds.
@@ -446,28 +454,48 @@ fn atlas_quads(placement: &Placement, atlases_x: usize, atlases_y: usize) -> Vec
             1.0 - 2.0 * (screen.y - target.min.y) / target.height(),
         ]
     };
-    let mut quads = Vec::with_capacity(atlases_x * atlases_y);
-    for ay in 0..atlases_y {
-        for ax in 0..atlases_x {
-            let (x0, y0) = (ax as f32 * atlas, ay as f32 * atlas);
-            let w = atlas.min(placement.canvas_size.x - x0);
-            let h = atlas.min(placement.canvas_size.y - y0);
-            if w <= 0.0 || h <= 0.0 {
-                continue;
+    // Wrap-around: the canvas and its eight neighbours.
+    let repeats: &[(f32, f32)] = if placement.wrap {
+        &[
+            (0.0, 0.0),
+            (-1.0, -1.0),
+            (0.0, -1.0),
+            (1.0, -1.0),
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (-1.0, 1.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+        ]
+    } else {
+        &[(0.0, 0.0)]
+    };
+    let mut quads = Vec::with_capacity(atlases_x * atlases_y * repeats.len());
+    for &(rx, ry) in repeats {
+        let shift = egui::vec2(rx * placement.canvas_size.x, ry * placement.canvas_size.y);
+        for ay in 0..atlases_y {
+            for ax in 0..atlases_x {
+                let (x0, y0) = (ax as f32 * atlas, ay as f32 * atlas);
+                let w = atlas.min(placement.canvas_size.x - x0);
+                let h = atlas.min(placement.canvas_size.y - y0);
+                if w <= 0.0 || h <= 0.0 {
+                    continue;
+                }
+                let texture = ATLAS_TEXTURE_SIZE as f32;
+                let border = ATLAS_BORDER as f32 / texture;
+                let (u, v) = (border + w / texture, border + h / texture);
+                let corner = |x: f32, y: f32| to_ndc(egui::pos2(x, y) + shift);
+                quads.push(AtlasQuad {
+                    atlas: ay * atlases_x + ax,
+                    corners: [
+                        corner(x0, y0),
+                        corner(x0 + w, y0),
+                        corner(x0 + w, y0 + h),
+                        corner(x0, y0 + h),
+                    ],
+                    uvs: [[border, border], [u, border], [u, v], [border, v]],
+                });
             }
-            let texture = ATLAS_TEXTURE_SIZE as f32;
-            let border = ATLAS_BORDER as f32 / texture;
-            let (u, v) = (border + w / texture, border + h / texture);
-            quads.push(AtlasQuad {
-                atlas: ay * atlases_x + ax,
-                corners: [
-                    to_ndc(egui::pos2(x0, y0)),
-                    to_ndc(egui::pos2(x0 + w, y0)),
-                    to_ndc(egui::pos2(x0 + w, y0 + h)),
-                    to_ndc(egui::pos2(x0, y0 + h)),
-                ],
-                uvs: [[border, border], [u, border], [u, v], [border, v]],
-            });
         }
     }
     quads
@@ -490,6 +518,7 @@ pub fn paint_canvas(app: &PainterApp, ui: &egui::Ui, view: &CanvasView, uploads:
         rotation: app.viewport.rotation,
         flip: app.viewport.flip_x,
         target,
+        wrap: app.workspace.wrap_around,
     };
     let cache = &app.render_cache;
     let paint = CanvasPaint {
@@ -676,9 +705,23 @@ mod tests {
             rotation: 0.0,
             flip: false,
             target,
+            wrap: false,
         };
         let quads = atlas_quads(&placement, 2, 1);
         assert_eq!(quads.len(), 2);
+        // Wrap-around: the canvas repeated round itself, the first repeat
+        // one canvas to the right of it.
+        let wrapped = atlas_quads(
+            &Placement {
+                wrap: true,
+                ..placement
+            },
+            2,
+            1,
+        );
+        assert_eq!(wrapped.len(), 18);
+        let right_of = &wrapped[2 * 5];
+        assert!((right_of.corners[0][0] - quads[0].corners[0][0] - 2.0).abs() < 1e-4);
 
         let split = 2.0 * ATLAS_SIZE as f32 / 3000.0 - 1.0;
         let close =
