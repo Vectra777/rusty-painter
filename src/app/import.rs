@@ -79,11 +79,13 @@ impl PainterApp {
             let result = if let Some(project) = project {
                 // Projects open.
                 self.load_project_from_path(project)
-            } else if extension(crate::brush_engine::preset_file::EXTENSION) {
-                // Brush presets join the library.
+            } else if Self::is_brush_file(&file.name)
+                || path.is_some_and(|p| Self::is_brush_file(&p.to_string_lossy()))
+            {
+                // Brushes (ours or another app's) join the library.
                 match (&file.bytes, path) {
-                    (Some(bytes), _) => self.import_presets_bytes(bytes).map(|_| ()),
-                    (None, Some(path)) => self.import_presets_path(path).map(|_| ()),
+                    (Some(bytes), _) => self.import_brushes_bytes(&file.name, bytes).map(|_| ()),
+                    (None, Some(path)) => self.import_brushes_path(path).map(|_| ()),
                     (None, None) => continue,
                 }
             } else {

@@ -72,6 +72,50 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
         app.brush_state.show_presets = false;
     }
     save_preset_modal(app, ctx);
+    import_report_window(app, ctx);
+}
+
+/// What the last import of other apps' brushes brought in, and what it
+/// approximated or left out.
+fn import_report_window(app: &mut PainterApp, ctx: &egui::Context) {
+    let Some(report) = &app.brush_state.import_report else {
+        return;
+    };
+    let mut open = true;
+    let mut close = false;
+    egui::Window::new("Imported Brushes")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([420.0, 300.0])
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    for (file, count, notes) in report {
+                        ui.label(RichText::new(format!("{file}: {count} brushes")).strong());
+                        for note in notes {
+                            ui.label(RichText::new(format!("• {note}")).small().color(TEXT_DIM));
+                        }
+                        ui.add_space(6.0);
+                    }
+                });
+            ui.label(
+                RichText::new(
+                    "Other apps' brushes can do things this one doesn't: what has a \
+                     counterpart here came across. They're in the presets list.",
+                )
+                .small()
+                .color(TEXT_DIM),
+            );
+            if ui.button("OK").clicked() {
+                close = true;
+            }
+        });
+    if !open || close {
+        app.brush_state.import_report = None;
+    }
 }
 
 /// What the user did in the presets list.

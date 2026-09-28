@@ -53,6 +53,9 @@ pub struct BrushState {
     pub show_presets: bool,
     /// The smudge / blur stroke in progress.
     pub blend_stroke: Option<crate::app::tools::blend::BlendStroke>,
+    /// Brushes just imported from other apps: per file, how many presets
+    /// and what was approximated (shown until dismissed).
+    pub import_report: Option<Vec<(String, usize, Vec<String>)>>,
 }
 
 /// A tip in the brush settings' tip list: one tip, or a set the dabs take
@@ -105,6 +108,7 @@ impl BrushState {
             stashed_preset: eraser_preset,
             show_presets: false,
             blend_stroke: None,
+            import_report: None,
         }
     }
 

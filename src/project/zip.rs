@@ -159,6 +159,65 @@ pub(crate) fn read_entry<'a>(bytes: &'a [u8], name: &str) -> Result<&'a [u8], St
     Err(format!("{name} is missing from the project file"))
 }
 
+/// Largest entry inflated from another app's archive (a brush bundle).
+const MAX_INFLATED: usize = 256 << 20;
+
+/// Every entry of a ZIP archive, stored or deflated (other apps' archives,
+/// such as Krita's brush bundles, compress theirs): `(name, data)`.
+pub(crate) fn read_all(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let broken = || "Damaged archive".to_string();
+    let search_from = bytes.len().saturating_sub(22 + usize::from(u16::MAX));
+    let end = (search_from..=bytes.len().saturating_sub(22))
+        .rev()
+        .find(|&at| get32(bytes, at) == Some(END_OF_DIRECTORY))
+        .ok_or_else(broken)?;
+    let count = get16(bytes, end + 10).ok_or_else(broken)?;
+    let mut at = get32(bytes, end + 16).ok_or_else(broken)? as usize;
+    let mut out = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        if get32(bytes, at) != Some(CENTRAL_HEADER) {
+            return Err(broken());
+        }
+        let method = get16(bytes, at + 10).ok_or_else(broken)?;
+        let crc = get32(bytes, at + 16).ok_or_else(broken)?;
+        let packed = get32(bytes, at + 20).ok_or_else(broken)? as usize;
+        let size = get32(bytes, at + 24).ok_or_else(broken)? as usize;
+        let name_len = get16(bytes, at + 28).ok_or_else(broken)? as usize;
+        let extra_len = get16(bytes, at + 30).ok_or_else(broken)? as usize;
+        let comment_len = get16(bytes, at + 32).ok_or_else(broken)? as usize;
+        let offset = get32(bytes, at + 42).ok_or_else(broken)? as usize;
+        let name = bytes.get(at + 46..at + 46 + name_len).ok_or_else(broken)?;
+        let name = String::from_utf8_lossy(name).into_owned();
+        at += 46 + name_len + extra_len + comment_len;
+        if name.ends_with('/') {
+            continue;
+        }
+        if get32(bytes, offset) != Some(LOCAL_HEADER) {
+            return Err(broken());
+        }
+        let local_name = get16(bytes, offset + 26).ok_or_else(broken)? as usize;
+        let local_extra = get16(bytes, offset + 28).ok_or_else(broken)? as usize;
+        let start = offset + 30 + local_name + local_extra;
+        let raw = bytes.get(start..start + packed).ok_or_else(broken)?;
+        let data = match method {
+            0 => raw.to_vec(),
+            8 => {
+                if size > MAX_INFLATED {
+                    return Err(format!("{name} is too large"));
+                }
+                miniz_oxide::inflate::decompress_to_vec_with_limit(raw, MAX_INFLATED)
+                    .map_err(|_| broken())?
+            }
+            _ => return Err(format!("Unsupported compression for {name}")),
+        };
+        if crc32fast::hash(&data) != crc {
+            return Err(broken());
+        }
+        out.push((name, data));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +233,69 @@ mod tests {
         assert_eq!(read_entry(&bytes, "a/b.bin").unwrap(), &[1, 2, 3]);
         assert_eq!(read_entry(&bytes, "empty").unwrap(), &[] as &[u8]);
         assert!(read_entry(&bytes, "nope").is_err());
+    }
+
+    #[test]
+    fn deflated_entries_are_read() {
+        // A one-entry archive with a deflated entry, as other apps write.
+        let text = b"hello hello hello hello, deflate me".repeat(4);
+        let packed = miniz_oxide::deflate::compress_to_vec(&text, 6);
+        let name = b"dir/a.txt";
+        let crc = crc32fast::hash(&text);
+        let mut z = Vec::new();
+        let mut local = Vec::new();
+        put32(&mut local, LOCAL_HEADER);
+        put16(&mut local, ZIP_VERSION);
+        put16(&mut local, 0);
+        put16(&mut local, 8);
+        put16(&mut local, 0);
+        put16(&mut local, DOS_DATE);
+        put32(&mut local, crc);
+        put32(&mut local, packed.len() as u32);
+        put32(&mut local, text.len() as u32);
+        put16(&mut local, name.len() as u16);
+        put16(&mut local, 0);
+        local.extend_from_slice(name);
+        z.extend_from_slice(&local);
+        z.extend_from_slice(&packed);
+        let dir = z.len() as u32;
+        put32(&mut z, CENTRAL_HEADER);
+        put16(&mut z, ZIP_VERSION);
+        put16(&mut z, ZIP_VERSION);
+        put16(&mut z, 0);
+        put16(&mut z, 8);
+        put16(&mut z, 0);
+        put16(&mut z, DOS_DATE);
+        put32(&mut z, crc);
+        put32(&mut z, packed.len() as u32);
+        put32(&mut z, text.len() as u32);
+        put16(&mut z, name.len() as u16);
+        put16(&mut z, 0);
+        put16(&mut z, 0);
+        put16(&mut z, 0);
+        put16(&mut z, 0);
+        put32(&mut z, 0);
+        put32(&mut z, 0);
+        z.extend_from_slice(name);
+        let dir_len = z.len() as u32 - dir;
+        put32(&mut z, END_OF_DIRECTORY);
+        put16(&mut z, 0);
+        put16(&mut z, 0);
+        put16(&mut z, 1);
+        put16(&mut z, 1);
+        put32(&mut z, dir_len);
+        put32(&mut z, dir);
+        put16(&mut z, 0);
+        let entries = read_all(&z).unwrap();
+        assert_eq!(entries, vec![("dir/a.txt".to_string(), text.clone())]);
+        // Our own stored archives read the same way.
+        let mut w = ZipWriter::default();
+        w.add("x", b"stored").unwrap();
+        assert_eq!(read_all(&w.finish().unwrap()).unwrap()[0].1, b"stored");
+        // Damage is caught.
+        let mut bad = z.clone();
+        bad[40] ^= 0xFF;
+        assert!(read_all(&bad).is_err());
     }
 
     #[test]

@@ -14,7 +14,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Round tip, hardness / softness curve | ✅ | ✅ | ✅ | ✅ Gaussian or curve |
-| Image tips (custom shapes) | ✅ PNG, GBR, ABR import | ✅ | ✅ brush patterns | ✅ PNGs in `brushes/` |
+| Image tips (custom shapes) | ✅ PNG, GBR, ABR import | ✅ | ✅ brush patterns | ✅ PNGs in `brushes/`, and imported |
 | Image tips sampled cleanly when small (mipmaps) | ✅ | ✅ | ✅ | ✅ trilinear |
 | Image tips keep their proportions | ✅ | ✅ | ✅ | ✅ |
 | Several tips per brush (random or in sequence) | ✅ animated GIH | ✅ | ⚠️ | ✅ in turn, random, pressure, direction |
@@ -63,7 +63,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Symmetry / radial mirror | ✅ | ✅ | ✅ | ✅ incl. kaleidoscope |
 | Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ✅ brushes, smudge and blur |
 | Pen eraser end switches to eraser | ✅ | ✅ | ✅ | ✅ |
-| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ✅ built-in presets + your own, kept and shared as `.rpbrush` files |
+| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ✅ built-in presets + your own, kept and shared as `.rpbrush` files; imports GIMP, Photoshop, Krita, MyPaint and Clip Studio brushes |
 
 ## Roadmap
 
@@ -136,10 +136,15 @@ below.
   the edges, and the view shows the canvas repeated. Fill, liquify,
   gradients and paper textures don't wrap, and the textures' grain only
   meets up at the seam when the canvas is a multiple of its size.
-- [ ] **Importing other apps' brushes:** GIMP (`.gbr`, `.gih`), Photoshop
-  (`.abr`), Krita (`.kpp`, `.bundle`), MyPaint (`.myb`), Clip Studio
-  (`.sut`). ibisPaint brushes can't be imported: they're only shared as QR
-  codes through the app, in an undocumented format.
+- [x] **Importing other apps' brushes** (presets window → Import brushes…,
+  or drop the file on the window): GIMP (`.gbr`, `.gih`), Photoshop
+  (`.abr`), Krita (`.kpp` presets and `.bundle` sets), MyPaint (`.myb`) and
+  Clip Studio (`.sut`). Tips always come across; the settings that have a
+  counterpart here do (size, spacing, hardness, shape, angle, opacity,
+  flow, pressure and its curves, scatter; Krita's textures and masking
+  brush), and a report lists what didn't. Tested on Krita's own presets
+  and bundles. ibisPaint brushes can't be imported: they're only shared as
+  QR codes through the app, in an undocumented format.
 
 ### Quality rules for every feature
 

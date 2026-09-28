@@ -24,6 +24,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zstd = "0.13"
 crc32fast = "1.5"
+# Importing other apps' brushes: deflated ZIP entries (Krita bundles), PNG
+# text chunks (Krita presets), their XML, Clip Studio's SQLite files.
+miniz_oxide = "0.8"
+png = "0.18"
+quick-xml = "0.37"
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 pollster = "0.4"
@@ -92,8 +98,11 @@ opt-level = 2
 opt-level = 2
 
 [features]
+default = ["sut-import"]
 # Exposes `bench_api` for `benches/app_bench.rs`; off in normal builds.
 bench = []
+# Importing Clip Studio Paint brushes (.sut, SQLite: builds SQLite from C).
+sut-import = ["dep:rusqlite"]
 
 [[bench]]
 name = "app_bench"

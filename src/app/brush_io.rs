@@ -288,21 +288,55 @@ impl PainterApp {
         }
     }
 
-    /// Import every preset in a `.rpbrush` file into the library; returns
-    /// how many there were.
-    pub(crate) fn import_presets_bytes(&mut self, bytes: &[u8]) -> Result<usize, String> {
-        let presets = preset_file::decode(bytes)?;
+    /// Import the brushes in file `name` (a `.rpbrush`, or another app's
+    /// brush file) into the library; returns how many there were. Another
+    /// app's brushes come with a report of what was approximated.
+    pub(crate) fn import_brushes_bytes(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<usize, String> {
+        let is_preset_file = std::path::Path::new(name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(preset_file::EXTENSION));
+        let (presets, notes) = if is_preset_file {
+            (preset_file::decode(bytes)?, Vec::new())
+        } else {
+            let imported = crate::brush_engine::import::import(name, bytes)?;
+            (imported.presets, imported.notes)
+        };
         let count = presets.len();
         for preset in presets {
             self.add_user_preset(preset);
         }
+        if !is_preset_file {
+            let report = self
+                .brush_state
+                .import_report
+                .get_or_insert_with(Default::default);
+            report.push((name.to_string(), count, notes));
+        }
+        // Show them (and the report) in the presets window.
+        self.brush_state.show_presets = true;
         Ok(count)
     }
 
-    pub(crate) fn import_presets_path(&mut self, path: &std::path::Path) -> Result<usize, String> {
+    pub(crate) fn import_brushes_path(&mut self, path: &std::path::Path) -> Result<usize, String> {
         let bytes =
             std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
-        self.import_presets_bytes(&bytes)
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        self.import_brushes_bytes(&name, &bytes)
+    }
+
+    /// Whether `name` is a file of brushes this app imports.
+    pub(crate) fn is_brush_file(name: &str) -> bool {
+        std::path::Path::new(name).extension().is_some_and(|e| {
+            let e = e.to_string_lossy().to_lowercase();
+            e == preset_file::EXTENSION
+                || crate::brush_engine::import::EXTENSIONS.contains(&e.as_str())
+        })
     }
 }
 
@@ -344,14 +378,21 @@ pub(crate) fn export_presets_dialog(app: &mut PainterApp, indices: &[usize], nam
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn import_presets_dialog(app: &mut PainterApp) {
+    let mut all: Vec<&str> = vec![preset_file::EXTENSION];
+    all.extend(crate::brush_engine::import::EXTENSIONS);
     let Some(paths) = rfd::FileDialog::new()
-        .add_filter("Brush presets", &[preset_file::EXTENSION])
+        .add_filter("Brushes", &all)
+        .add_filter("Rusty Painter presets", &[preset_file::EXTENSION])
+        .add_filter("Photoshop", &["abr"])
+        .add_filter("Krita", &["kpp", "bundle"])
+        .add_filter("GIMP", &["gbr", "gih"])
+        .add_filter("MyPaint", &["myb"])
         .pick_files()
     else {
         return;
     };
     for path in paths {
-        if let Err(err) = app.import_presets_path(&path) {
+        if let Err(err) = app.import_brushes_path(&path) {
             log::error!("{err}");
             app.export_state.message = Some(err);
         }
