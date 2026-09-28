@@ -70,9 +70,22 @@ impl PainterApp {
                 .map_or_else(|| std::path::Path::new(&file.name), |p| p)
                 .file_stem()
                 .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
-            let result = if path.is_some_and(|p| p.extension().is_some_and(|e| e == "rpainter")) {
+            let extension = |ext: &str| {
+                path.map_or_else(|| std::path::Path::new(&file.name), |p| p)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+            };
+            let project = path.filter(|_| extension("rpainter"));
+            let result = if let Some(project) = project {
                 // Projects open.
-                self.load_project_from_path(path.unwrap())
+                self.load_project_from_path(project)
+            } else if extension(crate::brush_engine::preset_file::EXTENSION) {
+                // Brush presets join the library.
+                match (&file.bytes, path) {
+                    (Some(bytes), _) => self.import_presets_bytes(bytes).map(|_| ()),
+                    (None, Some(path)) => self.import_presets_path(path).map(|_| ()),
+                    (None, None) => continue,
+                }
             } else {
                 let bytes = match (&file.bytes, path) {
                     (Some(bytes), _) => Ok(bytes.to_vec()),

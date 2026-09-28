@@ -875,3 +875,21 @@ fn render_presets_and_tips() {
         .unwrap();
     }
 }
+
+#[test]
+fn every_preset_paints_the_same_after_a_trip_through_a_preset_file() {
+    let presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+    let bytes = crate::brush_engine::preset_file::encode(&presets).unwrap();
+    let back = crate::brush_engine::preset_file::decode(&bytes).unwrap();
+    assert_eq!(back.len(), presets.len());
+    let below = Color32::from_rgb(235, 230, 220);
+    for (a, b) in presets.iter().zip(&back) {
+        let (ca, _) = paint_preset(&mut a.brush.clone(), below);
+        let (cb, _) = paint_preset(&mut b.brush.clone(), below);
+        assert!(
+            pixels_rgba(&ca) == pixels_rgba(&cb),
+            "{} paints differently after saving",
+            a.name
+        );
+    }
+}

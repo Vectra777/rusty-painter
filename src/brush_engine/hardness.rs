@@ -2,13 +2,13 @@
 //! preset or an editable curve.
 
 /// Option for how the brush softness falloff is calculated.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SoftnessSelector {
     Gaussian,
     Curve,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CurvePoint {
     pub x: f32,
     pub y: f32,
@@ -20,7 +20,7 @@ impl CurvePoint {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SoftnessCurve {
     pub points: Vec<CurvePoint>,
 }

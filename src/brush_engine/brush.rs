@@ -31,13 +31,13 @@ use std::ops::Range;
 use std::sync::Mutex;
 
 /// Available shapes for how a brush applies paint.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BrushType {
     Soft,
     Pixel,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StabilizerAlgorithm {
     None,
     Simple,
@@ -1225,6 +1225,9 @@ impl Brush {
 pub struct BrushPreset {
     pub name: String,
     pub brush: Brush,
+    /// Where a preset the user saved or imported is kept; `None` for the
+    /// built-in ones.
+    pub file: Option<std::path::PathBuf>,
 }
 
 #[cfg(test)]

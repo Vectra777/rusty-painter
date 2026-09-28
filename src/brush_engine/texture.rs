@@ -62,7 +62,7 @@ impl Pattern {
 }
 
 /// How the texture combines with a dab.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TextureMode {
     Multiply,
     Subtract,

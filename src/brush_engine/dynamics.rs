@@ -10,7 +10,8 @@
 use eframe::egui::Vec2;
 
 /// The tip's angle and shape.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TipShape {
     /// Degrees, counter-clockwise; with `follow_stroke`, added to the
     /// stroke's direction.
@@ -50,7 +51,8 @@ impl TipShape {
 }
 
 /// Thinning (and/or fading) the ends of a stroke.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Taper {
     /// Length of the taper at the start, in canvas pixels (0 = none).
     pub start: f32,
@@ -98,7 +100,8 @@ impl Taper {
 }
 
 /// What stroke speed changes.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SpeedDynamics {
     /// -1..1: negative thins fast strokes (ink), positive thickens them.
     pub size: f32,
@@ -113,7 +116,8 @@ impl SpeedDynamics {
 }
 
 /// What pen tilt changes (tablets that report it).
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TiltDynamics {
     /// -1..1: positive widens the stroke as the pen leans (pencil on its
     /// side), negative narrows it.
@@ -142,7 +146,8 @@ pub struct PenTilt {
 pub const FAST_SPEED: f32 = 2500.0;
 
 /// Per-dab randomness.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Randomness {
     /// Size randomness, 0..1 (1: a dab can shrink to nothing).
     pub size: f32,
@@ -174,7 +179,8 @@ impl Randomness {
 }
 
 /// All of a brush's dynamics.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct BrushDynamics {
     pub tip: TipShape,
     pub taper: Taper,

@@ -7,6 +7,7 @@ pub mod dynamics;
 mod dynamics_tests;
 pub mod hardness;
 pub(crate) mod masks;
+pub mod preset_file;
 pub mod preview;
 #[cfg(test)]
 mod smoothness_tests;

@@ -26,14 +26,14 @@ impl PartialEq for PixelBrushShape {
 }
 
 /// Blending strategy for how source color affects the destination.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
     Normal,
     Eraser,
 }
 
 /// How a stroke's dabs combine, as in Krita.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaintingMode {
     /// Every dab adds paint at flow × opacity, so overlaps keep building up.
     BuildUp,
@@ -69,7 +69,8 @@ pub struct BrushOptions {
 }
 
 /// A pressure response per setting it drives.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PressureCurves {
     pub size: Option<SoftnessCurve>,
     pub opacity: Option<SoftnessCurve>,

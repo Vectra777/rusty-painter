@@ -2,7 +2,9 @@
 //! textured tips for the brush list.
 
 use crate::app::PainterApp;
+use crate::brush_engine::brush::BrushPreset;
 use crate::brush_engine::brush_options::PixelBrushShape;
+use crate::brush_engine::preset_file;
 use eframe::egui::{self, Color32, TextureOptions};
 
 const MAX_BRUSH_TIP_PIXELS: u32 = 4_194_304;
@@ -126,6 +128,176 @@ impl PainterApp {
         self.brush_state
             .loaded_brush_tips
             .sort_by(|a, b| a.0.cmp(&b.0));
+    }
+}
+
+/// Saving, sharing and importing brush presets (`.rpbrush` files). The
+/// user's own presets live in `brushes/presets/`, one file each.
+impl PainterApp {
+    fn presets_dir(&self) -> std::path::PathBuf {
+        self.brush_state.brushes_path.join("presets")
+    }
+
+    /// Add the presets saved in `brushes/presets/` after the built-in ones.
+    pub(crate) fn load_user_presets(&mut self) {
+        let Ok(entries) = std::fs::read_dir(self.presets_dir()) else {
+            return;
+        };
+        let mut paths: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == preset_file::EXTENSION))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let loaded = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| preset_file::decode(&bytes));
+            match loaded {
+                Ok(presets) => {
+                    for mut preset in presets {
+                        preset.name = self.unique_preset_name(&preset.name);
+                        preset.file = Some(path.clone());
+                        self.brush_state.presets.push(preset);
+                    }
+                }
+                Err(err) => log::warn!("Skipping brush preset {}: {err}", path.display()),
+            }
+        }
+    }
+
+    /// `name`, or `name 2`, `name 3`… if a preset already has it.
+    pub(crate) fn unique_preset_name(&self, name: &str) -> String {
+        let taken = |n: &str| self.brush_state.presets.iter().any(|p| p.name == n);
+        if !taken(name) {
+            return name.to_string();
+        }
+        (2..)
+            .map(|i| format!("{name} {i}"))
+            .find(|n| !taken(n))
+            .expect("some number is free")
+    }
+
+    /// Add `preset` to the list and keep it in the user's library.
+    pub(crate) fn add_user_preset(&mut self, mut preset: BrushPreset) {
+        preset.name = self.unique_preset_name(&preset.name);
+        match self.write_library_file(&preset) {
+            Ok(path) => preset.file = Some(path),
+            Err(err) => {
+                log::warn!("Couldn't save brush preset {}: {err}", preset.name);
+                self.export_state.message = Some(format!("Couldn't save the preset: {err}"));
+            }
+        }
+        self.brush_state.presets.push(preset);
+    }
+
+    fn write_library_file(&self, preset: &BrushPreset) -> Result<std::path::PathBuf, String> {
+        let dir = self.presets_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let stem = preset_file::file_stem(&preset.name);
+        let path = std::iter::once(stem.clone())
+            .chain((2..).map(|i| format!("{stem} {i}")))
+            .map(|s| dir.join(format!("{s}.{}", preset_file::EXTENSION)))
+            .find(|p| !p.exists())
+            .expect("some name is free");
+        let bytes = preset_file::encode(std::slice::from_ref(preset))?;
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        Ok(path)
+    }
+
+    /// Remove a preset the user saved or imported (built-in ones stay).
+    pub(crate) fn delete_user_preset(&mut self, index: usize) {
+        let Some(preset) = self.brush_state.presets.get(index) else {
+            return;
+        };
+        let Some(path) = preset.file.clone() else {
+            return;
+        };
+        if let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            self.export_state.message = Some(format!("Couldn't delete the preset: {err}"));
+            return;
+        }
+        let preset = self.brush_state.presets.remove(index);
+        self.brush_state.preset_previews.remove(&preset.name);
+        for active in [
+            &mut self.brush_state.active_preset,
+            &mut self.brush_state.stashed_preset,
+        ] {
+            if active.as_deref() == Some(preset.name.as_str()) {
+                *active = None;
+            }
+        }
+    }
+
+    /// Import every preset in a `.rpbrush` file into the library; returns
+    /// how many there were.
+    pub(crate) fn import_presets_bytes(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        let presets = preset_file::decode(bytes)?;
+        let count = presets.len();
+        for preset in presets {
+            self.add_user_preset(preset);
+        }
+        Ok(count)
+    }
+
+    pub(crate) fn import_presets_path(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+        self.import_presets_bytes(&bytes)
+    }
+}
+
+/// Write `presets` to `path` as one `.rpbrush` file.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn export_presets(
+    presets: &[BrushPreset],
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let bytes = preset_file::encode(presets)?;
+    std::fs::write(path, bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn export_presets_dialog(app: &mut PainterApp, indices: &[usize], name: &str) {
+    let presets: Vec<BrushPreset> = indices
+        .iter()
+        .filter_map(|&i| app.brush_state.presets.get(i).cloned())
+        .collect();
+    if presets.is_empty() {
+        return;
+    }
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Brush presets", &[preset_file::EXTENSION])
+        .set_file_name(format!(
+            "{}.{}",
+            preset_file::file_stem(name),
+            preset_file::EXTENSION
+        ))
+        .save_file()
+    else {
+        return;
+    };
+    if let Err(err) = export_presets(&presets, &path) {
+        log::error!("{err}");
+        app.export_state.message = Some(err);
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn import_presets_dialog(app: &mut PainterApp) {
+    let Some(paths) = rfd::FileDialog::new()
+        .add_filter("Brush presets", &[preset_file::EXTENSION])
+        .pick_files()
+    else {
+        return;
+    };
+    for path in paths {
+        if let Err(err) = app.import_presets_path(&path) {
+            log::error!("{err}");
+            app.export_state.message = Some(err);
+        }
     }
 }
 

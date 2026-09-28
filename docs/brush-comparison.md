@@ -63,7 +63,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Symmetry / radial mirror | ✅ | ✅ | ✅ | ✅ incl. kaleidoscope |
 | Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ❌ |
 | Pen eraser end switches to eraser | ✅ | ✅ | ✅ | ✅ |
-| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ⚠️ 16 built-in + save your own (no sharing yet) |
+| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ✅ 16 built-in + your own, kept and shared as `.rpbrush` files |
 
 ## Roadmap
 
@@ -76,7 +76,7 @@ below.
   driving size and opacity.
 - [x] **2. Tip rotation and shape.** Fixed angle, follow the stroke
   direction, random rotation, squash ratio; for round and image tips.
-- [x] **3. Randomness per dab.** Size, opacity and flow randomness; several
+- [x] **3. Randomness per dab.** Size and opacity randomness; several
   dabs per step (spray); hue, saturation and value randomness.
 - [x] **4. Texture.** Paper grain on the brush (built-in grains and your own
   images), with scale, strength and how it combines (multiply, subtract,
@@ -96,8 +96,25 @@ below.
   charcoal, dry bristles, spray, foliage, spatter; and four generated tips
   (bristles, rough disc, spatter, leaf). For oil-like mixing, the Smudge tool
   with a Colour rate. Every preset is tested to paint and undo exactly.
-- [ ] Later: dual brush, airbrush, several tips per brush, decoration
-  brushes, more rulers.
+- [x] **Preset files.** Presets you save are kept in `brushes/presets/`
+  and can be exported and imported as `.rpbrush` files (one preset or a
+  whole set, with the tips and textures they use), from the presets
+  window's menu or by dropping a file on the window.
+- [ ] **Airbrush.** Paint keeps building while the pen is held still.
+- [ ] **Several tips per brush**, in sequence, at random, or by pressure or
+  direction.
+- [ ] **Dual brush.** A second tip masks the first.
+- [ ] **Watercolour edges.** Paint pools at the rim of the stroke.
+- [ ] **Bristle engine.**
+- [ ] **Ribbon and decoration brushes.**
+- [ ] **Sketch and hatching engines.**
+- [ ] **Deform, filter and clone brushes.**
+- [ ] **Assistants:** vanishing point, perspective, ellipse, concentric.
+- [ ] **Wrap-around painting** for seamless tiles.
+- [ ] **Importing other apps' brushes:** GIMP (`.gbr`, `.gih`), Photoshop
+  (`.abr`), Krita (`.kpp`, `.bundle`), MyPaint (`.myb`), Clip Studio
+  (`.sut`). ibisPaint brushes can't be imported: they're only shared as QR
+  codes through the app, in an undocumented format.
 
 ### Quality rules for every feature
 

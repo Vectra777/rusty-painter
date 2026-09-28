@@ -36,12 +36,36 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
         .default_size([WINDOW_WIDTH, 520.0])
         .min_size([200.0, 160.0])
         .show(ctx, |ui| {
-            if let Some(index) = presets_list(app, ui) {
-                app.apply_preset(index);
-                // On a tablet the window is in the way once a preset is picked.
-                if m.touch {
-                    app.brush_state.show_presets = false;
+            match presets_list(app, ui) {
+                Some(PresetAction::Pick(index)) => {
+                    app.apply_preset(index);
+                    // On a tablet the window is in the way once a preset is picked.
+                    if m.touch {
+                        app.brush_state.show_presets = false;
+                    }
                 }
+                Some(PresetAction::Delete(index)) => app.delete_user_preset(index),
+                #[cfg(not(target_os = "android"))]
+                Some(PresetAction::Export(index)) => {
+                    let name = app.brush_state.presets[index].name.clone();
+                    crate::app::brush_io::export_presets_dialog(app, &[index], &name);
+                }
+                #[cfg(not(target_os = "android"))]
+                Some(PresetAction::ExportMine) => {
+                    let mine: Vec<usize> = (app.brush_state.presets.iter().enumerate())
+                        .filter(|(_, p)| p.file.is_some())
+                        .map(|(i, _)| i)
+                        .collect();
+                    crate::app::brush_io::export_presets_dialog(app, &mine, "My brushes");
+                }
+                #[cfg(not(target_os = "android"))]
+                Some(PresetAction::ExportAll) => {
+                    let all: Vec<usize> = (0..app.brush_state.presets.len()).collect();
+                    crate::app::brush_io::export_presets_dialog(app, &all, "Brushes");
+                }
+                #[cfg(not(target_os = "android"))]
+                Some(PresetAction::Import) => crate::app::brush_io::import_presets_dialog(app),
+                None => {}
             }
         });
     if !open {
@@ -50,8 +74,23 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
     save_preset_modal(app, ctx);
 }
 
-/// The list; returns the index of the preset the user picked.
-fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<usize> {
+/// What the user did in the presets list.
+enum PresetAction {
+    Pick(usize),
+    Delete(usize),
+    #[cfg(not(target_os = "android"))]
+    Export(usize),
+    #[cfg(not(target_os = "android"))]
+    ExportMine,
+    #[cfg(not(target_os = "android"))]
+    ExportAll,
+    #[cfg(not(target_os = "android"))]
+    Import,
+}
+
+/// The list, with a menu on each preset (export, delete) and in the header
+/// (import, export several).
+fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction> {
     let m = metrics(ui.ctx());
     let mut picked = None;
 
@@ -80,6 +119,36 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<usize> {
                 app.brush_state.new_preset_name = "New Preset".to_string();
                 ui.ctx()
                     .data_mut(|d| d.remove::<bool>(egui::Id::new(DUPLICATE_NAME_WARNING_ID)));
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                let menu = icon_button(ui, Icon::Menu, m.header_button, false, "Import and export");
+                let id = ui.make_persistent_id("brush_presets_menu");
+                if menu.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(id));
+                }
+                egui::popup_below_widget(
+                    ui,
+                    id,
+                    &menu,
+                    egui::PopupCloseBehavior::CloseOnClick,
+                    |ui| {
+                        ui.set_min_width(170.0);
+                        if ui.button("Import brushes…").clicked() {
+                            picked = Some(PresetAction::Import);
+                        }
+                        let any_mine = app.brush_state.presets.iter().any(|p| p.file.is_some());
+                        if ui
+                            .add_enabled(any_mine, egui::Button::new("Export my brushes…"))
+                            .clicked()
+                        {
+                            picked = Some(PresetAction::ExportMine);
+                        }
+                        if ui.button("Export all brushes…").clicked() {
+                            picked = Some(PresetAction::ExportAll);
+                        }
+                    },
+                );
             }
         });
     });
@@ -119,9 +188,24 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<usize> {
                     // Any brush can be the eraser's, so the name alone says
                     // which is in use.
                     let active = bs.active_preset.as_deref() == Some(preset.name.as_str());
-                    if preset_tile(ui, &preset.name, texture, tile_height, active).clicked() {
-                        picked = Some(index);
+                    let tile = preset_tile(ui, &preset.name, texture, tile_height, active);
+                    if tile.clicked() {
+                        picked = Some(PresetAction::Pick(index));
                     }
+                    let mine = preset.file.is_some();
+                    tile.context_menu(|ui| {
+                        #[cfg(not(target_os = "android"))]
+                        if ui.button("Export…").clicked() {
+                            picked = Some(PresetAction::Export(index));
+                        }
+                        if ui
+                            .add_enabled(mine, egui::Button::new("Delete"))
+                            .on_disabled_hover_text("Built-in presets can't be deleted")
+                            .clicked()
+                        {
+                            picked = Some(PresetAction::Delete(index));
+                        }
+                    });
                 }
                 ui.add_space(6.0);
             }
@@ -204,6 +288,7 @@ fn save_preset_modal(app: &mut PainterApp, ctx: &egui::Context) {
         return;
     }
     let warning_id = egui::Id::new(DUPLICATE_NAME_WARNING_ID);
+    let mut save = None;
     egui::Window::new("Save Brush Preset")
         .collapsible(false)
         .resizable(false)
@@ -231,15 +316,20 @@ fn save_preset_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     if bs.presets.iter().any(|p| p.name == name) {
                         ctx.data_mut(|d| d.insert_temp(warning_id, true));
                     } else {
-                        bs.presets.push(BrushPreset {
-                            name: name.clone(),
+                        save = Some(BrushPreset {
+                            name,
                             brush: bs.brush.clone(),
+                            file: None,
                         });
-                        bs.active_preset = Some(name);
                         ctx.data_mut(|d| d.remove::<bool>(warning_id));
                         bs.show_new_preset_modal = false;
                     }
                 }
             });
         });
+    if let Some(preset) = save {
+        let name = preset.name.clone();
+        app.add_user_preset(preset);
+        app.brush_state.active_preset = Some(name);
+    }
 }

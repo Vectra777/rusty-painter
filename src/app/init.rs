@@ -72,6 +72,7 @@ impl PainterApp {
         };
 
         app.load_brush_tips(cc.egui_ctx.clone());
+        app.load_user_presets();
         // The user's gradients sit next to the brushes folder.
         let gradients = app
             .brush_state
@@ -108,6 +109,7 @@ impl PainterApp {
         let preset = |name: &str, brush: Brush| BrushPreset {
             name: name.to_string(),
             brush,
+            file: None,
         };
         vec![
             preset("Pencil (Sketch)", {

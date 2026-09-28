@@ -26,7 +26,7 @@ mod blobs;
 mod convert;
 pub(crate) mod export;
 mod preview;
-mod zip;
+pub(crate) mod zip;
 
 use blobs::{StoredBlob, push_blobs, read_blob};
 use convert::{

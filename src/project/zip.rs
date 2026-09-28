@@ -12,7 +12,7 @@ const UTF8_NAMES: u16 = 1 << 11;
 /// 1980-01-01 00:00 in MS-DOS time: no timestamps, so saves are repeatable.
 const DOS_DATE: u16 = (1 << 5) | 1;
 
-pub(super) const SIGNATURE: &[u8; 4] = b"PK\x03\x04";
+pub(crate) const SIGNATURE: &[u8; 4] = b"PK\x03\x04";
 
 struct Entry {
     name: String,
@@ -22,7 +22,7 @@ struct Entry {
 }
 
 #[derive(Default)]
-pub(super) struct ZipWriter {
+pub(crate) struct ZipWriter {
     out: Vec<u8>,
     entries: Vec<Entry>,
 }
@@ -116,7 +116,7 @@ fn get32(bytes: &[u8], at: usize) -> Option<u32> {
 }
 
 /// The data of entry `name`, which must be stored (not compressed).
-pub(super) fn read_entry<'a>(bytes: &'a [u8], name: &str) -> Result<&'a [u8], String> {
+pub(crate) fn read_entry<'a>(bytes: &'a [u8], name: &str) -> Result<&'a [u8], String> {
     let broken = || "Damaged project file".to_string();
     // The end record is the last 22 bytes, plus a comment of up to 64 KB.
     let search_from = bytes.len().saturating_sub(22 + usize::from(u16::MAX));
