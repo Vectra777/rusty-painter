@@ -14,7 +14,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Round tip, hardness / softness curve | ✅ | ✅ | ✅ | ✅ Gaussian or curve |
-| Image tips (custom shapes) | ✅ PNG, GBR, ABR import | ✅ | ✅ brush patterns | ✅ PNGs in `brushes/`, and imported |
+| Image tips (custom shapes) | ✅ PNG, GBR, ABR import | ✅ | ✅ brush patterns | ✅ PNGs in `brushes/`, imported, or made from the selection |
 | Image tips sampled cleanly when small (mipmaps) | ✅ | ✅ | ✅ | ✅ trilinear |
 | Image tips keep their proportions | ✅ | ✅ | ✅ | ✅ |
 | Several tips per brush (random or in sequence) | ✅ animated GIH | ✅ | ⚠️ | ✅ in turn, random, pressure, direction |
@@ -30,6 +30,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 |---|---|---|---|---|
 | Pressure → size / opacity / flow | ✅ | ✅ | ✅ | ✅ |
 | Own pressure curve per setting | ✅ | ✅ | ⚠️ | ✅ size, opacity, flow |
+| Any input → any setting, with a curve | ✅ sensors | ⚠️ fixed pairs | ❌ | ✅ 9 inputs → size, opacity, angle, squash, hue, saturation, value |
 | Pen tilt / barrel rotation | ✅ | ✅ | ⚠️ barrel roll (Apple Pencil Pro) | ✅ tilt → size, opacity, tip angle (no barrel roll) |
 | Stroke speed | ✅ | ✅ | ✅ Dynamic tab | ✅ size and opacity |
 | Taper at the start / end of a stroke | ✅ fade | ✅ | ✅ Fade tab | ✅ size and/or opacity, no lag |
@@ -59,6 +60,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Stabiliser | ✅ several kinds | ✅ + post-correction | ✅ + forced fade | ✅ simple + dynamic (mass/drag) |
+| Hold to snap to a shape (QuickShape) | ❌ | ⚠️ | ⚠️ | ✅ line, ellipse, rectangle, polygon |
 | Rulers / assistants (perspective, ellipse…) | ✅ | ✅ | ✅ | ✅ ruler, vanishing point, perspective, ellipse, concentric |
 | Symmetry / radial mirror | ✅ | ✅ | ✅ | ✅ incl. kaleidoscope |
 | Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ✅ brushes, smudge and blur |
@@ -146,6 +148,32 @@ below.
   and bundles. ibisPaint brushes can't be imported: they're only shared as
   QR codes through the app, in an undocumented format.
 
+- [x] **Brush inputs** (Brush → Inputs): any of nine sensors (pressure,
+  speed, tilt, tilt direction, stroke direction, distance, time, random per
+  dab or per stroke) drives size, opacity, angle, squash, hue, saturation
+  or value, each through its own curve. They stack with the fixed dynamics
+  above and are saved in `.rpbrush` files.
+- [x] **Define a tip from the selection** (Edit → Define Brush Tip from
+  Selection): what's drawn there, dark paints and light doesn't; saved in
+  `brushes/` and used at once.
+- [x] **QuickShape** (View → QuickShape): hold the pen still at the end of a
+  stroke and it becomes a clean line, ellipse, rectangle or polygon,
+  editable with the Shape tool's handles until applied.
+
+### Next
+
+- [ ] Brush inputs driving texture strength, hardness, scatter and the mix
+  of the main and second colour.
+- [ ] A filter brush: any filter painted through the brush.
+- [ ] Texture: grain moving with the stroke, rotated, offset each stroke,
+  applied to each dab.
+- [ ] Stabiliser: pulled string (lazy mouse), post-correction, motion
+  filtering; pressure calibration from a test stroke.
+- [ ] Brush library: tags, favourites, search, recent brushes, a pop-up
+  palette.
+- [ ] Bigger: vector brushes, a spray/particle engine, wet paint simulation
+  and impasto.
+
 ### Quality rules for every feature
 
 - **Nothing changes when it's off.** Every existing brush paints
@@ -184,6 +212,11 @@ below.
   per sample 6.7 ms, dual brush 7.3 ms, wet edges 6.5 ms, colour tip
   8.5 ms, sketch 8.9 ms, bristle (30 hairs) 11 ms, three image tips 14 ms,
   hatching 20 ms, ribbon 21 ms.
+- **After the third round** (brush inputs and the layer features): the
+  fixed workloads in `examples/fixed_workloads.rs`, counted with `perf
+  stat` in single-codegen-unit builds, run within ±0.04% of the instructions
+  they did before for strokes (plain, airbrush, paper texture). Four input
+  mappings on the same stroke cost about 3.1 ms (`input_mappings`).
 
 ## Sources
 
