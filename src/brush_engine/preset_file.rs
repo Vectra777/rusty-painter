@@ -17,6 +17,7 @@ use crate::brush_engine::brush::{Brush, BrushPreset, BrushType, StabilizerAlgori
 use crate::brush_engine::brush_options::{
     BlendMode, PaintingMode, PixelBrushShape, PressureCurves, TipOrder,
 };
+use crate::brush_engine::dual::{DualMode, DualTip};
 use crate::brush_engine::dynamics::BrushDynamics;
 use crate::brush_engine::hardness::{SoftnessCurve, SoftnessSelector};
 use crate::brush_engine::texture::{BrushTexture, Pattern, TextureMode};
@@ -73,6 +74,76 @@ enum StoredShape {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct StoredDual {
+    shape: StoredShape,
+    size: f32,
+    hardness: f32,
+    spacing: f32,
+    scatter: f32,
+    count: u32,
+    random_angle: bool,
+    mode: DualMode,
+}
+
+impl Default for StoredDual {
+    fn default() -> Self {
+        StoredDual::from_dual(&DualTip::default(), &mut Resources::default())
+    }
+}
+
+impl StoredDual {
+    fn from_dual(d: &DualTip, res: &mut Resources) -> Self {
+        Self {
+            shape: StoredShape::from_shape(&d.shape, res),
+            size: d.size,
+            hardness: d.hardness,
+            spacing: d.spacing,
+            scatter: d.scatter,
+            count: d.count,
+            random_angle: d.random_angle,
+            mode: d.mode,
+        }
+    }
+
+    fn into_dual(self, res: &Resources) -> Result<DualTip, String> {
+        Ok(DualTip {
+            shape: self.shape.into_shape(res)?,
+            size: self.size,
+            hardness: self.hardness,
+            spacing: self.spacing,
+            scatter: self.scatter,
+            count: self.count,
+            random_angle: self.random_angle,
+            mode: self.mode,
+        })
+    }
+}
+
+impl StoredShape {
+    fn from_shape(shape: &PixelBrushShape, res: &mut Resources) -> Self {
+        match shape {
+            PixelBrushShape::Circle => StoredShape::Circle,
+            PixelBrushShape::Square => StoredShape::Square,
+            PixelBrushShape::Custom(tip) => StoredShape::Tip(res.tip(tip)),
+        }
+    }
+
+    fn into_shape(self, res: &Resources) -> Result<PixelBrushShape, String> {
+        Ok(match self {
+            StoredShape::Circle => PixelBrushShape::Circle,
+            StoredShape::Square => PixelBrushShape::Square,
+            StoredShape::Tip(i) => PixelBrushShape::Custom(
+                res.tips
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| format!("Missing brush tip {i}"))?,
+            ),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 struct StoredBrushTexture {
     /// A texture from the file's `textures`.
     pattern: usize,
@@ -119,6 +190,7 @@ struct StoredBrush {
     /// A [`LayerBlend::key`].
     paint_blend: String,
     airbrush_rate: f32,
+    dual: Option<StoredDual>,
 }
 
 impl Default for StoredBrush {
@@ -163,11 +235,7 @@ impl StoredBrush {
             hardness: o.hardness,
             softness_selector: o.softness_selector,
             softness_curve: o.softness_curve.clone(),
-            shape: match &o.pixel_shape {
-                PixelBrushShape::Circle => StoredShape::Circle,
-                PixelBrushShape::Square => StoredShape::Square,
-                PixelBrushShape::Custom(tip) => StoredShape::Tip(res.tip(tip)),
-            },
+            shape: StoredShape::from_shape(&o.pixel_shape, res),
             extra_tips: o.extra_tips.iter().map(|t| res.tip(t)).collect(),
             tip_order: o.tip_order,
             color: o.color.to_array(),
@@ -198,6 +266,7 @@ impl StoredBrush {
             }),
             paint_blend: b.paint_blend.key().to_string(),
             airbrush_rate: b.airbrush_rate,
+            dual: b.dual.as_ref().map(|d| StoredDual::from_dual(d, res)),
         }
     }
 
@@ -207,16 +276,7 @@ impl StoredBrush {
         let o = &mut b.brush_options;
         o.softness_selector = self.softness_selector;
         o.softness_curve = self.softness_curve;
-        o.pixel_shape = match self.shape {
-            StoredShape::Circle => PixelBrushShape::Circle,
-            StoredShape::Square => PixelBrushShape::Square,
-            StoredShape::Tip(i) => PixelBrushShape::Custom(
-                res.tips
-                    .get(i)
-                    .cloned()
-                    .ok_or_else(|| format!("Missing brush tip {i}"))?,
-            ),
-        };
+        o.pixel_shape = self.shape.into_shape(res)?;
         o.extra_tips = self
             .extra_tips
             .iter()
@@ -263,6 +323,7 @@ impl StoredBrush {
         };
         b.paint_blend = LayerBlend::from_key(&self.paint_blend).unwrap_or_default();
         b.airbrush_rate = self.airbrush_rate;
+        b.dual = self.dual.map(|d| d.into_dual(res)).transpose()?;
         Ok(b)
     }
 }

@@ -43,6 +43,10 @@ pub(crate) struct StrokeBuffer {
     /// tail segment's. `None` for single-colour strokes.
     pub colors: Option<Vec<[f32; 3]>>,
     pub tail_colors: [Option<Vec<[f32; 3]>>; 2],
+    /// A dual brush's mask (its second tip's coverage), and where it grew
+    /// since the pixels were last resolved with it.
+    pub mask: Option<Vec<f32>>,
+    pub mask_dirty: Option<[usize; 4]>,
 }
 
 /// Tiles touched by the current stroke.
@@ -58,6 +62,8 @@ pub struct StrokeTiles {
     pub(crate) tail_tiles: [HashSet<(usize, usize)>; 2],
     /// Which tail segment is the newer (painted over the other).
     pub(crate) tail_newer: usize,
+    /// Tiles a dual brush's mask grew in since they were last resolved.
+    pub(crate) mask_tiles: HashSet<(usize, usize)>,
 }
 
 /// Shared drawing dependencies for adding points to a stroke.
@@ -132,6 +138,11 @@ impl<'a> StrokeContext<'a> {
             self.undo_action,
             self.stroke_tiles,
         );
+    }
+
+    /// Show the paint a dual brush's mask has uncovered since last time.
+    fn resolve_mask(&mut self, brush: &Brush) {
+        brush.resolve_mask_changes(self.canvas, self.selection, self.stroke_tiles);
     }
 
     /// Take the stroke's redrawable tail back off.
@@ -247,6 +258,10 @@ pub struct StrokeState {
     airbrush_due: Option<f64>,
     /// The next tip of a brush that uses its tips in turn.
     next_tip: usize,
+    /// A dual brush's second tip: where its last dab went, and how far
+    /// along the stroke the next one is.
+    mask_last: Option<Vec2>,
+    mask_until_next: f32,
     /// Every dab's variation as painted, for tests.
     #[cfg(test)]
     pub(crate) painted: Vec<DabVar>,
@@ -288,6 +303,8 @@ impl StrokeState {
             prev_sample_time: None,
             airbrush_due: None,
             next_tip: 0,
+            mask_last: None,
+            mask_until_next: 0.0,
             #[cfg(test)]
             painted: Vec::new(),
         }
@@ -339,6 +356,9 @@ impl StrokeState {
             // Spacing and jitter follow this sample's pressure.
             apply_pressure(brush, original, p);
             self.add_point_at_pressure(brush, raw_pos);
+            if brush.dual.is_some() {
+                self.paint_mask(brush, original.0, context);
+            }
             if !self.pending.is_empty()
                 && let Some(t) = time
             {
@@ -409,6 +429,57 @@ impl StrokeState {
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
         }
+    }
+
+    /// A dual brush: stamp its second tip along the stroke up to where it
+    /// is now (spaced by its own size), into the stroke's mask, then show
+    /// the paint the mask uncovered. `diameter` is the brush's unpressured
+    /// size, which the second tip's follows.
+    fn paint_mask(&mut self, brush: &Brush, diameter: f32, context: &mut StrokeContext<'_>) {
+        let (Some(dual), Some(to)) = (&brush.dual, self.last_pos) else {
+            return;
+        };
+        let step = dual.step(diameter);
+        let mut centers = Vec::new();
+        match self.mask_last {
+            None => centers.push(to),
+            Some(from) => {
+                let length = (to - from).length();
+                let mut walked = self.mask_until_next;
+                while walked <= length {
+                    centers.push(from + (to - from) * (walked / length.max(1e-6)));
+                    walked += step;
+                }
+                self.mask_until_next = walked - length;
+            }
+        }
+        if self.mask_last.is_none() {
+            self.mask_until_next = step;
+        }
+        self.mask_last = Some(to);
+        if centers.is_empty() {
+            return;
+        }
+        let mut mask_brush = dual.brush(brush, diameter);
+        let count = dual.count.clamp(1, 16);
+        let mut points = Vec::with_capacity(centers.len() * count as usize);
+        let mut vars = Vec::with_capacity(points.capacity());
+        for c in centers {
+            for _ in 0..count {
+                points.push(self.scatter(&mask_brush, c));
+                let orient = if dual.random_angle {
+                    tip_orientation(self.rng.random::<f32>() * std::f32::consts::TAU, 1.0)
+                } else {
+                    crate::brush_engine::dynamics::IDENTITY
+                };
+                vars.push(DabVar {
+                    orient,
+                    ..DabVar::default()
+                });
+            }
+        }
+        context.dabs_varied(&mut mask_brush, &points, &vars, Target::Mask);
+        context.resolve_mask(brush);
     }
 
     /// Paint the dabs queued in `self.pending`, their pressure blending from

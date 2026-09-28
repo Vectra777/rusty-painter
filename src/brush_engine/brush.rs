@@ -168,6 +168,8 @@ pub struct Brush {
     /// Airbrush: dabs per second added where the pen is while it's down,
     /// so paint builds up when it's held still (0 = off).
     pub airbrush_rate: f32,
+    /// Dual brush: a second tip that masks this one; `None` for none.
+    pub dual: Option<crate::brush_engine::dual::DualTip>,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -201,6 +203,8 @@ struct BatchCtx<'a> {
     general: bool,
     /// Which tail segment is the newer.
     tail_newer: usize,
+    /// A dual brush: how its mask combines with the coverage.
+    dual: Option<crate::brush_engine::dual::DualMode>,
 }
 
 /// Where a batch of dabs accumulates.
@@ -212,6 +216,9 @@ pub(crate) enum Target {
     /// come): merged into the stroke once it's far enough behind the pen,
     /// or cleared and drawn again, tapered, when the pen lifts.
     Tail(usize),
+    /// A dual brush's mask: the second tip's coverage, which the stroke's
+    /// is combined with when resolving (nothing is resolved on its own).
+    Mask,
 }
 
 /// A whole tile's selection coverage, row by row.
@@ -306,15 +313,25 @@ fn paint_batch(
             tail,
             colors,
             tail_colors,
+            mask,
             ..
         } = &mut *buffer;
+        let mut no_colors = None;
         let (coverage, colors) = match ctx.target {
             Target::Stroke => (coverage, colors),
             Target::Tail(k) => (
                 tail[k].get_or_insert_with(|| vec![0.0; tile_size * tile_size]),
                 &mut tail_colors[k],
             ),
+            Target::Mask => (
+                mask.get_or_insert_with(|| vec![0.0; tile_size * tile_size]),
+                &mut no_colors,
+            ),
         };
+        // The stroke's coverage takes the selection; its mask needn't too.
+        let selection_coverage = selection_coverage
+            .as_deref()
+            .filter(|_| ctx.target != Target::Mask);
         let mut colors = ctx
             .colored
             .then(|| colors.get_or_insert_with(|| vec![[0.0; 3]; tile_size * tile_size]));
@@ -384,6 +401,15 @@ fn paint_batch(
         }
 
         if !touched {
+            return;
+        }
+        if ctx.target == Target::Mask {
+            // Resolved later, with the brush the mask belongs to.
+            for (row, &(lo, hi)) in spans.iter().enumerate() {
+                if lo <= hi {
+                    grow_rect(&mut buffer.mask_dirty, [lo, row, hi + 1, row + 1]);
+                }
+            }
             return;
         }
         if let Target::Tail(k) = ctx.target {
@@ -494,6 +520,20 @@ fn resolve_spans_in(
             &combined[..]
         } else {
             &buffer.coverage[range.clone()]
+        };
+        // A dual brush: paint only where its second tip reached too.
+        let masked;
+        let coverage = match ctx.dual {
+            Some(mode) => {
+                let mask = buffer.mask.as_ref().map(|m| &m[range.clone()]);
+                masked = coverage
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| mode.apply(c, mask.map_or(0.0, |m| m[i])))
+                    .collect::<Vec<f32>>();
+                &masked[..]
+            }
+            None => coverage,
         };
         // Canvas position of the span, for the alpha dither.
         let origin = [(tile_x0 + min_x) as u32, (tile_y0 + row) as u32];
@@ -615,6 +655,7 @@ impl Brush {
             texture: None,
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
+            dual: None,
         }
     }
 
@@ -635,6 +676,7 @@ impl Brush {
             texture: None,
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
+            dual: None,
         }
     }
 
@@ -882,6 +924,45 @@ impl Brush {
         }
     }
 
+    /// Re-resolve, with this (dual) brush, the pixels its mask's latest
+    /// dabs reached: where the stroke already has paint, more of it shows.
+    pub(crate) fn resolve_mask_changes(
+        &self,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        stroke_tiles: &mut StrokeTiles,
+    ) {
+        let tile_size = canvas.tile_size();
+        let keys: Vec<_> = stroke_tiles.mask_tiles.drain().collect();
+        let ctx = self.batch_ctx(
+            canvas,
+            selection,
+            &[],
+            &stroke_tiles.buffers,
+            Target::Stroke,
+            stroke_tiles.tail_newer,
+        );
+        for key in keys {
+            let Some(buffer) = stroke_tiles.buffers.get(&key) else {
+                continue;
+            };
+            let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let Some([x0, y0, x1, y1]) = buffer.mask_dirty.take() else {
+                continue;
+            };
+            let mut spans = vec![(usize::MAX, 0usize); tile_size];
+            for span in &mut spans[y0..y1] {
+                *span = (x0, x1 - 1);
+            }
+            let region = TileRegion {
+                tx: key.0,
+                ty: key.1,
+            };
+            resolve_spans(&ctx, region, &mut buffer, &spans);
+            stroke_tiles.dirty.insert(key);
+        }
+    }
+
     /// What a batch needs to paint and resolve with this brush.
     fn batch_ctx<'a>(
         &'a self,
@@ -916,6 +997,7 @@ impl Brush {
             mode: self.paint_blend,
             general: colored || self.paint_blend != LayerBlend::Normal,
             tail_newer,
+            dual: self.dual.as_ref().map(|d| d.mode),
         }
     }
 
@@ -945,8 +1027,14 @@ impl Brush {
         // stroke at opacity when resolving.
         let strength =
             o.color.a() as f32 / 255.0 * (o.flow / 100.0) * if wash { 1.0 } else { o.opacity };
-        if let Target::Tail(k) = target {
-            stroke_tiles.tail_tiles[k].extend(regions.iter().map(|r| (r.tx, r.ty)));
+        match target {
+            Target::Tail(k) => {
+                stroke_tiles.tail_tiles[k].extend(regions.iter().map(|r| (r.tx, r.ty)));
+            }
+            Target::Mask => stroke_tiles
+                .mask_tiles
+                .extend(regions.iter().map(|r| (r.tx, r.ty))),
+            Target::Stroke => {}
         }
         let ctx = self.batch_ctx(
             canvas,
@@ -1017,6 +1105,8 @@ impl Brush {
                     tail_rect: [None, None],
                     colors: None,
                     tail_colors: [None, None],
+                    mask: None,
+                    mask_dirty: None,
                 }),
             );
         }

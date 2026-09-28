@@ -46,7 +46,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ✅ all 27 layer modes |
 | Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ✅ Smudge with a colour rate |
 | Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height |
-| Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ❌ |
+| Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ✅ multiply, darken, subtract, height |
 | Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ❌ |
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
 | Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ❌ |
@@ -105,7 +105,9 @@ below.
 - [x] **Several tips per brush**, in turn, at random, or by pressure or
   direction. A folder of pictures in `brushes/` is a tip set; right-click
   tips to add them to a brush. The Mixed Leaves preset uses three.
-- [ ] **Dual brush.** A second tip masks the first.
+- [x] **Dual brush.** A second tip, with its own size, spacing, scatter
+  and count, masks the first (multiply, darken, subtract or height). The
+  Dry Media preset uses a spatter tip.
 - [ ] **Watercolour edges.** Paint pools at the rim of the stroke.
 - [ ] **Bristle engine.**
 - [ ] **Ribbon and decoration brushes.**

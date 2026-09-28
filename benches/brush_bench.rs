@@ -556,6 +556,22 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.brush_options.tip_order = TipOrder::Random;
         b
     }));
+    // A dual brush: a spatter tip masking the round one.
+    cases.push(("dual_brush", {
+        use rusty_painter::brush_engine::brush_options::PixelBrushShape;
+        let spatter = rusty_painter::brush_engine::tip::builtin()
+            .iter()
+            .find(|(n, _)| *n == "Spatter")
+            .map(|(_, t)| t.clone())
+            .unwrap();
+        let mut b = base();
+        b.dual = Some(rusty_painter::brush_engine::dual::DualTip {
+            shape: PixelBrushShape::Custom(spatter),
+            size: 0.5,
+            ..Default::default()
+        });
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {

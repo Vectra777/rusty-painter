@@ -436,6 +436,7 @@ fn brush_settings_contents(
 
     changed |= dynamics_sections(ui, &mut brush.dynamics);
     changed |= texture_section(ui, &mut brush.texture, textures);
+    changed |= dual_section(ui, &mut brush.dual, loaded_tips);
 
     section(ui, "Pen pressure & tilt", true, |ui| {
         let o = &mut brush.brush_options;
@@ -734,6 +735,131 @@ fn dynamics_sections(
 }
 
 /// Paper texture: which pattern, how it combines, its scale and strength.
+/// The dual brush: a second tip masking the first.
+fn dual_section(
+    ui: &mut egui::Ui,
+    dual: &mut Option<crate::brush_engine::dual::DualTip>,
+    loaded_tips: &[crate::app::state::LoadedTip],
+) -> bool {
+    use crate::brush_engine::dual::{DualMode, DualTip};
+    let mut changed = false;
+    section(ui, "Dual brush", false, |ui| {
+        let mut on = dual.is_some();
+        if ui
+            .checkbox(&mut on, "Mask with a second tip")
+            .on_hover_text(
+                "A second tip is stamped along the stroke, and paint shows only where it \
+                 reaches: a round brush masked by a spatter tip paints like dry media.",
+            )
+            .changed()
+        {
+            *dual = on.then(DualTip::default);
+            changed = true;
+        }
+        let Some(d) = dual else {
+            return;
+        };
+        let name_of = |shape: &PixelBrushShape| match shape {
+            PixelBrushShape::Circle => "Circle".to_string(),
+            PixelBrushShape::Square => "Square".to_string(),
+            PixelBrushShape::Custom(_) => loaded_tips
+                .iter()
+                .find(|t| &t.shape == shape)
+                .map_or_else(|| "Picture".to_string(), |t| t.name.clone()),
+        };
+        property_row(ui, "Tip", |ui| {
+            egui::ComboBox::from_id_salt("dual_tip")
+                .selected_text(name_of(&d.shape))
+                .show_ui(ui, |ui| {
+                    let choices = [PixelBrushShape::Circle, PixelBrushShape::Square]
+                        .into_iter()
+                        .chain(
+                            loaded_tips
+                                .iter()
+                                .filter(|t| t.extra.is_empty())
+                                .map(|t| t.shape.clone()),
+                        );
+                    for shape in choices {
+                        let selected = d.shape == shape;
+                        let label = name_of(&shape);
+                        if ui.selectable_label(selected, label).clicked() && !selected {
+                            d.shape = shape;
+                            changed = true;
+                        }
+                    }
+                });
+        });
+        property_row(ui, "Mode", |ui| {
+            egui::ComboBox::from_id_salt("dual_mode")
+                .selected_text(d.mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in DualMode::ALL {
+                        changed |= ui
+                            .selectable_value(&mut d.mode, mode, mode.label())
+                            .changed();
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Multiply: soft all over. Darken: the weaker of the two. Subtract: the \
+                     second tip's gaps eat into the paint. Height: light paint only on its \
+                     peaks.",
+                );
+        });
+        changed |= slider_row(
+            ui,
+            "Size",
+            crate::ui::widgets::reset(&mut d.size, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.05..=2.0).logarithmic(true))
+            }),
+        )
+        .on_hover_text("As a share of the brush size.")
+        .changed();
+        if !matches!(d.shape, PixelBrushShape::Custom(_)) {
+            changed |= slider_row(
+                ui,
+                "Hardness",
+                crate::ui::widgets::reset(&mut d.hardness, |v| {
+                    egui::Slider::new(v, 0.0..=100.0)
+                        .max_decimals(0)
+                        .suffix("%")
+                }),
+            )
+            .changed();
+        }
+        changed |= slider_row(
+            ui,
+            "Spacing",
+            crate::ui::widgets::reset(&mut d.spacing, |v| {
+                egui::Slider::new(v, 5.0..=300.0)
+                    .max_decimals(0)
+                    .suffix("%")
+            }),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Scatter",
+            crate::ui::widgets::reset(&mut d.scatter, |v| {
+                egui::Slider::new(v, 0.0..=300.0)
+                    .max_decimals(0)
+                    .suffix("%")
+            }),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Count",
+            crate::ui::widgets::reset(&mut d.count, |v| egui::Slider::new(v, 1..=16)),
+        )
+        .changed();
+        changed |= ui
+            .checkbox(&mut d.random_angle, "Turn each dab at random")
+            .changed();
+    });
+    changed
+}
+
 fn texture_section(
     ui: &mut egui::Ui,
     texture: &mut Option<crate::brush_engine::texture::BrushTexture>,

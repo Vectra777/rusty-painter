@@ -301,6 +301,23 @@ impl PainterApp {
                 };
                 b
             }),
+            preset("Dry Media", {
+                // A soft round brush broken up by a spatter tip: the grain
+                // of dry pastel or a worn-out brush.
+                let mut b = Brush::new(36.0, 70.0, Color32::from_rgb(90, 60, 50), 10.0);
+                b.brush_options.pressure_min_size = 0.4;
+                b.dual = Some(crate::brush_engine::dual::DualTip {
+                    shape: tip("Spatter"),
+                    size: 0.5,
+                    spacing: 30.0,
+                    scatter: 60.0,
+                    count: 2,
+                    random_angle: true,
+                    mode: crate::brush_engine::dual::DualMode::Multiply,
+                    ..Default::default()
+                });
+                b
+            }),
             preset("Spatter", {
                 let mut b = Brush::new(40.0, 90.0, black, 90.0);
                 b.brush_options.pixel_shape = tip("Spatter");

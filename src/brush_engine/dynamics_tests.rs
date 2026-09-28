@@ -1154,3 +1154,80 @@ fn a_set_of_the_same_tip_paints_like_the_tip_alone() {
     let (b, _) = paint(&mut two, &line(64.0, 0.5), 1, true);
     assert!(pixels(&a) == pixels(&b));
 }
+
+fn dual_brush(dual: Option<crate::brush_engine::dual::DualTip>) -> Brush {
+    let mut b = Brush::new(20.0, 60.0, Color32::BLACK, 10.0);
+    b.brush_options.pressure_size = false;
+    b.dual = dual;
+    b
+}
+
+#[test]
+fn a_dual_tip_covering_everything_changes_nothing() {
+    use crate::brush_engine::brush_options::PixelBrushShape;
+    use crate::brush_engine::dual::DualTip;
+    let full = DualTip {
+        shape: PixelBrushShape::Square,
+        size: 4.0,
+        hardness: 100.0,
+        spacing: 5.0,
+        scatter: 0.0,
+        random_angle: false,
+        ..Default::default()
+    };
+    let (plain, _) = paint(&mut dual_brush(None), &line(64.0, 0.5), 1, true);
+    let (masked, _) = paint(&mut dual_brush(Some(full)), &line(64.0, 0.5), 1, true);
+    assert!(pixels(&plain) == pixels(&masked));
+}
+
+#[test]
+fn an_empty_dual_tip_masks_all_the_paint() {
+    use crate::brush_engine::brush_options::PixelBrushShape;
+    use crate::brush_engine::dual::{DualMode, DualTip};
+    let blank = crate::brush_engine::tip::TipMask::from_mask(8, 8, vec![0; 64]);
+    for mode in DualMode::ALL {
+        let dual = DualTip {
+            shape: PixelBrushShape::Custom(blank.clone()),
+            mode,
+            ..Default::default()
+        };
+        let (canvas, _) = paint(&mut dual_brush(Some(dual)), &line(64.0, 0.5), 1, true);
+        assert!(pixels(&canvas).iter().all(|&a| a == 0), "{mode:?}");
+    }
+}
+
+#[test]
+fn a_spatter_dual_tip_breaks_the_stroke_up_and_undoes_exactly() {
+    use crate::brush_engine::dual::DualTip;
+    let spatter = crate::brush_engine::tip::builtin()
+        .iter()
+        .find(|(n, _)| *n == "Spatter")
+        .map(|(_, t)| t.clone())
+        .unwrap();
+    let dual = DualTip {
+        shape: crate::brush_engine::brush_options::PixelBrushShape::Custom(spatter),
+        size: 0.6,
+        ..Default::default()
+    };
+    let (plain, _) = paint(&mut dual_brush(None), &line(64.0, 0.5), 1, true);
+    let (mut masked, undo) = paint(&mut dual_brush(Some(dual)), &line(64.0, 0.5), 1, true);
+    let painted = |c: &Canvas| pixels(c).iter().filter(|&&a| a > 20).count();
+    let (full, broken) = (painted(&plain), painted(&masked));
+    assert!(
+        broken > full / 10 && broken < full * 3 / 4,
+        "{broken} of {full}"
+    );
+    // Nowhere more paint than the plain stroke.
+    assert!(
+        pixels(&plain)
+            .iter()
+            .zip(pixels(&masked))
+            .all(|(p, m)| m <= *p)
+    );
+    let mut history = History::new();
+    history.push_action(undo);
+    let mut selection = crate::selection::SelectionManager::new();
+    let mut tool = crate::app::tools::Tool::Brush;
+    history.undo(&mut masked, &mut selection, &mut tool);
+    assert!(pixels(&masked).iter().all(|&a| a == 0));
+}
