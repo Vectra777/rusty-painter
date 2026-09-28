@@ -588,6 +588,30 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.bristles.count = 30;
         b
     }));
+    // A ribbon, and flowers in their own colours.
+    let tip = |name: &str| {
+        rusty_painter::brush_engine::tip::builtin()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, t)| t.clone())
+            .unwrap()
+    };
+    cases.push(("ribbon", {
+        use rusty_painter::brush_engine::brush_options::{PixelBrushShape, Placement};
+        let mut b = base();
+        b.brush_options.pixel_shape = PixelBrushShape::Custom(tip("Striped ribbon"));
+        b.brush_options.placement = Placement::Ribbon;
+        b.brush_options.tip_colors = true;
+        b
+    }));
+    cases.push(("colour_tip", {
+        use rusty_painter::brush_engine::brush_options::PixelBrushShape;
+        let mut b = base();
+        b.brush_options.pixel_shape = PixelBrushShape::Custom(tip("Flower"));
+        b.brush_options.tip_colors = true;
+        b.brush_options.spacing = 60.0;
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {

@@ -160,11 +160,20 @@ impl PainterApp {
     }
 
     fn create_brush_texture(tip: &TipMask, ctx: &egui::Context) -> egui::TextureHandle {
-        let pixels: Vec<Color32> = tip
-            .pixels
-            .iter()
-            .map(|&alpha| Color32::from_white_alpha(alpha))
-            .collect();
+        // A colour tip shows its colours; a grey one, white.
+        let pixels: Vec<Color32> = match &tip.colors {
+            Some(colors) => tip
+                .pixels
+                .iter()
+                .zip(colors)
+                .map(|(&a, c)| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], a))
+                .collect(),
+            None => tip
+                .pixels
+                .iter()
+                .map(|&alpha| Color32::from_white_alpha(alpha))
+                .collect(),
+        };
         let texture_img = egui::ColorImage {
             size: [tip.width, tip.height],
             pixels,

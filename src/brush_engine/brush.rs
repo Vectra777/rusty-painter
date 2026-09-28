@@ -215,6 +215,8 @@ struct BatchCtx<'a> {
     tail_newer: usize,
     /// A dual brush: how its mask combines with the coverage.
     dual: Option<crate::brush_engine::dual::DualMode>,
+    /// The dabs paint their tips' own colours.
+    tip_colors: bool,
 }
 
 /// Where a batch of dabs accumulates.
@@ -294,6 +296,7 @@ fn paint_batch(
     buckets: &[TileBucket],
     work_pixels: usize,
     stamp: &(impl Fn(&PlacedDab, usize, usize, &mut [f32]) -> Range<usize> + Sync),
+    color_stamp: Option<&ColorStamp<'_>>,
 ) {
     let tile_size = ctx.canvas.tile_size();
     let draw_tile = |(region, dab_ids): &TileBucket| {
@@ -346,6 +349,11 @@ fn paint_batch(
             .colored
             .then(|| colors.get_or_insert_with(|| vec![[0.0; 3]; tile_size * tile_size]));
         let mut alpha_row = vec![0.0f32; tile_size];
+        let mut color_row = if color_stamp.is_some() {
+            vec![[0.0f32; 3]; tile_size]
+        } else {
+            Vec::new()
+        };
         // Per tile row, the columns [min, max] any dab of this batch actually
         // reached (non-zero alpha). Resolving only those, rather than the
         // union of dab rectangles, skips the rectangles' empty corners and the
@@ -370,6 +378,16 @@ fn paint_batch(
                 }
                 let (first, last) = (span.start, span.end - 1);
                 let start = (gy - tile_y0) * tile_size + (overlap.min_x - tile_x0);
+                if let Some(color_stamp) = color_stamp {
+                    // From the tip's own alpha, before texture and selection.
+                    color_stamp(
+                        dab,
+                        gy,
+                        overlap.min_x + first,
+                        &alphas[span.clone()],
+                        &mut color_row[..span.len()],
+                    );
+                }
                 if let Some(texture) = ctx.texture {
                     texture.apply_row(gy, overlap.min_x + first, &mut alphas[span.clone()]);
                 }
@@ -383,17 +401,24 @@ fn paint_batch(
                 }
                 if let Some(colors) = colors.as_deref_mut() {
                     // Each dab's colour laid over what's there, like paint.
-                    let c = dab.color;
-                    for (dst, &alpha) in colors[start + first..=start + last]
-                        .iter_mut()
-                        .zip(&alphas[span.clone()])
-                    {
+                    let dst = &mut colors[start + first..=start + last];
+                    let alphas = &alphas[span.clone()];
+                    let mix = |dst: &mut [f32; 3], c: [f32; 3], alpha: f32| {
                         let keep = 1.0 - alpha;
                         *dst = [
                             c[0] * alpha + dst[0] * keep,
                             c[1] * alpha + dst[1] * keep,
                             c[2] * alpha + dst[2] * keep,
                         ];
+                    };
+                    if color_stamp.is_some() {
+                        for ((dst, &alpha), &c) in dst.iter_mut().zip(alphas).zip(&color_row) {
+                            mix(dst, c, alpha);
+                        }
+                    } else {
+                        for (dst, &alpha) in dst.iter_mut().zip(alphas) {
+                            mix(dst, dab.color, alpha);
+                        }
                     }
                 }
                 for (cov, &alpha) in coverage[start + first..=start + last]
@@ -433,6 +458,27 @@ fn paint_batch(
         resolve_spans(ctx, *region, &mut buffer, &spans);
     };
     dispatch_over_buckets(buckets, pool, work_pixels, draw_tile);
+}
+
+/// The colours of a dab painting its tip's own: `(dab, gy, x0, alphas,
+/// out)` writes the colours (in the document's blend space, unmultiplied)
+/// of the pixels whose stamped alphas are `alphas`, from column `x0`.
+type ColorStamp<'a> = dyn Fn(&PlacedDab, usize, usize, &[f32], &mut [[f32; 3]]) + Sync + 'a;
+
+/// One stretch of a ribbon brush's stroke: from `p0` to `p1`, with the unit
+/// normals there (`n0`, `n1`, towards the bottom of the picture), the
+/// half-widths (`w0`, `w1`) and the position along the repeating picture
+/// (`u0`, `u1`, in picture lengths).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RibbonSeg {
+    pub p0: Vec2,
+    pub p1: Vec2,
+    pub n0: Vec2,
+    pub n1: Vec2,
+    pub w0: f32,
+    pub w1: f32,
+    pub u0: f32,
+    pub u1: f32,
 }
 
 /// Grow `rect` (`[x0, y0, x1, y1)`) to include `r`.
@@ -636,6 +682,20 @@ impl Brush {
         self.dynamics.is_active()
             || self.brush_options.tip_count() > 1
             || self.brush_type == BrushType::Bristle
+            || self.paints_tip_colors()
+    }
+
+    /// The brush lays its image tip along the stroke as a ribbon.
+    pub fn is_ribbon(&self) -> bool {
+        self.brush_options.placement == crate::brush_engine::brush_options::Placement::Ribbon
+            && matches!(self.brush_options.pixel_shape, PixelBrushShape::Custom(_))
+    }
+
+    /// The dabs paint their tips' own colours (smooth image tips only).
+    pub fn paints_tip_colors(&self) -> bool {
+        self.brush_options.paints_tip_colors()
+            && self.anti_aliasing
+            && self.brush_type != BrushType::Pixel
     }
 
     /// The tip turns with the stroke's direction (a bristle brush's hairs
@@ -798,7 +858,7 @@ impl Brush {
         };
         let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
         let tile_size = canvas.tile_size();
-        let colored = self.dynamics.random.has_color();
+        let colored = self.dynamics.random.has_color() || self.paints_tip_colors();
         let linear = canvas.blend_space == BlendSpace::Linear;
         // How far past its radius a turned tip reaches: a square's (or an
         // image's) corners.
@@ -1151,7 +1211,8 @@ impl Brush {
         tail_newer: usize,
     ) -> BatchCtx<'a> {
         let o = &self.brush_options;
-        let colored = self.dynamics.random.has_color();
+        let tip_colors = self.paints_tip_colors();
+        let colored = self.dynamics.random.has_color() || tip_colors;
         let wash = o.painting_mode == PaintingMode::Wash;
         BatchCtx {
             canvas,
@@ -1175,6 +1236,7 @@ impl Brush {
             general: colored || self.paint_blend != LayerBlend::Normal,
             tail_newer,
             dual: self.dual.as_ref().map(|d| d.mode),
+            tip_colors,
         }
     }
 
@@ -1190,6 +1252,38 @@ impl Brush {
         undo_action: &mut UndoAction,
         stroke_tiles: &mut StrokeTiles,
     ) {
+        self.paint_prepared(
+            pool,
+            canvas,
+            selection,
+            dabs,
+            target,
+            undo_action,
+            stroke_tiles,
+            |brush, ctx, buckets, work_pixels, strength| match brush.brush_type {
+                BrushType::Soft | BrushType::Bristle => {
+                    brush.paint_soft(pool, ctx, buckets, work_pixels, strength)
+                }
+                BrushType::Pixel => brush.paint_pixel(pool, ctx, buckets, work_pixels, strength),
+            },
+        );
+    }
+
+    /// Snapshot the tiles `dabs` reach, then `paint(brush, ctx, buckets,
+    /// work_pixels, strength)` them.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_prepared(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        dabs: Vec<PlacedDab>,
+        target: Target,
+        undo_action: &mut UndoAction,
+        stroke_tiles: &mut StrokeTiles,
+        paint: impl FnOnce(&Self, &BatchCtx<'_>, &[TileBucket], usize, f32),
+    ) {
+        let _ = pool;
         if dabs.is_empty() {
             return;
         }
@@ -1228,12 +1322,121 @@ impl Brush {
                 side * side
             })
             .sum();
-        match self.brush_type {
-            BrushType::Soft | BrushType::Bristle => {
-                self.paint_soft(pool, &ctx, &buckets, work_pixels, strength)
-            }
-            BrushType::Pixel => self.paint_pixel(pool, &ctx, &buckets, work_pixels, strength),
-        }
+        paint(self, &ctx, &buckets, work_pixels, strength);
+    }
+
+    /// Lay the brush's image tip along `segs` (a ribbon), repeated along
+    /// the stroke, its height across it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ribbon(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        segs: &[RibbonSeg],
+        undo_action: &mut UndoAction,
+        stroke_tiles: &mut StrokeTiles,
+    ) {
+        let PixelBrushShape::Custom(tip) = &self.brush_options.pixel_shape else {
+            return;
+        };
+        let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
+        let tile_size = canvas.tile_size();
+        let dabs: Vec<PlacedDab> = segs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, seg)| {
+                let center = (seg.p0 + seg.p1) * 0.5;
+                let reach = (seg.p1 - seg.p0).length() * 0.5 + seg.w0.max(seg.w1) + 1.5;
+                let bounds = calc_dab_bounds(center, reach, canvas_w, canvas_h, tile_size)?;
+                let mut dab = PlacedDab::new(center, bounds, reach);
+                dab.seg = i as u32;
+                Some(dab)
+            })
+            .collect();
+        let tip = tip.clone();
+        self.paint_prepared(
+            pool,
+            canvas,
+            selection,
+            dabs,
+            Target::Stroke,
+            undo_action,
+            stroke_tiles,
+            |_, ctx, buckets, work_pixels, strength| {
+                let (tw, th) = (tip.width as f32, tip.height as f32);
+                let sampler_of = |seg: &RibbonSeg| tip.ribbon_sampler(seg.w0 + seg.w1);
+                // Where pixel (x, y) falls on the picture: texel coordinates,
+                // or `None` off this segment.
+                let texel = |seg: &RibbonSeg, x: f32, y: f32| {
+                    let d = seg.p1 - seg.p0;
+                    let len = d.length();
+                    if len < 1e-4 {
+                        return None;
+                    }
+                    let dir = d / len;
+                    let rel = Vec2::new(x, y) - seg.p0;
+                    let t = rel.dot(dir) / len;
+                    if !(0.0..1.0).contains(&t) {
+                        return None;
+                    }
+                    let n = (seg.n0 + (seg.n1 - seg.n0) * t).normalized();
+                    let w = (seg.w0 + (seg.w1 - seg.w0) * t).max(0.25);
+                    let v = (rel - dir * (t * len)).dot(n) / w;
+                    let margin = 1.0 + 2.0 / th.max(1.0);
+                    if v.abs() > margin {
+                        return None;
+                    }
+                    let u = (seg.u0 + (seg.u1 - seg.u0) * t).rem_euclid(1.0);
+                    Some((u * tw, (v * 0.5 + 0.5) * th))
+                };
+                let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
+                    let seg = &segs[dab.seg as usize];
+                    let sampler = sampler_of(seg);
+                    let y = gy as f32 + 0.5;
+                    for (i, slot) in out.iter_mut().enumerate() {
+                        let x = (x0 + i) as f32 + 0.5;
+                        *slot = texel(seg, x, y).map_or(0.0, |(tx, ty)| {
+                            tip.sample_texel(&sampler, tx, ty) * strength
+                        });
+                    }
+                    nonzero_span(out)
+                };
+                let linear = ctx.space == BlendSpace::Linear;
+                let srgb =
+                    crate::brush_engine::dynamics::shift_hsv(self.brush_options.color, [0.0; 3]);
+                let brush_color = if linear {
+                    srgb.map(srgb_to_linear)
+                } else {
+                    srgb
+                };
+                let color_stamp = |dab: &PlacedDab,
+                                   gy: usize,
+                                   x0: usize,
+                                   alphas: &[f32],
+                                   out: &mut [[f32; 3]]| {
+                    let seg = &segs[dab.seg as usize];
+                    let sampler = sampler_of(seg);
+                    let y = gy as f32 + 0.5;
+                    for (i, (o, &a)) in out.iter_mut().zip(alphas).enumerate() {
+                        let x = (x0 + i) as f32 + 0.5;
+                        *o = match texel(seg, x, y) {
+                            Some((tx, ty)) if tip.has_colors() => {
+                                let c = tip.color_texel(&sampler, tx, ty, a / strength.max(1e-6));
+                                if linear { c.map(srgb_to_linear) } else { c }
+                            }
+                            _ => brush_color,
+                        };
+                    }
+                };
+                let color_stamp: Option<&ColorStamp<'_>> = if ctx.tip_colors {
+                    Some(&color_stamp)
+                } else {
+                    None
+                };
+                paint_batch(pool, ctx, buckets, work_pixels, &stamp, color_stamp);
+            },
+        );
     }
 
     /// On a tile's first touch this stroke: snapshot it for undo and create
@@ -1332,7 +1535,7 @@ impl Brush {
             }
             nonzero_span(out)
         };
-        paint_batch(pool, ctx, buckets, work_pixels, &stamp);
+        paint_batch(pool, ctx, buckets, work_pixels, &stamp, None);
     }
 
     /// Soft, anti-aliased dabs.
@@ -1450,7 +1653,42 @@ impl Brush {
                 }
                 nonzero_span(out)
             };
-            paint_batch(pool, ctx, buckets, work_pixels, &stamp);
+            let linear = ctx.space == BlendSpace::Linear;
+            let color_stamp =
+                |dab: &PlacedDab, gy: usize, x0: usize, alphas: &[f32], out: &mut [[f32; 3]]| {
+                    let PixelBrushShape::Custom(tip) = &tips[dab.tip as usize] else {
+                        unreachable!("extra tips go with an image tip");
+                    };
+                    let sampler = tip.sampler(dab.r);
+                    let strength = (strength * dab.strength).min(1.0);
+                    let pdy = gy as f32 + 0.5 - dab.center.y;
+                    let pdx = x0 as f32 + 0.5 - dab.center.x;
+                    let [a, b, c, d] = dab.orient;
+                    if tip.has_colors() {
+                        tip.color_row(
+                            &sampler,
+                            (a * pdx + b * pdy, c * pdx + d * pdy),
+                            (a, c),
+                            alphas,
+                            strength,
+                            out,
+                        );
+                        if linear {
+                            for c in out.iter_mut() {
+                                *c = c.map(srgb_to_linear);
+                            }
+                        }
+                    } else {
+                        // A grey tip among colour ones paints the brush colour.
+                        out.fill(dab.color);
+                    }
+                };
+            let color_stamp: Option<&ColorStamp<'_>> = if ctx.tip_colors {
+                Some(&color_stamp)
+            } else {
+                None
+            };
+            paint_batch(pool, ctx, buckets, work_pixels, &stamp, color_stamp);
             return;
         }
 
@@ -1505,10 +1743,10 @@ impl Brush {
                 }
                 chord
             };
-            paint_batch(pool, ctx, buckets, work_pixels, &stamp);
+            paint_batch(pool, ctx, buckets, work_pixels, &stamp, None);
             return;
         }
-        paint_batch(pool, ctx, buckets, work_pixels, &general);
+        paint_batch(pool, ctx, buckets, work_pixels, &general, None);
     }
 }
 

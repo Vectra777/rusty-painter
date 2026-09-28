@@ -50,7 +50,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ✅ when the pen lifts |
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
 | Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ✅ hairs fan out and run dry |
-| Decoration / ribbon brushes | ✅ | ✅ | ✅ | ❌ |
+| Decoration / ribbon brushes | ✅ | ✅ | ✅ | ✅ colour tips, ribbons |
 | Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ❌ |
 | Smudge and blur tools | ✅ | ✅ | ✅ | ✅ |
 
@@ -115,7 +115,10 @@ below.
   its own line; they fan out with pressure and run dry at their own pace.
   Presets: Oil Bristle, Dry Brush. (For colour picked up from the canvas,
   use the Smudge tool.)
-- [ ] **Ribbon and decoration brushes.**
+- [x] **Ribbon and decoration brushes.** Colour pictures keep their
+  colours and a brush can paint them (flowers, stitches); a ribbon lays the
+  picture along the stroke, repeated, its height across it (lace, printed
+  ribbons). Presets: Stitches, Chain, Lace Ribbon, Striped Ribbon, Flowers.
 - [ ] **Sketch and hatching engines.**
 - [ ] **Deform, filter and clone brushes.**
 - [ ] **Assistants:** vanishing point, perspective, ellipse, concentric.

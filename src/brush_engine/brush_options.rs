@@ -58,6 +58,17 @@ impl TipOrder {
     }
 }
 
+/// How a brush lays its tip down.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Placement {
+    /// A dab at every step (every brush).
+    #[default]
+    Dabs,
+    /// The tip's picture laid along the stroke and repeated, its height
+    /// across the stroke (ribbons, lace, borders).
+    Ribbon,
+}
+
 /// Blending strategy for how source color affects the destination.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
@@ -87,6 +98,11 @@ pub struct BrushOptions {
     pub extra_tips: Vec<std::sync::Arc<crate::brush_engine::tip::TipMask>>,
     /// How the dabs pick among the tips.
     pub tip_order: TipOrder,
+    /// Paint with a colour tip's own colours rather than the brush colour
+    /// (decorations: flowers, stitches, chains).
+    pub tip_colors: bool,
+    /// Dabs, or the tip laid along the stroke as a ribbon.
+    pub placement: Placement,
     pub color: Color32,
     pub spacing: f32, // Percentage of diameter (0..100+)
     pub flow: f32,    // 0..100
@@ -143,6 +159,18 @@ impl BrushOptions {
         }
     }
 
+    /// Whether the dabs paint their tips' own colours: asked for, and some
+    /// tip has colours.
+    pub fn paints_tip_colors(&self) -> bool {
+        self.tip_colors
+            && match &self.pixel_shape {
+                PixelBrushShape::Custom(tip) => {
+                    tip.has_colors() || self.extra_tips.iter().any(|t| t.has_colors())
+                }
+                _ => false,
+            }
+    }
+
     /// Tip `i` of [`Self::tip_count`] (0 is `pixel_shape`).
     pub fn tip_shapes(&self) -> std::borrow::Cow<'_, [PixelBrushShape]> {
         if self.tip_count() == 1 {
@@ -163,6 +191,8 @@ impl BrushOptions {
             pixel_shape: PixelBrushShape::Circle,
             extra_tips: Vec::new(),
             tip_order: TipOrder::Sequence,
+            tip_colors: false,
+            placement: Placement::Dabs,
             color,
             spacing,
             flow: 100.0,

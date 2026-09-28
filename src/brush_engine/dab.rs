@@ -95,6 +95,8 @@ pub(super) struct PlacedDab {
     pub color: [f32; 3],
     /// Which of the brush's tips it uses.
     pub tip: u8,
+    /// A ribbon's segment this dab paints (see `Brush::ribbon`).
+    pub seg: u32,
 }
 
 impl PlacedDab {
@@ -116,6 +118,7 @@ impl PlacedDab {
             rigid: true,
             color: [0.0; 3],
             tip: 0,
+            seg: 0,
         }
     }
 

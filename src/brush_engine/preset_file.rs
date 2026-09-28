@@ -15,7 +15,7 @@
 
 use crate::brush_engine::brush::{Brush, BrushPreset, BrushType, StabilizerAlgorithm};
 use crate::brush_engine::brush_options::{
-    BlendMode, PaintingMode, PixelBrushShape, PressureCurves, TipOrder,
+    BlendMode, PaintingMode, PixelBrushShape, Placement, PressureCurves, TipOrder,
 };
 use crate::brush_engine::dual::{DualMode, DualTip};
 use crate::brush_engine::dynamics::BrushDynamics;
@@ -166,6 +166,8 @@ struct StoredBrush {
     /// More tips the dabs alternate with, from the file's `tips`.
     extra_tips: Vec<usize>,
     tip_order: TipOrder,
+    tip_colors: bool,
+    placement: Placement,
     /// Premultiplied RGBA, as the brush holds it.
     color: [u8; 4],
     spacing: f32,
@@ -241,6 +243,8 @@ impl StoredBrush {
             shape: StoredShape::from_shape(&o.pixel_shape, res),
             extra_tips: o.extra_tips.iter().map(|t| res.tip(t)).collect(),
             tip_order: o.tip_order,
+            tip_colors: o.tip_colors,
+            placement: o.placement,
             color: o.color.to_array(),
             spacing: o.spacing,
             flow: o.flow,
@@ -294,6 +298,8 @@ impl StoredBrush {
             })
             .collect::<Result<_, _>>()?;
         o.tip_order = self.tip_order;
+        o.tip_colors = self.tip_colors;
+        o.placement = self.placement;
         let [r, g, bl, a] = self.color;
         o.color = Color32::from_rgba_premultiplied(r, g, bl, a);
         o.flow = self.flow;
@@ -372,9 +378,24 @@ pub fn encode(presets: &[BrushPreset]) -> Result<Vec<u8>, String> {
     let json = serde_json::to_vec_pretty(&library).map_err(|e| e.to_string())?;
     zip.add(PRESETS_ENTRY, &json)?;
     for (i, tip) in res.tips.iter().enumerate() {
-        let img =
-            image::GrayImage::from_raw(tip.width as u32, tip.height as u32, tip.pixels.clone())
-                .ok_or("Brush tip has the wrong size")?;
+        let (w, h) = (tip.width as u32, tip.height as u32);
+        let img: image::DynamicImage = match &tip.colors {
+            // A colour tip: its colours, with the mask as alpha.
+            Some(colors) => image::RgbaImage::from_raw(
+                w,
+                h,
+                colors
+                    .iter()
+                    .zip(&tip.pixels)
+                    .flat_map(|(c, &a)| [c[0], c[1], c[2], a])
+                    .collect(),
+            )
+            .ok_or("Brush tip has the wrong size")?
+            .into(),
+            None => image::GrayImage::from_raw(w, h, tip.pixels.clone())
+                .ok_or("Brush tip has the wrong size")?
+                .into(),
+        };
         let mut png = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .map_err(|e| e.to_string())?;
@@ -410,13 +431,24 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<BrushPreset>, String> {
             return Err(damaged(format!("tip {i} size")));
         }
         let png = zip::read_entry(bytes, &format!("tips/{i}.png")).map_err(damaged)?;
-        let grey = image::load_from_memory(png)
-            .map_err(|e| damaged(e.to_string()))?
-            .to_luma8();
-        if (grey.width() as usize, grey.height() as usize) != (stored.width, stored.height) {
+        let img = image::load_from_memory(png).map_err(|e| damaged(e.to_string()))?;
+        if (img.width() as usize, img.height() as usize) != (stored.width, stored.height) {
             return Err(damaged(format!("tip {i} size")));
         }
-        let pixels = grey.into_raw();
+        if img.color().has_alpha() {
+            let rgba = img.to_rgba8();
+            let pixels: Vec<u8> = rgba.pixels().map(|p| p[3]).collect();
+            let colors: Vec<[u8; 3]> = rgba.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+            let builtin = crate::brush_engine::tip::builtin()
+                .iter()
+                .find(|(_, t)| t.pixels == pixels && t.colors.as_ref() == Some(&colors));
+            res.tips.push(match builtin {
+                Some((_, t)) => t.clone(),
+                None => TipMask::from_colored(stored.width, stored.height, pixels, colors),
+            });
+            continue;
+        }
+        let pixels = img.to_luma8().into_raw();
         let builtin = crate::brush_engine::tip::builtin().iter().find(|(_, t)| {
             (t.width, t.height) == (stored.width, stored.height) && t.pixels == pixels
         });
@@ -561,6 +593,28 @@ mod tests {
             Color32::from_rgba_premultiplied(10, 20, 30, 40)
         );
         assert_eq!(b.paint_blend, LayerBlend::Multiply);
+    }
+
+    #[test]
+    fn a_colour_tip_keeps_its_colours() {
+        let tip = TipMask::from_colored(
+            2,
+            2,
+            vec![255, 128, 40, 0],
+            vec![[200, 10, 30], [5, 250, 90], [1, 2, 3], [9, 9, 9]],
+        );
+        let mut brush = Brush::new(30.0, 50.0, Color32::BLACK, 12.0);
+        brush.brush_options.pixel_shape = PixelBrushShape::Custom(tip.clone());
+        brush.brush_options.tip_colors = true;
+        let preset = BrushPreset {
+            name: "Colour".into(),
+            brush,
+            file: None,
+        };
+        let back = decode(&encode(&[preset]).unwrap()).unwrap();
+        let o = &back[0].brush.brush_options;
+        assert!(o.tip_colors);
+        assert_eq!(o.pixel_shape, PixelBrushShape::Custom(tip));
     }
 
     #[test]

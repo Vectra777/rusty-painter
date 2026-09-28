@@ -1373,3 +1373,156 @@ fn bristles_fan_out_with_pressure_and_run_dry() {
     );
     assert!(column(120) < column(40));
 }
+
+fn builtin_tip(name: &str) -> std::sync::Arc<crate::brush_engine::tip::TipMask> {
+    crate::brush_engine::tip::builtin()
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, t)| t.clone())
+        .unwrap()
+}
+
+/// The colour (unmultiplied sRGB) of layer pixel `(x, y)`.
+fn rgb(canvas: &Canvas, x: usize, y: usize) -> [u8; 3] {
+    let [r, g, b, _] = pixel(canvas, x, y).to_srgba_unmultiplied();
+    [r, g, b]
+}
+
+#[test]
+fn a_colour_tip_paints_its_own_colours_when_asked() {
+    use crate::brush_engine::brush_options::PixelBrushShape;
+    let mut b = Brush::new(60.0, 90.0, Color32::BLACK, 100.0);
+    b.brush_options.pressure_size = false;
+    b.brush_options.pixel_shape = PixelBrushShape::Custom(builtin_tip("Flower"));
+    let dab = [(Vec2::new(64.0, 64.0), 0.0)];
+    let (grey, _) = paint(&mut b.clone(), &dab, 1, true);
+    b.brush_options.tip_colors = true;
+    let (colour, _) = paint(&mut b, &dab, 1, true);
+    // The heart is yellow, a petal pink; without the option, black.
+    let heart = rgb(&colour, 64, 64);
+    assert!(
+        heart[0] > 200 && heart[1] > 150 && heart[2] < 120,
+        "{heart:?}"
+    );
+    let petal = rgb(&colour, 64 + 18, 64);
+    assert!(petal[0] > 200 && petal[1] < 170, "{petal:?}");
+    assert_eq!(rgb(&grey, 64, 64), [0, 0, 0]);
+    // The same shape either way.
+    for y in 30..100 {
+        for x in 30..100 {
+            assert!(alpha(&grey, x, y).abs_diff(alpha(&colour, x, y)) <= 1);
+        }
+    }
+}
+
+fn ribbon_brush(tip: &str, colours: bool) -> Brush {
+    use crate::brush_engine::brush_options::{PixelBrushShape, Placement};
+    let mut b = Brush::new(32.0, 90.0, Color32::BLACK, 10.0);
+    b.brush_options.pressure_size = false;
+    b.brush_options.pixel_shape = PixelBrushShape::Custom(builtin_tip(tip));
+    b.brush_options.placement = Placement::Ribbon;
+    b.brush_options.tip_colors = colours;
+    b
+}
+
+#[test]
+fn a_ribbon_lays_its_picture_along_the_stroke_and_repeats_it() {
+    // 32 px wide.
+    let (canvas, _) = paint(
+        &mut ribbon_brush("Striped ribbon", true),
+        &along_x(0.0, 256.0, 40)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (p, _))| (p, i as f64 * 0.01))
+            .collect::<Vec<_>>(),
+        1,
+        true,
+    );
+    // As wide as the brush, centred on the stroke.
+    let across = (0..H).filter(|&y| alpha(&canvas, 100, y) > 128).count();
+    assert!((26..=32).contains(&across), "{across}");
+    // Red and white stripes along it, 16 px each way.
+    let reds: Vec<bool> = (8..120).map(|x| rgb(&canvas, x, 64)[1] < 120).collect();
+    let changes = reds.windows(2).filter(|w| w[0] != w[1]).count();
+    assert!((12..=15).contains(&changes), "{changes} stripe edges");
+    // The picture repeats every picture length: its width over its height,
+    // times the ribbon's width.
+    let tip = builtin_tip("Striped ribbon");
+    let length = (tip.width as f32 / tip.height as f32 * 32.0).round() as usize;
+    // (Up to a pixel off at the stripes' edges: the length isn't whole.)
+    let differ = (20..100)
+        .filter(|&x| {
+            let (a, b) = (rgb(&canvas, x, 60), rgb(&canvas, x + length, 60));
+            a.iter().zip(b).any(|(p, q)| p.abs_diff(q) > 40)
+        })
+        .count();
+    assert!(differ <= 10, "{differ} of 80 differ");
+}
+
+#[test]
+fn a_ribbon_follows_a_bend_and_undoes_exactly() {
+    let bend: Vec<(Vec2, f64)> = (0..=40)
+        .map(|i| {
+            let t = i as f32 / 40.0 * std::f32::consts::PI;
+            (
+                Vec2::new(128.0 - 80.0 * t.cos(), 110.0 - 70.0 * t.sin()),
+                i as f64 * 0.01,
+            )
+        })
+        .collect();
+    let (mut canvas, undo) = paint(&mut ribbon_brush("Lace", false), &bend, 1, true);
+    // Lace all along the arch, nothing at its centre.
+    let painted = |x: usize, y: usize| {
+        (y.saturating_sub(18)..(y + 18).min(H)).any(|yy| {
+            (x.saturating_sub(18)..(x + 18).min(W)).any(|xx| alpha(&canvas, xx, yy) > 100)
+        })
+    };
+    assert!(painted(48, 110) && painted(128, 40) && painted(208, 110));
+    assert!(!painted(128, 105));
+    let mut history = History::new();
+    history.push_action(undo);
+    let mut selection = crate::selection::SelectionManager::new();
+    let mut tool = crate::app::tools::Tool::Brush;
+    history.undo(&mut canvas, &mut selection, &mut tool);
+    assert!(pixels(&canvas).iter().all(|&a| a == 0));
+}
+
+#[test]
+fn a_mirrored_ribbon_paints_its_mirror_image() {
+    use crate::brush_engine::symmetry::{Symmetry, SymmetryMode};
+    let symmetry = Symmetry {
+        mode: SymmetryMode::Vertical,
+        center: Vec2::new(128.0, 64.0),
+        ..Default::default()
+    };
+    let copies = symmetry.copies();
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(1);
+    let mut brush = ribbon_brush("Lace", false);
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles)
+            .with_symmetry(&symmetry, &copies);
+        for (i, (p, _)) in along_x(10.0, 100.0, 20).into_iter().enumerate() {
+            let p = Vec2::new(p.x, 50.0);
+            stroke.add_sample(&mut brush, p, 1.0, Some(i as f64 * 0.01), &mut ctx);
+        }
+        stroke.finish(&mut brush, &mut ctx);
+    }
+    // Left and right halves mirror each other (to within a pixel's edge).
+    let differ = (0..H)
+        .flat_map(|y| (20..100).map(move |x| (x, y)))
+        .filter(|&(x, y)| alpha(&canvas, x, y).abs_diff(alpha(&canvas, 255 - x, y)) > 60)
+        .count();
+    let painted = (0..H)
+        .flat_map(|y| (20..100).map(move |x| (x, y)))
+        .filter(|&(x, y)| alpha(&canvas, x, y) > 60)
+        .count();
+    assert!(
+        painted > 400 && differ < painted / 20,
+        "{differ} of {painted}"
+    );
+}

@@ -2,8 +2,8 @@
 //! and the per-tile buffers dabs accumulate into before being resolved
 //! onto the layer.
 
-use crate::brush_engine::brush::{Brush, Target};
-use crate::brush_engine::brush_options::TipOrder;
+use crate::brush_engine::brush::{Brush, RibbonSeg, Target};
+use crate::brush_engine::brush_options::{PixelBrushShape, TipOrder};
 use crate::brush_engine::dynamics::{DabVar, FAST_SPEED, PenTilt, direction, tip_orientation};
 use crate::brush_engine::stabilizer::Stabilizer;
 use crate::brush_engine::symmetry::{Copy2, Symmetry};
@@ -145,6 +145,32 @@ impl<'a> StrokeContext<'a> {
         brush.apply_wet_edges(self.pool, self.canvas, self.selection, self.stroke_tiles);
     }
 
+    /// A ribbon brush's segments, with their mirror copies.
+    fn ribbon(&mut self, brush: &Brush, segs: &[RibbonSeg]) {
+        let mut all = segs.to_vec();
+        if let Some((symmetry, copies)) = self.symmetry {
+            for copy in copies {
+                let point = |p: Vec2| symmetry.map(copy, p);
+                let vector = |v: Vec2| symmetry.map(copy, symmetry.center + v) - symmetry.center;
+                all.extend(segs.iter().map(|s| RibbonSeg {
+                    p0: point(s.p0),
+                    p1: point(s.p1),
+                    n0: vector(s.n0),
+                    n1: vector(s.n1),
+                    ..*s
+                }));
+            }
+        }
+        brush.ribbon(
+            self.pool,
+            self.canvas,
+            self.selection,
+            &all,
+            self.undo_action,
+            self.stroke_tiles,
+        );
+    }
+
     /// Show the paint a dual brush's mask has uncovered since last time.
     fn resolve_mask(&mut self, brush: &Brush) {
         brush.resolve_mask_changes(self.canvas, self.selection, self.stroke_tiles);
@@ -207,6 +233,17 @@ struct Plan {
     along: f32,
 }
 
+/// Where a ribbon brush's ribbon has got to.
+#[derive(Clone, Copy, Debug)]
+struct RibbonPoint {
+    pos: Vec2,
+    /// Across the stroke (towards the picture's bottom), once known.
+    normal: Option<Vec2>,
+    half: f32,
+    /// Position along the repeating picture, in picture lengths.
+    u: f32,
+}
+
 /// Tracks per-stroke state like the last position and spacing accumulator.
 pub struct StrokeState {
     pub last_pos: Option<Vec2>,
@@ -263,6 +300,8 @@ pub struct StrokeState {
     airbrush_due: Option<f64>,
     /// The next tip of a brush that uses its tips in turn.
     next_tip: usize,
+    /// A ribbon brush: the last point of its ribbon.
+    ribbon_last: Option<RibbonPoint>,
     /// A dual brush's second tip: where its last dab went, and how far
     /// along the stroke the next one is.
     mask_last: Option<Vec2>,
@@ -309,6 +348,7 @@ impl StrokeState {
             airbrush_due: None,
             next_tip: 0,
             mask_last: None,
+            ribbon_last: None,
             mask_until_next: 0.0,
             #[cfg(test)]
             painted: Vec::new(),
@@ -436,6 +476,62 @@ impl StrokeState {
         }
     }
 
+    /// A ribbon brush: the stretch from the last ribbon point through this
+    /// sample's points, the picture repeating along it.
+    fn paint_ribbon(
+        &mut self,
+        brush: &Brush,
+        original: (f32, f32, f32),
+        from: f32,
+        p: f32,
+        pending: &[Pending],
+        context: &mut StrokeContext<'_>,
+    ) {
+        let PixelBrushShape::Custom(tip) = &brush.brush_options.pixel_shape else {
+            return;
+        };
+        let base_half = original.0 * 0.5;
+        // The picture's length on the canvas at the brush's own size.
+        let length = (tip.width as f32 / tip.height.max(1) as f32 * 2.0 * base_half).max(1.0);
+        let o = &brush.brush_options;
+        let mut segs = Vec::with_capacity(pending.len());
+        for d in pending {
+            let pressure = from + (p - from) * d.t;
+            let size = if o.pressure_size {
+                o.pressure_min_size + (1.0 - o.pressure_min_size) * o.pressure_curves.size(pressure)
+            } else {
+                1.0
+            };
+            let normal = d.dir.map(|a| Vec2::new(a.sin(), a.cos()));
+            let point = RibbonPoint {
+                pos: d.pos,
+                normal,
+                half: (base_half * size).max(0.5),
+                u: d.along / length,
+            };
+            if let Some(last) = self.ribbon_last {
+                let n1 = normal.or(last.normal).unwrap_or(Vec2::new(0.0, 1.0));
+                let n0 = last.normal.unwrap_or(n1);
+                if (point.pos - last.pos).length_sq() > 1e-6 {
+                    segs.push(RibbonSeg {
+                        p0: last.pos,
+                        p1: point.pos,
+                        n0,
+                        n1,
+                        w0: last.half,
+                        w1: point.half,
+                        u0: last.u,
+                        u1: point.u,
+                    });
+                }
+            }
+            self.ribbon_last = Some(point);
+        }
+        if !segs.is_empty() {
+            context.ribbon(brush, &segs);
+        }
+    }
+
     /// A dual brush: stamp its second tip along the stroke up to where it
     /// is now (spaced by its own size), into the stroke's mask, then show
     /// the paint the mask uncovered. `diameter` is the brush's unpressured
@@ -499,6 +595,12 @@ impl StrokeState {
     ) {
         {
             let pending = std::mem::take(&mut self.pending);
+            if brush.is_ribbon() {
+                self.paint_ribbon(brush, original, from, p, &pending, context);
+                self.pending = pending;
+                self.pending.clear();
+                return;
+            }
             if brush.varies_per_dab() {
                 let plans: Vec<Plan> = pending
                     .iter()
@@ -834,6 +936,9 @@ impl StrokeState {
         let spacing_dist = if brush.brush_type == crate::brush_engine::brush::BrushType::Bristle {
             // Each hair draws a continuous line.
             brush.bristles.step()
+        } else if brush.is_ribbon() {
+            // Short segments, so the ribbon bends smoothly.
+            (brush.brush_options.diameter * 0.15).clamp(1.0, 6.0)
         } else {
             (brush.brush_options.spacing / 100.0) * brush.brush_options.diameter
         };

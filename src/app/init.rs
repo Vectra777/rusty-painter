@@ -362,6 +362,55 @@ impl PainterApp {
                 b.dynamics.taper.start = 20.0;
                 b
             }),
+            preset("Stitches", {
+                // Running stitches along the stroke.
+                let mut b = Brush::new(14.0, 90.0, Color32::from_rgb(60, 60, 70), 170.0);
+                b.brush_options.pixel_shape = tip("Stitch");
+                b.brush_options.pressure_size = false;
+                b.dynamics.tip.follow_stroke = true;
+                b
+            }),
+            preset("Chain", {
+                // Links face on and side on, in turn, along the stroke.
+                let mut b = Brush::new(22.0, 90.0, Color32::from_rgb(120, 120, 130), 62.0);
+                if let Some((_, tips)) = crate::brush_engine::tip::builtin_sets()
+                    .into_iter()
+                    .find(|(n, _)| *n == "Chain")
+                    && let Some((first, rest)) = tips.split_first()
+                {
+                    b.brush_options.pixel_shape = PixelBrushShape::Custom(first.clone());
+                    b.brush_options.extra_tips = rest.to_vec();
+                }
+                b.brush_options.pressure_size = false;
+                b.dynamics.tip.follow_stroke = true;
+                b
+            }),
+            preset("Lace Ribbon", {
+                let mut b = Brush::new(30.0, 90.0, Color32::from_rgb(245, 245, 240), 10.0);
+                b.brush_options.pixel_shape = tip("Lace");
+                b.brush_options.placement = crate::brush_engine::brush_options::Placement::Ribbon;
+                b.brush_options.pressure_size = false;
+                b
+            }),
+            preset("Striped Ribbon", {
+                let mut b = Brush::new(24.0, 90.0, black, 10.0);
+                b.brush_options.pixel_shape = tip("Striped ribbon");
+                b.brush_options.placement = crate::brush_engine::brush_options::Placement::Ribbon;
+                b.brush_options.tip_colors = true;
+                b.brush_options.pressure_min_size = 0.6;
+                b
+            }),
+            preset("Flowers", {
+                // Scattered flowers in their own colours.
+                let mut b = Brush::new(26.0, 90.0, black, 120.0);
+                b.brush_options.pixel_shape = tip("Flower");
+                b.brush_options.tip_colors = true;
+                b.brush_options.pressure_size = false;
+                b.jitter = 70.0;
+                b.dynamics.tip.random_angle = 180.0;
+                b.dynamics.random.size = 0.4;
+                b
+            }),
             preset("Spatter", {
                 let mut b = Brush::new(40.0, 90.0, black, 90.0);
                 b.brush_options.pixel_shape = tip("Spatter");

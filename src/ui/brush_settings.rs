@@ -2,7 +2,7 @@
 //! stabiliser.
 
 use crate::brush_engine::brush::{Brush, BrushType, StabilizerAlgorithm};
-use crate::brush_engine::brush_options::{PaintingMode, PixelBrushShape, TipOrder};
+use crate::brush_engine::brush_options::{PaintingMode, PixelBrushShape, Placement, TipOrder};
 use crate::brush_engine::hardness::SoftnessSelector;
 use crate::ui::style::*;
 use crate::ui::widgets::{percent_of_unit, property_row, section, segmented, slider_row};
@@ -282,6 +282,42 @@ fn brush_settings_contents(
                 *extra = extra.inverted();
             }
             mask_changed = true;
+        }
+        if matches!(brush.brush_options.pixel_shape, PixelBrushShape::Custom(_)) {
+            let o = &mut brush.brush_options;
+            property_row(ui, "Lay", |ui| {
+                changed |= segmented(
+                    ui,
+                    &mut o.placement,
+                    &[(Placement::Dabs, "Dabs"), (Placement::Ribbon, "Ribbon")],
+                    false,
+                );
+            });
+            if o.placement == Placement::Ribbon {
+                ui.label(
+                    egui::RichText::new(
+                        "The picture is laid along the stroke and repeated, its height across \
+                         it: ribbons, lace, borders.",
+                    )
+                    .small()
+                    .color(TEXT_DIM),
+                );
+            }
+            let colored = match &o.pixel_shape {
+                PixelBrushShape::Custom(t) => {
+                    t.has_colors() || o.extra_tips.iter().any(|t| t.has_colors())
+                }
+                _ => false,
+            };
+            if colored {
+                changed |= ui
+                    .checkbox(&mut o.tip_colors, "Paint the picture's colours")
+                    .on_hover_text(
+                        "Paint with the tip picture's own colours instead of the brush colour \
+                         (flowers, stitches, printed ribbons).",
+                    )
+                    .changed();
+            }
         }
         let tips = brush.brush_options.tip_count();
         if tips > 1 {

@@ -6,6 +6,8 @@
 //!   black shape on transparent, black on white and white on black all
 //!   paint the shape. Empty borders are trimmed.
 //! - **Proportions** are kept: the longest side spans the brush size.
+//! - **Colours**: a colour picture on transparency keeps its colours as
+//!   well, for brushes that paint with them (decorations, ribbons).
 //! - **Sampling** blends the two copies nearest the dab's size, bilinearly
 //!   within each (trilinear), so a large picture used as a small tip neither
 //!   shimmers nor jumps as pressure changes the size.
@@ -83,35 +85,189 @@ pub struct TipMask {
     pub height: usize,
     pub pixels: Vec<u8>,
     levels: Vec<Level>,
+    /// A colour picture's colours (unmultiplied sRGB), full size; `None`
+    /// for a grey tip. Brushes paint with them when asked to.
+    pub colors: Option<Vec<[u8; 3]>>,
+    /// The colours' mipmaps: red, green and blue, premultiplied by the
+    /// mask, one set per level of `levels`.
+    color_levels: Vec<[Level; 3]>,
 }
 
 impl PartialEq for TipMask {
     fn eq(&self, other: &Self) -> bool {
-        self.width == other.width && self.height == other.height && self.pixels == other.pixels
+        self.width == other.width
+            && self.height == other.height
+            && self.pixels == other.pixels
+            && self.colors == other.colors
     }
 }
 
 impl TipMask {
     /// From a mask (255 = full paint), trimmed to what it covers.
     pub fn from_mask(width: usize, height: usize, pixels: Vec<u8>) -> Arc<Self> {
-        let (width, height, pixels) = trim(width, height, pixels);
-        let mut levels = vec![Level::new(
-            width,
-            height,
-            pixels.iter().map(|&v| v as f32 / 255.0).collect(),
-        )];
+        Self::from_parts(width, height, pixels, None)
+    }
+
+    /// From a mask and its colours (unmultiplied sRGB, one per pixel).
+    pub fn from_colored(
+        width: usize,
+        height: usize,
+        pixels: Vec<u8>,
+        colors: Vec<[u8; 3]>,
+    ) -> Arc<Self> {
+        Self::from_parts(width, height, pixels, Some(colors))
+    }
+
+    fn from_parts(
+        width: usize,
+        height: usize,
+        pixels: Vec<u8>,
+        colors: Option<Vec<[u8; 3]>>,
+    ) -> Arc<Self> {
+        let rect = trim_rect(width, height, &pixels);
+        let (pixels, colors) = (
+            crop(&pixels, width, rect),
+            colors.map(|c| crop(&c, width, rect)),
+        );
+        let [x0, y0, x1, y1] = rect;
+        let (width, height) = (x1 - x0, y1 - y0);
+        let alpha: Vec<f32> = pixels.iter().map(|&v| v as f32 / 255.0).collect();
+        let mut levels = vec![Level::new(width, height, alpha.clone())];
         while let Some(last) = levels.last()
             && (last.w > 1 || last.h > 1)
         {
             let next = halve(last);
             levels.push(next);
         }
+        let mut color_levels = Vec::new();
+        if let Some(colors) = &colors {
+            // Premultiplied, so a transparent texel's colour doesn't bleed.
+            let plane = |k: usize| {
+                let data = colors
+                    .iter()
+                    .zip(&alpha)
+                    .map(|(c, a)| c[k] as f32 / 255.0 * a)
+                    .collect();
+                Level::new(width, height, data)
+            };
+            color_levels.push([plane(0), plane(1), plane(2)]);
+            while color_levels.len() < levels.len() {
+                let last = color_levels.last().expect("one level at least");
+                let next = [halve(&last[0]), halve(&last[1]), halve(&last[2])];
+                color_levels.push(next);
+            }
+        }
         Arc::new(Self {
             width,
             height,
             pixels,
             levels,
+            colors,
+            color_levels,
         })
+    }
+
+    /// Whether the tip has colours of its own.
+    pub fn has_colors(&self) -> bool {
+        self.colors.is_some()
+    }
+
+    /// The colours along a row sampled like [`Self::row`] (same sampler,
+    /// start and step), unmultiplied sRGB 0..1, given that row's coverage
+    /// from [`Self::row`] times `alpha_scale`. A grey tip gives black.
+    pub fn color_row(
+        &self,
+        s: &TipSampler,
+        start: (f32, f32),
+        step: (f32, f32),
+        alpha: &[f32],
+        alpha_scale: f32,
+        out: &mut [[f32; 3]],
+    ) {
+        if self.color_levels.is_empty() {
+            out.fill([0.0; 3]);
+            return;
+        }
+        let (cx, cy) = (self.width as f32 * 0.5, self.height as f32 * 0.5);
+        let (tx0, ty0) = (cx + start.0 * s.per_px, cy + start.1 * s.per_px);
+        let (dtx, dty) = (step.0 * s.per_px, step.1 * s.per_px);
+        self.color_run(s, (tx0, ty0), (dtx, dty), alpha, alpha_scale, out);
+    }
+
+    /// Premultiplied colours from texel `start` by `step`, divided by the
+    /// coverage (`alpha / alpha_scale`).
+    fn color_run(
+        &self,
+        s: &TipSampler,
+        start: (f32, f32),
+        step: (f32, f32),
+        alpha: &[f32],
+        alpha_scale: f32,
+        out: &mut [[f32; 3]],
+    ) {
+        let inv_scale = 1.0 / alpha_scale.max(1e-6);
+        let blend = if s.blend < 0.02 { 0.0 } else { s.blend };
+        let mut plane = vec![0.0f32; out.len()];
+        for k in 0..3 {
+            let run = RowRun {
+                lo: &self.color_levels[s.lo][k],
+                hi: &self.color_levels[s.hi][k],
+                blend,
+                scale_lo: s.scale_lo,
+                scale_hi: s.scale_hi,
+                start,
+                step,
+            };
+            run.run(&mut plane);
+            for ((o, &v), &a) in out.iter_mut().zip(&plane).zip(alpha) {
+                let a = a * inv_scale;
+                o[k] = if a > 1e-4 {
+                    (v / a).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
+    /// Coverage at full-size texel `(tx, ty)` (texel centres at +0.5),
+    /// sampled for `s`: for ribbons, which map the picture themselves.
+    #[inline]
+    pub fn sample_texel(&self, s: &TipSampler, tx: f32, ty: f32) -> f32 {
+        let mut out = [0.0];
+        let blend = if s.blend < 0.02 { 0.0 } else { s.blend };
+        RowRun {
+            lo: &self.levels[s.lo],
+            hi: &self.levels[s.hi],
+            blend,
+            scale_lo: s.scale_lo,
+            scale_hi: s.scale_hi,
+            start: (tx, ty),
+            step: (0.0, 0.0),
+        }
+        .run(&mut out);
+        out[0]
+    }
+
+    /// The colour at full-size texel `(tx, ty)` whose coverage is `alpha`
+    /// (unmultiplied sRGB 0..1; black for a grey tip).
+    #[inline]
+    pub fn color_texel(&self, s: &TipSampler, tx: f32, ty: f32, alpha: f32) -> [f32; 3] {
+        if self.color_levels.is_empty() {
+            return [0.0; 3];
+        }
+        let mut out = [[0.0; 3]];
+        self.color_run(s, (tx, ty), (0.0, 0.0), &[alpha], 1.0, &mut out);
+        out[0]
+    }
+
+    /// How a ribbon `width` pixels across samples this tip (its height
+    /// spans the width).
+    pub fn ribbon_sampler(&self, width: f32) -> TipSampler {
+        // `sampler` fits the longest side to 2r; fit the height instead.
+        let longest = self.width.max(self.height) as f32;
+        let r = width * longest / self.height.max(1) as f32 / 2.0;
+        self.sampler(r)
     }
 
     /// From a picture (see the module notes for which pixels paint).
@@ -122,6 +278,16 @@ impl TipMask {
             (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) as u8
         };
         let has_alpha = rgba.pixels().any(|p| p[3] < 250);
+        // A picture in colour on transparency keeps its colours too.
+        let colored = has_alpha
+            && rgba
+                .pixels()
+                .any(|p| p[3] > 8 && (p[0].abs_diff(p[1]) > 8 || p[1].abs_diff(p[2]) > 8));
+        if colored {
+            let pixels = rgba.pixels().map(|p| p[3]).collect();
+            let colors = rgba.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+            return Self::from_colored(w, h, pixels, colors);
+        }
         let pixels: Vec<u8> = if has_alpha {
             rgba.pixels().map(|p| p[3]).collect()
         } else {
@@ -147,10 +313,11 @@ impl TipMask {
 
     /// The same mask, inverted (what painted doesn't, and the other way).
     pub fn inverted(&self) -> Arc<Self> {
-        Self::from_mask(
+        Self::from_parts(
             self.width,
             self.height,
             self.pixels.iter().map(|&v| 255 - v).collect(),
+            self.colors.clone(),
         )
     }
 
@@ -363,8 +530,118 @@ pub fn builtin() -> &'static [(&'static str, Arc<TipMask>)] {
                     (v * 6.0).clamp(0.0, 1.0)
                 }),
             ),
+            ("Stitch", make(&|x, y| capsule(x, y, 0.6, 0.13))),
+            (
+                "Chain link",
+                make(&|x, y| {
+                    // An oval ring seen face on.
+                    let e = ((x / 0.85).powi(2) + (y / 0.45).powi(2)).sqrt();
+                    ((1.0 - (e - 0.82).abs() / 0.2) * 3.0).clamp(0.0, 1.0)
+                }),
+            ),
+            ("Chain side", make(&|x, y| capsule(x, y, 0.75, 0.15))),
+            ("Lace", lace()),
+            ("Flower", flower()),
+            ("Striped ribbon", striped_ribbon()),
         ]
     })
+}
+
+/// A rounded bar along x, `half` long each way and `radius` thick.
+fn capsule(x: f32, y: f32, half: f32, radius: f32) -> f32 {
+    let dx = (x.abs() - half).max(0.0);
+    let d = (dx * dx + y * y).sqrt();
+    ((radius - d) / radius * 4.0).clamp(0.0, 1.0)
+}
+
+/// Sides of the wide (ribbon) tips.
+const RIBBON_W: usize = 256;
+const RIBBON_H: usize = 64;
+
+/// A wide picture from `f(u, v)`: `u` 0..1 along, `v` -1..1 across (down).
+fn wide(f: &dyn Fn(f32, f32) -> ([u8; 3], f32), colored: bool) -> Arc<TipMask> {
+    let (w, h) = (RIBBON_W, RIBBON_H);
+    let mut pixels = Vec::with_capacity(w * h);
+    let mut colors = Vec::with_capacity(w * h);
+    for i in 0..w * h {
+        let u = ((i % w) as f32 + 0.5) / w as f32;
+        let v = ((i / w) as f32 + 0.5) / h as f32 * 2.0 - 1.0;
+        let (c, a) = f(u, v);
+        pixels.push((a.clamp(0.0, 1.0) * 255.0) as u8);
+        colors.push(c);
+    }
+    if colored {
+        TipMask::from_colored(w, h, pixels, colors)
+    } else {
+        TipMask::from_mask(w, h, pixels)
+    }
+}
+
+/// Lace: a band with holes along the top, scallops below; repeats
+/// seamlessly along its length.
+fn lace() -> Arc<TipMask> {
+    const SCALLOPS: f32 = 4.0;
+    wide(
+        &|u, v| {
+            // Position within one scallop, -0.5..0.5, and the across
+            // coordinate stretched to the same scale.
+            let k = (u * SCALLOPS).fract() - 0.5;
+            let (sx, sy) = (k * 2.0, (v + 0.35) / 0.65);
+            let band = (v > -0.95 && v < -0.35) as u8 as f32;
+            let hole = ((sx * 2.2).powi(2) + ((v + 0.65) / 0.16).powi(2)).sqrt() < 1.0;
+            let ring = (sx * sx + sy * sy).sqrt();
+            let scallop = v >= -0.35 && (0.62..0.98).contains(&ring);
+            let petal = v >= -0.35 && ring < 0.38;
+            let a = if hole {
+                0.0
+            } else {
+                band.max((scallop || petal) as u8 as f32)
+            };
+            ([255; 3], a)
+        },
+        false,
+    )
+}
+
+/// A ribbon in red and white stripes, soft at its edges.
+fn striped_ribbon() -> Arc<TipMask> {
+    wide(
+        &|u, v| {
+            let a = ((0.9 - v.abs()) * 20.0).clamp(0.0, 1.0);
+            let stripe = ((u * 8.0 + v * 0.25).rem_euclid(1.0) < 0.5) as u8;
+            let c = if stripe == 1 {
+                [210, 40, 60]
+            } else {
+                [250, 245, 240]
+            };
+            (c, a)
+        },
+        true,
+    )
+}
+
+/// A five-petal flower in colour: pink petals, a yellow heart.
+fn flower() -> Arc<TipMask> {
+    const N: usize = 128;
+    let mut pixels = Vec::with_capacity(N * N);
+    let mut colors = Vec::with_capacity(N * N);
+    for i in 0..N * N {
+        let x = ((i % N) as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+        let y = ((i / N) as f32 + 0.5) / N as f32 * 2.0 - 1.0;
+        let (r, theta) = ((x * x + y * y).sqrt(), y.atan2(x));
+        let petal = 0.6 + 0.35 * (5.0 * theta).cos();
+        let a = ((petal - r) * 25.0).clamp(0.0, 1.0);
+        let c = if r < 0.24 {
+            [250, 205, 60]
+        } else {
+            let t = ((r - 0.24) / 0.7).clamp(0.0, 1.0);
+            let lerp = |a: f32, b: f32| (a + (b - a) * t) as u8;
+            [lerp(250.0, 225.0), lerp(170.0, 80.0), lerp(200.0, 150.0)]
+        };
+        pixels.push((a * 255.0) as u8);
+        colors.push(c);
+    }
+    TipMask::from_colored(N, N, pixels, colors)
 }
 
 /// Tip sets that come with the app: the dabs take the tips in turn.
@@ -376,7 +653,10 @@ pub fn builtin_sets() -> Vec<(&'static str, Vec<Arc<TipMask>>)> {
             .map(|(_, tip)| tip.clone())
             .collect()
     };
-    vec![("Mixed leaves", named(&["Leaf", "Round leaf", "Long leaf"]))]
+    vec![
+        ("Mixed leaves", named(&["Leaf", "Round leaf", "Long leaf"])),
+        ("Chain", named(&["Chain link", "Chain side"])),
+    ]
 }
 
 /// A repeatable pseudo-random value in 0..1.
@@ -437,8 +717,16 @@ fn halve(level: &Level) -> Level {
     Level::new(w, h, data)
 }
 
-/// Cut the rows and columns with no paint off the edges.
-fn trim(width: usize, height: usize, pixels: Vec<u8>) -> (usize, usize, Vec<u8>) {
+/// The part `[x0, y0, x1, y1)` of a `width`-wide picture.
+fn crop<T: Copy>(v: &[T], width: usize, [x0, y0, x1, y1]: [usize; 4]) -> Vec<T> {
+    (y0..y1)
+        .flat_map(|y| v[y * width + x0..y * width + x1].iter().copied())
+        .collect()
+}
+
+/// The rectangle `[x0, y0, x1, y1)` of a mask that has paint: its empty
+/// rows and columns cut off the edges (all of it if it has none).
+fn trim_rect(width: usize, height: usize, pixels: &[u8]) -> [usize; 4] {
     let painted = |x: usize, y: usize| pixels[y * width + x] > 2;
     let rows: Vec<usize> = (0..height)
         .filter(|&y| (0..width).any(|x| painted(x, y)))
@@ -446,19 +734,10 @@ fn trim(width: usize, height: usize, pixels: Vec<u8>) -> (usize, usize, Vec<u8>)
     let cols: Vec<usize> = (0..width)
         .filter(|&x| (0..height).any(|y| painted(x, y)))
         .collect();
-    let (Some(&y0), Some(&y1), Some(&x0), Some(&x1)) =
-        (rows.first(), rows.last(), cols.first(), cols.last())
-    else {
-        return (width, height, pixels);
-    };
-    if (x0, y0, x1, y1) == (0, 0, width - 1, height - 1) {
-        return (width, height, pixels);
+    match (rows.first(), rows.last(), cols.first(), cols.last()) {
+        (Some(&y0), Some(&y1), Some(&x0), Some(&x1)) => [x0, y0, x1 + 1, y1 + 1],
+        _ => [0, 0, width, height],
     }
-    let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
-    let out = (y0..=y1)
-        .flat_map(|y| pixels[y * width + x0..=y * width + x1].iter().copied())
-        .collect();
-    (w, h, out)
 }
 
 #[cfg(test)]
@@ -485,7 +764,9 @@ mod tests {
         for (name, tip) in builtin() {
             let painted = tip.pixels.iter().filter(|&&v| v > 40).count();
             assert!(painted > 100, "{name}: {painted}");
-            assert!(tip.width > 20 && tip.height > 20, "{name}");
+            // Thin tips (stitches, bars) are still a few pixels across.
+            assert!(tip.width.max(tip.height) > 60, "{name}");
+            assert!(tip.width.min(tip.height) > 8, "{name}");
         }
         // Generated once: the same tip every time.
         assert!(Arc::ptr_eq(&builtin()[0].1, &builtin()[0].1));
