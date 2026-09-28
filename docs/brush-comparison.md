@@ -48,7 +48,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height |
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ❌ |
 | Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ❌ |
-| Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ❌ |
+| Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
 | Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ❌ |
 | Decoration / ribbon brushes | ✅ | ✅ | ✅ | ❌ |
 | Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ❌ |
@@ -100,7 +100,8 @@ below.
   and can be exported and imported as `.rpbrush` files (one preset or a
   whole set, with the tips and textures they use), from the presets
   window's menu or by dropping a file on the window.
-- [ ] **Airbrush.** Paint keeps building while the pen is held still.
+- [x] **Airbrush.** Paint keeps building while the pen is held still, at
+  a rate in dabs per second (Stroke → Airbrush; the Soft Airbrush preset).
 - [ ] **Several tips per brush**, in sequence, at random, or by pressure or
   direction.
 - [ ] **Dual brush.** A second tip masks the first.

@@ -893,3 +893,118 @@ fn every_preset_paints_the_same_after_a_trip_through_a_preset_file() {
         );
     }
 }
+
+/// A press at the canvas centre held still, the airbrush called every
+/// 10 ms until `seconds`; the centre's alpha after each call.
+fn hold_airbrush(brush: &mut Brush, seconds: f64, seed: u64) -> (Canvas, Vec<u8>) {
+    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(seed);
+    let mut centre = Vec::new();
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        stroke.add_sample(brush, Vec2::new(128.0, 64.0), 1.0, Some(0.0), &mut ctx);
+        let mut t = 0.0;
+        while t < seconds {
+            t += 0.01;
+            stroke.airbrush(brush, t, &mut ctx);
+            centre.push(alpha(&canvas, 128, 64));
+        }
+        stroke.finish(brush, &mut ctx);
+    }
+    (canvas, centre)
+}
+
+fn airbrush(rate: f32) -> Brush {
+    let mut b = Brush::new(30.0, 0.0, Color32::BLACK, 10.0);
+    b.brush_options.flow = 5.0;
+    b.airbrush_rate = rate;
+    b
+}
+
+#[test]
+fn without_an_airbrush_holding_still_adds_nothing() {
+    let (canvas, centre) = hold_airbrush(&mut airbrush(0.0), 0.5, 1);
+    assert!(centre.windows(2).all(|w| w[0] == w[1]));
+    let (plain, _) = paint(
+        &mut airbrush(0.0),
+        &[(Vec2::new(128.0, 64.0), 0.0)],
+        1,
+        true,
+    );
+    assert!(pixels(&canvas) == pixels(&plain));
+}
+
+#[test]
+fn an_airbrush_builds_up_while_held_still_at_its_rate() {
+    let (_, centre) = hold_airbrush(&mut airbrush(20.0), 1.0, 1);
+    let first = centre[0];
+    let last = *centre.last().unwrap();
+    assert!(centre.windows(2).all(|w| w[1] >= w[0]), "only builds up");
+    assert!(last > first + 100, "{first} → {last}");
+    // 20 dabs a second: about 20 increases in a second.
+    let steps = centre.windows(2).filter(|w| w[1] > w[0]).count();
+    assert!((17..=22).contains(&steps), "{steps} dabs");
+    // A faster rate builds up sooner.
+    let (_, fast) = hold_airbrush(&mut airbrush(60.0), 0.3, 1);
+    let (_, slow) = hold_airbrush(&mut airbrush(20.0), 0.3, 1);
+    assert!(fast.last() > slow.last());
+}
+
+#[test]
+fn an_airbrush_is_repeatable_and_undoes_exactly() {
+    let mut b = airbrush(30.0);
+    b.jitter = 20.0;
+    b.dynamics.random.size = 0.5;
+    let (a, _) = hold_airbrush(&mut b.clone(), 0.5, 7);
+    let (c, _) = hold_airbrush(&mut b.clone(), 0.5, 7);
+    assert!(pixels(&a) == pixels(&c));
+
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let before = pixels(&canvas);
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(3);
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        stroke.add_sample(&mut b, Vec2::new(60.0, 60.0), 1.0, Some(0.0), &mut ctx);
+        stroke.airbrush(&mut b, 0.5, &mut ctx);
+        stroke.add_sample(&mut b, Vec2::new(150.0, 70.0), 1.0, Some(0.6), &mut ctx);
+        stroke.airbrush(&mut b, 1.0, &mut ctx);
+        stroke.finish(&mut b, &mut ctx);
+    }
+    assert!(pixels(&canvas) != before);
+    let mut history = History::new();
+    history.push_action(undo);
+    let mut selection = crate::selection::SelectionManager::new();
+    let mut tool = crate::app::tools::Tool::Brush;
+    history.undo(&mut canvas, &mut selection, &mut tool);
+    assert!(pixels(&canvas) == before);
+}
+
+#[test]
+fn a_long_stall_does_not_bank_airbrush_dabs() {
+    // Ten seconds late: at most a handful of dabs at once, not 200.
+    let mut b = airbrush(20.0);
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(3);
+    let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+    stroke.add_sample(&mut b, Vec2::new(128.0, 64.0), 1.0, Some(0.0), &mut ctx);
+    let start = alpha(&canvas, 128, 64);
+    stroke.airbrush(&mut b, 10.0, &mut ctx);
+    let after = alpha(&canvas, 128, 64);
+    // The next call a moment later paints nothing more.
+    stroke.airbrush(&mut b, 10.01, &mut ctx);
+    assert_eq!(alpha(&canvas, 128, 64), after);
+    // Each 5% dab adds about 13 levels near white-on-black; 8 at most.
+    assert!(after > start && after - start < 8 * 16, "{start} → {after}");
+}

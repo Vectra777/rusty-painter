@@ -165,6 +165,9 @@ pub struct Brush {
     /// How the paint blends onto the layer (multiply, screen, add…), like a
     /// layer's blend mode but per stroke.
     pub paint_blend: LayerBlend,
+    /// Airbrush: dabs per second added where the pen is while it's down,
+    /// so paint builds up when it's held still (0 = off).
+    pub airbrush_rate: f32,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -605,6 +608,7 @@ impl Brush {
             dynamics: Default::default(),
             texture: None,
             paint_blend: LayerBlend::Normal,
+            airbrush_rate: 0.0,
         }
     }
 
@@ -624,6 +628,7 @@ impl Brush {
             dynamics: Default::default(),
             texture: None,
             paint_blend: LayerBlend::Normal,
+            airbrush_rate: 0.0,
         }
     }
 

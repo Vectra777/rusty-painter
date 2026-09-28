@@ -115,6 +115,7 @@ struct StoredBrush {
     texture: Option<StoredBrushTexture>,
     /// A [`LayerBlend::key`].
     paint_blend: String,
+    airbrush_rate: f32,
 }
 
 impl Default for StoredBrush {
@@ -191,6 +192,7 @@ impl StoredBrush {
                 invert: t.invert,
             }),
             paint_blend: b.paint_blend.key().to_string(),
+            airbrush_rate: b.airbrush_rate,
         }
     }
 
@@ -244,6 +246,7 @@ impl StoredBrush {
             }),
         };
         b.paint_blend = LayerBlend::from_key(&self.paint_blend).unwrap_or_default();
+        b.airbrush_rate = self.airbrush_rate;
         Ok(b)
     }
 }

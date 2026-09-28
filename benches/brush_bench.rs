@@ -518,12 +518,62 @@ fn bench_dynamic_strokes(c: &mut Criterion) {
     group.finish();
 }
 
+/// Brushes built on the later features (airbrush, multiple tips…), each on
+/// the same 60-sample pressure stroke as [`bench_dynamic_strokes`].
+fn bench_feature_strokes(c: &mut Criterion) {
+    let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let canvas = Canvas::new(1024, 1024, Color32::WHITE, 64);
+    let points: Vec<(Vec2, f32, f64)> = (0..60)
+        .map(|i| {
+            let t = i as f32 / 59.0;
+            let pos = Vec2::new(150.0 + t * 700.0, 500.0 + (t * 9.0).sin() * 200.3);
+            (
+                pos,
+                0.3 + 0.7 * (t * std::f32::consts::PI).sin(),
+                t as f64 * 0.6,
+            )
+        })
+        .collect();
+    let base = || Brush::new(60.0, 40.0, Color32::from_rgb(30, 60, 200), 10.0);
+    let mut cases: Vec<(&str, Brush)> = Vec::new();
+    // The airbrush, the pen resting 50 ms at every sample.
+    cases.push(("airbrush", {
+        let mut b = base();
+        b.airbrush_rate = 60.0;
+        b
+    }));
+    let mut group = c.benchmark_group("feature_stroke_60_samples");
+    for (name, mut brush) in cases {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let mut undo_action = UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                };
+                let mut stroke_tiles = StrokeTiles::default();
+                let mut stroke = StrokeState::with_seed(1);
+                let mut context =
+                    StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut stroke_tiles);
+                for &(pos, pressure, time) in &points {
+                    stroke.add_sample(&mut brush, pos, pressure, Some(time), &mut context);
+                    stroke.airbrush(&mut brush, time + 0.05, &mut context);
+                }
+                stroke.finish(&mut brush, &mut context);
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_soft_dab,
     bench_pressure_stroke,
     bench_pressure_stroke_app_pool,
     bench_dynamic_strokes,
+    bench_feature_strokes,
     bench_huge_brush_stroke,
     bench_composite_dirty_tiles,
     bench_composite_damaged_rects,

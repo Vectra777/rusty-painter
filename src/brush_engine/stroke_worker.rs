@@ -41,6 +41,12 @@ pub struct FinishedStroke {
     pub undo: UndoAction,
 }
 
+/// Shortest and longest the worker sleeps between airbrush dabs (seconds):
+/// no faster than a fast display refreshes, and often enough that a low
+/// rate still starts promptly once the pen stops.
+const MIN_AIRBRUSH_WAIT: f32 = 1.0 / 240.0;
+const MAX_AIRBRUSH_WAIT: f32 = 0.05;
+
 enum Job {
     Begin(Box<StrokeSetup>),
     /// `time`: seconds since the worker started, for stroke speed.
@@ -94,11 +100,55 @@ impl StrokeWorker {
         let (jobs, receiver) = mpsc::channel();
         let shared = Arc::new(Shared::default());
         let thread_shared = Arc::clone(&shared);
+        let epoch = std::time::Instant::now();
         let thread = std::thread::Builder::new()
             .name("stroke-worker".into())
             .spawn(move || {
-                let mut session = None;
-                for job in receiver {
+                let mut session: Option<Session> = None;
+                loop {
+                    // An airbrush keeps painting between samples: wake up
+                    // when its next dab is due.
+                    let airbrush = session
+                        .as_ref()
+                        .map(|s| s.setup.brush.airbrush_rate)
+                        .filter(|&rate| rate > 0.0);
+                    let job = match airbrush {
+                        None => match receiver.recv() {
+                            Ok(job) => job,
+                            Err(_) => break,
+                        },
+                        Some(rate) => {
+                            let wait = std::time::Duration::from_secs_f32(
+                                (1.0 / rate).clamp(MIN_AIRBRUSH_WAIT, MAX_AIRBRUSH_WAIT),
+                            );
+                            match receiver.recv_timeout(wait) {
+                                Ok(job) => job,
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    let now = epoch.elapsed().as_secs_f64();
+                                    let result = std::panic::catch_unwind(
+                                        std::panic::AssertUnwindSafe(|| {
+                                            if let Some(session) = session.as_mut() {
+                                                session.paint(
+                                                    &thread_shared,
+                                                    |stroke, brush, context| {
+                                                        stroke.airbrush(brush, now, context)
+                                                    },
+                                                );
+                                            }
+                                        }),
+                                    );
+                                    if result.is_err() {
+                                        log::error!(
+                                            "stroke worker panicked; dropping the current stroke"
+                                        );
+                                        session = None;
+                                    }
+                                    continue;
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                    };
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         run_job(&mut session, job, &thread_shared)
                     }));
@@ -115,7 +165,7 @@ impl StrokeWorker {
             })
             .expect("failed to spawn the stroke worker thread");
         Self {
-            epoch: std::time::Instant::now(),
+            epoch,
             jobs: Some(jobs),
             shared,
             thread: Some(thread),
@@ -403,5 +453,34 @@ mod tests {
             1,
             "an idle worker holds no canvas"
         );
+    }
+
+    #[test]
+    fn the_worker_keeps_airbrushing_while_the_pen_is_held_still() {
+        let centre_after_hold = |rate: f32| {
+            let pool = Arc::new(ThreadPoolBuilder::new().num_threads(1).build().unwrap());
+            let mut brush = Brush::new(30.0, 0.0, Color32::BLACK, 10.0);
+            brush.brush_options.flow = 5.0;
+            brush.airbrush_rate = rate;
+            let canvas = Arc::new(Canvas::new(128, 128, Color32::TRANSPARENT, 64));
+            let worker = StrokeWorker::new();
+            worker.begin(StrokeSetup {
+                canvas: Arc::clone(&canvas),
+                brush,
+                selection: None,
+                pool,
+                layer_idx: 1,
+                symmetry: Default::default(),
+                view_scale: 1.0,
+            });
+            worker.sample(Vec2::new(64.0, 64.0), 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            worker.end();
+            worker.wait_idle();
+            let tile = canvas.get_layer_tile_data(1, 1, 1).unwrap();
+            tile[0].a()
+        };
+        let (held, plain) = (centre_after_hold(60.0), centre_after_hold(0.0));
+        assert!(held > plain + 40, "{plain} → {held}");
     }
 }

@@ -171,6 +171,11 @@ impl eframe::App for PainterApp {
                 if self.sync_stroke_worker() {
                     needs_repaint = true;
                 }
+                // An airbrush paints while the pen is held still, with no
+                // input to wake the frame loop.
+                if self.brush_state.is_drawing && self.brush_state.brush.airbrush_rate > 0.0 {
+                    needs_repaint = true;
+                }
                 if self.render_cache.tiles.iter().any(|t| t.dirty) {
                     self.layer_state.thumbnails_dirty = true;
                 }

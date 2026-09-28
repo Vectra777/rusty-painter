@@ -169,6 +169,8 @@ impl PainterApp {
                 b.brush_options.opacity = 0.6;
                 b.brush_options.pressure_size = false;
                 b.brush_options.pressure_flow = true;
+                // Keeps spraying where the pen rests.
+                b.airbrush_rate = 20.0;
                 b
             }),
             preset("Hard Round", Brush::new(20.0, 100.0, black, 10.0)),

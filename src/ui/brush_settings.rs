@@ -322,6 +322,22 @@ fn brush_settings_contents(
         )
         .on_hover_text("Random dab offset, as a percentage of the brush size.")
         .changed();
+        changed |= slider_row(
+            ui,
+            "Airbrush",
+            crate::ui::widgets::reset(&mut brush.airbrush_rate, |v| {
+                egui::Slider::new(v, 0.0..=100.0)
+                    .max_decimals(0)
+                    .suffix("/s")
+                    .logarithmic(true)
+                    .smallest_positive(1.0)
+            }),
+        )
+        .on_hover_text(
+            "Dabs per second added where the pen is, so paint keeps building while it's held \
+             still (0: off).",
+        )
+        .changed();
         property_row(ui, "Blend", |ui| {
             use crate::canvas::blend_modes::LayerBlend;
             egui::ComboBox::from_id_salt("brush_paint_blend")

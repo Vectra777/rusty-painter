@@ -242,6 +242,8 @@ pub struct StrokeState {
     /// stabiliser).
     sample_time: Option<f64>,
     prev_sample_time: Option<f64>,
+    /// When the airbrush's next dab is due (seconds), if it has one.
+    airbrush_due: Option<f64>,
     /// Every dab's variation as painted, for tests.
     #[cfg(test)]
     pub(crate) painted: Vec<DabVar>,
@@ -281,6 +283,7 @@ impl StrokeState {
             held: None,
             sample_time: None,
             prev_sample_time: None,
+            airbrush_due: None,
             #[cfg(test)]
             painted: Vec::new(),
         }
@@ -332,6 +335,90 @@ impl StrokeState {
             // Spacing and jitter follow this sample's pressure.
             apply_pressure(brush, original, p);
             self.add_point_at_pressure(brush, raw_pos);
+            if !self.pending.is_empty()
+                && let Some(t) = time
+            {
+                self.airbrush_due = Some(t + airbrush_interval(brush));
+            }
+            self.paint_pending(brush, original, from, p, context);
+        }));
+
+        let o = &mut brush.brush_options;
+        (o.diameter, o.opacity, o.flow) = original;
+        self.last_pressure = Some(p);
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// Airbrush: while the pen is down, keep adding dabs where it is at the
+    /// brush's rate, so paint builds up while it's held still. Call it with
+    /// the time now (seconds, the same clock as the samples); it paints the
+    /// dabs due since the last sample or the last call.
+    pub fn airbrush(&mut self, brush: &mut Brush, time: f64, context: &mut StrokeContext<'_>) {
+        if brush.airbrush_rate <= 0.0 || brush.pixel_perfect {
+            return;
+        }
+        let (Some(pos), Some(p)) = (self.last_pos, self.last_pressure) else {
+            return;
+        };
+        let interval = airbrush_interval(brush);
+        let mut due = self.airbrush_due.unwrap_or(time + interval);
+        let mut ticks = 0;
+        while due <= time && ticks < MAX_AIRBRUSH_TICKS {
+            due += interval;
+            ticks += 1;
+        }
+        // A long stall (the worker was busy) doesn't bank dabs for later.
+        if due <= time {
+            due = time + interval;
+        }
+        self.airbrush_due = Some(due);
+        if ticks == 0 {
+            return;
+        }
+        let o = &brush.brush_options;
+        let original = (o.diameter, o.opacity, o.flow);
+        let dynamic = brush.dynamics.is_active();
+        if dynamic {
+            // Held still: the speed settles to nothing.
+            self.prev_speed = self.speed;
+            self.speed = 0.0;
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_pressure(brush, original, p);
+            let count = brush.dynamics.random.dabs_per_step();
+            for _ in 0..ticks * count {
+                let at = self.scatter(brush, pos);
+                self.pending.push(Pending {
+                    pos: at,
+                    t: 1.0,
+                    along: self.travel,
+                    dir: self.dir,
+                });
+            }
+            self.paint_pending(brush, original, p, p, context);
+        }));
+        let o = &mut brush.brush_options;
+        (o.diameter, o.opacity, o.flow) = original;
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// Paint the dabs queued in `self.pending`, their pressure blending from
+    /// `from` to `p` along the segment.
+    fn paint_pending(
+        &mut self,
+        brush: &mut Brush,
+        original: (f32, f32, f32),
+        from: f32,
+        p: f32,
+        context: &mut StrokeContext<'_>,
+    ) {
+        {
+            let dynamic = brush.dynamics.is_active();
             let pending = std::mem::take(&mut self.pending);
             if dynamic {
                 let plans: Vec<Plan> = pending
@@ -377,14 +464,6 @@ impl StrokeState {
             self.run = run;
             self.pending = pending;
             self.pending.clear();
-        }));
-
-        let o = &mut brush.brush_options;
-        (o.diameter, o.opacity, o.flow) = original;
-        self.last_pressure = Some(p);
-
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
         }
     }
 
@@ -817,6 +896,14 @@ const SPEED_WINDOW: f32 = 0.008;
 const SPEED_SMOOTHING: f32 = 0.06;
 /// Time constant of the pen lean's smoothing (seconds).
 const LEAN_SMOOTHING: f32 = 0.04;
+
+/// Most airbrush dabs painted at once, however long since the last ones.
+const MAX_AIRBRUSH_TICKS: u32 = 8;
+
+/// Seconds between airbrush dabs.
+fn airbrush_interval(brush: &Brush) -> f64 {
+    1.0 / f64::from(brush.airbrush_rate.max(0.1))
+}
 
 /// Pressure steps dabs are grouped by; finer than any visible change.
 const PRESSURE_LEVELS: f32 = 64.0;
