@@ -572,6 +572,15 @@ fn bench_feature_strokes(c: &mut Criterion) {
         });
         b
     }));
+    // Watercolour edges on a wash (applied when the pen lifts).
+    cases.push(("wet_edges", {
+        let mut b = base();
+        b.brush_options.painting_mode =
+            rusty_painter::brush_engine::brush_options::PaintingMode::Wash;
+        b.brush_options.opacity = 0.6;
+        b.wet_edge = 0.6;
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {

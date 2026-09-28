@@ -437,6 +437,32 @@ fn brush_settings_contents(
     changed |= dynamics_sections(ui, &mut brush.dynamics);
     changed |= texture_section(ui, &mut brush.texture, textures);
     changed |= dual_section(ui, &mut brush.dual, loaded_tips);
+    section(ui, "Watercolour", false, |ui| {
+        changed |= slider_row(
+            ui,
+            "Wet edges",
+            crate::ui::widgets::reset(&mut brush.wet_edge, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=0.95))
+            }),
+        )
+        .on_hover_text(
+            "When the pen lifts, the middle of the stroke thins and its paint gathers at the \
+             rim, as a wash does drying (0: off).",
+        )
+        .changed();
+        if brush.wet_edge > 0.0 {
+            changed |= slider_row(
+                ui,
+                "Edge width",
+                crate::ui::widgets::reset(&mut brush.wet_edge_width, |v| {
+                    egui::Slider::new(v, 1.0..=32.0)
+                        .max_decimals(0)
+                        .suffix(" px")
+                }),
+            )
+            .changed();
+        }
+    });
 
     section(ui, "Pen pressure & tilt", true, |ui| {
         let o = &mut brush.brush_options;

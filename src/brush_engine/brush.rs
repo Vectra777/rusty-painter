@@ -170,6 +170,11 @@ pub struct Brush {
     pub airbrush_rate: f32,
     /// Dual brush: a second tip that masks this one; `None` for none.
     pub dual: Option<crate::brush_engine::dual::DualTip>,
+    /// Watercolour edges: how much the middle of a stroke thins when the
+    /// pen lifts, its paint pooling at the rim (0 = off, up to 0.95).
+    pub wet_edge: f32,
+    /// How wide the pooled rim is, in canvas pixels.
+    pub wet_edge_width: f32,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -656,6 +661,8 @@ impl Brush {
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
             dual: None,
+            wet_edge: 0.0,
+            wet_edge_width: 6.0,
         }
     }
 
@@ -677,6 +684,8 @@ impl Brush {
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
             dual: None,
+            wet_edge: 0.0,
+            wet_edge_width: 6.0,
         }
     }
 
@@ -954,6 +963,102 @@ impl Brush {
             for span in &mut spans[y0..y1] {
                 *span = (x0, x1 - 1);
             }
+            let region = TileRegion {
+                tx: key.0,
+                ty: key.1,
+            };
+            resolve_spans(&ctx, region, &mut buffer, &spans);
+            stroke_tiles.dirty.insert(key);
+        }
+    }
+
+    /// Watercolour edges, when the pen lifts: thin the middle of the whole
+    /// stroke, keeping its rim (see [`crate::brush_engine::wet_edge`]),
+    /// and show the result.
+    pub(crate) fn apply_wet_edges(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        stroke_tiles: &mut StrokeTiles,
+    ) {
+        use rayon::prelude::*;
+        if self.wet_edge <= 0.0 || stroke_tiles.buffers.is_empty() {
+            return;
+        }
+        let ts = canvas.tile_size();
+        let radius = (self.wet_edge_width.round() as usize).clamp(1, ts);
+        let pad = radius;
+        let side = ts + 2 * pad;
+        // Every tile's coverage as the stroke left it, so each tile's blur
+        // reads its neighbours unchanged.
+        let before: FxHashMap<(usize, usize), Vec<f32>> = stroke_tiles
+            .buffers
+            .iter()
+            .map(|(&k, b)| {
+                (
+                    k,
+                    b.lock().unwrap_or_else(|e| e.into_inner()).coverage.clone(),
+                )
+            })
+            .collect();
+        let keys: Vec<_> = before.keys().copied().collect();
+        let strength = self.wet_edge;
+        let after: Vec<((usize, usize), Vec<f32>)> = pool.install(|| {
+            keys.par_iter()
+                .map(|&(tx, ty)| {
+                    let mut patch = vec![0.0f32; side * side];
+                    for py in 0..side {
+                        // Canvas row of this patch row, and its tile.
+                        let gy = (ty * ts + py) as isize - pad as isize;
+                        if gy < 0 {
+                            continue;
+                        }
+                        let (sty, ly) = (gy as usize / ts, gy as usize % ts);
+                        for px in 0..side {
+                            let gx = (tx * ts + px) as isize - pad as isize;
+                            if gx < 0 {
+                                continue;
+                            }
+                            let (stx, lx) = (gx as usize / ts, gx as usize % ts);
+                            if let Some(c) = before.get(&(stx, sty)) {
+                                patch[py * side + px] = c[ly * ts + lx];
+                            }
+                        }
+                    }
+                    let out = crate::brush_engine::wet_edge::wet_edge_tile(
+                        &patch, side, pad, radius, strength,
+                    );
+                    ((tx, ty), out)
+                })
+                .collect()
+        });
+        let ctx = self.batch_ctx(
+            canvas,
+            selection,
+            &[],
+            &stroke_tiles.buffers,
+            Target::Stroke,
+            stroke_tiles.tail_newer,
+        );
+        for (key, coverage) in after {
+            let Some(buffer) = stroke_tiles.buffers.get(&key) else {
+                continue;
+            };
+            let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            // Where the stroke has paint (the rest stays as it was).
+            let spans: Vec<(usize, usize)> = coverage
+                .chunks_exact(ts)
+                .map(|row| {
+                    let first = row.iter().position(|&c| c > 0.0);
+                    let last = row.iter().rposition(|&c| c > 0.0);
+                    match (first, last) {
+                        (Some(a), Some(b)) => (a, b),
+                        _ => (usize::MAX, 0),
+                    }
+                })
+                .collect();
+            buffer.coverage = coverage;
             let region = TileRegion {
                 tx: key.0,
                 ty: key.1,

@@ -140,6 +140,11 @@ impl<'a> StrokeContext<'a> {
         );
     }
 
+    /// Watercolour edges on the whole stroke.
+    fn wet_edges(&mut self, brush: &Brush) {
+        brush.apply_wet_edges(self.pool, self.canvas, self.selection, self.stroke_tiles);
+    }
+
     /// Show the paint a dual brush's mask has uncovered since last time.
     fn resolve_mask(&mut self, brush: &Brush) {
         brush.resolve_mask_changes(self.canvas, self.selection, self.stroke_tiles);
@@ -582,6 +587,10 @@ impl StrokeState {
         (o.diameter, o.opacity, o.flow) = original;
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
+        }
+        // Watercolour edges, on the whole stroke once it's down.
+        if brush.wet_edge > 0.0 {
+            context.wet_edges(brush);
         }
     }
 

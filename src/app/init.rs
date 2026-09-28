@@ -318,6 +318,19 @@ impl PainterApp {
                 });
                 b
             }),
+            preset("Watercolour", {
+                // A wash on rough paper that dries with a darker rim.
+                let mut b = Brush::new(40.0, 30.0, Color32::from_rgb(40, 90, 170), 8.0);
+                b.brush_options.flow = 40.0;
+                b.brush_options.opacity = 0.55;
+                b.brush_options.painting_mode =
+                    crate::brush_engine::brush_options::PaintingMode::Wash;
+                b.brush_options.pressure_min_size = 0.5;
+                b.texture = paper("Rough paper", TextureMode::Height, 0.5);
+                b.wet_edge = 0.55;
+                b.wet_edge_width = 7.0;
+                b
+            }),
             preset("Spatter", {
                 let mut b = Brush::new(40.0, 90.0, black, 90.0);
                 b.brush_options.pixel_shape = tip("Spatter");

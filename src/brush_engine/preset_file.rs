@@ -191,6 +191,8 @@ struct StoredBrush {
     paint_blend: String,
     airbrush_rate: f32,
     dual: Option<StoredDual>,
+    wet_edge: f32,
+    wet_edge_width: f32,
 }
 
 impl Default for StoredBrush {
@@ -267,6 +269,8 @@ impl StoredBrush {
             paint_blend: b.paint_blend.key().to_string(),
             airbrush_rate: b.airbrush_rate,
             dual: b.dual.as_ref().map(|d| StoredDual::from_dual(d, res)),
+            wet_edge: b.wet_edge,
+            wet_edge_width: b.wet_edge_width,
         }
     }
 
@@ -324,6 +328,8 @@ impl StoredBrush {
         b.paint_blend = LayerBlend::from_key(&self.paint_blend).unwrap_or_default();
         b.airbrush_rate = self.airbrush_rate;
         b.dual = self.dual.map(|d| d.into_dual(res)).transpose()?;
+        b.wet_edge = self.wet_edge;
+        b.wet_edge_width = self.wet_edge_width;
         Ok(b)
     }
 }

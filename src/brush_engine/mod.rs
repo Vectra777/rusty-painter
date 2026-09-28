@@ -18,3 +18,4 @@ pub mod stroke_worker;
 pub mod symmetry;
 pub mod texture;
 pub mod tip;
+pub mod wet_edge;

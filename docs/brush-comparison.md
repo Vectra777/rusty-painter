@@ -47,7 +47,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ✅ Smudge with a colour rate |
 | Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height |
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ✅ multiply, darken, subtract, height |
-| Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ❌ |
+| Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ✅ when the pen lifts |
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
 | Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ❌ |
 | Decoration / ribbon brushes | ✅ | ✅ | ✅ | ❌ |
@@ -108,7 +108,9 @@ below.
 - [x] **Dual brush.** A second tip, with its own size, spacing, scatter
   and count, masks the first (multiply, darken, subtract or height). The
   Dry Media preset uses a spatter tip.
-- [ ] **Watercolour edges.** Paint pools at the rim of the stroke.
+- [x] **Watercolour edges.** When the pen lifts, the middle of the stroke
+  thins and its paint gathers at the rim (strength and width). The
+  Watercolour preset uses them with a wash on rough paper.
 - [ ] **Bristle engine.**
 - [ ] **Ribbon and decoration brushes.**
 - [ ] **Sketch and hatching engines.**

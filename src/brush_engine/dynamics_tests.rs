@@ -1231,3 +1231,49 @@ fn a_spatter_dual_tip_breaks_the_stroke_up_and_undoes_exactly() {
     history.undo(&mut masked, &mut selection, &mut tool);
     assert!(pixels(&masked).iter().all(|&a| a == 0));
 }
+
+fn wash(wet_edge: f32) -> Brush {
+    let mut b = Brush::new(50.0, 100.0, Color32::BLACK, 5.0);
+    b.brush_options.pressure_size = false;
+    b.brush_options.opacity = 0.6;
+    b.brush_options.painting_mode = crate::brush_engine::brush_options::PaintingMode::Wash;
+    b.wet_edge = wet_edge;
+    b.wet_edge_width = 6.0;
+    b
+}
+
+#[test]
+fn wet_edges_thin_the_middle_of_a_wash_and_keep_its_rim() {
+    // A thick line across tile borders (tiles are 64 px): 50 px wide.
+    let (plain, _) = paint(&mut wash(0.0), &line(64.0, 0.5), 1, true);
+    let (mut wet, undo) = paint(&mut wash(0.6), &line(64.0, 0.5), 1, true);
+    let (middle, rim) = (alpha(&wet, 128, 64), alpha(&wet, 128, 64 - 22));
+    let plain_middle = alpha(&plain, 128, 64) as u32;
+    assert!(
+        (middle as u32) < plain_middle * 2 / 3,
+        "middle {middle} vs {plain_middle}"
+    );
+    assert!(rim > middle + 40, "rim {rim}, middle {middle}");
+    // Across the tile border at x = 128 as elsewhere: no seam.
+    let (left, right) = (alpha(&wet, 127, 64), alpha(&wet, 128, 64));
+    assert!(left.abs_diff(right) <= 1, "{left} | {right}");
+    // Nothing outside the stroke, and undo restores the layer exactly.
+    for (p, w) in pixels(&plain).iter().zip(pixels(&wet)) {
+        assert!(*p > 0 || w == 0);
+    }
+    let mut history = History::new();
+    history.push_action(undo);
+    let mut selection = crate::selection::SelectionManager::new();
+    let mut tool = crate::app::tools::Tool::Brush;
+    history.undo(&mut wet, &mut selection, &mut tool);
+    assert!(pixels(&wet).iter().all(|&a| a == 0));
+}
+
+#[test]
+fn without_wet_edges_the_stroke_is_unchanged() {
+    let mut off = wash(0.0);
+    off.wet_edge_width = 20.0;
+    let (a, _) = paint(&mut wash(0.0), &line(64.0, 0.5), 1, true);
+    let (b, _) = paint(&mut off, &line(64.0, 0.5), 1, true);
+    assert!(pixels(&a) == pixels(&b));
+}
