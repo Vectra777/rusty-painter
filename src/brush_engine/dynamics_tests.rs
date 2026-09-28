@@ -1277,3 +1277,99 @@ fn without_wet_edges_the_stroke_is_unchanged() {
     let (b, _) = paint(&mut off, &line(64.0, 0.5), 1, true);
     assert!(pixels(&a) == pixels(&b));
 }
+
+fn bristle_brush(ink: f32) -> Brush {
+    let mut b = Brush::new(40.0, 80.0, Color32::BLACK, 10.0);
+    b.brush_type = crate::brush_engine::brush::BrushType::Bristle;
+    b.brush_options.pressure_min_size = 0.3;
+    b.bristles = crate::brush_engine::bristle::Bristles {
+        count: 8,
+        thickness: 2.0,
+        spread: 1.0,
+        ink,
+        variation: 0.0,
+    };
+    b
+}
+
+/// Separate painted runs along a column (`vertical`) or a row.
+fn runs(canvas: &Canvas, at: usize, vertical: bool) -> usize {
+    let len = if vertical { H } else { W };
+    let painted: Vec<bool> = (0..len)
+        .map(|i| {
+            let (x, y) = if vertical { (at, i) } else { (i, at) };
+            alpha(canvas, x, y) > 60
+        })
+        .collect();
+    painted.windows(2).filter(|w| w[1] && !w[0]).count() + usize::from(painted[0])
+}
+
+fn stroke_with_pressure(brush: &mut Brush, points: &[(Vec2, f32)]) -> Canvas {
+    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(1);
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        for (i, &(p, pressure)) in points.iter().enumerate() {
+            stroke.add_sample(brush, p, pressure, Some(i as f64 * 0.01), &mut ctx);
+        }
+        stroke.finish(brush, &mut ctx);
+    }
+    canvas
+}
+
+#[test]
+fn a_bristle_brush_paints_one_streak_per_hair_across_the_stroke() {
+    let canvas = stroke_with_pressure(&mut bristle_brush(0.0), &along_x(20.0, 236.0, 40));
+    assert_eq!(
+        runs(&canvas, 128, true),
+        8,
+        "streaks across a horizontal stroke"
+    );
+    // Along the stroke each streak is continuous.
+    let streak_row = (0..H).find(|&y| alpha(&canvas, 128, y) > 60).unwrap();
+    assert_eq!(runs(&canvas, streak_row, false), 1);
+    // Going down, the hairs lie across it: the streaks are side by side.
+    let down: Vec<(Vec2, f32)> = (0..=30)
+        .map(|i| (Vec2::new(128.0, 10.0 + i as f32 * 3.6), 1.0))
+        .collect();
+    let canvas = stroke_with_pressure(&mut bristle_brush(0.0), &down);
+    assert_eq!(
+        runs(&canvas, 64, false),
+        8,
+        "streaks across a vertical stroke"
+    );
+}
+
+#[test]
+fn bristles_fan_out_with_pressure_and_run_dry() {
+    let width = |c: &Canvas| {
+        (0..H).rfind(|&y| alpha(c, 128, y) > 30).unwrap()
+            - (0..H).find(|&y| alpha(c, 128, y) > 30).unwrap()
+    };
+    let light: Vec<_> = along_x(20.0, 236.0, 40)
+        .into_iter()
+        .map(|(p, _)| (p, 0.2))
+        .collect();
+    let soft = stroke_with_pressure(&mut bristle_brush(0.0), &light);
+    let hard = stroke_with_pressure(&mut bristle_brush(0.0), &along_x(20.0, 236.0, 40));
+    assert!(
+        width(&hard) > width(&soft) * 2,
+        "{} vs {}",
+        width(&hard),
+        width(&soft)
+    );
+
+    let dry = stroke_with_pressure(&mut bristle_brush(100.0), &along_x(20.0, 236.0, 40));
+    let column = |x: usize| (0..H).filter(|&y| alpha(&dry, x, y) > 30).count();
+    assert!(
+        column(40) > 0 && column(220) == 0,
+        "{} → {}",
+        column(40),
+        column(220)
+    );
+    assert!(column(120) < column(40));
+}

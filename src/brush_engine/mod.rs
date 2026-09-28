@@ -1,4 +1,5 @@
 //! Brush rendering logic and stroke handling.
+pub mod bristle;
 pub mod brush;
 pub mod brush_options;
 mod dab;

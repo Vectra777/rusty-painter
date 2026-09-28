@@ -35,6 +35,9 @@ use std::sync::Mutex;
 pub enum BrushType {
     Soft,
     Pixel,
+    /// A row of hairs, each painting its own line (see
+    /// [`crate::brush_engine::bristle`]).
+    Bristle,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -175,6 +178,8 @@ pub struct Brush {
     pub wet_edge: f32,
     /// How wide the pooled rim is, in canvas pixels.
     pub wet_edge_width: f32,
+    /// The hairs of a [`BrushType::Bristle`] brush.
+    pub bristles: crate::brush_engine::bristle::Bristles,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -628,7 +633,15 @@ impl Brush {
     /// Whether dabs can differ from one another (dynamics, several tips),
     /// so each is planned on its own.
     pub fn varies_per_dab(&self) -> bool {
-        self.dynamics.is_active() || self.brush_options.tip_count() > 1
+        self.dynamics.is_active()
+            || self.brush_options.tip_count() > 1
+            || self.brush_type == BrushType::Bristle
+    }
+
+    /// The tip turns with the stroke's direction (a bristle brush's hairs
+    /// always lie across it).
+    pub fn follows_stroke(&self) -> bool {
+        self.dynamics.tip.follow_stroke || self.brush_type == BrushType::Bristle
     }
 
     /// The stroke smoothing this brush asks for.
@@ -663,6 +676,7 @@ impl Brush {
             dual: None,
             wet_edge: 0.0,
             wet_edge_width: 6.0,
+            bristles: Default::default(),
         }
     }
 
@@ -686,6 +700,7 @@ impl Brush {
             dual: None,
             wet_edge: 0.0,
             wet_edge_width: 6.0,
+            bristles: Default::default(),
         }
     }
 
@@ -773,6 +788,14 @@ impl Brush {
     ) {
         use crate::brush_engine::dynamics::compose;
         let base_r = self.brush_options.diameter / 2.0;
+        // A bristle brush: each dab is one small dab per hair.
+        let hair_dabs;
+        let (centers, vars, orients) = if self.brush_type == BrushType::Bristle {
+            hair_dabs = self.hair_dabs(centers, vars, orients);
+            (&hair_dabs.0[..], &hair_dabs.1[..], None)
+        } else {
+            (centers, vars, orients)
+        };
         let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
         let tile_size = canvas.tile_size();
         let colored = self.dynamics.random.has_color();
@@ -833,6 +856,55 @@ impl Brush {
             undo_action,
             stroke_tiles,
         );
+    }
+
+    /// A bristle brush's dabs, one per hair of each of `centers` (with its
+    /// variation and mirror copy): the hairs' centres and variations.
+    fn hair_dabs(
+        &self,
+        centers: &[Vec2],
+        vars: &[crate::brush_engine::dynamics::DabVar],
+        orients: Option<&[[f32; 4]]>,
+    ) -> (Vec<Vec2>, Vec<crate::brush_engine::dynamics::DabVar>) {
+        use crate::brush_engine::dynamics::{DabVar, IDENTITY, compose};
+        let b = &self.bristles;
+        let hairs = b.hairs();
+        let base_r = (self.brush_options.diameter / 2.0).max(0.25);
+        let mut out_centers = Vec::with_capacity(centers.len() * hairs.len());
+        let mut out_vars = Vec::with_capacity(out_centers.capacity());
+        for (i, &center) in centers.iter().enumerate() {
+            let var = vars.get(i % vars.len().max(1)).copied().unwrap_or_default();
+            let orient = match orients.and_then(|o| o.get(i)) {
+                Some(&m) => compose(var.orient, m),
+                None => var.orient,
+            };
+            // Tip frame → canvas: the inverse of `orient`.
+            let [a, bb, c, d] = orient;
+            let det = a * d - bb * c;
+            let inv = if det.abs() > 1e-9 {
+                [d / det, -bb / det, -c / det, a / det]
+            } else {
+                IDENTITY
+            };
+            let spread = base_r * var.scale * b.spread;
+            for hair in &hairs {
+                let ink = b.ink_left(hair, var.along);
+                if ink <= 0.0 {
+                    continue;
+                }
+                let (tx, ty) = (hair.offset.x * spread, hair.offset.y * spread);
+                let offset = Vec2::new(inv[0] * tx + inv[1] * ty, inv[2] * tx + inv[3] * ty);
+                out_centers.push(center + offset);
+                let hair_r = (b.thickness * 0.5 * hair.thickness).max(0.3);
+                out_vars.push(DabVar {
+                    scale: hair_r / base_r,
+                    strength: var.strength * hair.strength * ink,
+                    orient: IDENTITY,
+                    ..var
+                });
+            }
+        }
+        (out_centers, out_vars)
     }
 
     /// Merge tail segment `k` into the stroke for good. The pixels don't
@@ -1091,7 +1163,7 @@ impl Brush {
             space: canvas.blend_space,
             color: StrokeColor::new(o.color),
             cap: if wash { o.opacity } else { 1.0 },
-            antialiased_selection: self.brush_type == BrushType::Soft,
+            antialiased_selection: self.brush_type != BrushType::Pixel,
             alpha_lock: canvas
                 .layers
                 .get(canvas.active_layer_idx)
@@ -1157,7 +1229,9 @@ impl Brush {
             })
             .sum();
         match self.brush_type {
-            BrushType::Soft => self.paint_soft(pool, &ctx, &buckets, work_pixels, strength),
+            BrushType::Soft | BrushType::Bristle => {
+                self.paint_soft(pool, &ctx, &buckets, work_pixels, strength)
+            }
             BrushType::Pixel => self.paint_pixel(pool, &ctx, &buckets, work_pixels, strength),
         }
     }

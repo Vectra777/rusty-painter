@@ -130,7 +130,11 @@ fn brush_settings_contents(
         mask_changed |= segmented(
             ui,
             &mut brush.brush_type,
-            &[(BrushType::Soft, "Soft"), (BrushType::Pixel, "Pixel")],
+            &[
+                (BrushType::Soft, "Soft"),
+                (BrushType::Pixel, "Pixel"),
+                (BrushType::Bristle, "Bristle"),
+            ],
             false,
         );
     });
@@ -142,10 +146,17 @@ fn brush_settings_contents(
             BrushType::Pixel => {
                 "Dabs snap to whole pixels with hard edges: pixel art and crisp 1-px lines."
             }
+            BrushType::Bristle => {
+                "A row of hairs across the stroke, each painting its own line: streaky paint \
+                 that fans out with pressure."
+            }
         })
         .small()
         .color(TEXT_DIM),
     );
+    if brush.brush_type == BrushType::Bristle {
+        changed |= bristle_section(ui, &mut brush.bristles);
+    }
     property_row(ui, "Painting", |ui| {
         changed |= segmented(
             ui,
@@ -761,6 +772,67 @@ fn dynamics_sections(
 }
 
 /// Paper texture: which pattern, how it combines, its scale and strength.
+/// A bristle brush's hairs.
+fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bristles) -> bool {
+    let mut changed = false;
+    section(ui, "Bristles", true, |ui| {
+        changed |= slider_row(
+            ui,
+            "Hairs",
+            crate::ui::widgets::reset(&mut b.count, |v| {
+                egui::Slider::new(v, 1..=crate::brush_engine::bristle::MAX_HAIRS)
+            }),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Thickness",
+            crate::ui::widgets::reset(&mut b.thickness, |v| {
+                egui::Slider::new(v, 0.5..=20.0)
+                    .logarithmic(true)
+                    .max_decimals(1)
+                    .suffix(" px")
+            }),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Spread",
+            crate::ui::widgets::reset(&mut b.spread, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.1..=2.0))
+            }),
+        )
+        .on_hover_text("How far the hairs fan out, as a share of the brush size.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Paint lasts",
+            crate::ui::widgets::reset(&mut b.ink, |v| {
+                egui::Slider::new(v, 0.0..=4000.0)
+                    .logarithmic(true)
+                    .smallest_positive(50.0)
+                    .max_decimals(0)
+                    .suffix(" px")
+            }),
+        )
+        .on_hover_text(
+            "How long a stroke the hairs' paint lasts before they run dry, each at its own \
+             pace (0: it never runs out).",
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Variation",
+            crate::ui::widgets::reset(&mut b.variation, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
+        )
+        .on_hover_text("How much the hairs differ in thickness and strength.")
+        .changed();
+    });
+    changed
+}
+
 /// The dual brush: a second tip masking the first.
 fn dual_section(
     ui: &mut egui::Ui,

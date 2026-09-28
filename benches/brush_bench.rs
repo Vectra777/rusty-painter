@@ -581,6 +581,13 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.wet_edge = 0.6;
         b
     }));
+    // A bristle brush: 30 hairs.
+    cases.push(("bristle", {
+        let mut b = base();
+        b.brush_type = rusty_painter::brush_engine::brush::BrushType::Bristle;
+        b.bristles.count = 30;
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {

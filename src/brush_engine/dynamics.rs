@@ -215,6 +215,9 @@ pub struct DabVar {
     pub hsv: [f32; 3],
     /// Which of the brush's tips (see `BrushOptions::tip_count`).
     pub tip: u8,
+    /// How far along the stroke the dab is, canvas pixels (for a bristle
+    /// brush's hairs running dry).
+    pub along: f32,
 }
 
 impl Default for DabVar {
@@ -225,6 +228,7 @@ impl Default for DabVar {
             orient: IDENTITY,
             hsv: [0.0; 3],
             tip: 0,
+            along: 0.0,
         }
     }
 }

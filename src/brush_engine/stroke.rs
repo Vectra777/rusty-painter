@@ -669,6 +669,7 @@ impl StrokeState {
         let d = &brush.dynamics;
         let mut v = DabVar {
             tip: self.pick_tip(brush, dab, pressure),
+            along: dab.along,
             ..DabVar::default()
         };
         if d.taper.is_active() && d.taper.start > 0.0 {
@@ -734,9 +735,9 @@ impl StrokeState {
     /// The tip's turn and squash for a dab going in direction `dir`.
     fn orient(&mut self, brush: &Brush, mut v: DabVar, dir: Option<f32>, t: f32) -> DabVar {
         let tip = &brush.dynamics.tip;
-        if tip.is_active() {
+        if tip.is_active() || brush.follows_stroke() {
             let mut angle = tip.angle.to_radians();
-            if tip.follow_stroke {
+            if brush.follows_stroke() {
                 angle += dir.or(self.dir).unwrap_or(0.0);
             }
             if tip.follow_tilt
@@ -764,7 +765,7 @@ impl StrokeState {
     ) {
         #[cfg(test)]
         self.painted.extend(plans.iter().map(|p| p.var));
-        let follow = brush.dynamics.tip.follow_stroke;
+        let follow = brush.follows_stroke();
         if follow {
             if self.held.is_some() {
                 let Some(dir) = self.dir else {
@@ -830,7 +831,12 @@ impl StrokeState {
             self.stabilizer
                 .step_timed(&brush.stabilizer_settings(), self.last_pos, raw_pos, dt);
 
-        let spacing_dist = (brush.brush_options.spacing / 100.0) * brush.brush_options.diameter;
+        let spacing_dist = if brush.brush_type == crate::brush_engine::brush::BrushType::Bristle {
+            // Each hair draws a continuous line.
+            brush.bristles.step()
+        } else {
+            (brush.brush_options.spacing / 100.0) * brush.brush_options.diameter
+        };
         let spacing_dist = spacing_dist.max(0.5); // Avoid infinite loops
         let count = brush.dynamics.random.dabs_per_step();
 

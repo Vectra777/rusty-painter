@@ -331,6 +331,37 @@ impl PainterApp {
                 b.wet_edge_width = 7.0;
                 b
             }),
+            preset("Oil Bristle", {
+                // A loaded flat brush: streaks that fan out with pressure.
+                let mut b = Brush::new(40.0, 60.0, Color32::from_rgb(150, 70, 40), 10.0);
+                b.brush_type = crate::brush_engine::brush::BrushType::Bristle;
+                b.brush_options.pressure_min_size = 0.35;
+                b.brush_options.flow = 70.0;
+                b.bristles = crate::brush_engine::bristle::Bristles {
+                    count: 30,
+                    thickness: 2.5,
+                    spread: 1.0,
+                    ink: 0.0,
+                    variation: 0.6,
+                };
+                b
+            }),
+            preset("Dry Brush", {
+                // Few thin hairs that run dry along the stroke.
+                let mut b = Brush::new(34.0, 80.0, Color32::from_rgb(45, 40, 38), 10.0);
+                b.brush_type = crate::brush_engine::brush::BrushType::Bristle;
+                b.brush_options.pressure_min_size = 0.5;
+                b.brush_options.pressure_opacity = true;
+                b.bristles = crate::brush_engine::bristle::Bristles {
+                    count: 18,
+                    thickness: 1.5,
+                    spread: 1.0,
+                    ink: 700.0,
+                    variation: 0.8,
+                };
+                b.dynamics.taper.start = 20.0;
+                b
+            }),
             preset("Spatter", {
                 let mut b = Brush::new(40.0, 90.0, black, 90.0);
                 b.brush_options.pixel_shape = tip("Spatter");

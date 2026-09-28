@@ -49,7 +49,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ✅ multiply, darken, subtract, height |
 | Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ✅ when the pen lifts |
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
-| Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ❌ |
+| Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ✅ hairs fan out and run dry |
 | Decoration / ribbon brushes | ✅ | ✅ | ✅ | ❌ |
 | Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ❌ |
 | Smudge and blur tools | ✅ | ✅ | ✅ | ✅ |
@@ -111,7 +111,10 @@ below.
 - [x] **Watercolour edges.** When the pen lifts, the middle of the stroke
   thins and its paint gathers at the rim (strength and width). The
   Watercolour preset uses them with a wash on rough paper.
-- [ ] **Bristle engine.**
+- [x] **Bristle engine.** A row of hairs across the stroke, each painting
+  its own line; they fan out with pressure and run dry at their own pace.
+  Presets: Oil Bristle, Dry Brush. (For colour picked up from the canvas,
+  use the Smudge tool.)
 - [ ] **Ribbon and decoration brushes.**
 - [ ] **Sketch and hatching engines.**
 - [ ] **Deform, filter and clone brushes.**
