@@ -7,6 +7,7 @@
 //! factor and the tip's orientation (rotation and squash as a matrix from
 //! canvas offsets to tip offsets).
 
+use crate::canvas::blend::Unmultiply;
 use eframe::egui::Vec2;
 
 /// The tip's angle and shape.
@@ -494,7 +495,7 @@ pub fn compose(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 /// `color` (unmultiplied sRGB) with its hue turned by `hsv[0]` degrees and
 /// its saturation and value moved by `hsv[1]`, `hsv[2]`; sRGB 0..1.
 pub fn shift_hsv(color: eframe::egui::Color32, hsv: [f32; 3]) -> [f32; 3] {
-    let [r, g, b, _] = color.to_srgba_unmultiplied().map(|v| v as f32 / 255.0);
+    let [r, g, b, _] = color.unmultiplied().map(|v| v as f32 / 255.0);
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     let d = max - min;

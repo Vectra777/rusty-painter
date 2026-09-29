@@ -1125,6 +1125,39 @@ mod tests {
     }
 
     #[test]
+    fn curves_are_drawn_within_a_quarter_pixel_of_the_true_curve() {
+        for (a, b, c, d) in [
+            // A tight S, a long gentle arc, and a loop.
+            ((10.0, 10.0), (60.0, 0.0), (0.0, 60.0), (50.0, 50.0)),
+            ((0.0, 0.0), (400.0, 0.0), (800.0, 200.0), (1200.0, 0.0)),
+            ((0.0, 0.0), (100.0, 100.0), (-100.0, 100.0), (0.0, 0.0)),
+        ] {
+            let [a, b, c, d] = [a, b, c, d].map(|(x, y)| Vec2::new(x, y));
+            let mut poly = vec![a];
+            flatten_cubic(a, b, c, d, &mut poly);
+            let at = |t: f32| {
+                let u = 1.0 - t;
+                a * (u * u * u) + b * (3.0 * u * u * t) + c * (3.0 * u * t * t) + d * (t * t * t)
+            };
+            let to_poly = |p: Vec2| {
+                poly.windows(2)
+                    .map(|w| {
+                        let (s, e) = (w[0], w[1]);
+                        let t =
+                            ((p - s).dot(e - s) / (e - s).length_sq().max(1e-9)).clamp(0.0, 1.0);
+                        (s + (e - s) * t - p).length()
+                    })
+                    .fold(f32::MAX, f32::min)
+            };
+            let worst = (0..=4000)
+                .map(|i| to_poly(at(i as f32 / 4000.0)))
+                .fold(0.0, f32::max);
+            assert!(worst <= 0.25, "{worst} px off");
+            assert!(poly.len() < 1024, "not more points than needed");
+        }
+    }
+
+    #[test]
     fn a_dragged_curve_bows_and_paints_as_one_step() {
         let mut app = app();
         app.workspace.shapes.settings.closed = false;

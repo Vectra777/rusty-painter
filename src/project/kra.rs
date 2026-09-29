@@ -452,6 +452,7 @@ fn blend(op: &str) -> LayerBlend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::blend::Unmultiply;
 
     #[test]
     fn lzf_undoes_runs_and_back_references() {
@@ -507,7 +508,7 @@ mod tests {
         assert_eq!(px(red, 95, 20), Color32::TRANSPARENT);
         let blue = find("Blue multiply");
         assert_eq!(canvas.layers[blue].blend, LayerBlend::Multiply);
-        let b = px(blue, 100, 60).to_srgba_unmultiplied();
+        let b = px(blue, 100, 60).unmultiplied();
         assert_eq!((b[2], b[3]), (255, 200), "{b:?}");
         let folder = canvas.layers.iter().find(|l| l.name == "Folder").unwrap();
         assert!((folder.opacity - 191.0 / 255.0).abs() < 1e-3);
@@ -535,8 +536,10 @@ mod tests {
         ));
         app.load_project_from_path(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        let entries: HashMap<String, Vec<u8>> =
-            crate::project::zip::read_all(&bytes).unwrap().into_iter().collect();
+        let entries: HashMap<String, Vec<u8>> = crate::project::zip::read_all(&bytes)
+            .unwrap()
+            .into_iter()
+            .collect();
         let (w, h, krita) = merged_image(&entries).unwrap();
         let ours = app.canvas.flatten_final();
         assert_eq!(ours.size, [w, h]);

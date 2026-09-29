@@ -257,4 +257,56 @@ mod tests {
             assert_eq!(f.is_layered(), f.image_format().is_none(), "{}", f.label());
         }
     }
+
+    /// A picture with smooth gradients, hard edges and alpha.
+    fn photo(w: usize, h: usize) -> ColorImage {
+        let mut img = ColorImage::new([w, h], Color32::TRANSPARENT);
+        for (i, p) in img.pixels.iter_mut().enumerate() {
+            let (x, y) = (i % w, i / w);
+            let edge = if (x / 16 + y / 16) % 2 == 0 { 40 } else { 0 };
+            *p = Color32::from_rgba_unmultiplied(
+                (x * 255 / w) as u8,
+                (y * 255 / h) as u8,
+                (100 + edge) as u8,
+                if y < h / 4 { 140 } else { 255 },
+            );
+        }
+        img
+    }
+
+    #[test]
+    fn lossless_formats_give_back_exactly_the_picture() {
+        let img = photo(97, 61);
+        let want = to_rgba_image(img.clone()).unwrap();
+        for (f, format) in [
+            (ExportFormat::Png, ImageFormat::Png),
+            (ExportFormat::Tiff, ImageFormat::Tiff),
+            (ExportFormat::WebP, ImageFormat::WebP),
+        ] {
+            let bytes = encode_color_image(img.clone(), f).unwrap();
+            let back = image::load_from_memory_with_format(&bytes, format)
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(back.as_raw(), want.as_raw(), "{}", f.label());
+        }
+    }
+
+    #[test]
+    fn jpeg_stays_close_to_the_picture_on_white() {
+        let img = photo(128, 96);
+        let want = to_rgb_on_white(&img).unwrap();
+        let bytes = encode_color_image(img, ExportFormat::Jpeg).unwrap();
+        let back = image::load_from_memory_with_format(&bytes, ImageFormat::Jpeg)
+            .unwrap()
+            .to_rgb8();
+        let mse = back
+            .as_raw()
+            .iter()
+            .zip(want.as_raw())
+            .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+            .sum::<f64>()
+            / want.as_raw().len() as f64;
+        let psnr = 10.0 * (255.0f64 * 255.0 / mse.max(1e-9)).log10();
+        assert!(psnr > 32.0, "PSNR {psnr:.1} dB");
+    }
 }

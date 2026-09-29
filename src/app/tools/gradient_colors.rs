@@ -2,6 +2,7 @@
 //! built-in presets, and the user's own gradients made in the Gradient
 //! Editor, which are kept in `gradients.json` next to the brushes folder.
 
+use crate::canvas::blend::Unmultiply;
 use crate::canvas::gradient::Stop;
 use eframe::egui::Color32;
 use serde::{Deserialize, Serialize};
@@ -211,17 +212,14 @@ impl CustomGradient {
                 } else {
                     0.0
                 };
-                let (ca, cb) = (
-                    a.color.to_srgba_unmultiplied(),
-                    b.color.to_srgba_unmultiplied(),
-                );
+                let (ca, cb) = (a.color.unmultiplied(), b.color.unmultiplied());
                 let mix: [u8; 4] = std::array::from_fn(|k| {
                     (ca[k] as f32 + (cb[k] as f32 - ca[k] as f32) * t).round() as u8
                 });
                 Color32::from_rgba_unmultiplied(mix[0], mix[1], mix[2], mix[3])
             }
         };
-        let [r, g, b, a] = color.to_srgba_unmultiplied();
+        let [r, g, b, a] = color.unmultiplied();
         self.stops.push(EditStop {
             pos,
             color: StopColor::Fixed([r, g, b]),
@@ -249,7 +247,7 @@ impl CustomGradient {
 }
 
 fn rgb(c: Color32) -> [u8; 3] {
-    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    let [r, g, b, _] = c.unmultiplied();
     [r, g, b]
 }
 
@@ -416,7 +414,7 @@ mod tests {
         let stops = g.resolve(Color32::RED, Color32::BLUE);
         assert_eq!(stops[0].color, Color32::RED, "sorted by position");
         assert_eq!(stops[1].color.a(), 0);
-        assert_eq!(stops[1].color.to_srgba_unmultiplied()[3], 0);
+        assert_eq!(stops[1].color.unmultiplied()[3], 0);
     }
 
     #[test]

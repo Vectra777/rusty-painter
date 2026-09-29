@@ -1889,6 +1889,8 @@ mod perf {
         }
         let mut app = tests::test_app_pub(canvas);
         app.canvas_mut().active_layer_idx = 1;
+        // Every core, as the app has (the test app has one thread).
+        app.workspace.pool = std::sync::Arc::new(rayon::ThreadPoolBuilder::new().build().unwrap());
         app
     }
 
@@ -2132,6 +2134,184 @@ mod perf {
         app.workspace.fill.mode = crate::app::tools::fill::FillMode::Enclose;
         app.workspace.fill.path = lasso.clone();
         time("enclose fill: 3000 px lasso", || app.fill_release());
+    }
+    #[test]
+    #[ignore = "timing"]
+    fn every_filter() {
+        use crate::canvas::filters::Filter;
+        let mut app = big_app();
+        for f in Filter::MENU.iter().flat_map(|g| g.iter()) {
+            time(&format!("filter: {}", f.name()), || {
+                app.filter_open(*f);
+                app.filter_commit();
+            });
+            app.apply_history(false);
+        }
+    }
+
+    #[test]
+    #[ignore = "timing"]
+    fn filter_stages() {
+        // Where the time of applying a cheap filter to a whole layer goes.
+        use crate::canvas::filters::Filter;
+        let mut app = big_app();
+        let pool = std::sync::Arc::clone(&app.workspace.pool);
+        let canvas = &app.canvas;
+        let bounds = [0, 0, N as i32, N as i32];
+        let original = time("filter stage: capture region", || {
+            pool.install(|| canvas.capture_region(1, bounds))
+        });
+        let src = time("filter stage: region to pixels", || {
+            pool.install(|| original.pixels(canvas.tile_size()))
+        });
+        let out = time("filter stage: apply (invert)", || {
+            pool.install(|| Filter::Invert.apply(&src, N, N, (0, 0)))
+        });
+        time("filter stage: write back", || {
+            pool.install(|| canvas.replace_region(1, &original, &out, None))
+        });
+        let tiles = time("filter stage: undo snapshots", || {
+            pool.install(|| canvas.region_snapshots(1, &original))
+        });
+        time("filter stage: push undo", || {
+            app.push_undo(crate::canvas::history::UndoAction {
+                tiles,
+                selection: None,
+                transform: None,
+                layer_action: None,
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "timing"]
+    fn layer_kinds_and_styles() {
+        use crate::canvas::filters::Filter;
+        use crate::canvas::layer_style::{Border, LayerFill, LayerStyle};
+        let mut app = big_app();
+        time("composite: two paint layers", || app.canvas.flatten());
+        for f in Filter::ADJUSTMENTS {
+            app.canvas_mut().active_layer_idx = 1;
+            app.add_adjustment_layer(f);
+            let idx = app.canvas.active_layer_idx;
+            time(&format!("composite: + {} layer", f.name()), || {
+                app.canvas.flatten()
+            });
+            app.remove_layer(idx);
+        }
+        for (label, fill) in [
+            ("colour", LayerFill::Colour([30, 90, 200])),
+            (
+                "gradient",
+                LayerFill::Gradient {
+                    colours: Default::default(),
+                    shape: crate::canvas::gradient::GradientShape::Linear,
+                    start: [0.0, 0.0],
+                    end: [N as f32, N as f32],
+                },
+            ),
+        ] {
+            app.canvas_mut().active_layer_idx = 1;
+            app.add_fill_layer(fill);
+            let idx = app.canvas.active_layer_idx;
+            time(&format!("composite: + {label} fill layer"), || {
+                app.canvas.flatten()
+            });
+            app.remove_layer(idx);
+        }
+        for width in [4.0, 16.0, 40.0] {
+            app.set_layer_style(
+                1,
+                LayerStyle {
+                    fill: None,
+                    border: Some(Border {
+                        width,
+                        ..Border::default()
+                    }),
+                },
+            );
+            time(
+                &format!("composite: {width} px border on the layer"),
+                || app.canvas.flatten(),
+            );
+        }
+        app.set_layer_style(1, LayerStyle::default());
+
+        app.add_vector_layer();
+        let idx = app.canvas.active_layer_idx;
+        let lines: Vec<Vec<Vec2>> = (0..500)
+            .map(|i| {
+                let y = 100.0 + i as f32 * 7.5;
+                (0..60)
+                    .map(|k| Vec2::new(100.0 + k as f32 * 60.0, y + (k as f32 * 0.7).sin() * 40.0))
+                    .collect()
+            })
+            .collect();
+        time("vector: add 500 lines of 60 points", || {
+            for l in &lines {
+                app.add_vector_line(idx, l);
+            }
+        });
+        time("composite: + 500-line vector layer", || {
+            app.canvas.flatten()
+        });
+        time("vector: rasterise the layer", || {
+            app.rasterise_vector_layer(idx)
+        });
+    }
+
+    #[test]
+    #[ignore = "timing"]
+    fn every_export_format() {
+        use crate::project::export::{ExportFormat, encode_color_image};
+        let app = big_app();
+        let img = app.canvas.flatten();
+        for f in ExportFormat::ALL {
+            time(&format!("export: {}", f.label()), || {
+                let size = match f {
+                    ExportFormat::Psd => {
+                        psd::encode_psd(&psd::PsdDocument::from_canvas(&app.canvas))
+                            .unwrap()
+                            .len()
+                    }
+                    ExportFormat::Svg => svg::document_svg(&app.canvas).unwrap().len(),
+                    _ => encode_color_image(img.clone(), f).unwrap().len(),
+                };
+                eprintln!("  {} KB", size / 1024);
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "timing"]
+    fn open_other_apps_documents() {
+        // A 4000 px PSD of the test picture; set `RP_OPEN` to other files
+        // (.kra, .clip) to time those too.
+        let app = big_app();
+        let bytes = psd::encode_psd(&psd::PsdDocument::from_canvas(&app.canvas)).unwrap();
+        time("open: 4000 px psd (decode)", || {
+            psd::decode_psd(&bytes).unwrap()
+        });
+        let doc = psd::decode_psd(&bytes).unwrap();
+        time("open: 4000 px psd (to layers)", || {
+            doc.into_canvas().unwrap()
+        });
+        for path in std::env::var("RP_OPEN").unwrap_or_default().split(':') {
+            let path = std::path::Path::new(path);
+            let Some(decode) = path
+                .extension()
+                .and_then(|e| foreign_decoder(&e.to_string_lossy().to_ascii_lowercase()))
+            else {
+                continue;
+            };
+            let bytes = fs::read(path).unwrap();
+            let doc = time(&format!("open: {} (decode)", path.display()), || {
+                decode(&bytes).unwrap()
+            });
+            time(&format!("open: {} (to layers)", path.display()), || {
+                doc.into_canvas().unwrap()
+            });
+        }
     }
 }
 

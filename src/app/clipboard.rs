@@ -10,6 +10,7 @@
 
 use crate::PainterApp;
 use crate::app::tools::Tool;
+use crate::canvas::blend::Unmultiply;
 use crate::canvas::storage::LayerKind;
 use crate::selection::SelectionMask;
 use crate::selection::transform::TransformInfo;
@@ -42,10 +43,7 @@ pub struct ClipboardState {
 impl Clip {
     /// Unmultiplied RGBA bytes, row-major.
     fn to_rgba(&self) -> Vec<u8> {
-        self.pixels
-            .iter()
-            .flat_map(|p| p.to_srgba_unmultiplied())
-            .collect()
+        self.pixels.iter().flat_map(|p| p.unmultiplied()).collect()
     }
 
     /// Shrunk to its non-transparent pixels; `None` if there are none.

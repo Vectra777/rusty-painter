@@ -766,6 +766,19 @@ pub fn unmultiply(c: Color32) -> [u8; 4] {
     ]
 }
 
+/// [`unmultiply`] as a method: egui's `to_srgba_unmultiplied` gives the
+/// same values but goes through floats and powers, several times slower.
+pub trait Unmultiply {
+    fn unmultiplied(self) -> [u8; 4];
+}
+
+impl Unmultiply for Color32 {
+    #[inline]
+    fn unmultiplied(self) -> [u8; 4] {
+        unmultiply(self)
+    }
+}
+
 /// `c` with its alpha replaced by `alpha`, keeping its (unpremultiplied)
 /// colour: how alpha-locked layers take paint.
 #[inline]

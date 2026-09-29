@@ -9,6 +9,7 @@ use crate::app::{
     state::{LayerState, RenderCache},
 };
 use crate::canvas::Canvas;
+use crate::canvas::blend::Unmultiply;
 use crate::canvas::history::{History, LayerHistoryOp, RemovedLayer, TileSnapshot, UndoAction};
 use crate::canvas::storage::{LayerId, LayerKind};
 use eframe::egui::{self, Color32, Vec2};
@@ -713,12 +714,7 @@ impl PainterApp {
 
     /// A colour fill in the brush colour.
     pub(crate) fn add_colour_fill_layer(&mut self) {
-        let [r, g, b, _] = self
-            .brush_state
-            .brush
-            .brush_options
-            .color
-            .to_srgba_unmultiplied();
+        let [r, g, b, _] = self.brush_state.brush.brush_options.color.unmultiplied();
         self.add_fill_layer(crate::canvas::layer_style::LayerFill::Colour([r, g, b]));
     }
 
@@ -726,7 +722,7 @@ impl PainterApp {
     /// left to right across the canvas.
     pub(crate) fn add_gradient_fill_layer(&mut self) {
         let rgb = |c: Color32| {
-            let [r, g, b, _] = c.to_srgba_unmultiplied();
+            let [r, g, b, _] = c.unmultiplied();
             [r, g, b]
         };
         let colours = crate::canvas::filters::GradientMap::from_stops(&[

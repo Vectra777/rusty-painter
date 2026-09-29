@@ -199,7 +199,13 @@ pub fn render_region(strokes: &[VectorStroke], region: [i32; 4]) -> Vec<Color32>
     let [x0, y0, x1, y1] = region;
     let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
     let mut out = vec![Color32::TRANSPARENT; w * h];
+    // Kept all zero between lines: each line clears what it used.
     let mut coverage = vec![0.0f32; w * h];
+    // Which `CHUNK`-wide pieces of each row the line touched, so a long
+    // line only visits the pixels near it rather than its whole box.
+    const CHUNK: i32 = 32;
+    let chunks = (w as i32 + CHUNK - 1) / CHUNK;
+    let mut touched = vec![false; (chunks as usize) * h];
     for stroke in strokes {
         let b = stroke.bounds();
         let [bx0, by0, bx1, by1] = [b[0].max(x0), b[1].max(y0), b[2].min(x1), b[3].min(y1)];
@@ -208,10 +214,6 @@ pub fn render_region(strokes: &[VectorStroke], region: [i32; 4]) -> Vec<Color32>
         }
         // The line's coverage of each pixel (the most any part of it gives,
         // so where it overlaps itself it doesn't darken).
-        for y in by0..by1 {
-            let row = (y - y0) as usize * w;
-            coverage[row + (bx0 - x0) as usize..row + (bx1 - x0) as usize].fill(0.0);
-        }
         let path = stroke.path();
         let segments: Vec<([f32; 3], [f32; 3])> = if path.len() == 1 {
             vec![(path[0], path[0])]
@@ -224,8 +226,15 @@ pub fn render_region(strokes: &[VectorStroke], region: [i32; 4]) -> Vec<Color32>
             let sy0 = ((a[1].min(c[1]) - r).floor() as i32).max(by0);
             let sx1 = ((a[0].max(c[0]) + r).ceil() as i32 + 1).min(bx1);
             let sy1 = ((a[1].max(c[1]) + r).ceil() as i32 + 1).min(by1);
+            if sx0 >= sx1 {
+                continue;
+            }
             for y in sy0..sy1 {
                 let row = (y - y0) as usize * w;
+                let flags = (y - y0) as usize * chunks as usize;
+                for k in (sx0 - x0) / CHUNK..=(sx1 - 1 - x0) / CHUNK {
+                    touched[flags + k as usize] = true;
+                }
                 for x in sx0..sx1 {
                     let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
                     let (d, t) = segment_distance(p, a, c);
@@ -248,14 +257,21 @@ pub fn render_region(strokes: &[VectorStroke], region: [i32; 4]) -> Vec<Color32>
         let opacity = stroke.opacity.clamp(0.0, 1.0);
         for y in by0..by1 {
             let row = (y - y0) as usize * w;
-            for x in bx0..bx1 {
-                let i = row + (x - x0) as usize;
-                let a = coverage[i] * opacity;
-                if a <= 0.0 {
+            let flags = (y - y0) as usize * chunks as usize;
+            for k in (bx0 - x0) / CHUNK..=(bx1 - 1 - x0) / CHUNK {
+                if !std::mem::take(&mut touched[flags + k as usize]) {
                     continue;
                 }
-                let src = Color32::from_rgba_unmultiplied(r, g, b, (a * 255.0).round() as u8);
-                out[i] = crate::canvas::storage::gamma_over(src, out[i]);
+                let from = (k * CHUNK) as usize;
+                let to = ((k + 1) * CHUNK).min(w as i32) as usize;
+                for i in row + from..row + to {
+                    let a = std::mem::take(&mut coverage[i]) * opacity;
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let src = Color32::from_rgba_unmultiplied(r, g, b, (a * 255.0).round() as u8);
+                    out[i] = crate::canvas::storage::gamma_over(src, out[i]);
+                }
             }
         }
     }

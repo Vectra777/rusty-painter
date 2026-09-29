@@ -6,6 +6,7 @@
 //! dithering nudges each pixel's position by up to one 8-bit step, which
 //! breaks up the bands a smooth gradient otherwise shows.
 
+use crate::canvas::blend::Unmultiply;
 use crate::canvas::blend_modes::BlendSpace;
 use eframe::egui::{Color32, Vec2};
 
@@ -205,7 +206,7 @@ impl Ramp {
         assert!(!stops.is_empty(), "a gradient needs a colour");
         // Premultiplied, in the space colours mix in.
         let to_space = |c: Color32| {
-            let [r, g, b, a] = c.to_srgba_unmultiplied();
+            let [r, g, b, a] = c.unmultiplied();
             let a = a as f32 / 255.0;
             match space {
                 BlendSpace::Linear => [

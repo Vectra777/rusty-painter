@@ -1,6 +1,7 @@
 //! Pixel writers with undo: painting colours, masks and regions into a
 //! layer, mapping its pixels, and capturing/restoring areas.
 
+use crate::canvas::blend::Unmultiply;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -251,7 +252,7 @@ impl Canvas {
         history: &mut UndoAction,
     ) -> Option<eframe::egui::Rect> {
         let alpha_lock = self.layers.get(layer_idx)?.alpha_locked;
-        let [r, g, b, a] = color.to_srgba_unmultiplied();
+        let [r, g, b, a] = color.unmultiplied();
         // The fill colour at every coverage level, as pixels (egui colours
         // are the canvas's pixel format).
         let colors: Vec<Color32> = (0..=255u32)

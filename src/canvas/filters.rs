@@ -7,6 +7,7 @@
 //! do; blurs average premultiplied pixels, so transparent ones don't darken
 //! the edges.
 
+use crate::canvas::blend::Unmultiply;
 use crate::canvas::effects::{self, Frame};
 use eframe::egui::Color32;
 use rayon::prelude::*;
@@ -750,7 +751,9 @@ impl Filter {
             Filter::GaussianBlur { radius } | Filter::Sharpen { radius, .. } => {
                 (radius * 3.0).ceil() as i32
             }
-            Filter::MotionBlur { distance, .. } => (distance * 0.5).ceil() as i32 + 1,
+            // Half the line each way, and a pixel for each of its three
+            // resampling passes.
+            Filter::MotionBlur { distance, .. } => (distance * 0.5).ceil() as i32 + 3,
             Filter::Pixelate { size } => size as i32,
             Filter::Glow { radius, .. } => (radius * 3.0).ceil() as i32,
             Filter::ChromaticAberration { amount, .. } => amount.ceil() as i32 + 1,
@@ -829,7 +832,7 @@ impl Filter {
         if c.a() == 0 {
             return c;
         }
-        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        let [r, g, b, a] = c.unmultiplied();
         let rgb = [r, g, b].map(|v| v as f32 / 255.0);
         if let Filter::LineArt {
             black,
@@ -973,7 +976,7 @@ fn with_lut(c: Color32, lut: &ChannelLut) -> Color32 {
     if c.a() == 0 {
         return c;
     }
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    let [r, g, b, a] = c.unmultiplied();
     Color32::from_rgba_unmultiplied(
         lut[0][r as usize],
         lut[1][g as usize],
@@ -1168,41 +1171,16 @@ fn motion_blur(src: &[Color32], w: usize, h: usize, angle: f32, distance: f32) -
     if distance < 1.0 || w == 0 || h == 0 {
         return src.to_vec();
     }
-    let samples = (distance.ceil() as usize + 1).min(64);
+    // Along a line centred on each pixel: steps along a line add, so the
+    // three-pass average is the 64-point one.
     let (dy, dx) = angle.to_radians().sin_cos();
-    let offsets: Vec<(f32, f32)> = (0..samples)
-        .map(|i| {
-            let t = (i as f32 / (samples - 1) as f32 - 0.5) * distance;
-            (dx * t, -dy * t)
-        })
-        .collect();
-    let sample = |x: f32, y: f32| -> [f32; 4] {
-        let (x, y) = (x.clamp(0.0, (w - 1) as f32), y.clamp(0.0, (h - 1) as f32));
-        let (x0, y0) = (x as usize, y as usize);
-        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-        let px = |x: usize, y: usize| src[y * w + x].to_array().map(|v| v as f32);
-        let (a, b, c, d) = (px(x0, y0), px(x1, y0), px(x0, y1), px(x1, y1));
-        std::array::from_fn(|i| {
-            let top = a[i] + (b[i] - a[i]) * fx;
-            let bottom = c[i] + (d[i] - c[i]) * fx;
-            top + (bottom - top) * fy
-        })
-    };
-    let mut out = vec![Color32::TRANSPARENT; w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, o) in row.iter_mut().enumerate() {
-            let mut sum = [0.0f32; 4];
-            for &(ox, oy) in &offsets {
-                for (s, v) in sum.iter_mut().zip(sample(x as f32 + ox, y as f32 + oy)) {
-                    *s += v;
-                }
-            }
-            let [r, g, b, a] = sum.map(|s| (s / samples as f32).round() as u8);
-            *o = Color32::from_rgba_premultiplied(r, g, b, a);
-        }
-    });
-    out
+    let (ux, uy) = (dx * distance, -dy * distance);
+    super::effects::path_blur(src, w, h, true, |x, y, t, dt| {
+        Some(std::array::from_fn(|d| {
+            let s = t + d as f32 * dt;
+            (x + ux * s, y + uy * s)
+        }))
+    })
 }
 
 /// Each `size`² block of the canvas grid set to its average.
@@ -1328,7 +1306,7 @@ mod tests {
     }
 
     fn rgb_of(f: Filter, c: Color32) -> [u8; 3] {
-        let out = f.apply(&[c], 1, 1, (0, 0))[0].to_srgba_unmultiplied();
+        let out = f.apply(&[c], 1, 1, (0, 0))[0].unmultiplied();
         [out[0], out[1], out[2]]
     }
 
@@ -1728,7 +1706,7 @@ mod tests {
                 if c.a() == 0 {
                     continue;
                 }
-                let [r, g, b, _] = c.to_srgba_unmultiplied();
+                let [r, g, b, _] = c.unmultiplied();
                 let rgb = [r, g, b].map(|v| v as f32 / 255.0);
                 let fast = f
                     .adjust_rgb(rgb, lut.as_deref())
@@ -1782,6 +1760,20 @@ mod timing {
                 amount: 1.0,
             },
             Filter::Pixelate { size: 16 },
+            Filter::ZoomBlur {
+                amount: 0.1,
+                frame: Frame::NONE,
+            }
+            .fitted(w, h),
+            Filter::SpinBlur {
+                angle: 10.0,
+                frame: Frame::NONE,
+            }
+            .fitted(w, h),
+            Filter::MotionBlur {
+                angle: 0.0,
+                distance: 20.0,
+            },
         ] {
             let t = std::time::Instant::now();
             std::hint::black_box(f.apply(&src, w, h, (0, 0)));

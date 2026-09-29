@@ -236,18 +236,22 @@ fn snapshot_bytes(action: &UndoAction) -> usize {
     action.tiles.iter().map(|tile| tile.data.held_bytes()).sum()
 }
 
-/// Compress the pixels of every action except the newest.
+/// Compress the pixels of every action except the newest. Usually only
+/// the one before the newest has any left raw: the rest are passed over
+/// without handing each to the thread pool (which, with hundreds of steps,
+/// made every new step slower than the last).
 fn compress_older_actions(stack: &mut [UndoAction]) {
-    use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
+    use rayon::iter::{IntoParallelIterator, ParallelIterator};
     let Some((_, older)) = stack.split_last_mut() else {
         return;
     };
-    for action in older {
-        action
-            .tiles
-            .par_iter_mut()
-            .for_each(|tile| tile.data.compress());
-    }
+    let raw: Vec<&mut SnapshotPixels> = older
+        .iter_mut()
+        .flat_map(|action| action.tiles.iter_mut())
+        .map(|tile| &mut tile.data)
+        .filter(|data| matches!(data, SnapshotPixels::Raw(_)))
+        .collect();
+    raw.into_par_iter().for_each(|data| data.compress());
 }
 
 /// Drop the oldest actions until the stack fits in `max_bytes`, always

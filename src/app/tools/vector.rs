@@ -111,10 +111,21 @@ impl PainterApp {
             drawing: None,
             last: Vec2::ZERO,
         });
+        // What's there now is the undo step's picture: read it rather than
+        // drawing the old lines again.
+        let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let region = [
+            bounds[0].max(0),
+            bounds[1].max(0),
+            bounds[2].min(w),
+            bounds[3].min(h),
+        ];
+        let before = (region[0] < region[2] && region[1] < region[3])
+            .then(|| read_region(&self.canvas, idx, region));
         self.edit_vector(idx, |v| v.strokes.push(stroke));
         self.redraw_vector(idx, bounds);
         if let Some(session) = self.workspace.vector.session.take() {
-            self.push_vector_step(session, "Vector shape");
+            self.push_vector_step_from(session, "Vector shape", before);
         }
     }
 
@@ -313,10 +324,22 @@ impl PainterApp {
     /// File a vector step: the lines as they were, and the pixels over what
     /// changed as they were drawn from them.
     fn push_vector_step(&mut self, session: VectorSession, label: &str) {
+        self.push_vector_step_from(session, label, None);
+    }
+
+    /// [`Self::push_vector_step`], given the pixels over what changed as
+    /// they were (when they were read before the change).
+    fn push_vector_step_from(
+        &mut self,
+        session: VectorSession,
+        label: &str,
+        before: Option<Vec<Color32>>,
+    ) {
         let Some(region) = session.changed else {
             return;
         };
-        let before = vector::render_region(&session.before.strokes, region);
+        let before =
+            before.unwrap_or_else(|| vector::render_region(&session.before.strokes, region));
         let tiles = region_snapshots(&self.canvas, session.layer, region, &before);
         self.layer_state.history.label_next(label);
         self.layer_state.history.push_action(UndoAction {
@@ -621,6 +644,30 @@ fn span_bounds(layer: &crate::canvas::storage::Layer, n: usize) -> [i32; 4] {
         })
 }
 
+/// Layer `idx`'s pixels over `region`, row-major.
+fn read_region(canvas: &crate::canvas::Canvas, idx: usize, region: [i32; 4]) -> Vec<Color32> {
+    let ts = canvas.tile_size() as i32;
+    let [x0, y0, x1, y1] = region;
+    let w = (x1 - x0) as usize;
+    let mut out = vec![Color32::TRANSPARENT; w * (y1 - y0) as usize];
+    for ty in y0.div_euclid(ts)..=(y1 - 1).div_euclid(ts) {
+        for tx in x0.div_euclid(ts)..=(x1 - 1).div_euclid(ts) {
+            let Some(data) = canvas.get_layer_tile_data(idx, tx, ty) else {
+                continue;
+            };
+            let (ox, oy) = (tx * ts, ty * ts);
+            let (sx0, sx1) = (x0.max(ox), x1.min(ox + ts));
+            for y in y0.max(oy)..y1.min(oy + ts) {
+                let src = ((y - oy) * ts + sx0 - ox) as usize;
+                let dst = (y - y0) as usize * w + (sx0 - x0) as usize;
+                out[dst..dst + (sx1 - sx0) as usize]
+                    .copy_from_slice(&data[src..src + (sx1 - sx0) as usize]);
+            }
+        }
+    }
+    out
+}
+
 /// Put `pixels` (`region`, row-major) into layer `idx`'s tiles.
 fn write_region(canvas: &crate::canvas::Canvas, idx: usize, region: [i32; 4], pixels: &[Color32]) {
     let ts = canvas.tile_size() as i32;
@@ -757,6 +804,30 @@ mod tests {
         app.apply_history(true);
         assert_eq!(strokes(&app), 1);
         assert_eq!(px(&app, 70, 20), Color32::BLACK, "redone");
+    }
+
+    #[test]
+    fn a_shape_line_over_other_lines_undoes_to_exactly_what_was_there() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
+        let idx = app.canvas.active_layer_idx;
+        let snapshot = |app: &PainterApp| -> Vec<Color32> {
+            (0..96)
+                .flat_map(|y| (0..128).map(move |x| (x, y)))
+                .map(|(x, y)| px(app, x, y))
+                .collect()
+        };
+        let before = snapshot(&app);
+        app.brush_state.brush.brush_options.color = Color32::RED;
+        app.add_vector_line(idx, &[Vec2::new(60.0, 10.0), Vec2::new(70.0, 90.0)]);
+        let after = snapshot(&app);
+        assert_ne!(before, after);
+        assert_eq!(strokes(&app), 2);
+        app.apply_history(false);
+        assert_eq!(snapshot(&app), before, "undone exactly");
+        assert_eq!(strokes(&app), 1);
+        app.apply_history(true);
+        assert_eq!(snapshot(&app), after, "redone exactly");
     }
 
     /// A mouse drag, frame by frame, through the app's input handling.

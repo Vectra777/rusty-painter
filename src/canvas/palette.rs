@@ -2,6 +2,7 @@
 //! Oklab, where distances match how different colours look) and recolour
 //! pixels to the nearest palette colour, optionally with ordered dithering.
 
+use crate::canvas::blend::Unmultiply;
 use eframe::egui::Color32;
 use rayon::prelude::*;
 
@@ -203,7 +204,7 @@ impl Recolor {
             colors: palette
                 .iter()
                 .map(|c| {
-                    let [r, g, b, _] = c.to_srgba_unmultiplied();
+                    let [r, g, b, _] = c.unmultiplied();
                     [r, g, b]
                 })
                 .collect(),

@@ -1,6 +1,7 @@
 //! HSV and grey conversions on `Color32`, used by the colour picker and
 //! layer clears.
 
+use crate::canvas::blend::Unmultiply;
 use eframe::egui::Color32;
 
 pub type Color = Color32;
@@ -48,7 +49,7 @@ impl ColorManipulation for Color32 {
     }
 
     fn to_hsva(self) -> (f32, f32, f32, f32) {
-        let [r, g, b, a] = self.to_srgba_unmultiplied();
+        let [r, g, b, a] = self.unmultiplied();
         let r = r as f32 / 255.0;
         let g = g as f32 / 255.0;
         let b = b as f32 / 255.0;

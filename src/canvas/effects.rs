@@ -4,6 +4,7 @@
 //! over a row-major buffer of premultiplied sRGB pixels whose top-left pixel
 //! is at canvas point `origin`, like the rest of [`crate::canvas::filters`].
 
+use crate::canvas::blend::Unmultiply;
 use eframe::egui::Color32;
 use rayon::prelude::*;
 
@@ -52,7 +53,7 @@ fn c4(v: [f32; 4]) -> Color32 {
 
 #[inline]
 fn luma(c: Color32) -> f32 {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    let [r, g, b, a] = c.unmultiplied();
     if a == 0 {
         return 1.0;
     }
@@ -72,6 +73,25 @@ fn sample(src: &[Color32], w: usize, h: usize, x: f32, y: f32) -> [f32; 4] {
         let top = a[i] + (b[i] - a[i]) * fx;
         let bottom = c[i] + (d[i] - c[i]) * fx;
         top + (bottom - top) * fy
+    })
+}
+
+/// [`sample`] in whole numbers, for summing many: each channel times
+/// 65536 (weights in 1/256ths each way).
+#[inline]
+fn sample_fixed(src: &[Color32], w: usize, h: usize, x: f32, y: f32) -> [u32; 4] {
+    let x = x.clamp(0.0, (w - 1) as f32);
+    let y = y.clamp(0.0, (h - 1) as f32);
+    let (x0, y0) = (x as usize, y as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let fx = ((x - x0 as f32) * 256.0) as u32;
+    let fy = ((y - y0 as f32) * 256.0) as u32;
+    let (a, b) = (src[y0 * w + x0].to_array(), src[y0 * w + x1].to_array());
+    let (c, d) = (src[y1 * w + x0].to_array(), src[y1 * w + x1].to_array());
+    std::array::from_fn(|i| {
+        let top = a[i] as u32 * (256 - fx) + b[i] as u32 * fx;
+        let bottom = c[i] as u32 * (256 - fx) + d[i] as u32 * fx;
+        top * (256 - fy) + bottom * fy
     })
 }
 
@@ -189,7 +209,7 @@ pub fn halftone(
         let d = ((u - cu).powi(2) + (v - cv).powi(2)).sqrt();
         let ink = (radius - d + 0.5).clamp(0.0, 1.0);
         let [ir, ig, ib] = if colour {
-            let [r, g, b, _] = cell_c.to_srgba_unmultiplied();
+            let [r, g, b, _] = cell_c.unmultiplied();
             // The cell's hue at full strength, its darkness in the dot size.
             let m = r.max(g).max(b).max(1) as f32;
             let lift = |v: u8| (v as f32 / m * 255.0).min(255.0);
@@ -206,15 +226,23 @@ pub fn halftone(
 /// A grey relief lit from `angle` degrees, `depth` its strength.
 pub fn emboss(src: &[Color32], w: usize, h: usize, angle: f32, depth: f32) -> Vec<Color32> {
     let (s, c) = angle.to_radians().sin_cos();
+    // Brightness once per pixel, then read between pixels from that.
+    let l: Vec<f32> = src.par_iter().map(|&c| luma(c)).collect();
+    let at = |x: f32, y: f32| {
+        let x = x.clamp(0.0, (w - 1) as f32);
+        let y = y.clamp(0.0, (h - 1) as f32);
+        let (x0, y0) = (x as usize, y as usize);
+        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let top = l[y0 * w + x0] + (l[y0 * w + x1] - l[y0 * w + x0]) * fx;
+        let bottom = l[y1 * w + x0] + (l[y1 * w + x1] - l[y1 * w + x0]) * fx;
+        top + (bottom - top) * fy
+    };
     per_pixel(w, h, |x, y| {
-        let own = src[y * w + x];
-        let at = |dx: f32, dy: f32| {
-            let v = sample(src, w, h, x as f32 + dx, y as f32 + dy);
-            luma(c4(v))
-        };
-        let slope = at(c, s) - at(-c, -s);
+        let (fx, fy) = (x as f32, y as f32);
+        let slope = at(fx + c, fy + s) - at(fx - c, fy - s);
         let v = ((0.5 + slope * depth) * 255.0).round().clamp(0.0, 255.0) as u8;
-        Color32::from_rgba_unmultiplied(v, v, v, own.a())
+        Color32::from_rgba_unmultiplied(v, v, v, src[y * w + x].a())
     })
 }
 
@@ -411,7 +439,7 @@ pub fn vignette(
         let e = (ex * ex + ey * ey).sqrt() / std::f32::consts::SQRT_2;
         let t = ((e - size) / (1.0 - size).max(0.05)).clamp(0.0, 1.0);
         let k = t * t * (3.0 - 2.0 * t) * amount.abs();
-        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        let [r, g, b, a] = c.unmultiplied();
         let to = if amount >= 0.0 { 0.0 } else { 255.0 };
         let m = |v: u8| (v as f32 + (to - v as f32) * k).round() as u8;
         Color32::from_rgba_unmultiplied(m(r), m(g), m(b), a)
@@ -419,10 +447,58 @@ pub fn vignette(
 }
 
 /// Most a zoom or spin blur reaches, pixels (see `filters::MAX_REACH`).
-const BLUR_REACH: f32 = crate::canvas::filters::MAX_REACH as f32;
+// Three resampling passes each read a pixel further.
+const BLUR_REACH: f32 = (crate::canvas::filters::MAX_REACH - 3) as f32;
 
-/// Streaks out from the canvas's centre: each pixel averages the way
-/// towards it, `amount` (0..=1) of its distance, as far as [`BLUR_REACH`].
+/// A blur along a path through each pixel as three passes of four
+/// samples: `path(x, y, t, dt)` gives where the path through buffer pixel
+/// `(x, y)` is at `t`, `t + dt`, `t + 2dt` and `t + 3dt` (`t` 0..=1 of
+/// its length), or `None` when it's under a pixel long. The 64 evenly
+/// spaced points of the path are the sums of one step from each pass
+/// (`t = (a + 4b + 16c) / 63`), which holds exactly when the paths
+/// compose (rotations about a point do, and so do scalings spaced
+/// geometrically), so the result is the 64-point average for a fifth of
+/// the samples, most of them close by. `centred` paths run from half their
+/// length back (`t` from −0.5).
+pub(crate) fn path_blur(
+    src: &[Color32],
+    w: usize,
+    h: usize,
+    centred: bool,
+    path: impl Fn(f32, f32, f32, f32) -> Option<[(f32, f32); 4]> + Sync,
+) -> Vec<Color32> {
+    let mut buf = src.to_vec();
+    for pass in 0..3 {
+        let step = (1 << (2 * pass)) as f32 / 63.0;
+        let back = if centred && pass == 0 { -0.5 } else { 0.0 };
+        let from = &buf;
+        buf = per_pixel(w, h, |x, y| {
+            let Some(at) = path(x as f32, y as f32, back, step) else {
+                return from[y * w + x];
+            };
+            // Under a third of a pixel from end to end: nothing to do.
+            let ((ax, ay), (ex, ey)) = (at[0], at[3]);
+            if (ex - ax).abs() + (ey - ay).abs() < 0.3 {
+                return from[y * w + x];
+            }
+            let mut sum = [0u32; 4];
+            for (sx, sy) in at {
+                let s = sample_fixed(from, w, h, sx, sy);
+                for k in 0..4 {
+                    sum[k] += s[k];
+                }
+            }
+            // Four samples of 65536ths: round to the nearest level.
+            let [r, g, b, a] = sum.map(|v| ((v + (1 << 17)) >> 18).min(255) as u8);
+            Color32::from_rgba_premultiplied(r, g, b, a)
+        });
+    }
+    buf
+}
+
+/// Rushing towards the canvas's centre: each pixel averages the line
+/// towards the centre, `amount` of its distance long (at most
+/// [`BLUR_REACH`]).
 pub fn zoom_blur(
     src: &[Color32],
     w: usize,
@@ -431,25 +507,27 @@ pub fn zoom_blur(
     amount: f32,
     frame: Frame,
 ) -> Vec<Color32> {
-    per_pixel(w, h, |x, y| {
-        let (px, py) = (origin.0 as f32 + x as f32, origin.1 as f32 + y as f32);
-        let (dx, dy) = (frame.centre[0] - px, frame.centre[1] - py);
-        let dist = (dx * dx + dy * dy).sqrt();
-        let len = (dist * amount).min(BLUR_REACH);
-        if len < 0.5 {
-            return src[y * w + x];
+    // Buffer coordinates of the centre.
+    let (cx, cy) = (
+        frame.centre[0] - origin.0 as f32,
+        frame.centre[1] - origin.1 as f32,
+    );
+    path_blur(src, w, h, false, |x, y, t, dt| {
+        let (vx, vy) = (x - cx, y - cy);
+        let dist = (vx * vx + vy * vy).sqrt();
+        let shrink = (amount.min(BLUR_REACH / dist.max(1e-3))).clamp(0.0, 0.97);
+        if dist * shrink < 0.5 {
+            return None;
         }
-        let steps = (len.ceil() as usize).clamp(2, 64);
-        let (ux, uy) = (dx / dist * len, dy / dist * len);
-        let mut sum = [0.0f32; 4];
-        for i in 0..steps {
-            let t = i as f32 / (steps - 1) as f32;
-            let s = sample(src, w, h, x as f32 + ux * t, y as f32 + uy * t);
-            for k in 0..4 {
-                sum[k] += s[k];
-            }
-        }
-        c4(sum.map(|v| v / steps as f32))
+        // Scaling towards the centre by (1 − shrink)^t: spaced
+        // geometrically, so steps add.
+        let l = (1.0 - shrink).log2();
+        let (mut k, r) = ((t * l).exp2(), (dt * l).exp2());
+        Some(std::array::from_fn(|_| {
+            let p = (cx + vx * k, cy + vy * k);
+            k *= r;
+            p
+        }))
     })
 }
 
@@ -463,33 +541,29 @@ pub fn spin_blur(
     angle: f32,
     frame: Frame,
 ) -> Vec<Color32> {
-    per_pixel(w, h, |x, y| {
-        let (px, py) = (origin.0 as f32 + x as f32, origin.1 as f32 + y as f32);
-        let (vx, vy) = (px - frame.centre[0], py - frame.centre[1]);
+    let (cx, cy) = (
+        frame.centre[0] - origin.0 as f32,
+        frame.centre[1] - origin.1 as f32,
+    );
+    let angle = angle.to_radians();
+    path_blur(src, w, h, true, |x, y, t, dt| {
+        let (vx, vy) = (x - cx, y - cy);
         let dist = (vx * vx + vy * vy).sqrt();
-        let arc = (angle.to_radians() * dist).min(BLUR_REACH);
-        if arc < 0.5 || dist < 1e-3 {
-            return src[y * w + x];
+        let arc = (angle * dist).min(BLUR_REACH);
+        if arc < 0.5 {
+            return None;
         }
+        // The span depends only on the distance, which turning keeps, so
+        // the passes compose. Turn to the first point, then step.
         let span = arc / dist;
-        let steps = (arc.ceil() as usize).clamp(2, 64);
-        let mut sum = [0.0f32; 4];
-        for i in 0..steps {
-            let a = span * (i as f32 / (steps - 1) as f32 - 0.5);
-            let (s, c) = a.sin_cos();
-            let (rx, ry) = (vx * c - vy * s, vx * s + vy * c);
-            let at = sample(
-                src,
-                w,
-                h,
-                rx + frame.centre[0] - origin.0 as f32,
-                ry + frame.centre[1] - origin.1 as f32,
-            );
-            for k in 0..4 {
-                sum[k] += at[k];
-            }
-        }
-        c4(sum.map(|v| v / steps as f32))
+        let (s, c) = (span * t).sin_cos();
+        let (ds, dc) = (span * dt).sin_cos();
+        let (mut ux, mut uy) = (vx * c - vy * s, vx * s + vy * c);
+        Some(std::array::from_fn(|_| {
+            let p = (cx + ux, cy + uy);
+            (ux, uy) = (ux * dc - uy * ds, ux * ds + uy * dc);
+            p
+        }))
     })
 }
 
@@ -519,7 +593,7 @@ pub fn dither(src: &[Color32], w: usize, h: usize, origin: (i32, i32), levels: u
             (origin.1 + y as i32).rem_euclid(8) as usize,
         );
         let t = (BAYER[gy][gx] as f32 + 0.5) / 64.0;
-        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        let [r, g, b, a] = c.unmultiplied();
         let q = |v: u8| {
             let s = v as f32 / 255.0 * steps;
             let level = if s - s.floor() > t {
@@ -685,6 +759,89 @@ mod tests {
         assert!(out[0].r() < 60, "a corner: {:?}", out[0]);
         let light = vignette(&src, 20, 20, (0, 0), -1.0, 0.3, Frame::of_canvas(20, 20));
         assert!(light[0].r() > 240);
+    }
+
+    /// The blurs as the plain `n`-point average along each pixel's path.
+    fn brute(
+        src: &[Color32],
+        w: usize,
+        h: usize,
+        zoom: bool,
+        amount: f32,
+        c: (f32, f32),
+        n: usize,
+    ) -> Vec<Color32> {
+        per_pixel(w, h, |x, y| {
+            let (vx, vy) = (x as f32 - c.0, y as f32 - c.1);
+            let dist = (vx * vx + vy * vy).sqrt().max(1e-3);
+            let mut sum = [0.0f32; 4];
+            for i in 0..n {
+                let t = i as f32 / (n - 1) as f32;
+                let (sx, sy) = if zoom {
+                    let shrink = amount.min(BLUR_REACH / dist).min(0.97);
+                    let k = (1.0 - shrink).powf(t);
+                    (c.0 + vx * k, c.1 + vy * k)
+                } else {
+                    let a = (amount.to_radians() * dist).min(BLUR_REACH) / dist * (t - 0.5);
+                    let (s, co) = a.sin_cos();
+                    (c.0 + vx * co - vy * s, c.1 + vx * s + vy * co)
+                };
+                let p = sample(src, w, h, sx, sy);
+                for k in 0..4 {
+                    sum[k] += p[k];
+                }
+            }
+            c4(sum.map(|v| v / n as f32))
+        })
+    }
+
+    #[test]
+    fn zoom_and_spin_blur_stay_close_to_the_true_average() {
+        let (w, h) = (160, 120);
+        let src: Vec<Color32> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let v = if (x / 8 + y / 8) % 2 == 0 { 230 } else { 20 };
+                Color32::from_rgb(v, (x * 255 / w) as u8, (y * 2) as u8)
+            })
+            .collect();
+        let frame = Frame::of_canvas(w, h);
+        let c = (frame.centre[0], frame.centre[1]);
+        for (zoom, amount) in [(true, 0.3), (true, 0.9), (false, 20.0), (false, 90.0)] {
+            let fast = if zoom {
+                zoom_blur(&src, w, h, (0, 0), amount, frame)
+            } else {
+                spin_blur(&src, w, h, (0, 0), amount, frame)
+            };
+            // Against the (nearly) continuous average: within two levels
+            // (three resamplings soften a little more than one; on this
+            // hard checkerboard the plain 64-point one is within half).
+            let truth = brute(&src, w, h, zoom, amount, c, 1024);
+            let plain = brute(&src, w, h, zoom, amount, c, 64);
+            // Only where the whole path stays on the canvas: off it, both
+            // make up what's there (clamping to the edge), differently.
+            let inside = |i: usize| {
+                let (dx, dy) = ((i % w) as f32 - c.0, (i / w) as f32 - c.1);
+                (dx * dx + dy * dy).sqrt() < c.1 - 2.0
+            };
+            let mean = |got: &[Color32]| {
+                let (mut total, mut n) = (0, 0);
+                for (i, (a, b)) in got.iter().zip(&truth).enumerate() {
+                    if inside(i) {
+                        n += 4;
+                        total += (0..4)
+                            .map(|k| (a.to_array()[k] as i32 - b.to_array()[k] as i32).abs())
+                            .sum::<i32>();
+                    }
+                }
+                total as f32 / n as f32
+            };
+            let (fast, plain) = (mean(&fast), mean(&plain));
+            assert!(
+                fast < 2.0,
+                "zoom {zoom} {amount}: off by {fast} on average (64 points: {plain})"
+            );
+        }
     }
 
     #[test]

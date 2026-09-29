@@ -7,6 +7,7 @@
 //! it).
 
 use crate::canvas::Canvas;
+use crate::canvas::blend::Unmultiply;
 use crate::canvas::blend_modes::LayerBlend;
 use crate::canvas::layer_style::LayerFill;
 use crate::canvas::storage::{LayerId, LayerKind};
@@ -89,7 +90,7 @@ fn children(
                 } else {
                     // The background shows its colour where it's unpainted.
                     if i == 0 {
-                        let [r, g, b, _] = canvas.clear_color().to_srgba_unmultiplied();
+                        let [r, g, b, _] = canvas.clear_color().unmultiplied();
                         let (w, h) = (canvas.width(), canvas.height());
                         let _ = writeln!(
                             out,
@@ -419,5 +420,61 @@ mod tests {
         // Well formed enough: every group closed, one root.
         assert_eq!(svg.matches("<g").count(), svg.matches("</g>").count());
         assert!(svg.trim_end().ends_with("</svg>"));
+    }
+
+    #[test]
+    fn the_svg_parses_and_its_pictures_hold_the_layer_exactly() {
+        let mut canvas = Canvas::new(100, 70, Color32::WHITE, 64);
+        // Paint across two tiles, with half-transparent pixels.
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let t: Vec<Color32> = (0..64 * 64)
+                .map(|i| {
+                    let (x, y) = (tx * 64 + i % 64, ty * 64 + i / 64);
+                    if (20..90).contains(&x) && (15..60).contains(&y) {
+                        Color32::from_rgba_unmultiplied(x as u8 * 2, y as u8 * 3, 90, 60 + x as u8)
+                    } else {
+                        Color32::TRANSPARENT
+                    }
+                })
+                .collect();
+            canvas.set_layer_tile_data(1, tx, ty, t);
+        }
+        let svg = document_svg(&canvas).unwrap();
+        let root = crate::brush_engine::import::krita::parse_xml(&svg).expect("well-formed XML");
+        let image = root.find("image").expect("the paint as a picture");
+        let href = image.attr("xlink:href").unwrap();
+        let data = href.strip_prefix("data:image/png;base64,").unwrap();
+        // Undo the base64.
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut bits = 0u32;
+        let mut n = 0;
+        let mut png = Vec::new();
+        for c in data.bytes().filter(|&c| c != b'=') {
+            bits = bits << 6 | alphabet.iter().position(|&a| a == c).unwrap() as u32;
+            n += 6;
+            if n >= 8 {
+                n -= 8;
+                png.push((bits >> n) as u8);
+            }
+        }
+        let img = image::load_from_memory(&png).unwrap().to_rgba8();
+        let at = |k: &str| image.attr(k).unwrap().parse::<u32>().unwrap();
+        assert_eq!(
+            (at("x"), at("y"), at("width"), at("height")),
+            (20, 15, 70, 45)
+        );
+        assert_eq!((img.width(), img.height()), (70, 45));
+        canvas.layers[0].visible = false;
+        let flat = crate::project::export::to_rgba_image(canvas.flatten()).unwrap();
+        for y in 0..45 {
+            for x in 0..70 {
+                let (a, b) = (img.get_pixel(x, y), flat.get_pixel(20 + x, 15 + y));
+                let off = (0..4)
+                    .map(|c| (a[c] as i32 - b[c] as i32).abs())
+                    .max()
+                    .unwrap();
+                assert!(off <= 1, "{:?} vs {:?} at {x},{y}", a, b);
+            }
+        }
     }
 }
