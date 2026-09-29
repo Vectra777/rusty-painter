@@ -1405,10 +1405,8 @@ mod mode_tests {
                     gamma: 1.0,
                 },
                 Filter::Curves { .. } => {
-                    let invert = crate::canvas::filters::ToneCurve::from_points(&[
-                        [0.0, 1.0],
-                        [1.0, 0.0],
-                    ]);
+                    let invert =
+                        crate::canvas::filters::ToneCurve::from_points(&[[0.0, 1.0], [1.0, 0.0]]);
                     let same = crate::canvas::filters::ToneCurve::default();
                     Filter::Curves {
                         rgb: invert,
