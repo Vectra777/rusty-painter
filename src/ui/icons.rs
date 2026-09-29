@@ -43,6 +43,7 @@ pub(crate) enum Icon {
     ShapeRect,
     ShapeEllipse,
     ShapePolygon,
+    ShapeCurve,
     Ruler,
     Gradient,
     Text,
@@ -205,6 +206,38 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                 g.p(1.5, 6.5),
             ];
             painter.add(Shape::closed_line(pts, Stroke::new(g.w(1.5), color)));
+        }
+        Icon::ShapeCurve => {
+            // An S through two anchors, with one handle pulled out.
+            let (a, b, c, d) = (
+                (2.0f32, 13.0f32),
+                (4.0f32, 1.0f32),
+                (12.0f32, 15.0f32),
+                (14.0f32, 3.0f32),
+            );
+            let pts: Vec<Pos2> = (0..=24)
+                .map(|i| {
+                    let t = i as f32 / 24.0;
+                    let u = 1.0 - t;
+                    let f = |p: f32, q: f32, r: f32, s: f32| {
+                        p * u * u * u + q * 3.0 * u * u * t + r * 3.0 * u * t * t + s * t * t * t
+                    };
+                    g.p(f(a.0, b.0, c.0, d.0), f(a.1, b.1, c.1, d.1))
+                })
+                .collect();
+            painter.add(Shape::line(pts, Stroke::new(g.w(1.5), color)));
+            line(a, b, 0.8);
+            painter.circle_filled(g.p(b.0, b.1), g.w(1.2), color);
+            painter.rect_filled(
+                Rect::from_center_size(g.p(a.0, a.1), eframe::egui::vec2(g.w(2.4), g.w(2.4))),
+                0.0,
+                color,
+            );
+            painter.rect_filled(
+                Rect::from_center_size(g.p(d.0, d.1), eframe::egui::vec2(g.w(2.4), g.w(2.4))),
+                0.0,
+                color,
+            );
         }
         Icon::Gradient => {
             // A box filling from solid to empty in bands.

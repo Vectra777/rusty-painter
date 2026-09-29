@@ -15,6 +15,7 @@ pub(crate) fn icon_for(kind: ShapeKind) -> Icon {
         ShapeKind::Rectangle => Icon::ShapeRect,
         ShapeKind::Ellipse => Icon::ShapeEllipse,
         ShapeKind::Polygon => Icon::ShapePolygon,
+        ShapeKind::Curve => Icon::ShapeCurve,
     }
 }
 

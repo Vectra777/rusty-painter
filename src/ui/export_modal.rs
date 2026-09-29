@@ -32,16 +32,14 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                 egui::ComboBox::from_label("Format")
                     .selected_text(settings.format.label())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut settings.format, ExportFormat::Png, "PNG");
-                        ui.selectable_value(&mut settings.format, ExportFormat::Jpeg, "JPEG");
-                        ui.selectable_value(&mut settings.format, ExportFormat::Tiff, "TIFF");
-                        // Android saves to the photo library, which takes pictures only.
-                        #[cfg(not(target_os = "android"))]
-                        ui.selectable_value(
-                            &mut settings.format,
-                            ExportFormat::Psd,
-                            ExportFormat::Psd.label(),
-                        );
+                        for format in ExportFormat::ALL {
+                            // Android saves to the photo library, which
+                            // takes pictures only.
+                            if cfg!(target_os = "android") && format.is_layered() {
+                                continue;
+                            }
+                            ui.selectable_value(&mut settings.format, format, format.label());
+                        }
                     });
             });
 
@@ -96,13 +94,16 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     enum Data {
                         Image(egui::ColorImage),
                         Layers(Box<crate::project::psd::PsdDocument>),
+                        Svg(Result<String, String>),
                     }
-                    let data = if format == ExportFormat::Psd {
-                        Data::Layers(Box::new(crate::project::psd::PsdDocument::from_canvas(
-                            &app.canvas,
-                        )))
-                    } else {
-                        Data::Image(app.canvas.flatten_final())
+                    let data = match format {
+                        ExportFormat::Psd => Data::Layers(Box::new(
+                            crate::project::psd::PsdDocument::from_canvas(&app.canvas),
+                        )),
+                        ExportFormat::Svg => {
+                            Data::Svg(crate::project::svg::document_svg(&app.canvas))
+                        }
+                        _ => Data::Image(app.canvas.flatten_final()),
                     };
 
                     app.export_state.in_progress = true;
@@ -120,6 +121,9 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                             Data::Layers(doc) => {
                                 crate::project::export::save_psd(&doc, target.clone())
                             }
+                            Data::Svg(svg) => svg.and_then(|svg| {
+                                crate::project::export::save_svg(&svg, target.clone())
+                            }),
                         }
                         .map(|_| target.clone());
                         match result {

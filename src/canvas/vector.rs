@@ -40,6 +40,11 @@ impl VectorStroke {
         b
     }
 
+    /// The line as drawn (see `path`), for exporting it.
+    pub fn smoothed(&self) -> Vec<[f32; 3]> {
+        self.path()
+    }
+
     /// The line smoothed through its points (Catmull-Rom, a few steps per
     /// segment), for drawing: a hand-drawn line's corners round off.
     fn path(&self) -> Vec<[f32; 3]> {

@@ -84,6 +84,40 @@ impl PainterApp {
         (o.diameter * k).clamp(0.0, vector::MAX_WIDTH)
     }
 
+    /// Add a line through `points` (a shape's outline) to vector layer
+    /// `idx`, with the brush's width, colour and opacity, as one step.
+    pub(crate) fn add_vector_line(&mut self, idx: usize, points: &[Vec2]) {
+        if !self.is_vector_layer(idx) || points.len() < 2 || self.brush_state.eraser_active {
+            return;
+        }
+        self.release_canvas();
+        let width = self.vector_width(1.0);
+        let o = &self.brush_state.brush.brush_options;
+        let [r, g, b, _] = o.color.to_srgba_unmultiplied();
+        let raw: Vec<[f32; 3]> = points.iter().map(|p| [p.x, p.y, width]).collect();
+        let stroke = VectorStroke {
+            // Fewer points; drawn smoothed through them, it keeps its shape.
+            points: vector::simplify(&raw, 0.3),
+            colour: [r, g, b],
+            opacity: o.opacity.clamp(0.0, 1.0),
+        };
+        self.brush_state.remember_color(Color32::from_rgb(r, g, b));
+        let layer = &self.canvas.layers[idx];
+        let bounds = stroke.bounds();
+        self.workspace.vector.session = Some(VectorSession {
+            layer: layer.id,
+            before: layer.vector.clone().unwrap_or_default(),
+            changed: None,
+            drawing: None,
+            last: Vec2::ZERO,
+        });
+        self.edit_vector(idx, |v| v.strokes.push(stroke));
+        self.redraw_vector(idx, bounds);
+        if let Some(session) = self.workspace.vector.session.take() {
+            self.push_vector_step(session, "Vector shape");
+        }
+    }
+
     /// A brush stroke starts on the active layer: on a vector layer it
     /// draws (or, with the eraser, erases) lines instead. Returns whether
     /// it did.

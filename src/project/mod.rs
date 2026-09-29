@@ -29,6 +29,7 @@ mod convert;
 pub(crate) mod export;
 mod preview;
 pub(crate) mod psd;
+pub(crate) mod svg;
 pub(crate) mod zip;
 
 use blobs::{StoredBlob, push_blobs, read_blob};

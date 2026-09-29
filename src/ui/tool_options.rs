@@ -593,6 +593,9 @@ fn shape_options(
         ShapeKind::Line => {
             "Drag to draw  ·  Shift: 15° steps  ·  drag the ends to adjust  ·  Enter apply  ·  Esc cancel"
         }
+        ShapeKind::Curve => {
+            "Click for a corner, drag for a smooth point  ·  click the first point or double-click to finish  ·  Alt+drag a handle: sharp turn  ·  Enter apply"
+        }
         _ => {
             "Drag to draw  ·  Shift: square / circle  ·  Alt: from the centre  ·  Enter apply  ·  Esc cancel"
         }

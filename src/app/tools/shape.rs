@@ -21,14 +21,17 @@ pub enum ShapeKind {
     Rectangle,
     Ellipse,
     Polygon,
+    /// A Bézier path: anchors with handles, like a pen tool.
+    Curve,
 }
 
 impl ShapeKind {
-    pub const ALL: [(ShapeKind, &'static str); 4] = [
+    pub const ALL: [(ShapeKind, &'static str); 5] = [
         (ShapeKind::Line, "Line"),
         (ShapeKind::Rectangle, "Rectangle"),
         (ShapeKind::Ellipse, "Ellipse"),
         (ShapeKind::Polygon, "Polygon"),
+        (ShapeKind::Curve, "Curve"),
     ];
 
     /// The next kind, for the shortcut that cycles them.
@@ -37,8 +40,30 @@ impl ShapeKind {
             ShapeKind::Line => ShapeKind::Rectangle,
             ShapeKind::Rectangle => ShapeKind::Ellipse,
             ShapeKind::Ellipse => ShapeKind::Polygon,
-            ShapeKind::Polygon => ShapeKind::Line,
+            ShapeKind::Polygon => ShapeKind::Curve,
+            ShapeKind::Curve => ShapeKind::Line,
         }
+    }
+
+    /// Takes points one press at a time (a polygon's corners, a curve's
+    /// anchors) rather than being dragged out.
+    pub fn is_built(self) -> bool {
+        matches!(self, ShapeKind::Polygon | ShapeKind::Curve)
+    }
+}
+
+/// A curve's points come in threes: anchor, handle in, handle out.
+const CURVE_STRIDE: usize = 3;
+
+/// The cubic Bézier from `a` to `d` pulled by `b` and `c`, as points about
+/// two pixels apart (the brush's spacing places dabs along them).
+fn flatten_cubic(a: Vec2, b: Vec2, c: Vec2, d: Vec2, out: &mut Vec<Vec2>) {
+    let hull = (b - a).length() + (c - b).length() + (d - c).length();
+    let n = ((hull / 2.0).ceil() as usize).clamp(1, 1024);
+    for i in 1..=n {
+        let t = i as f32 / n as f32;
+        let u = 1.0 - t;
+        out.push(a * (u * u * u) + b * (3.0 * u * u * t) + c * (3.0 * u * t * t) + d * (t * t * t));
     }
 }
 
@@ -73,8 +98,11 @@ impl Default for ShapeSettings {
 enum ShapeDrag {
     /// Drawing it out from `anchor` (where the press was).
     Create { anchor: Vec2 },
-    /// Moving point / corner `i`.
+    /// Moving point / corner `i` (a curve's anchor takes its handles along;
+    /// a handle turns its twin the other way unless Alt is held).
     Point(usize),
+    /// Pulling the handles out of curve anchor `i` just placed.
+    NewNode(usize),
     /// Moving the whole shape.
     Move { last: Vec2 },
     /// Turning an ellipse: its angle when the drag began, and the
@@ -86,7 +114,7 @@ enum ShapeDrag {
 pub struct ShapeSession {
     pub kind: ShapeKind,
     /// Line: its ends. Rectangle, ellipse: opposite corners of the box.
-    /// Polygon: its points.
+    /// Polygon: its points. Curve: each anchor, then its handles in and out.
     pub points: Vec<Vec2>,
     drag: Option<ShapeDrag>,
     /// A polygon still taking points (press to add one).
@@ -96,6 +124,9 @@ pub struct ShapeSession {
     /// Ellipse: how far it's turned about its centre (radians, clockwise
     /// on screen). `points` is then its box before turning.
     pub angle: f32,
+    /// Curve: finished on its first anchor, so its end joins its start
+    /// (finished with Enter or a double-click, it's left open).
+    pub closed_curve: bool,
 }
 
 pub struct ShapeToolState {
@@ -120,6 +151,7 @@ impl ShapeToolState {
             } else {
                 0.0
             },
+            closed_curve: false,
         });
     }
 }
@@ -219,8 +251,16 @@ impl ShapeSession {
             ShapeKind::Rectangle | ShapeKind::Ellipse => corners(self.points[0], self.points[1])
                 .map(|p| self.to_canvas(p))
                 .to_vec(),
-            ShapeKind::Line | ShapeKind::Polygon => self.points.clone(),
+            ShapeKind::Line | ShapeKind::Polygon | ShapeKind::Curve => self.points.clone(),
         }
+    }
+
+    /// A curve's anchors and handles, as `[anchor, in, out]`.
+    fn nodes(&self) -> Vec<[Vec2; 3]> {
+        self.points
+            .chunks_exact(CURVE_STRIDE)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect()
     }
 
     /// An ellipse's turning handle: above the middle of its top side,
@@ -291,6 +331,22 @@ impl ShapeSession {
                 }
                 pts
             }
+            ShapeKind::Curve => {
+                let nodes = self.nodes();
+                let Some(first) = nodes.first() else {
+                    return Vec::new();
+                };
+                let mut pts = vec![first[0]];
+                for pair in nodes.windows(2) {
+                    let ([a, _, a_out], [b, b_in, _]) = (pair[0], pair[1]);
+                    flatten_cubic(a, a_out, b_in, b, &mut pts);
+                }
+                if self.closed_curve && nodes.len() > 1 {
+                    let ([a, _, a_out], [b, b_in, _]) = (nodes[nodes.len() - 1], nodes[0]);
+                    flatten_cubic(a, a_out, b_in, b, &mut pts);
+                }
+                pts
+            }
         }
     }
 
@@ -299,6 +355,7 @@ impl ShapeSession {
         match self.kind {
             ShapeKind::Line => false,
             ShapeKind::Polygon => closed_polygon && self.points.len() > 2,
+            ShapeKind::Curve => self.closed_curve && self.points.len() >= 2 * CURVE_STRIDE,
             ShapeKind::Rectangle | ShapeKind::Ellipse => true,
         }
     }
@@ -328,6 +385,19 @@ impl PainterApp {
     pub(crate) fn shape_press(&mut self, kind: ShapeKind, pos: Vec2) {
         let hit = HANDLE_HIT / self.shape_zoom();
         if let Some(session) = self.workspace.shapes.session.as_mut() {
+            if session.building && session.kind == ShapeKind::Curve {
+                // Back at the first anchor: the curve is done, closed.
+                if session.points.len() >= 2 * CURVE_STRIDE
+                    && (pos - session.points[0]).length() <= hit
+                {
+                    session.building = false;
+                    session.closed_curve = true;
+                    return;
+                }
+                session.points.extend([pos; CURVE_STRIDE]);
+                session.drag = Some(ShapeDrag::NewNode(session.points.len() / CURVE_STRIDE - 1));
+                return;
+            }
             if session.building {
                 // Back at the first point: the polygon is done.
                 if session.points.len() > 2 && (pos - session.points[0]).length() <= hit {
@@ -376,6 +446,15 @@ impl PainterApp {
             }
         }
         self.workspace.shapes.session = Some(match kind {
+            ShapeKind::Curve => ShapeSession {
+                kind,
+                points: vec![pos; CURVE_STRIDE],
+                drag: Some(ShapeDrag::NewNode(0)),
+                building: true,
+                cursor: Some(pos),
+                angle: 0.0,
+                closed_curve: false,
+            },
             ShapeKind::Polygon => ShapeSession {
                 kind,
                 points: vec![pos],
@@ -383,6 +462,7 @@ impl PainterApp {
                 building: true,
                 cursor: Some(pos),
                 angle: 0.0,
+                closed_curve: false,
             },
             _ => ShapeSession {
                 kind,
@@ -391,6 +471,7 @@ impl PainterApp {
                 building: false,
                 cursor: Some(pos),
                 angle: 0.0,
+                closed_curve: false,
             },
         });
     }
@@ -404,6 +485,38 @@ impl PainterApp {
         session.cursor = Some(pos);
         match session.drag {
             None => {}
+            Some(ShapeDrag::NewNode(n)) => {
+                // Dragging out of a new anchor pulls its handles, the way
+                // out towards the pointer and the way in mirrored.
+                let i = n * CURVE_STRIDE;
+                if let Some(&anchor) = session.points.get(i) {
+                    session.points[i + 2] = pos;
+                    session.points[i + 1] = anchor - (pos - anchor);
+                }
+            }
+            Some(ShapeDrag::Point(i)) if session.kind == ShapeKind::Curve => {
+                let node = i - i % CURVE_STRIDE;
+                if i % CURVE_STRIDE == 0 {
+                    // An anchor carries its handles.
+                    let d = pos - session.points[i];
+                    for p in &mut session.points[node..node + CURVE_STRIDE] {
+                        *p += d;
+                    }
+                } else {
+                    let anchor = session.points[node];
+                    session.points[i] = pos;
+                    // Smooth: the other handle turns with it (Alt: a corner).
+                    if !mods.from_center {
+                        let twin = if i % CURVE_STRIDE == 1 { i + 1 } else { i - 1 };
+                        let len = (session.points[twin] - anchor).length();
+                        let dir = anchor - pos;
+                        if dir.length() > 1e-3 {
+                            let len = if len > 1e-3 { len } else { dir.length() };
+                            session.points[twin] = anchor + dir.normalized() * len;
+                        }
+                    }
+                }
+            }
             Some(ShapeDrag::Create { anchor }) => {
                 let mut end = pos;
                 if mods.constrain {
@@ -442,7 +555,7 @@ impl PainterApp {
                     };
                     session.points = vec![opposite, end];
                 }
-                ShapeKind::Line | ShapeKind::Polygon => {
+                ShapeKind::Line | ShapeKind::Polygon | ShapeKind::Curve => {
                     let pos = if mods.constrain && i > 0 {
                         snap_angle(session.points[i - 1], pos)
                     } else if mods.constrain && session.kind == ShapeKind::Line {
@@ -499,7 +612,13 @@ impl PainterApp {
             session.building = false;
             // A double-click also added a point where it landed.
             let n = session.points.len();
-            if n > 2 && (session.points[n - 1] - session.points[n - 2]).length() < 1.0 {
+            if session.kind == ShapeKind::Curve {
+                let s = CURVE_STRIDE;
+                if n >= 3 * s && (session.points[n - s] - session.points[n - 2 * s]).length() < 1.0
+                {
+                    session.points.truncate(n - s);
+                }
+            } else if n > 2 && (session.points[n - 1] - session.points[n - 2]).length() < 1.0 {
                 session.points.pop();
             }
         }
@@ -508,9 +627,15 @@ impl PainterApp {
     /// Remove the polygon's last point (Backspace).
     pub(crate) fn shape_undo_point(&mut self) {
         if let Some(session) = self.workspace.shapes.session.as_mut()
-            && session.kind == ShapeKind::Polygon
+            && session.kind.is_built()
         {
-            session.points.pop();
+            let n = if session.kind == ShapeKind::Curve {
+                CURVE_STRIDE
+            } else {
+                1
+            };
+            let keep = session.points.len().saturating_sub(n);
+            session.points.truncate(keep);
             session.building = true;
             if session.points.is_empty() {
                 self.workspace.shapes.session = None;
@@ -539,6 +664,12 @@ impl PainterApp {
             return;
         };
         if layer.locked || layer.kind == LayerKind::Group {
+            return;
+        }
+        // On a vector layer a shape is one more line (its outline).
+        if self.is_vector_layer(layer_idx) {
+            let outline = session.outline(settings.closed);
+            self.add_vector_line(layer_idx, &outline);
             return;
         }
         self.release_canvas();
@@ -712,7 +843,27 @@ pub(crate) fn draw_shape(
         Stroke::new(1.0_f32, Color32::WHITE),
         Color32::TRANSPARENT,
     ));
-    for h in session.handles() {
+    if session.kind == ShapeKind::Curve {
+        // Anchors as squares; pulled-out handles as dots on stems.
+        for [anchor, h_in, h_out] in session.nodes() {
+            let a = to_screen(anchor);
+            for h in [h_in, h_out] {
+                let p = to_screen(h);
+                if (p - a).length() < 1.0 {
+                    continue;
+                }
+                painter.line_segment([a, p], Stroke::new(3.0_f32, Color32::BLACK));
+                painter.line_segment([a, p], Stroke::new(1.0_f32, Color32::WHITE));
+                painter.circle_filled(p, HANDLE_SIZE, Color32::BLACK);
+                painter.circle_filled(p, HANDLE_SIZE - 1.0, Color32::WHITE);
+            }
+        }
+    }
+    let anchors: Vec<Vec2> = match session.kind {
+        ShapeKind::Curve => session.nodes().iter().map(|n| n[0]).collect(),
+        _ => session.handles(),
+    };
+    for h in anchors {
         let r =
             egui::Rect::from_center_size(to_screen(h), egui::vec2(HANDLE_SIZE, HANDLE_SIZE) * 2.0);
         painter.rect_filled(r.expand(1.0), 0.0, Color32::BLACK);
@@ -964,5 +1115,171 @@ mod tests {
         app.shape_commit();
         assert!(painted(&app, 60, 40));
         assert!(!painted(&app, 25, 90));
+    }
+
+    /// Click at `a`, drag to `handle`, let go (a smooth anchor).
+    fn curve_point(app: &mut crate::PainterApp, a: Vec2, handle: Vec2) {
+        app.shape_press(ShapeKind::Curve, a);
+        app.shape_move(handle, ShapeMods::default());
+        app.shape_release();
+    }
+
+    #[test]
+    fn a_dragged_curve_bows_and_paints_as_one_step() {
+        let mut app = app();
+        app.workspace.shapes.settings.closed = false;
+        // Two anchors, handles pulled up: an arch.
+        curve_point(&mut app, Vec2::new(20.0, 90.0), Vec2::new(20.0, 50.0));
+        curve_point(&mut app, Vec2::new(100.0, 90.0), Vec2::new(100.0, 130.0));
+        app.shape_finish_polygon();
+        let session = app.workspace.shapes.session.as_ref().unwrap();
+        assert!(!session.building);
+        assert_eq!(session.points.len(), 6);
+        // The second anchor's handle in mirrors its drag: pulled up too.
+        assert_eq!(session.points[4], Vec2::new(100.0, 50.0));
+        let outline = session.outline(false);
+        let top = outline.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        assert!((58.0..62.0).contains(&top), "the arch peaks at y 60: {top}");
+        assert!(
+            outline.windows(2).all(|w| (w[1] - w[0]).length() < 4.0),
+            "fine steps"
+        );
+        let pushes = app.layer_state.history.push_count();
+        app.shape_commit();
+        assert_eq!(app.layer_state.history.push_count(), pushes + 1);
+        assert!(painted(&app, 60, 60), "the top of the arch");
+        assert!(!painted(&app, 60, 90), "not the chord under it");
+    }
+
+    #[test]
+    fn a_curve_closes_at_its_first_anchor_and_fills() {
+        let mut app = app();
+        app.workspace.shapes.settings.style = ShapeStyle::Fill;
+        for (a, h) in [
+            ((30.0, 30.0), (30.0, 30.0)),
+            ((100.0, 30.0), (100.0, 30.0)),
+            ((64.0, 100.0), (64.0, 100.0)),
+        ] {
+            curve_point(&mut app, Vec2::new(a.0, a.1), Vec2::new(h.0, h.1));
+        }
+        app.shape_press(ShapeKind::Curve, Vec2::new(31.0, 31.0));
+        app.shape_release();
+        let session = app.workspace.shapes.session.as_ref().unwrap();
+        assert!(!session.building, "closed on the first anchor");
+        assert_eq!(session.points.len(), 9, "no anchor added there");
+        app.shape_commit();
+        assert!(painted(&app, 64, 50), "inside");
+        assert!(!painted(&app, 20, 100), "outside");
+    }
+
+    #[test]
+    fn curve_handles_turn_together_unless_alt_is_held() {
+        let mut app = app();
+        curve_point(&mut app, Vec2::new(20.0, 60.0), Vec2::new(40.0, 60.0));
+        curve_point(&mut app, Vec2::new(100.0, 60.0), Vec2::new(120.0, 60.0));
+        app.shape_finish_polygon();
+        // Grab the first anchor's out handle (at 40, 60) and swing it up.
+        app.shape_press(ShapeKind::Curve, Vec2::new(40.0, 60.0));
+        app.shape_move(Vec2::new(20.0, 40.0), ShapeMods::default());
+        app.shape_release();
+        let p = app
+            .workspace
+            .shapes
+            .session
+            .as_ref()
+            .unwrap()
+            .points
+            .clone();
+        assert_eq!(p[2], Vec2::new(20.0, 40.0));
+        assert!(
+            (p[1] - Vec2::new(20.0, 80.0)).length() < 1e-3,
+            "twin opposite: {:?}",
+            p[1]
+        );
+        // With Alt only the one moves.
+        let alt = ShapeMods {
+            constrain: false,
+            from_center: true,
+        };
+        app.shape_press(ShapeKind::Curve, Vec2::new(20.0, 40.0));
+        app.shape_move(Vec2::new(0.0, 40.0), alt);
+        app.shape_release();
+        let q = app
+            .workspace
+            .shapes
+            .session
+            .as_ref()
+            .unwrap()
+            .points
+            .clone();
+        assert_eq!(q[2], Vec2::new(0.0, 40.0));
+        assert_eq!(q[1], p[1], "the twin stays");
+        // Dragging an anchor carries both handles.
+        app.shape_press(ShapeKind::Curve, Vec2::new(100.0, 60.0));
+        app.shape_move(Vec2::new(100.0, 70.0), ShapeMods::default());
+        app.shape_release();
+        let r = app
+            .workspace
+            .shapes
+            .session
+            .as_ref()
+            .unwrap()
+            .points
+            .clone();
+        assert_eq!(r[3], Vec2::new(100.0, 70.0));
+        assert_eq!(r[5], Vec2::new(120.0, 70.0));
+        // Backspace takes the last anchor away with its handles.
+        app.shape_undo_point();
+        assert_eq!(
+            app.workspace.shapes.session.as_ref().unwrap().points.len(),
+            3
+        );
+    }
+
+    #[test]
+    fn shapes_on_a_vector_layer_become_lines() {
+        let mut app = app();
+        app.add_vector_layer();
+        let idx = app.canvas.active_layer_idx;
+        curve_point(&mut app, Vec2::new(20.0, 90.0), Vec2::new(20.0, 50.0));
+        curve_point(&mut app, Vec2::new(100.0, 90.0), Vec2::new(100.0, 130.0));
+        app.shape_finish_polygon();
+        app.shape_commit();
+        let v = app.canvas.layers[idx]
+            .vector
+            .as_ref()
+            .expect("still a vector layer");
+        assert_eq!(v.strokes.len(), 1);
+        assert!(
+            v.strokes[0].points.len() < 40,
+            "thinned: {}",
+            v.strokes[0].points.len()
+        );
+        let top = v.strokes[0]
+            .points
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::MAX, f32::min);
+        assert!((58.0..62.0).contains(&top), "{top}");
+        // A rectangle too.
+        drag(
+            &mut app,
+            ShapeKind::Rectangle,
+            Vec2::new(10.0, 10.0),
+            Vec2::new(50.0, 40.0),
+            ShapeMods::default(),
+        );
+        app.shape_commit();
+        let v = app.canvas.layers[idx].vector.as_ref().unwrap();
+        assert_eq!(v.strokes.len(), 2);
+        assert_eq!(
+            app.layer_state
+                .history
+                .labels()
+                .0
+                .last()
+                .map(String::as_str),
+            Some("Vector shape")
+        );
     }
 }
