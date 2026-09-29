@@ -10,7 +10,7 @@ use crate::canvas::storage::{LayerKind, SampleLayers};
 use crate::selection::SelectionMask;
 use eframe::egui::Vec2;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FillMode {
     /// Click an area to fill it.
     Bucket,
@@ -37,7 +37,7 @@ impl FillMode {
 }
 
 /// What the fill looks at to find the areas and lines.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FillSource {
     CurrentLayer,
     LayerBelow,

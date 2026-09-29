@@ -552,9 +552,10 @@ pub(crate) fn save_project(app: &mut PainterApp) {
 
 #[cfg(not(target_os = "android"))]
 fn open_project_dialog() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
+    crate::app::settings::file_dialog()
         .add_filter("Rusty Painter or Photoshop", &["rpainter", "psd", "PSD"])
         .pick_file()
+        .inspect(|p| crate::app::settings::remember_dir(p))
 }
 
 #[cfg(target_os = "android")]
@@ -564,19 +565,21 @@ fn open_project_dialog() -> Option<std::path::PathBuf> {
 
 #[cfg(not(target_os = "android"))]
 fn save_project_dialog() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
+    crate::app::settings::file_dialog()
         .add_filter("Rusty Painter", &["rpainter"])
         .set_file_name("project.rpainter")
         .save_file()
+        .inspect(|p| crate::app::settings::remember_dir(p))
 }
 
 #[cfg(not(target_os = "android"))]
 fn timelapse_dialog() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
+    crate::app::settings::file_dialog()
         .add_filter("Video (MP4)", &["mp4"])
         .add_filter("Animated GIF", &["gif"])
         .set_file_name("timelapse.mp4")
         .save_file()
+        .inspect(|p| crate::app::settings::remember_dir(p))
 }
 
 #[cfg(target_os = "android")]

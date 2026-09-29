@@ -189,9 +189,10 @@ pub(crate) fn downscale(src: &image::RgbaImage, w: u32, h: u32) -> image::RgbaIm
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn import_image_dialog(app: &mut PainterApp) {
-    let Some(path) = rfd::FileDialog::new()
+    let Some(path) = crate::app::settings::file_dialog()
         .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
         .pick_file()
+        .inspect(|p| crate::app::settings::remember_dir(p))
     else {
         return;
     };

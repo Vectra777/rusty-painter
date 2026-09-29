@@ -311,7 +311,7 @@ mod tests {
         let mut app =
             crate::project::tests::test_app_pub(Canvas::new(400, 300, Color32::WHITE, 64));
         app.canvas_mut().active_layer_idx = 1;
-        app.brush_state.presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+        app.brush_state.presets = crate::PainterApp::default_brush_presets();
         app.brush_state.show_presets = true;
         app.edit_library(|lib| {
             lib.toggle_favourite("Chalk");

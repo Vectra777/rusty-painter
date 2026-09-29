@@ -154,12 +154,13 @@ impl PainterApp {
 
 #[cfg(not(target_os = "android"))]
 fn open_dialog(app: &mut PainterApp) {
-    let Some(path) = rfd::FileDialog::new()
+    let Some(path) = crate::app::settings::file_dialog()
         .add_filter(
             "Images",
             &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif"],
         )
         .pick_file()
+        .inspect(|p| crate::app::settings::remember_dir(p))
     else {
         return;
     };

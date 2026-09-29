@@ -32,6 +32,9 @@ pub struct LibraryFile {
     pub favourites: Vec<String>,
     /// The presets picked last, newest first.
     pub recent: Vec<String>,
+    /// The presets that come with the app were copied into the library
+    /// (once: the ones deleted since stay deleted).
+    pub defaults_installed: bool,
 }
 
 impl Default for LibraryFile {
@@ -41,6 +44,7 @@ impl Default for LibraryFile {
             tags: BTreeMap::new(),
             favourites: Vec::new(),
             recent: Vec::new(),
+            defaults_installed: false,
         }
     }
 }
@@ -528,9 +532,95 @@ mod tests {
 
     #[test]
     fn built_in_presets_all_have_tags() {
-        for preset in PainterApp::create_default_brush_presets(Color32::BLACK) {
+        for preset in PainterApp::default_brush_presets() {
             assert!(!default_tags(&preset.name).is_empty(), "{}", preset.name);
         }
+    }
+
+    #[test]
+    fn default_presets_are_files_that_keep_changes() {
+        let dir = std::env::temp_dir().join(format!("rp-defaults-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let start = || {
+            let canvas = crate::canvas::Canvas::new(64, 64, Color32::WHITE, 64);
+            let mut app = crate::project::tests::test_app_pub(canvas);
+            app.brush_state.brushes_path = dir.join("brushes");
+            app.load_user_presets();
+            app.load_brush_library();
+            app.install_default_presets();
+            app
+        };
+        let defaults = PainterApp::default_brush_presets();
+        let names = |app: &PainterApp| -> Vec<String> {
+            app.brush_state
+                .presets
+                .iter()
+                .map(|p| p.name.clone())
+                .collect()
+        };
+        let mut app = start();
+        let default_names: Vec<String> = defaults.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names(&app), default_names, "installed, in their order");
+        assert!(app.brush_state.presets.iter().all(|p| p.file.is_some()));
+        assert_eq!(app.brush_state.library.file.tags("Ink Pen"), ["Inking"]);
+        app.save_brush_library();
+
+        // A change to the brush lands in its preset's file.
+        let ink = app
+            .brush_state
+            .presets
+            .iter()
+            .position(|p| p.name == "Ink Pen")
+            .unwrap();
+        app.apply_preset(ink);
+        app.brush_state.brush.brush_options.diameter = 99.0;
+        app.save_active_preset(true);
+        assert_ne!(
+            app.brush_state.presets[ink].brush.brush_options.diameter,
+            99.0
+        );
+        app.save_active_preset(false);
+        let chalk = app
+            .brush_state
+            .presets
+            .iter()
+            .position(|p| p.name == "Chalk")
+            .unwrap();
+        app.delete_user_preset(chalk);
+        app.save_brush_library();
+
+        let mut app = start();
+        let ink = app
+            .brush_state
+            .presets
+            .iter()
+            .position(|p| p.name == "Ink Pen")
+            .unwrap();
+        assert_eq!(
+            app.brush_state.presets[ink].brush.brush_options.diameter,
+            99.0
+        );
+        assert!(
+            !names(&app).contains(&"Chalk".to_string()),
+            "deleted stays deleted"
+        );
+        app.restore_default_presets();
+        assert_eq!(names(&app), default_names, "restored, in their order");
+        let ink = app
+            .brush_state
+            .presets
+            .iter()
+            .position(|p| p.name == "Ink Pen")
+            .unwrap();
+        app.reset_preset(ink);
+        let default_ink = defaults.iter().find(|p| p.name == "Ink Pen").unwrap();
+        assert_eq!(
+            app.brush_state.presets[ink].brush.brush_options.diameter,
+            default_ink.brush.brush_options.diameter
+        );
+        let app = start();
+        assert_eq!(names(&app), default_names);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -540,7 +630,7 @@ mod tests {
         let canvas = crate::canvas::Canvas::new(64, 64, Color32::WHITE, 64);
         let mut app = crate::project::tests::test_app_pub(canvas);
         app.brush_state.brushes_path = dir.join("brushes");
-        app.brush_state.presets = PainterApp::create_default_brush_presets(Color32::BLACK);
+        app.brush_state.presets = PainterApp::default_brush_presets();
         // No file yet: the built-in tags.
         app.load_brush_library();
         assert_eq!(app.brush_state.library.file.tags("Ink Pen"), ["Inking"]);

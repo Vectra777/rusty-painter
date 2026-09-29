@@ -9,7 +9,7 @@ use eframe::egui::{Color32, Vec2};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LiquifyMode {
     /// Drag pixels along with the brush.
     Push,

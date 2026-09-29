@@ -93,9 +93,10 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
 
 #[cfg(not(target_os = "android"))]
 fn palette_from_image_dialog(app: &mut PainterApp) {
-    let Some(path) = rfd::FileDialog::new()
+    let Some(path) = crate::app::settings::file_dialog()
         .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
         .pick_file()
+        .inspect(|p| crate::app::settings::remember_dir(p))
     else {
         return;
     };

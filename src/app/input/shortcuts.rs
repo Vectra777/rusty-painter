@@ -493,7 +493,7 @@ mod preset_tests {
         app.canvas_mut().active_layer_idx = 1;
         app.canvas_mut()
             .set_layer_tile_data(1, 0, 0, vec![Color32::RED; 64 * 64]);
-        app.brush_state.presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+        app.brush_state.presets = crate::PainterApp::default_brush_presets();
         let index = |app: &crate::PainterApp, name: &str| {
             app.brush_state
                 .presets
@@ -536,7 +536,7 @@ mod preset_tests {
     #[test]
     fn a_preset_keeps_the_stabiliser() {
         let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
-        app.brush_state.presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+        app.brush_state.presets = crate::PainterApp::default_brush_presets();
         let b = &mut app.brush_state.brush;
         b.stabilizer_algorithm = StabilizerAlgorithm::Dynamic;
         b.stabilizer = 0.7;

@@ -325,7 +325,141 @@ impl PainterApp {
         Ok(path)
     }
 
-    /// Remove a preset the user saved or imported (built-in ones stay).
+    /// First start: copy the presets that come with the app into the
+    /// library, where they're kept and changed like the user's own. Then
+    /// list those first, in their order.
+    pub(crate) fn install_default_presets(&mut self) {
+        let defaults = Self::default_brush_presets();
+        if !self.brush_state.library.file.defaults_installed {
+            self.add_missing_defaults(&defaults);
+            self.edit_library(|lib| lib.defaults_installed = true);
+        }
+        let rank = |p: &BrushPreset| {
+            (defaults.iter())
+                .position(|d| d.name == p.name)
+                .unwrap_or(usize::MAX)
+        };
+        self.brush_state.presets.sort_by_key(rank);
+    }
+
+    /// Put back the presets that came with the app and were deleted.
+    pub(crate) fn restore_default_presets(&mut self) {
+        let defaults = Self::default_brush_presets();
+        self.add_missing_defaults(&defaults);
+        self.install_default_presets();
+    }
+
+    fn add_missing_defaults(&mut self, defaults: &[BrushPreset]) {
+        for preset in defaults {
+            if self
+                .brush_state
+                .presets
+                .iter()
+                .any(|p| p.name == preset.name)
+            {
+                continue;
+            }
+            self.add_user_preset(preset.clone());
+            let tags = crate::app::brush_library::default_tags(&preset.name);
+            self.edit_library(|lib| {
+                (lib.tags.entry(preset.name.clone()))
+                    .or_insert_with(|| tags.iter().map(|t| t.to_string()).collect());
+            });
+        }
+    }
+
+    /// Whether the preset called `name` came with the app (and can be reset).
+    pub(crate) fn is_default_preset(name: &str) -> bool {
+        static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let names = NAMES.get_or_init(|| {
+            let defaults = Self::default_brush_presets();
+            defaults.into_iter().map(|p| p.name).collect()
+        });
+        names.iter().any(|n| n == name)
+    }
+
+    /// Give preset `index` back the settings it came with.
+    pub(crate) fn reset_preset(&mut self, index: usize) {
+        let Some(name) = self.brush_state.presets.get(index).map(|p| p.name.clone()) else {
+            return;
+        };
+        let defaults = Self::default_brush_presets();
+        let Some(default) = defaults.into_iter().find(|d| d.name == name) else {
+            return;
+        };
+        self.brush_state.presets[index].brush = default.brush;
+        self.brush_state.preset_previews.remove(&name);
+        self.save_preset(index);
+        if self.brush_state.active_preset.as_deref() == Some(name.as_str()) {
+            self.apply_preset(index);
+        }
+    }
+
+    /// Write preset `index` to its file (with the others kept in it).
+    pub(crate) fn save_preset(&mut self, index: usize) {
+        let presets = &self.brush_state.presets;
+        let Some(preset) = presets.get(index).cloned() else {
+            return;
+        };
+        let result = match &preset.file {
+            Some(path) => {
+                let in_file: Vec<BrushPreset> = (presets.iter())
+                    .filter(|p| p.file.as_ref() == Some(path))
+                    .cloned()
+                    .collect();
+                let tmp = path.with_extension("tmp");
+                preset_file::encode(&in_file)
+                    .and_then(|bytes| std::fs::write(&tmp, bytes).map_err(|e| e.to_string()))
+                    .and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string()))
+            }
+            None => self
+                .write_library_file(&preset)
+                .map(|path| self.brush_state.presets[index].file = Some(path)),
+        };
+        if let Err(err) = result {
+            log::warn!("Couldn't save brush preset {}: {err}", preset.name);
+            self.export_state.message = Some(format!("Couldn't save the preset: {err}"));
+        }
+    }
+
+    /// The brush changed: keep the change in the preset it came from, as
+    /// Clip Studio does (once the pointer is up, not every frame of a
+    /// slider drag).
+    pub(crate) fn save_active_preset(&mut self, pointer_down: bool) {
+        let bs = &self.brush_state;
+        if bs.is_drawing || pointer_down {
+            return;
+        }
+        let Some(index) = (bs.active_preset.as_ref())
+            .and_then(|name| bs.presets.iter().position(|p| &p.name == name))
+        else {
+            return;
+        };
+        let stored = &bs.presets[index].brush;
+        let mut brush = bs.brush.clone();
+        // Not the preset's to keep: the colour and stabiliser are the
+        // artist's, and erasing with a brush doesn't make it an eraser.
+        let (b, s) = (&mut brush, stored);
+        b.brush_options.color = s.brush_options.color;
+        if bs.eraser_active {
+            b.brush_options.blend_mode = s.brush_options.blend_mode;
+        }
+        b.stabilizer = s.stabilizer;
+        b.stabilizer_algorithm = s.stabilizer_algorithm;
+        b.stabilizer_mass = s.stabilizer_mass;
+        b.stabilizer_drag = s.stabilizer_drag;
+        b.stabilizer_modes = s.stabilizer_modes;
+        if preset_file::same_settings(&brush, stored) {
+            return;
+        }
+        let bs = &mut self.brush_state;
+        bs.preset_previews.remove(&bs.presets[index].name);
+        bs.presets[index].brush = brush;
+        self.save_preset(index);
+    }
+
+    /// Remove a preset (the ones that came with the app too: Restore
+    /// default brushes puts them back).
     pub(crate) fn delete_user_preset(&mut self, index: usize) {
         let Some(preset) = self.brush_state.presets.get(index) else {
             return;
@@ -435,7 +569,7 @@ pub(crate) fn export_presets_dialog(app: &mut PainterApp, indices: &[usize], nam
     if presets.is_empty() {
         return;
     }
-    let Some(path) = rfd::FileDialog::new()
+    let Some(path) = crate::app::settings::file_dialog()
         .add_filter("Brush presets", &[preset_file::EXTENSION])
         .set_file_name(format!(
             "{}.{}",
@@ -443,6 +577,7 @@ pub(crate) fn export_presets_dialog(app: &mut PainterApp, indices: &[usize], nam
             preset_file::EXTENSION
         ))
         .save_file()
+        .inspect(|p| crate::app::settings::remember_dir(p))
     else {
         return;
     };
@@ -456,7 +591,7 @@ pub(crate) fn export_presets_dialog(app: &mut PainterApp, indices: &[usize], nam
 pub(crate) fn import_presets_dialog(app: &mut PainterApp) {
     let mut all: Vec<&str> = vec![preset_file::EXTENSION];
     all.extend(crate::brush_engine::import::EXTENSIONS);
-    let Some(paths) = rfd::FileDialog::new()
+    let Some(paths) = crate::app::settings::file_dialog()
         .add_filter("Brushes", &all)
         .add_filter("Rusty Painter presets", &[preset_file::EXTENSION])
         .add_filter("Photoshop", &["abr"])
@@ -464,6 +599,11 @@ pub(crate) fn import_presets_dialog(app: &mut PainterApp) {
         .add_filter("GIMP", &["gbr", "gih"])
         .add_filter("MyPaint", &["myb"])
         .pick_files()
+        .inspect(|ps| {
+            ps.iter()
+                .take(1)
+                .for_each(|p| crate::app::settings::remember_dir(p))
+        })
     else {
         return;
     };

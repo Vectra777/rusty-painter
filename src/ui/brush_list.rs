@@ -51,6 +51,9 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
                     }
                 }
                 Some(PresetAction::Delete(index)) => app.delete_user_preset(index),
+                Some(PresetAction::Reset(index)) => app.reset_preset(index),
+                #[cfg(not(target_os = "android"))]
+                Some(PresetAction::RestoreDefaults) => app.restore_default_presets(),
                 Some(PresetAction::ToggleFavourite(index)) => {
                     let name = app.brush_state.presets[index].name.clone();
                     app.edit_library(|lib| lib.toggle_favourite(&name));
@@ -74,7 +77,7 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
                 #[cfg(not(target_os = "android"))]
                 Some(PresetAction::ExportMine) => {
                     let mine: Vec<usize> = (app.brush_state.presets.iter().enumerate())
-                        .filter(|(_, p)| p.file.is_some())
+                        .filter(|(_, p)| !PainterApp::is_default_preset(&p.name))
                         .map(|(i, _)| i)
                         .collect();
                     crate::app::brush_io::export_presets_dialog(app, &mine, "My brushes");
@@ -143,6 +146,9 @@ fn import_report_window(app: &mut PainterApp, ctx: &egui::Context) {
 enum PresetAction {
     Pick(usize),
     Delete(usize),
+    Reset(usize),
+    #[cfg(not(target_os = "android"))]
+    RestoreDefaults,
     ToggleFavourite(usize),
     AddTag(usize, String),
     RemoveTag(usize, String),
@@ -205,7 +211,8 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
                         if ui.button("Import brushes…").clicked() {
                             picked = Some(PresetAction::Import);
                         }
-                        let any_mine = app.brush_state.presets.iter().any(|p| p.file.is_some());
+                        let any_mine = (app.brush_state.presets.iter())
+                            .any(|p| !PainterApp::is_default_preset(&p.name));
                         if ui
                             .add_enabled(any_mine, egui::Button::new("Export my brushes…"))
                             .clicked()
@@ -214,6 +221,10 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
                         }
                         if ui.button("Export all brushes…").clicked() {
                             picked = Some(PresetAction::ExportAll);
+                        }
+                        ui.separator();
+                        if ui.button("Restore default brushes").clicked() {
+                            picked = Some(PresetAction::RestoreDefaults);
                         }
                     },
                 );
@@ -340,7 +351,7 @@ fn preset_row(
     } else if tile.clicked() {
         picked = Some(PresetAction::Pick(index));
     }
-    let mine = preset.file.is_some();
+    let default = PainterApp::is_default_preset(&preset.name);
     let tags = bs.library.file.tags(&preset.name);
     let new_tag = &mut bs.library.new_tag;
     tile.context_menu(|ui| {
@@ -390,11 +401,10 @@ fn preset_row(
         if ui.button("Export…").clicked() {
             picked = Some(PresetAction::Export(index));
         }
-        if ui
-            .add_enabled(mine, egui::Button::new("Delete"))
-            .on_disabled_hover_text("Built-in presets can't be deleted")
-            .clicked()
-        {
+        if default && ui.button("Reset to default").clicked() {
+            picked = Some(PresetAction::Reset(index));
+        }
+        if ui.button("Delete").clicked() {
             picked = Some(PresetAction::Delete(index));
         }
     });

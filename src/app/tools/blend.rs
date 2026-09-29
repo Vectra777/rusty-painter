@@ -27,6 +27,8 @@ use crate::canvas::storage::{LayerId, LayerKind};
 use eframe::egui::{Color32, Vec2};
 use std::collections::HashMap;
 
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct BlendToolSettings {
     /// Smudge: how much of the carried paint stays with the brush each dab
     /// (0 = barely drags, 1 = smears a colour a long way).
@@ -52,6 +54,7 @@ pub struct BlendToolSettings {
     /// Filter: the filter painted, with its settings.
     pub brush_filter: crate::canvas::filters::Filter,
     /// Clone: where to copy from (canvas), set with Ctrl+click.
+    #[serde(skip)]
     pub clone_source: Option<Vec2>,
     /// Clone: keep the same offset from stroke to stroke (else each stroke
     /// starts again from the source).
@@ -59,6 +62,7 @@ pub struct BlendToolSettings {
     /// Clone: copy what's visible (all layers) rather than this layer.
     pub clone_merged: bool,
     /// Clone: the offset kept while aligned, from the first stroke.
+    #[serde(skip)]
     clone_offset: Option<Vec2>,
 }
 
@@ -94,7 +98,7 @@ impl BlendToolSettings {
 }
 
 /// What the Smudge tool does.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SmudgeMode {
     /// Carry the paint along (and mix in the brush colour).
     #[default]
@@ -106,7 +110,7 @@ pub enum SmudgeMode {
 }
 
 /// What the Blur tool does.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FilterMode {
     #[default]
     Blur,
@@ -120,7 +124,7 @@ pub enum FilterMode {
 }
 
 /// How Deform moves the paint.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DeformMode {
     /// Along with the brush.
     #[default]

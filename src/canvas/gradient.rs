@@ -9,7 +9,7 @@
 use crate::canvas::blend_modes::BlendSpace;
 use eframe::egui::{Color32, Vec2};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GradientShape {
     /// Along the line from start to end.
     Linear,
@@ -21,7 +21,7 @@ pub enum GradientShape {
     Angle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GradientRepeat {
     /// Past the ends, the end colours continue.
     None,

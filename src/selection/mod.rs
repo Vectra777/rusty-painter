@@ -11,7 +11,7 @@ pub mod transform;
 
 pub use mask::{SelectionMask, SelectionMode};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SelectionType {
     Rectangle,
     Circle,

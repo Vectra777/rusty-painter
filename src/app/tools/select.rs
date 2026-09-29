@@ -18,7 +18,7 @@ use crate::selection::{SelectionMask, SelectionMode, SelectionShape, SelectionTy
 use eframe::egui::{self, Vec2};
 
 /// What the click tools look at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SampleSource {
     /// The active layer.
     Layer,
@@ -29,7 +29,8 @@ pub enum SampleSource {
 }
 
 /// Magic wand settings.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct WandSettings {
     /// How different (per channel, 0..=255) a colour may be and still match.
     pub tolerance: u8,
@@ -58,7 +59,8 @@ impl Default for WandSettings {
 }
 
 /// Colour range settings: perceptual distance, in percent.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ColorRangeSettings {
     pub tolerance: f32,
     /// Colours a little further than the tolerance are partly selected.

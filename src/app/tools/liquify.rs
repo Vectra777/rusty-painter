@@ -10,6 +10,8 @@ use crate::canvas::storage::{LayerId, LayerKind};
 use eframe::egui::{Color32, Vec2};
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct LiquifySettings {
     pub mode: LiquifyMode,
     /// Brush radius in canvas pixels.

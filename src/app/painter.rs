@@ -50,6 +50,8 @@ pub struct PainterApp {
 
 impl eframe::App for PainterApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_active_preset(false);
+        self.save_settings(false);
         self.autosave_on_exit();
     }
 
@@ -216,6 +218,9 @@ impl eframe::App for PainterApp {
             self.save_swatches();
         }
         self.save_view_settings(ctx);
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        self.save_active_preset(pointer_down);
+        self.save_settings(pointer_down);
         if std::mem::take(&mut self.brush_state.library.dirty) {
             self.save_brush_library();
         }

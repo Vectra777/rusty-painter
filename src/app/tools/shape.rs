@@ -15,7 +15,7 @@ use crate::canvas::storage::LayerKind;
 use crate::selection::{SelectionManager, SelectionMask, SelectionMode};
 use eframe::egui::{self, Color32, Stroke, Vec2};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ShapeKind {
     Line,
     Rectangle,
@@ -43,7 +43,7 @@ impl ShapeKind {
 }
 
 /// What applying a shape paints.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ShapeStyle {
     /// Its outline, with the brush.
     Outline,
@@ -52,7 +52,8 @@ pub enum ShapeStyle {
     Both,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ShapeSettings {
     pub style: ShapeStyle,
     /// Polygons: join the last point back to the first.

@@ -11,7 +11,7 @@
 
 use eframe::egui::{self, Key, Modifiers};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum KeyboardLayout {
     #[default]
     Qwerty,

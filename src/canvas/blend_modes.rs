@@ -155,7 +155,7 @@ impl LayerBlend {
 }
 
 /// The colour space layers and strokes blend in.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendSpace {
     /// Physically correct light mixing: colours are decoded from sRGB,
     /// blended, and encoded again.

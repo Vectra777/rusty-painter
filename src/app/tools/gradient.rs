@@ -11,7 +11,8 @@ use crate::canvas::storage::LayerKind;
 use crate::selection::SelectionMask;
 use eframe::egui::{self, Color32, Stroke, Vec2};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct GradientSettings {
     pub shape: GradientShape,
     pub colors: GradientColors,

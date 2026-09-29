@@ -5,7 +5,7 @@ use eframe::egui::ColorImage;
 use image::ImageFormat;
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExportFormat {
     Png,
     Jpeg,

@@ -156,9 +156,10 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
 #[cfg(not(target_os = "android"))]
 fn pick_file(default_name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
+    crate::app::settings::file_dialog()
         .set_file_name(default_name)
         .save_file()
+        .inspect(|p| crate::app::settings::remember_dir(p))
 }
 
 #[cfg(target_os = "android")]

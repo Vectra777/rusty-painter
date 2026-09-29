@@ -82,16 +82,8 @@ impl BrushState {
         brushes_path: PathBuf,
         use_masked_brush: bool,
     ) -> Self {
-        // The eraser starts from the first eraser preset, else from the brush.
-        let eraser = presets
-            .iter()
-            .find(|p| p.brush.brush_options.blend_mode == BlendMode::Eraser);
-        let eraser_preset = eraser.map(|p| p.name.clone());
-        let mut eraser_brush = eraser.map_or_else(|| brush.clone(), |p| p.brush.clone());
-        eraser_brush.brush_options.blend_mode = BlendMode::Eraser;
-        eraser_brush.brush_options.color = brush.brush_options.color;
-        Self {
-            brush,
+        let mut state = Self {
+            brush: brush.clone(),
             brush_preview: BrushPreviewState::default(),
             presets,
             preset_previews: HashMap::new(),
@@ -106,16 +98,29 @@ impl BrushState {
             recent_colors: Vec::new(),
             swatches: vec![Color32::BLACK, Color32::WHITE],
             swatches_dirty: false,
-            stashed_brush: eraser_brush,
+            stashed_brush: brush.clone(),
             eraser_active: false,
             active_preset: None,
-            stashed_preset: eraser_preset,
+            stashed_preset: None,
             show_presets: false,
             blend_stroke: None,
             import_report: None,
             string: None,
             library: Default::default(),
-        }
+        };
+        state.pick_eraser();
+        state
+    }
+
+    /// The eraser starts from the first eraser preset, else from the brush.
+    pub fn pick_eraser(&mut self) {
+        let eraser =
+            (self.presets.iter()).find(|p| p.brush.brush_options.blend_mode == BlendMode::Eraser);
+        self.stashed_preset = eraser.map(|p| p.name.clone());
+        let mut eraser_brush = eraser.map_or_else(|| self.brush.clone(), |p| p.brush.clone());
+        eraser_brush.brush_options.blend_mode = BlendMode::Eraser;
+        eraser_brush.brush_options.color = self.brush.brush_options.color;
+        self.stashed_brush = eraser_brush;
     }
 
     /// Remember `color` at the front of the recent-colors strip.
@@ -457,6 +462,8 @@ pub struct WorkspaceState {
     pub refresh: crate::app::frame_stats::RefreshRate,
     /// Keyboard layout, for where shortcuts are and how they're labelled.
     pub keyboard: crate::app::input::keyboard::KeyboardState,
+    /// The settings as last written (`None` until they're loaded).
+    pub settings_saved: Option<crate::app::settings::Saved>,
 }
 
 impl WorkspaceState {
@@ -515,6 +522,7 @@ impl WorkspaceState {
             clipboard: Default::default(),
             refresh: Default::default(),
             keyboard: crate::app::input::keyboard::KeyboardState::new(),
+            settings_saved: None,
         }
     }
 }

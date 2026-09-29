@@ -721,7 +721,7 @@ fn paint_preset(brush: &mut Brush, below: Color32) -> (Canvas, UndoAction) {
 #[test]
 fn every_preset_paints_and_undoes_exactly() {
     use crate::brush_engine::brush_options::BlendMode;
-    let presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+    let presets = crate::PainterApp::default_brush_presets();
     assert!(presets.len() >= 14);
     for preset in presets {
         let mut brush = preset.brush.clone();
@@ -765,7 +765,7 @@ fn pixels_rgba(canvas: &Canvas) -> Vec<Color32> {
 #[test]
 #[ignore = "timing; run with --release --ignored --nocapture"]
 fn preset_stroke_times() {
-    for preset in crate::PainterApp::create_default_brush_presets(Color32::BLACK) {
+    for preset in crate::PainterApp::default_brush_presets() {
         let mut brush = preset.brush.clone();
         let start = std::time::Instant::now();
         for _ in 0..5 {
@@ -845,7 +845,7 @@ fn render_presets_and_tips() {
         .unwrap();
         img.save(dir.join(format!("tip_{name}.png"))).unwrap();
     }
-    for preset in crate::PainterApp::create_default_brush_presets(Color32::BLACK) {
+    for preset in crate::PainterApp::default_brush_presets() {
         let mut brush = preset.brush.clone();
         let eraser =
             brush.brush_options.blend_mode == crate::brush_engine::brush_options::BlendMode::Eraser;
@@ -878,7 +878,7 @@ fn render_presets_and_tips() {
 
 #[test]
 fn every_preset_paints_the_same_after_a_trip_through_a_preset_file() {
-    let presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+    let presets = crate::PainterApp::default_brush_presets();
     let bytes = crate::brush_engine::preset_file::encode(&presets).unwrap();
     let back = crate::brush_engine::preset_file::decode(&bytes).unwrap();
     assert_eq!(back.len(), presets.len());

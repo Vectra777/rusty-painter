@@ -17,7 +17,8 @@ use crate::selection::{SelectionMask, SelectionShape};
 use eframe::egui::{Color32, Vec2};
 use rayon::prelude::*;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct FillSettings {
     /// Largest per-channel difference (0..=255) still counted as the same area.
     pub tolerance: u8,

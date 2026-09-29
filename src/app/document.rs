@@ -11,7 +11,7 @@ pub const MAX_CANVAS_DIMENSION: usize = 65_536;
 pub const MAX_CANVAS_PIXELS: usize = 268_435_456;
 pub const MAX_CANVAS_DPI: f32 = 4_800.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CanvasUnit {
     Pixels,
     Inches,
@@ -25,7 +25,7 @@ pub enum Orientation {
     Landscape,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BackgroundChoice {
     Transparent,
     White,
@@ -130,9 +130,11 @@ impl NewCanvasSettings {
         }
     }
 
+    /// The canvas's size, in the unit picked.
     pub fn sync_from_canvas(&mut self, canvas: &Canvas) {
-        self.width = canvas.width() as f32;
-        self.height = canvas.height() as f32;
+        let per_unit = self.px_per_unit();
+        self.width = canvas.width() as f32 / per_unit;
+        self.height = canvas.height() as f32 / per_unit;
         self.orientation = if self.width >= self.height {
             Orientation::Landscape
         } else {
@@ -144,17 +146,19 @@ impl NewCanvasSettings {
         self.validated_dimensions().unwrap_or((16_384, 16_384))
     }
 
-    pub fn validated_dimensions(&self) -> Result<(usize, usize), String> {
+    fn px_per_unit(&self) -> f32 {
         let dpi = self.resolution.max(1.0);
-        validate_dpi(dpi)?;
-        let to_px = |value: f32| -> f32 {
-            match self.unit {
-                CanvasUnit::Pixels => value,
-                CanvasUnit::Inches => value * dpi,
-                CanvasUnit::Millimeters => value / 25.4 * dpi,
-                CanvasUnit::Centimeters => value / 2.54 * dpi,
-            }
-        };
+        match self.unit {
+            CanvasUnit::Pixels => 1.0,
+            CanvasUnit::Inches => dpi,
+            CanvasUnit::Millimeters => dpi / 25.4,
+            CanvasUnit::Centimeters => dpi / 2.54,
+        }
+    }
+
+    pub fn validated_dimensions(&self) -> Result<(usize, usize), String> {
+        validate_dpi(self.resolution.max(1.0))?;
+        let to_px = |value: f32| value * self.px_per_unit();
 
         let mut w = to_px(self.width.max(1.0));
         let mut h = to_px(self.height.max(1.0));

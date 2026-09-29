@@ -10,6 +10,8 @@
 //! - `textures/<n>.bin`: each texture's heights, `f32` little-endian,
 //!   zstd-compressed (a PNG would round them to 8 bits).
 //!
+//! Built-in tips and textures are written by name only (since version 2).
+//!
 //! Every setting has a default, so files from older versions (or written by
 //! hand) load with whatever they leave out at its default.
 
@@ -31,7 +33,7 @@ use std::sync::Arc;
 /// The file name extension.
 pub const EXTENSION: &str = "rpbrush";
 const FORMAT: &str = "rusty-painter-brushes";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const PRESETS_ENTRY: &str = "presets.json";
 /// Largest tip or texture side accepted from a file.
 const MAX_SIDE: usize = 8192;
@@ -57,12 +59,18 @@ struct StoredPreset {
 struct StoredTip {
     width: usize,
     height: usize,
+    /// A built-in tip's name: no picture in the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    builtin: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct StoredTexture {
     name: String,
     size: usize,
+    /// A built-in texture (found by `name`): no heights in the file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    builtin: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -361,6 +369,26 @@ impl StoredBrush {
     }
 }
 
+fn builtin_tip_name(tip: &Arc<TipMask>) -> Option<&'static str> {
+    let builtin = crate::brush_engine::tip::builtin().iter();
+    let mut builtin = builtin.filter(|(_, t)| Arc::ptr_eq(t, tip) || **t == **tip);
+    builtin.next().map(|(n, _)| *n)
+}
+
+fn is_builtin_texture(pattern: &Arc<Pattern>) -> bool {
+    let mut builtin = crate::brush_engine::texture::builtin().iter();
+    builtin.any(|p| Arc::ptr_eq(p, pattern) || **p == **pattern)
+}
+
+/// Whether `a` and `b` hold the same settings (everything a preset file
+/// keeps; tips and textures compared by content).
+pub fn same_settings(a: &Brush, b: &Brush) -> bool {
+    let mut res = Resources::default();
+    let a = serde_json::to_value(StoredBrush::from_brush(a, &mut res));
+    let b = serde_json::to_value(StoredBrush::from_brush(b, &mut res));
+    matches!((a, b), (Ok(a), Ok(b)) if a == b)
+}
+
 /// `presets` as the bytes of a `.rpbrush` file.
 pub fn encode(presets: &[BrushPreset]) -> Result<Vec<u8>, String> {
     let mut res = Resources::default();
@@ -381,6 +409,7 @@ pub fn encode(presets: &[BrushPreset]) -> Result<Vec<u8>, String> {
             .map(|t| StoredTip {
                 width: t.width,
                 height: t.height,
+                builtin: builtin_tip_name(t).map(str::to_string),
             })
             .collect(),
         textures: res
@@ -389,6 +418,7 @@ pub fn encode(presets: &[BrushPreset]) -> Result<Vec<u8>, String> {
             .map(|t| StoredTexture {
                 name: t.name.clone(),
                 size: t.size,
+                builtin: is_builtin_texture(t),
             })
             .collect(),
     };
@@ -396,6 +426,9 @@ pub fn encode(presets: &[BrushPreset]) -> Result<Vec<u8>, String> {
     let json = serde_json::to_vec_pretty(&library).map_err(|e| e.to_string())?;
     zip.add(PRESETS_ENTRY, &json)?;
     for (i, tip) in res.tips.iter().enumerate() {
+        if builtin_tip_name(tip).is_some() {
+            continue;
+        }
         let (w, h) = (tip.width as u32, tip.height as u32);
         let img: image::DynamicImage = match &tip.colors {
             // A colour tip: its colours, with the mask as alpha.
@@ -420,6 +453,9 @@ pub fn encode(presets: &[BrushPreset]) -> Result<Vec<u8>, String> {
         zip.add(&format!("tips/{i}.png"), &png)?;
     }
     for (i, pattern) in res.textures.iter().enumerate() {
+        if is_builtin_texture(pattern) {
+            continue;
+        }
         let raw: Vec<u8> = pattern.data.iter().flat_map(|v| v.to_le_bytes()).collect();
         let packed = zstd::encode_all(&raw[..], 9).map_err(|e| e.to_string())?;
         zip.add(&format!("textures/{i}.bin"), &packed)?;
@@ -445,6 +481,17 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<BrushPreset>, String> {
     }
     let mut res = Resources::default();
     for (i, stored) in library.tips.iter().enumerate() {
+        if let Some(name) = &stored.builtin {
+            let tip = crate::brush_engine::tip::builtin()
+                .iter()
+                .find(|(n, _)| n == name);
+            res.tips.push(
+                tip.ok_or_else(|| format!("Unknown built-in brush tip {name}"))?
+                    .1
+                    .clone(),
+            );
+            continue;
+        }
         if stored.width == 0 || stored.height == 0 || stored.width.max(stored.height) > MAX_SIDE {
             return Err(damaged(format!("tip {i} size")));
         }
@@ -476,6 +523,17 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<BrushPreset>, String> {
         });
     }
     for (i, stored) in library.textures.iter().enumerate() {
+        if stored.builtin {
+            let pattern = crate::brush_engine::texture::builtin()
+                .iter()
+                .find(|p| p.name == stored.name);
+            res.textures.push(
+                pattern
+                    .ok_or_else(|| format!("Unknown built-in texture {}", stored.name))?
+                    .clone(),
+            );
+            continue;
+        }
         if !stored.size.is_power_of_two() || stored.size > MAX_SIDE {
             return Err(damaged(format!("texture {i} size")));
         }
@@ -597,7 +655,7 @@ mod tests {
 
     #[test]
     fn damaged_files_are_refused_not_panicked_on() {
-        let presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+        let presets = crate::PainterApp::default_brush_presets();
         let bytes = encode(&presets).unwrap();
         assert!(decode(b"not a zip").is_err());
         for cut in [10, bytes.len() / 3, bytes.len() / 2, bytes.len() - 5] {
@@ -611,7 +669,7 @@ mod tests {
 
     #[test]
     fn shared_tips_and_textures_are_written_once_and_built_ins_come_back_shared() {
-        let presets = crate::PainterApp::create_default_brush_presets(Color32::BLACK);
+        let presets = crate::PainterApp::default_brush_presets();
         let back = decode(&encode(&presets).unwrap()).unwrap();
         assert_eq!(back.len(), presets.len());
         for (a, b) in presets.iter().zip(&back) {

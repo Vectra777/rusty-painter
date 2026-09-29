@@ -21,7 +21,7 @@ pub(crate) mod transform;
 use crate::selection::SelectionType;
 use crate::selection::transform::TransformInfo;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 // The Transform variant carries the warp grid (a few hundred bytes); the
 // tool is copied a handful of times a frame, and staying `Copy` keeps every
 // `if let Tool::Transform(info) = app.active_tool` simple.
@@ -29,6 +29,7 @@ use crate::selection::transform::TransformInfo;
 pub enum Tool {
     Brush,
     Select(SelectionType),
+    #[serde(skip)]
     Transform(TransformInfo),
     /// Click the canvas to pick the composited color into the brush.
     Eyedropper,
