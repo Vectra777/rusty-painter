@@ -1,10 +1,11 @@
 [package]
 name = "rusty-painter"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Valentin Belougne <valentin.belougne@gmail.com>"]
 edition = "2024"
 description = "Native tiled painting playground built with egui."
 readme = "README.md"
+license = "GPL-3.0-only"
 publish = false
 
 [lib]

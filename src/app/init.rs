@@ -14,6 +14,34 @@ use eframe::egui::{Color32, Vec2};
 use rayon::ThreadPoolBuilder;
 use std::{path::PathBuf, thread};
 
+/// Where the app keeps what it saves: `$RUSTY_PAINTER_DATA` if set, else
+/// the user's data folder (`~/.local/share`, `%APPDATA%`, `~/Library/
+/// Application Support`, the app's own storage on Android), else the
+/// folder it was started in.
+fn data_dir() -> PathBuf {
+    let var = |name: &str| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = || var("HOME");
+    let base = if let Some(dir) = var("RUSTY_PAINTER_DATA") {
+        return dir;
+    } else if cfg!(target_os = "android") {
+        return crate::ANDROID_DATA.get().cloned().unwrap_or_default();
+    } else if cfg!(windows) {
+        var("APPDATA")
+    } else if cfg!(target_os = "macos") {
+        home().map(|h| h.join("Library/Application Support"))
+    } else {
+        var("XDG_DATA_HOME").or_else(|| home().map(|h| h.join(".local/share")))
+    };
+    base.map_or_else(
+        || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        |b| b.join("rusty-painter"),
+    )
+}
+
 impl PainterApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let canvas_w = 4000;
@@ -107,9 +135,11 @@ impl PainterApp {
         )
     }
 
+    /// `brushes/` in the app's data folder, which also holds the settings,
+    /// swatches, gradients and autosave (siblings of `brushes/`).
     fn get_brushes_path() -> PathBuf {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("brushes")
+        let data = data_dir();
+        let _ = std::fs::create_dir_all(&data);
+        data.join("brushes")
     }
 }

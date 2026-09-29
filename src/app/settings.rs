@@ -409,7 +409,10 @@ mod tests {
             back.brush_state.brush.brush_options.color,
             Color32::from_rgb(10, 20, 30)
         );
-        assert_eq!(back.workspace.keyboard.choice, Some(KeyboardLayout::default()));
+        assert_eq!(
+            back.workspace.keyboard.choice,
+            Some(KeyboardLayout::default())
+        );
         assert_eq!(back.export_state.settings.format, ExportFormat::Jpeg);
         assert_eq!(last_dir().as_deref(), Some(dir.as_path()));
         // The New Canvas size is the canvas's, in the unit kept: 64 px at 32 dpi.

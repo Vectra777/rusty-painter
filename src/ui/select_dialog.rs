@@ -152,7 +152,7 @@ pub fn select_dialog(app: &mut PainterApp, ctx: &egui::Context) {
                 }
             }
         }
-    } else if !(cancel || !open) {
+    } else if !cancel && open {
         app.workspace.select.dialog = Some(dialog);
     }
 }

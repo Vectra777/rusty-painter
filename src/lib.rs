@@ -45,6 +45,10 @@ pub fn run() -> eframe::Result<()> {
     )
 }
 
+/// Android's private storage, set at start-up (the data folder there).
+pub(crate) static ANDROID_DATA: std::sync::OnceLock<std::path::PathBuf> =
+    std::sync::OnceLock::new();
+
 #[cfg(target_os = "android")]
 fn android_native_options(app: AndroidApp) -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {
@@ -65,6 +69,9 @@ pub fn android_main(app: AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
 
+    if let Some(dir) = app.internal_data_path() {
+        let _ = ANDROID_DATA.set(dir);
+    }
     let options = android_native_options(app);
     let _ = eframe::run_native(
         APP_NAME,
