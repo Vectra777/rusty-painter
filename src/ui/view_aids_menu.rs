@@ -13,14 +13,17 @@ pub(crate) fn view_aids_items(
     ui: &mut egui::Ui,
     mut item: impl FnMut(&mut egui::Ui, &str, Option<String>) -> bool,
 ) {
+    use crate::app::input::keymap::Action;
     let ctx = ui.ctx().clone();
-    let cmd = egui::Modifiers::COMMAND;
-    let hint = |key| crate::app::input::keyboard::shortcut_label(&ctx, cmd, key);
+    let keymap = &app.workspace.keymap;
+    let (grid_keys, guides_keys) = (
+        keymap.labels(&ctx, Action::Grid),
+        keymap.labels(&ctx, Action::Guides),
+    );
     let aids = &mut app.workspace.view_aids;
     ui.checkbox(&mut aids.grid.show, "Grid")
         .on_hover_text(format!(
-            "Lines every so many pixels over the canvas ({})",
-            hint(egui::Key::Quote)
+            "Lines every so many pixels over the canvas ({grid_keys})"
         ));
     ui.menu_button("Grid Settings", |ui| grid_controls(app, ui));
     ui.menu_button("Guides", |ui| {
@@ -29,7 +32,7 @@ pub(crate) fn view_aids_items(
         }
         let guides = &mut app.workspace.view_aids.guides;
         ui.checkbox(&mut guides.show, "Show Guides")
-            .on_hover_text(hint(egui::Key::Semicolon));
+            .on_hover_text(guides_keys);
         ui.checkbox(&mut guides.locked, "Lock Guides")
             .on_hover_text("Guides can't be moved or removed by dragging");
         let any = !guides.lines.is_empty();

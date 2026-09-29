@@ -2,6 +2,7 @@
 //! touch menu sheet, and the file/panel actions they and the shortcuts run.
 
 use crate::PainterApp;
+use crate::app::input::keymap::Action;
 use crate::ui::style::*;
 use crate::ui::widgets::bar_frame;
 use eframe::egui::{self, Key, Modifiers, RichText};
@@ -9,6 +10,12 @@ use eframe::egui::{self, Key, Modifiers, RichText};
 /// As printed on this keyboard (see [`crate::app::input::keyboard`]).
 fn shortcut(ctx: &egui::Context, modifiers: Modifiers, key: Key) -> String {
     crate::app::input::keyboard::shortcut_label(ctx, modifiers, key)
+}
+
+/// The keys `action` has now (they can be changed), as printed on this
+/// keyboard.
+fn keys(app: &PainterApp, ctx: &egui::Context, action: Action) -> Option<String> {
+    app.workspace.keymap.label(ctx, action)
 }
 
 fn menu_action_id() -> egui::Id {
@@ -135,22 +142,20 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
 
 fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     let ctx = &ui.ctx().clone();
-    let cmd = Modifiers::COMMAND;
-    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-    if menu_item(ui, "New Canvas…", Some(shortcut(ctx, cmd, Key::N))) {
+    if menu_item(ui, "New Canvas…", keys(app, ctx, Action::NewCanvas)) {
         open_new_canvas_dialog(app);
     }
-    if menu_item(ui, "Open…", Some(shortcut(ctx, cmd, Key::O))) {
+    if menu_item(ui, "Open…", keys(app, ctx, Action::Open)) {
         open_project(app);
     }
-    if menu_item(ui, "Save…", Some(shortcut(ctx, cmd, Key::S))) {
+    if menu_item(ui, "Save…", keys(app, ctx, Action::Save)) {
         save_project(app);
     }
     ui.separator();
-    if menu_item(ui, "Import Image…", Some(shortcut(ctx, cmd_shift, Key::O))) {
+    if menu_item(ui, "Import Image…", keys(app, ctx, Action::Import)) {
         crate::app::import::import_image_dialog(app);
     }
-    if menu_item(ui, "Export Image…", Some(shortcut(ctx, cmd, Key::E))) {
+    if menu_item(ui, "Export Image…", keys(app, ctx, Action::Export)) {
         open_export_dialog(app);
     }
     ui.separator();
@@ -196,11 +201,14 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     let ctx = &ui.ctx().clone();
     let cmd = Modifiers::COMMAND;
     let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-    if menu_item(ui, "Undo", Some(shortcut(ctx, cmd, Key::Z))) {
+    if menu_item(ui, "Undo", keys(app, ctx, Action::Undo)) {
         app.apply_history(false);
     }
-    if menu_item(ui, "Redo", Some(shortcut(ctx, cmd_shift, Key::Z))) {
+    if menu_item(ui, "Redo", keys(app, ctx, Action::Redo)) {
         app.apply_history(true);
+    }
+    if menu_item(ui, "History…", keys(app, ctx, Action::History)) {
+        app.modal_state.show_history = true;
     }
     ui.separator();
     if menu_item(ui, "Cut", Some(shortcut(ctx, cmd, Key::X))) {
@@ -215,13 +223,17 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Paste", Some(shortcut(ctx, cmd, Key::V))) {
         app.paste();
     }
-    if menu_item(ui, "Delete Selected Pixels", Some("Delete".into())) {
+    if menu_item(
+        ui,
+        "Delete Selected Pixels",
+        keys(app, ctx, Action::DeletePixels),
+    ) {
         app.delete_selection_contents();
     }
     if menu_item(
         ui,
         "Content-Aware Fill",
-        Some(shortcut(ctx, Modifiers::SHIFT, Key::F5)),
+        keys(app, ctx, Action::ContentFill),
     ) {
         app.content_aware_fill();
     }
@@ -247,12 +259,10 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
 
 fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     let ctx = &ui.ctx().clone();
-    let cmd = Modifiers::COMMAND;
-    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-    if menu_item(ui, "New Layer", Some(shortcut(ctx, cmd_shift, Key::N))) {
+    if menu_item(ui, "New Layer", keys(app, ctx, Action::NewLayer)) {
         app.add_layer_and_select();
     }
-    if menu_item(ui, "New Folder", Some(shortcut(ctx, cmd, Key::G))) {
+    if menu_item(ui, "New Folder", keys(app, ctx, Action::NewFolder)) {
         app.add_folder();
     }
     ui.menu_button("New Adjustment Layer", |ui| {
@@ -262,7 +272,11 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
             }
         }
     });
-    if menu_item(ui, "Duplicate Layer", Some(shortcut(ctx, cmd, Key::J))) {
+    if menu_item(
+        ui,
+        "Duplicate Layer",
+        keys(app, ctx, Action::DuplicateLayer),
+    ) {
         app.duplicate_layer();
     }
     ui.separator();
@@ -272,7 +286,7 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(
         ui,
         "Clip to Layer Below",
-        Some(shortcut(ctx, cmd | Modifiers::ALT, Key::G)),
+        keys(app, ctx, Action::ClipToBelow),
     ) {
         app.toggle_clip_active();
     }
@@ -285,14 +299,10 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.rasterise_text_layer(active);
     }
     ui.separator();
-    if menu_item(
-        ui,
-        "Merge Down",
-        Some(shortcut(ctx, cmd | Modifiers::ALT, Key::E)),
-    ) {
+    if menu_item(ui, "Merge Down", keys(app, ctx, Action::MergeDown)) {
         app.merge_down();
     }
-    if menu_item(ui, "Merge Visible", Some(shortcut(ctx, cmd_shift, Key::E))) {
+    if menu_item(ui, "Merge Visible", keys(app, ctx, Action::MergeVisible)) {
         app.merge_visible();
     }
     if menu_item(ui, "Flatten Image", None) {
@@ -302,18 +312,16 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
 
 fn select_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     let ctx = &ui.ctx().clone();
-    let cmd = Modifiers::COMMAND;
-    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-    if menu_item(ui, "Select All", Some(shortcut(ctx, cmd, Key::A))) {
+    if menu_item(ui, "Select All", keys(app, ctx, Action::SelectAll)) {
         app.select_all();
     }
-    if menu_item(ui, "Deselect", Some(shortcut(ctx, cmd, Key::D))) {
+    if menu_item(ui, "Deselect", keys(app, ctx, Action::Deselect)) {
         app.deselect();
     }
     if menu_item(
         ui,
         "Invert Selection",
-        Some(shortcut(ctx, cmd_shift, Key::I)),
+        keys(app, ctx, Action::InvertSelection),
     ) {
         app.invert_selection();
     }
@@ -341,17 +349,16 @@ fn filter_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
 
 fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     let ctx = &ui.ctx().clone();
-    let cmd = Modifiers::COMMAND;
-    if menu_item(ui, "Zoom In", Some(shortcut(ctx, cmd, Key::Equals))) {
+    if menu_item(ui, "Zoom In", keys(app, ctx, Action::ZoomIn)) {
         app.zoom_by_from_center(1.25);
     }
-    if menu_item(ui, "Zoom Out", Some(shortcut(ctx, cmd, Key::Minus))) {
+    if menu_item(ui, "Zoom Out", keys(app, ctx, Action::ZoomOut)) {
         app.zoom_by_from_center(0.8);
     }
-    if menu_item(ui, "Fit to Window", Some(shortcut(ctx, cmd, Key::Num0))) {
+    if menu_item(ui, "Fit to Window", keys(app, ctx, Action::FitView)) {
         app.fit_view();
     }
-    if menu_item(ui, "Actual Pixels", Some(shortcut(ctx, cmd, Key::Num1))) {
+    if menu_item(ui, "Actual Pixels", keys(app, ctx, Action::ActualPixels)) {
         app.set_zoom_from_center(1.0);
     }
     if menu_item(ui, "Reset Rotation", None) {

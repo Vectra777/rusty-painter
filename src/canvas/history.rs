@@ -237,8 +237,8 @@ fn compress_older_actions(stack: &mut [UndoAction]) {
 }
 
 /// Drop the oldest actions until the stack fits in `max_bytes`, always
-/// keeping the newest one.
-fn trim_oldest(stack: &mut Vec<UndoAction>, max_bytes: usize) {
+/// keeping the newest one. Returns how many were dropped.
+fn trim_oldest(stack: &mut Vec<UndoAction>, max_bytes: usize) -> usize {
     let mut total: usize = stack.iter().map(snapshot_bytes).sum();
     let mut dropped = 0;
     while total > max_bytes && dropped + 1 < stack.len() {
@@ -246,6 +246,36 @@ fn trim_oldest(stack: &mut Vec<UndoAction>, max_bytes: usize) {
         dropped += 1;
     }
     stack.drain(..dropped);
+    dropped
+}
+
+/// What a step did, where the step itself says: layers added, removed,
+/// moved or merged, the image resized, a transform, a selection.
+fn describe(action: &UndoAction) -> Option<&'static str> {
+    use crate::canvas::storage::LayerKind;
+    let op = LayerHistoryOp::structural(action.layer_action.as_ref());
+    Some(match op {
+        Some(LayerHistoryOp::Added { meta, .. }) => match meta {
+            Some(m) if m.text.is_some() => "Text",
+            Some(m) if m.adjustment.is_some() => "New adjustment layer",
+            Some(m) if m.kind == LayerKind::Group => "New folder",
+            Some(m) if matches!(m.kind, LayerKind::Mask { .. }) => "Add mask",
+            _ => "New layer",
+        },
+        Some(LayerHistoryOp::Removed { .. }) => "Delete layer",
+        Some(LayerHistoryOp::Moved { .. }) => "Move layer",
+        Some(LayerHistoryOp::Document(_)) => "Image size / rotation",
+        Some(LayerHistoryOp::Replaced(_)) => "Merge layers",
+        Some(LayerHistoryOp::Text { .. }) => "Text",
+        None if matches!(action.layer_action, Some(LayerHistoryOp::Text { .. }))
+            && action.tiles.is_empty() =>
+        {
+            "Text"
+        }
+        None if action.transform.is_some() => "Transform",
+        None if action.tiles.is_empty() && action.selection.is_some() => "Selection",
+        None => return None,
+    })
 }
 
 /// Stack-based undo/redo manager that swaps tile buffers in place.
@@ -253,6 +283,15 @@ fn trim_oldest(stack: &mut Vec<UndoAction>, max_bytes: usize) {
 pub struct History {
     undo_stack: Vec<UndoAction>,
     redo_stack: Vec<UndoAction>,
+    /// What each step did, for the History panel: one per step, in step
+    /// with the stacks.
+    undo_labels: Vec<String>,
+    redo_labels: Vec<String>,
+    /// The next step's name, when the command that makes it knows better
+    /// (a filter, a paste).
+    next_label: Option<String>,
+    /// The tool in use: the name of a step that only changes pixels.
+    tool_label: &'static str,
     /// Actions pushed so far, so callers can tell whether a given action was
     /// recorded (the stack itself drops its oldest entries).
     pushed: u64,
@@ -264,8 +303,51 @@ impl History {
         Self {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            undo_labels: Vec::new(),
+            redo_labels: Vec::new(),
+            next_label: None,
+            tool_label: "Edit",
             pushed: 0,
         }
+    }
+
+    /// Name the next step pushed (it does what the command says, whatever
+    /// the tool in use).
+    pub fn label_next(&mut self, label: impl Into<String>) {
+        self.next_label = Some(label.into());
+    }
+
+    /// Rename the newest step (a command that knows what it did better
+    /// than the tool in use).
+    pub fn rename_last(&mut self, label: impl Into<String>) {
+        if let Some(last) = self.undo_labels.last_mut() {
+            *last = label.into();
+        }
+    }
+
+    /// The tool in use, naming the pixel changes it makes.
+    pub fn set_tool_label(&mut self, label: &'static str) {
+        self.tool_label = label;
+    }
+
+    /// What each step did: those that can be undone (oldest first) and
+    /// those that can be redone (next first... last).
+    pub fn labels(&self) -> (&[String], &[String]) {
+        (&self.undo_labels, &self.redo_labels)
+    }
+
+    fn label_of(&mut self, action: &UndoAction) -> String {
+        self.next_label
+            .take()
+            .or_else(|| describe(action).map(str::to_string))
+            .unwrap_or_else(|| self.tool_label.to_string())
+    }
+
+    /// Labels for stacks read from a file, which don't keep them.
+    fn fill_labels(&mut self) {
+        let name = |a: &UndoAction| describe(a).unwrap_or("Edit").to_string();
+        self.undo_labels = self.undo_stack.iter().map(name).collect();
+        self.redo_labels = self.redo_stack.iter().map(name).collect();
     }
 
     /// How many actions have been pushed (see [`History::push_action`]).
@@ -277,16 +359,21 @@ impl History {
     /// was just undone and should not come back).
     pub fn discard_redo(&mut self) {
         self.redo_stack.clear();
+        self.redo_labels.clear();
     }
 
     /// Push a new action onto the undo stack and clear redo, dropping the
     /// oldest actions if the stack's tile snapshots exceed `MAX_UNDO_BYTES`.
     pub fn push_action(&mut self, action: UndoAction) {
+        let label = self.label_of(&action);
         self.undo_stack.push(action);
+        self.undo_labels.push(label);
         self.pushed += 1;
         self.redo_stack.clear();
+        self.redo_labels.clear();
         compress_older_actions(&mut self.undo_stack);
-        trim_oldest(&mut self.undo_stack, MAX_UNDO_BYTES);
+        let dropped = trim_oldest(&mut self.undo_stack, MAX_UNDO_BYTES);
+        self.undo_labels.drain(..dropped);
     }
 
     pub(crate) fn stacks(&self) -> (&[UndoAction], &[UndoAction]) {
@@ -305,15 +392,18 @@ impl History {
         }
         compress_older_actions(&mut merged.undo_stack);
         trim_oldest(&mut merged.undo_stack, MAX_UNDO_BYTES);
+        merged.fill_labels();
         merged
     }
 
     pub(crate) fn from_stacks(undo_stack: Vec<UndoAction>, redo_stack: Vec<UndoAction>) -> Self {
-        Self {
+        let mut history = Self {
             undo_stack,
             redo_stack,
-            pushed: 0,
-        }
+            ..Self::new()
+        };
+        history.fill_labels();
+        history
     }
 
     /// Undo the latest action, returning tile coordinates that changed and
@@ -335,6 +425,8 @@ impl History {
             let op = LayerHistoryOp::structural(action.layer_action.as_ref());
             let layer_action = Self::finalize_after_undo(canvas, op);
             self.redo_stack.push(action);
+            let label = self.undo_labels.pop().unwrap_or_default();
+            self.redo_labels.push(label);
             (tiles, layer_action)
         } else {
             (Vec::new(), None)
@@ -356,6 +448,8 @@ impl History {
             let op = LayerHistoryOp::structural(action.layer_action.as_ref());
             let layer_action = Self::finalize_after_redo(canvas, op);
             self.undo_stack.push(action);
+            let label = self.redo_labels.pop().unwrap_or_default();
+            self.undo_labels.push(label);
             (tiles, layer_action)
         } else {
             (Vec::new(), None)

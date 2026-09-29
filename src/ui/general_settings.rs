@@ -3,6 +3,7 @@
 //! shortcuts window.
 
 use crate::PainterApp;
+use crate::app::input::keymap::{self, Action};
 use eframe::egui;
 use rayon::ThreadPoolBuilder;
 
@@ -174,42 +175,16 @@ fn keyboard_layout_row(app: &mut PainterApp, ui: &mut egui::Ui) {
     });
 }
 
-/// A titled group of `(keys, action)` rows.
-type ShortcutGroup = (&'static str, &'static [(&'static str, &'static str)]);
-
-/// Every shortcut, grouped, for Help → Keyboard Shortcuts.
-const SHORTCUTS: &[ShortcutGroup] = &[
+/// Keys and gestures that aren't commands to rebind: `(keys, what)` rows
+/// shown under each group of the shortcuts window.
+const FIXED: &[(&str, &[(&str, &str)])] = &[
+    ("Tools", &[("Alt + click", "Pick color while painting")]),
     (
-        "Tools",
-        &[
-            ("B", "Brush"),
-            ("E", "Eraser"),
-            ("M", "Rectangle / ellipse select"),
-            ("L", "Lasso select (again: magnetic lasso)"),
-            ("Q", "Magic wand (again: colour range)"),
-            ("U", "Shapes (again: next shape)"),
-            ("Shift + G", "Gradient"),
-            ("R", "Show / hide the ruler"),
-            ("V or T", "Transform"),
-            ("I", "Eyedropper"),
-            ("G", "Fill (again: bucket / enclose / lasso delete)"),
-            ("W", "Liquify"),
-            ("S", "Smudge (again: blur)"),
-            ("Alt + click", "Pick color while painting"),
-        ],
-    ),
-    (
-        "Brush & color",
-        &[
-            ("{[}  /  {]}", "Smaller / larger brush"),
-            ("P", "Brush presets window"),
-            ("K (hold or tap)", "Pop-up palette of favourite brushes"),
-            (
-                "Right-click, pen side button",
-                "Pop-up palette (right drag pans)",
-            ),
-            ("X", "Swap brush and secondary color"),
-        ],
+        "Brush & colour",
+        &[(
+            "Right-click, pen side button",
+            "Pop-up palette (right drag pans)",
+        )],
     ),
     (
         "View",
@@ -218,13 +193,6 @@ const SHORTCUTS: &[ShortcutGroup] = &[
             ("Middle drag", "Rotate"),
             ("Mouse wheel", "Zoom at cursor"),
             ("Two fingers", "Pan, pinch to zoom, twist to rotate"),
-            ("Tab", "Show / hide panels"),
-            ("Ctrl + {=} / Ctrl + {-}", "Zoom in / out"),
-            ("Ctrl + {0}", "Fit to window"),
-            ("Ctrl + {1}", "Actual pixels"),
-            ("H", "Flip the view horizontally"),
-            ("Ctrl + '", "Show / hide the grid"),
-            ("Ctrl + ;", "Show / hide the guides"),
             (
                 "Ctrl + drag a guide",
                 "Move it (from beside the canvas: a new one)",
@@ -234,38 +202,23 @@ const SHORTCUTS: &[ShortcutGroup] = &[
     (
         "Edit",
         &[
-            ("Ctrl + Z", "Undo"),
-            ("Ctrl + Shift + Z, Ctrl + Y", "Redo"),
             ("Ctrl + X / C / V", "Cut / copy / paste (as a new layer)"),
             ("Ctrl + Shift + C", "Copy everything visible (merged)"),
-            ("Ctrl + Shift + N", "New layer"),
-            ("Ctrl + J", "Duplicate layer"),
-            ("Ctrl + G", "New folder"),
-            ("Ctrl + Alt + G", "Clip to the layer below"),
-            ("Ctrl + Alt + E", "Merge down"),
-            ("Ctrl + Shift + E", "Merge visible"),
             ("Double-click a layer", "Rename it (folders too)"),
             ("Two-finger tap", "Undo"),
             ("Three-finger tap", "Redo"),
-            ("{/}", "Lock layer transparency"),
         ],
     ),
     (
-        "Selection & transform",
+        "Selection",
         &[
-            ("Ctrl + A", "Select all"),
-            ("Ctrl + D, Esc", "Deselect"),
-            ("Ctrl + Shift + I", "Invert selection"),
-            ("Delete, Backspace", "Delete the selected pixels"),
-            ("Shift + F5", "Fill the selection from its surroundings"),
+            ("Esc", "Cancel what's in progress, else deselect"),
             ("Shift / Alt + drag", "Add to / erase from the selection"),
-            ("Shift + Q", "Quick mask: paint the selection"),
             ("Ctrl + click a thumbnail", "Select the layer's paint"),
             (
                 "Ctrl + Shift / Alt + click",
                 "Add it to / take it from the selection",
             ),
-            ("Backspace", "Remove the last magnetic lasso point"),
             (
                 "Enter, double-click",
                 "Close the magnetic lasso, finish a polygon",
@@ -278,32 +231,50 @@ const SHORTCUTS: &[ShortcutGroup] = &[
             ("Shift + drag corner", "Scale proportionally"),
         ],
     ),
-    (
-        "File",
-        &[
-            ("Ctrl + N", "New canvas"),
-            ("Ctrl + Shift + O, drop a file", "Import image as a layer"),
-            ("Ctrl + O", "Open project"),
-            ("Ctrl + S", "Save project"),
-            ("Ctrl + E", "Export image"),
-        ],
-    ),
+    ("File", &[("Drop a file", "Import image as a layer")]),
 ];
 
-/// Width of one column of shortcuts.
-const SHORTCUT_COLUMN_WIDTH: f32 = 330.0;
+/// The groups, in order.
+fn groups() -> Vec<&'static str> {
+    let mut groups: Vec<&str> = Vec::new();
+    for info in keymap::ACTIONS {
+        if !groups.contains(&info.group) {
+            groups.push(info.group);
+        }
+    }
+    groups
+}
 
-/// Help window listing every keyboard shortcut: the groups in as many
+fn fixed_rows(group: &str) -> &'static [(&'static str, &'static str)] {
+    FIXED
+        .iter()
+        .find(|(g, _)| *g == group)
+        .map_or(&[], |(_, rows)| rows)
+}
+
+/// How many rows a group takes (its header counts as about two).
+fn group_rows(group: &str) -> usize {
+    keymap::ACTIONS.iter().filter(|i| i.group == group).count() + fixed_rows(group).len() + 2
+}
+
+/// Width of one column of shortcuts, and of the names in it.
+const SHORTCUT_COLUMN_WIDTH: f32 = 400.0;
+const SHORTCUT_NAME_WIDTH: f32 = 170.0;
+
+/// Help → Keyboard Shortcuts: every command and its keys, which a click
+/// changes, and the gestures that can't be changed; the groups in as many
 /// columns as the screen fits (up to three), scrolling if still too tall.
 pub fn shortcuts_window(app: &mut PainterApp, ctx: &egui::Context) {
     if !app.modal_state.show_shortcuts {
+        app.workspace.recording_shortcut = None;
         return;
     }
+    record_shortcut(app, ctx);
     let screen = ctx.screen_rect();
     let columns = ((screen.width() - 48.0) / SHORTCUT_COLUMN_WIDTH)
         .floor()
         .clamp(1.0, 3.0) as usize;
-    let groups = shortcut_columns(columns);
+    let columns = shortcut_columns(columns);
     let mut open = true;
     egui::Window::new("Keyboard Shortcuts")
         .open(&mut open)
@@ -311,18 +282,42 @@ pub fn shortcuts_window(app: &mut PainterApp, ctx: &egui::Context) {
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Click a shortcut, then press the new keys (Esc: cancel). \
+                         + adds another key, × leaves it without one.",
+                    )
+                    .small()
+                    .color(crate::ui::style::TEXT_DIM),
+                );
+                let changed = keymap::ACTIONS
+                    .iter()
+                    .any(|i| !app.workspace.keymap.is_default(i.action));
+                if ui
+                    .add_enabled(changed, egui::Button::new("Reset All"))
+                    .clicked()
+                {
+                    app.workspace.keymap.reset_all();
+                    set_notice(ctx, None);
+                }
+            });
+            if let Some(notice) = notice(ctx) {
+                ui.label(egui::RichText::new(notice).color(crate::ui::style::TEXT_STRONG));
+            }
+            ui.separator();
             egui::ScrollArea::vertical()
-                .max_height((screen.height() - 120.0).max(200.0))
+                .max_height((screen.height() - 150.0).max(200.0))
                 .show(ui, |ui| {
                     ui.horizontal_top(|ui| {
-                        for (c, column) in groups.iter().enumerate() {
+                        for (c, column) in columns.iter().enumerate() {
                             if c > 0 {
                                 ui.separator();
                             }
                             ui.vertical(|ui| {
                                 ui.set_width(SHORTCUT_COLUMN_WIDTH - 24.0);
-                                for &(group, entries) in column {
-                                    shortcut_group(ui, group, entries);
+                                for group in column {
+                                    shortcut_group(app, ui, group);
                                 }
                             });
                         }
@@ -333,15 +328,14 @@ pub fn shortcuts_window(app: &mut PainterApp, ctx: &egui::Context) {
 }
 
 /// The groups split into `n` columns of about the same height, in order.
-fn shortcut_columns(n: usize) -> Vec<Vec<ShortcutGroup>> {
-    // A group's header counts as about two rows.
-    let rows = |entries: &[(&str, &str)]| entries.len() + 2;
-    let total: usize = SHORTCUTS.iter().map(|(_, e)| rows(e)).sum();
+fn shortcut_columns(n: usize) -> Vec<Vec<&'static str>> {
+    let groups = groups();
+    let total: usize = groups.iter().map(|g| group_rows(g)).sum();
     let target = total.div_ceil(n.max(1));
     let mut columns = vec![Vec::new()];
     let mut height = 0;
-    for &(group, entries) in SHORTCUTS {
-        let h = rows(entries);
+    for group in groups {
+        let h = group_rows(group);
         // Start a new column when this group would overshoot more than
         // stopping short does.
         if height > 0
@@ -352,16 +346,13 @@ fn shortcut_columns(n: usize) -> Vec<Vec<ShortcutGroup>> {
             columns.push(Vec::new());
             height = 0;
         }
-        columns
-            .last_mut()
-            .expect("one column")
-            .push((group, entries));
+        columns.last_mut().expect("one column").push(group);
         height += h;
     }
     columns
 }
 
-fn shortcut_group(ui: &mut egui::Ui, group: &str, entries: &[(&str, &str)]) {
+fn shortcut_group(app: &mut PainterApp, ui: &mut egui::Ui, group: &str) {
     ui.label(
         egui::RichText::new(group.to_uppercase())
             .small()
@@ -370,16 +361,146 @@ fn shortcut_group(ui: &mut egui::Ui, group: &str, entries: &[(&str, &str)]) {
     );
     egui::Grid::new(group)
         .num_columns(2)
-        .spacing([16.0, 3.0])
+        .spacing([12.0, 3.0])
         .show(ui, |ui| {
-            for (keys, action) in entries {
+            let name = |ui: &mut egui::Ui, text: &str| {
+                ui.allocate_ui(egui::vec2(SHORTCUT_NAME_WIDTH, 0.0), |ui| {
+                    ui.set_width(SHORTCUT_NAME_WIDTH);
+                    ui.add(egui::Label::new(text).wrap());
+                });
+            };
+            for info in keymap::ACTIONS.iter().filter(|i| i.group == group) {
+                name(ui, info.label);
+                action_keys(app, ui, info.action);
+                ui.end_row();
+            }
+            for (keys, what) in fixed_rows(group) {
+                name(ui, what);
                 let keys = crate::app::input::keyboard::with_keycaps(ui.ctx(), keys);
-                ui.label(egui::RichText::new(keys).monospace());
-                ui.add(egui::Label::new(*action).wrap());
+                ui.label(
+                    egui::RichText::new(keys)
+                        .monospace()
+                        .color(crate::ui::style::TEXT_DIM),
+                );
                 ui.end_row();
             }
         });
     ui.add_space(8.0);
+}
+
+/// An action's keys (click to record new ones) and its buttons.
+fn action_keys(app: &mut PainterApp, ui: &mut egui::Ui, action: Action) {
+    let ws = &mut app.workspace;
+    let recording = ws.recording_shortcut.filter(|r| r.0 == action);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let text = match recording {
+            Some(_) => "Press keys…".to_string(),
+            None => ws.keymap.labels(ui.ctx(), action),
+        };
+        let keys = ui
+            .selectable_label(recording.is_some(), egui::RichText::new(text).monospace())
+            .on_hover_text("Click, then press the new keys");
+        if keys.clicked() {
+            ws.recording_shortcut = match recording {
+                Some(_) => None,
+                None => Some((action, false)),
+            };
+        }
+        if ui
+            .small_button("+")
+            .on_hover_text("Add another key")
+            .clicked()
+        {
+            ws.recording_shortcut = Some((action, true));
+        }
+        if !ws.keymap.bindings(action).is_empty()
+            && ui.small_button("×").on_hover_text("No shortcut").clicked()
+        {
+            ws.keymap.set(action, Vec::new());
+            ws.recording_shortcut = None;
+        }
+        if !ws.keymap.is_default(action)
+            && ui
+                .small_button("Default")
+                .on_hover_text(format!(
+                    "Back to {}",
+                    keymap::Keymap::default().labels(ui.ctx(), action)
+                ))
+                .clicked()
+        {
+            ws.keymap.reset(action);
+        }
+    });
+}
+
+/// While a shortcut is being recorded, the next key press (with its
+/// modifiers) becomes it; Esc cancels. Keys that are only modifiers wait.
+fn record_shortcut(app: &mut PainterApp, ctx: &egui::Context) {
+    let Some((action, add)) = app.workspace.recording_shortcut else {
+        return;
+    };
+    let pressed = ctx.input_mut(|i| {
+        let found = i.events.iter().position(|e| {
+            matches!(
+                e,
+                egui::Event::Key {
+                    pressed: true,
+                    repeat: false,
+                    ..
+                }
+            )
+        })?;
+        match i.events.remove(found) {
+            egui::Event::Key {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            } => Some((key, physical_key, modifiers)),
+            _ => None,
+        }
+    });
+    let Some((key, physical_key, modifiers)) = pressed else {
+        return;
+    };
+    app.workspace.recording_shortcut = None;
+    if key == egui::Key::Escape && modifiers.is_none() {
+        return;
+    }
+    let binding = keymap::Binding::recorded(key, physical_key, modifiers);
+    let map = &mut app.workspace.keymap;
+    if !add {
+        map.set(action, Vec::new());
+    }
+    let taken = map.assign(action, binding);
+    let label = binding.label(ctx);
+    set_notice(
+        ctx,
+        (!taken.is_empty()).then(|| {
+            let names: Vec<&str> = taken.iter().map(|a| a.info().label).collect();
+            format!(
+                "{label} was the shortcut for {}; now it's {}.",
+                names.join(", "),
+                action.info().label
+            )
+        }),
+    );
+}
+
+fn notice_id() -> egui::Id {
+    egui::Id::new("shortcut_notice")
+}
+
+fn notice(ctx: &egui::Context) -> Option<String> {
+    ctx.data(|d| d.get_temp(notice_id()))
+}
+
+fn set_notice(ctx: &egui::Context, text: Option<String>) {
+    ctx.data_mut(|d| match text {
+        Some(t) => d.insert_temp(notice_id(), t),
+        None => d.remove::<String>(notice_id()),
+    });
 }
 
 #[cfg(test)]
@@ -391,15 +512,21 @@ mod tests {
         for n in 1..=3 {
             let columns = shortcut_columns(n);
             assert!(columns.len() <= n);
-            let flat: Vec<&str> = columns.iter().flatten().map(|g| g.0).collect();
-            let all: Vec<&str> = SHORTCUTS.iter().map(|g| g.0).collect();
-            assert_eq!(flat, all, "{n} columns");
+            let flat: Vec<&str> = columns.iter().flatten().copied().collect();
+            assert_eq!(flat, groups(), "{n} columns");
             let heights: Vec<usize> = columns
                 .iter()
-                .map(|c| c.iter().map(|g| g.1.len() + 2).sum())
+                .map(|c| c.iter().map(|g| group_rows(g)).sum())
                 .collect();
             let (lo, hi) = (heights.iter().min().unwrap(), heights.iter().max().unwrap());
-            assert!(hi - lo <= 12, "{n} columns: {heights:?}");
+            assert!(hi - lo <= 14, "{n} columns: {heights:?}");
+        }
+    }
+
+    #[test]
+    fn every_fixed_row_is_under_a_group_of_commands() {
+        for (group, _) in FIXED {
+            assert!(groups().contains(group), "{group}");
         }
     }
 }

@@ -163,74 +163,70 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     if app.workspace.filter.session.is_some() {
         return false;
     }
+    // The shortcuts window is waiting for a new shortcut's keys.
+    if app.workspace.recording_shortcut.is_some() {
+        return false;
+    }
     // The pop-up palette takes Esc and its own key while it's open.
     if app.brush_state.library.radial.is_some() {
         return ui::radial_palette::palette_keys(app, ctx);
     }
-    use crate::app::input::keyboard::consume_at;
+    use crate::app::input::keymap::Action;
     // Before the keys below consume V (the Transform tool).
     let clipboard = app.clipboard_keys(ctx);
 
-    let cmd = Modifiers::COMMAND;
-    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-    let none = Modifiers::NONE;
-    // `consume_key` matches shift loosely, so check the shifted combos first.
-    let pressed = |mods: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(mods, key));
+    let actions = app.workspace.keymap.take_actions(ctx);
+    let on = |a: Action| actions.contains(&a);
+    // Esc isn't a shortcut to change: it cancels what's in progress.
+    let escape = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
 
-    let redo = pressed(cmd_shift, Key::Z) || pressed(cmd, Key::Y);
-    let undo = !redo && pressed(cmd, Key::Z);
-    let new_layer = pressed(cmd_shift, Key::N);
-    // Before Ctrl+G, which would match it too (extra Alt is allowed).
-    let clip = pressed(cmd | Modifiers::ALT, Key::G);
-    let new_folder = pressed(cmd, Key::G);
-    let duplicate = pressed(cmd, Key::J);
-    let new_canvas = !new_layer && pressed(cmd, Key::N);
-    let import = pressed(cmd_shift, Key::O);
-    let open = !import && pressed(cmd, Key::O);
-    let save = pressed(cmd, Key::S);
-    // Before Ctrl+E, which would match them too.
-    let merge_visible = pressed(cmd_shift, Key::E);
-    let merge_down = pressed(cmd | Modifiers::ALT, Key::E);
-    let export = pressed(cmd, Key::E);
-    // Digits and symbols by key position (no Shift or AltGr needed on
-    // AZERTY and the like), or by the character typed.
-    let at =
-        |mods: Modifiers, position: Key| consume_at(ctx, mods, position) || pressed(mods, position);
-    let fit = at(cmd, Key::Num0);
-    let actual = at(cmd, Key::Num1);
-    let zoom_in = at(cmd, Key::Equals) || pressed(cmd, Key::Plus);
-    let zoom_out = at(cmd, Key::Minus);
-    let invert = pressed(cmd_shift, Key::I);
-    let select_all = pressed(cmd, Key::A);
-    let deselect = pressed(cmd, Key::D) || pressed(none, Key::Escape);
-    let brush = pressed(none, Key::B);
-    let eraser = pressed(none, Key::E);
-    let select_rect = pressed(none, Key::M);
-    let lasso = pressed(none, Key::L);
-    // Before Q, which would match it too.
-    let quick_mask = pressed(Modifiers::SHIFT, Key::Q);
-    let wand = pressed(none, Key::Q);
-    let flip = pressed(none, Key::H);
-    let content_fill = pressed(Modifiers::SHIFT, Key::F5);
-    let gradient = pressed(Modifiers::SHIFT, Key::G);
-    let shapes = pressed(none, Key::U);
-    let ruler = pressed(none, Key::R);
-    let remove_anchor = pressed(none, Key::Backspace);
-    let delete = pressed(none, Key::Delete);
-    let transform = pressed(none, Key::V) || pressed(none, Key::T);
-    let eyedropper = pressed(none, Key::I);
-    let fill = pressed(none, Key::G);
-    let alpha_lock = at(none, Key::Slash);
-    let liquify = pressed(none, Key::W);
-    let blend = pressed(none, Key::S);
-    let swap = pressed(none, Key::X);
-    let panels = pressed(none, Key::Tab);
-    let presets = pressed(none, Key::P);
-    let palette = pressed(none, Key::K);
-    let smaller = at(none, Key::OpenBracket);
-    let bigger = at(none, Key::CloseBracket);
-    let grid = pressed(cmd, Key::Quote);
-    let guides = pressed(cmd, Key::Semicolon);
+    let redo = on(Action::Redo);
+    let undo = !redo && on(Action::Undo);
+    let history = on(Action::History);
+    let new_layer = on(Action::NewLayer);
+    let clip = on(Action::ClipToBelow);
+    let new_folder = on(Action::NewFolder);
+    let duplicate = on(Action::DuplicateLayer);
+    let new_canvas = on(Action::NewCanvas);
+    let import = on(Action::Import);
+    let open = on(Action::Open);
+    let save = on(Action::Save);
+    let merge_visible = on(Action::MergeVisible);
+    let merge_down = on(Action::MergeDown);
+    let export = on(Action::Export);
+    let fit = on(Action::FitView);
+    let actual = on(Action::ActualPixels);
+    let zoom_in = on(Action::ZoomIn);
+    let zoom_out = on(Action::ZoomOut);
+    let invert = on(Action::InvertSelection);
+    let select_all = on(Action::SelectAll);
+    let deselect = on(Action::Deselect) || escape;
+    let brush = on(Action::Brush);
+    let eraser = on(Action::Eraser);
+    let select_rect = on(Action::RectSelect);
+    let lasso = on(Action::Lasso);
+    let quick_mask = on(Action::QuickMask);
+    let wand = on(Action::Wand);
+    let flip = on(Action::FlipView);
+    let content_fill = on(Action::ContentFill);
+    let gradient = on(Action::Gradient);
+    let shapes = on(Action::Shapes);
+    let ruler = on(Action::Ruler);
+    let delete = on(Action::DeletePixels);
+    let transform = on(Action::Transform);
+    let eyedropper = on(Action::Eyedropper);
+    let fill = on(Action::Fill);
+    let alpha_lock = on(Action::AlphaLock);
+    let liquify = on(Action::Liquify);
+    let blend = on(Action::Blend);
+    let swap = on(Action::SwapColors);
+    let panels = on(Action::TogglePanels);
+    let presets = on(Action::Presets);
+    let palette = on(Action::Palette);
+    let smaller = on(Action::SmallerBrush);
+    let bigger = on(Action::BiggerBrush);
+    let grid = on(Action::Grid);
+    let guides = on(Action::Guides);
 
     let mut repaint = clipboard;
     if duplicate {
@@ -240,6 +236,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
 
     if undo || redo {
         app.apply_history(redo);
+        repaint = true;
+    }
+    if history {
+        let show = &mut app.modal_state.show_history;
+        *show = !*show;
         repaint = true;
     }
     if new_folder {
@@ -336,13 +337,13 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         guides.show = !guides.show;
         repaint = true;
     }
-    if remove_anchor && app.workspace.select.magnetic.is_some() {
+    if delete && app.workspace.select.magnetic.is_some() {
         app.magnetic_undo_anchor();
         repaint = true;
-    } else if remove_anchor && app.workspace.shapes.session.is_some() {
+    } else if delete && app.workspace.shapes.session.is_some() {
         app.shape_undo_point();
         repaint = true;
-    } else if (delete || remove_anchor) && app.layer_state.floating_layer_idx.is_none() {
+    } else if delete && app.layer_state.floating_layer_idx.is_none() {
         // Delete (or Backspace, the Mac delete key) erases the selected
         // pixels; a floating transform is left alone.
         app.delete_selection_contents();

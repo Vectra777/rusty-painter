@@ -48,3 +48,25 @@ pub enum Tool {
     /// Type text onto a new layer.
     Text,
 }
+
+impl Tool {
+    /// What the History panel calls a step this tool makes by changing
+    /// pixels (steps that add layers, select or transform say so
+    /// themselves).
+    pub fn history_label(&self, eraser: bool) -> &'static str {
+        match self {
+            Tool::Brush if eraser => "Eraser",
+            Tool::Brush => "Brush",
+            Tool::Select(_) => "Selection",
+            Tool::Transform(_) => "Transform",
+            Tool::Eyedropper => "Edit",
+            Tool::Fill => "Fill",
+            Tool::Liquify => "Liquify",
+            Tool::Smudge => "Smudge",
+            Tool::Blur => "Blur",
+            Tool::Shape(_) => "Shape",
+            Tool::Gradient => "Gradient",
+            Tool::Text => "Text",
+        }
+    }
+}

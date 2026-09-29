@@ -26,29 +26,41 @@ fn radii(ctx: &egui::Context) -> (f32, f32) {
     }
 }
 
-/// Keys while the palette is open: Esc or `K` again closes it; letting go
-/// of the `K` that opened it over a slice picks that brush. Returns whether
-/// to repaint.
+/// Keys while the palette is open: Esc or its key (`K`) again closes it;
+/// letting go of the key that opened it over a slice picks that brush.
+/// Returns whether to repaint.
 pub(crate) fn palette_keys(app: &mut PainterApp, ctx: &egui::Context) -> bool {
     let (inner, _) = radii(ctx);
+    let binding = app
+        .workspace
+        .keymap
+        .bindings(crate::app::input::keymap::Action::Palette)
+        .first()
+        .copied();
     let (escape, again, released, pointer) = ctx.input_mut(|i| {
-        let again = i.events.iter().any(|e| {
-            matches!(
-                e,
-                egui::Event::Key {
-                    key: Key::K,
-                    pressed: true,
-                    repeat: false,
-                    ..
-                }
-            )
-        });
-        // Held keys repeat: those presses are the palette's too.
-        i.consume_key(egui::Modifiers::NONE, Key::K);
+        let (again, released) = match binding {
+            Some(b) => {
+                let again = i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        } if *key == b.key
+                    )
+                });
+                // Held keys repeat: those presses are the palette's too.
+                i.consume_key(b.modifiers(), b.key);
+                (again, i.key_released(b.key))
+            }
+            None => (false, false),
+        };
         (
             i.consume_key(egui::Modifiers::NONE, Key::Escape),
             again,
-            i.key_released(Key::K),
+            released,
             i.pointer.latest_pos(),
         )
     });

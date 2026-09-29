@@ -22,7 +22,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **Gradients**: Linear, radial, reflected and angle gradients, previewed live, dithered, clipped to the selection.
 - **Smart Patch**: Content-aware fill of the selection from its surroundings (PatchMatch), or paint over something with the selection brush to remove it.
 - **Transform Tools**: Move, rotate, scale and flip selections or layers with a live preview; **Perspective** (drag the corners of a plane seen at an angle) and **Distort** (a grid of points, 1×1 to 5×5 cells, inner points included: the picture bends smoothly through them). The selection follows what was transformed.
-- **History**: One undo history for the whole document (pixels, selections, transforms, layer add/remove/reorder/merge, canvas resizes; all of it kept in saved files), undone in the order things were done whichever layer is selected.
+- **History**: Edit → History (`Ctrl+H`) lists every step by what it did (the tool, filter or command); click one to go back to it, or forward again. One undo history for the whole document (pixels, selections, transforms, layer add/remove/reorder/merge, canvas resizes; all of it kept in saved files), undone in the order things were done whichever layer is selected.
 - **Canvas**: Large canvas support (default 4000x4000) backed by tiled storage and GPU texture atlases.
 - **Project Files**: Save/open your work as a `.rpainter` project (compressed, includes undo history) via the Open/Save buttons in the top bar. File managers show a preview of the drawing, and Krita, GIMP or MyPaint can open it as a flattened image.
 - **Export**: Save your work as PNG, JPEG, TIFF, or a layered PSD. Photoshop files (`.psd`, 8-bit RGB or grayscale) open with their layers, folders, masks, blend modes and clipping.
@@ -113,7 +113,7 @@ Needs `perf` and `cargo install flamegraph`. The script builds with frame pointe
   Without them the APK is signed with a throwaway key: it installs, but Android won't let a later release update it (different signature), so set them before sharing APKs. Keep the keystore safe: losing it means users must uninstall to upgrade.
 
 ## Controls
-The full list is in **Help → Keyboard Shortcuts**, labelled for your keyboard (QWERTY, AZERTY or QWERTZ, detected or set in Settings): letter shortcuts follow the letter, digit and symbol ones the key's position. The main ones (QWERTY names):
+The full list is in **Help → Keyboard Shortcuts**, labelled for your keyboard (QWERTY, AZERTY or QWERTZ, detected or set in Settings): letter shortcuts follow the letter, digit and symbol ones the key's position. Click any shortcut there and press new keys to change it (a key already in use moves over, and the window says from which command); changes are kept in `settings.json`. The defaults (QWERTY names):
 
 - **Paint**: left drag (pen pressure where supported). `B` brush, `E` eraser, `[` / `]` size, `K` (hold) or right-click the pop-up brush palette.
 - **View**: `Space` + drag or right drag to pan, middle drag to rotate, wheel to zoom, `Ctrl+0` fit, `Ctrl+1` actual pixels, `H` flip, `Ctrl+'` grid, `Ctrl+;` guides (Ctrl+drag a guide to move it). Two fingers pan, pinch and twist.

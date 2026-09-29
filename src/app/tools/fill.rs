@@ -165,7 +165,7 @@ impl PainterApp {
         // The selection's own coverage is the mask (soft edges fade).
         let sel = &self.selection_manager;
         let mask = SelectionMask::rasterize(bounds, |y, x0, out| sel.row_coverage(y, x0, out));
-        self.erase_under(mask, false);
+        self.labelled("Delete", |app| app.erase_under(mask, false));
     }
 
     /// `rect` grown to whole pixels (plus one for soft edges), within the
@@ -173,10 +173,10 @@ impl PainterApp {
     pub(crate) fn pixel_bounds(&self, rect: eframe::egui::Rect) -> [i32; 4] {
         let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
         [
-            (rect.min.x.floor() as i32 - 1).clamp(0, w),
-            (rect.min.y.floor() as i32 - 1).clamp(0, h),
-            (rect.max.x.ceil() as i32 + 1).clamp(0, w),
-            (rect.max.y.ceil() as i32 + 1).clamp(0, h),
+            (rect.min.x.floor() as i32).saturating_sub(1).clamp(0, w),
+            (rect.min.y.floor() as i32).saturating_sub(1).clamp(0, h),
+            (rect.max.x.ceil() as i32).saturating_add(1).clamp(0, w),
+            (rect.max.y.ceil() as i32).saturating_add(1).clamp(0, h),
         ]
     }
 

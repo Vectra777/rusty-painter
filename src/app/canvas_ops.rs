@@ -544,6 +544,36 @@ impl PainterApp {
 
     /// Record a pixel edit as one undo step. A text layer it paints on
     /// becomes plain pixels in that same step (undo brings the text back).
+    /// Run `command`; the undo step it makes (if any) is called `label`
+    /// in the History panel.
+    pub(crate) fn labelled(&mut self, label: &str, command: impl FnOnce(&mut Self)) {
+        let before = self.layer_state.history.push_count();
+        command(self);
+        if self.layer_state.history.push_count() > before {
+            self.layer_state.history.rename_last(label);
+        }
+    }
+
+    /// Go back or forward through the history until `undo_len` steps can
+    /// be undone (the History panel's click).
+    pub(crate) fn history_jump(&mut self, undo_len: usize) {
+        loop {
+            let (undo, redo) = self.layer_state.history.labels();
+            let (have, can_redo) = (undo.len(), redo.len());
+            if have > undo_len {
+                self.apply_history(false);
+            } else if have < undo_len && can_redo > 0 {
+                self.apply_history(true);
+            } else {
+                break;
+            }
+            // A step that couldn't move (nothing changed): stop.
+            if self.layer_state.history.labels().0.len() == have {
+                break;
+            }
+        }
+    }
+
     pub(crate) fn push_undo(&mut self, mut action: UndoAction) {
         self.rasterise_painted_text(&mut action);
         self.layer_state.history.push_action(action);

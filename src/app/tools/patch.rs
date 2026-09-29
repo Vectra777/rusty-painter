@@ -223,6 +223,7 @@ impl PainterApp {
             })
             .collect();
         if !tiles.is_empty() {
+            self.layer_state.history.label_next("Content-aware fill");
             self.push_undo(UndoAction {
                 tiles,
                 selection: None,

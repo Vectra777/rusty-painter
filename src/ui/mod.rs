@@ -11,6 +11,7 @@ pub(crate) mod filter_dialog;
 pub(crate) mod frame_times;
 pub(crate) mod general_settings;
 pub(crate) mod gradient_editor;
+pub(crate) mod history_panel;
 pub(crate) mod icons;
 pub(crate) mod image_gallery;
 pub(crate) mod image_menu;

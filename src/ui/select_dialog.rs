@@ -5,7 +5,7 @@ use crate::PainterApp;
 use crate::app::tools::select::SelectionModify;
 use crate::selection::SelectionMode;
 use crate::ui::widgets::{property_row, slider_row};
-use eframe::egui::{self, Key, Modifiers};
+use eframe::egui::{self, Key};
 
 /// An open Modify or Save Selection dialog.
 #[derive(Clone, Debug)]
@@ -95,8 +95,11 @@ pub fn select_menu_items(
     } else {
         "Quick Mask"
     };
-    let hint = crate::app::input::keyboard::shortcut_label(ui.ctx(), Modifiers::SHIFT, Key::Q);
-    if item(ui, label, Some(hint)) {
+    let hint = app
+        .workspace
+        .keymap
+        .label(ui.ctx(), crate::app::input::keymap::Action::QuickMask);
+    if item(ui, label, hint) {
         app.toggle_quick_mask();
     }
 }

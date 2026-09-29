@@ -28,7 +28,8 @@ CI also compiles the library for `aarch64-linux-android`. Android-only code, suc
 | What a tool does on press, drag or release | `src/app/tools/<tool>.rs` |
 | Which tool gets an input event | `src/app/input/mod.rs`: `handle_primary_press`, `handle_pen_drag`, `handle_tool_move`, `handle_primary_release` |
 | Touch gestures, palm rejection, pen pressure | `src/app/input/touch.rs`, `src/tablet/` |
-| A keyboard shortcut | `src/app/input/shortcuts.rs`, and its row in `SHORTCUTS` in `src/ui/general_settings.rs` (the help window) |
+| A keyboard shortcut | An `Action` and its default keys in `ACTIONS` (`src/app/input/keymap.rs`), what it does in `src/app/input/shortcuts.rs`; the shortcuts window (`src/ui/general_settings.rs`) lists and rebinds it by itself. Gestures and fixed keys go in `FIXED` there |
+| The History panel's step names | `History::label_next` / `PainterApp::labelled` for a command, `Tool::history_label` for a tool (`src/canvas/history.rs`, `src/ui/history_panel.rs`) |
 | A tool's options bar | `src/ui/tool_options.rs` (`options_row` picks the row for each tool) |
 | Menus | `src/ui/menus.rs` |
 | Toolbar buttons and icons | `src/ui/toolbar.rs`, `src/ui/icons.rs` |

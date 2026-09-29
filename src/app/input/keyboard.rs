@@ -150,6 +150,9 @@ pub fn shortcut_label(ctx: &egui::Context, modifiers: Modifiers, key: Key) -> St
             label += names.concat;
         }
         label + current(ctx).keycap(key)
+    } else if let Some(symbol) = punctuation(key) {
+        let label = ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, Key::A));
+        format!("{}{symbol}", label.strip_suffix('A').unwrap_or(&label))
     } else {
         ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, key))
     }
@@ -174,34 +177,28 @@ pub fn with_keycaps(ctx: &egui::Context, text: &str) -> String {
     out
 }
 
+/// Keys egui spells out ("Quote") that read better as what they type.
+fn punctuation(key: Key) -> Option<&'static str> {
+    use Key::*;
+    Some(match key {
+        Quote => "'",
+        Semicolon => ";",
+        Comma => ",",
+        Period => ".",
+        Backslash => "\\",
+        Backtick => "`",
+        Plus => "+",
+        _ => return None,
+    })
+}
+
 /// Shortcuts on these keys go by position.
-fn is_position_key(key: Key) -> bool {
+pub(crate) fn is_position_key(key: Key) -> bool {
     use Key::*;
     matches!(
         key,
         Num0 | Num1 | OpenBracket | CloseBracket | Slash | Minus | Equals
     )
-}
-
-/// Consume a press of the key at `position` (its QWERTY name) with
-/// `modifiers` (Shift ignored, as some layouts need it for digits; Command
-/// matched as egui does, so it's Ctrl off the Mac).
-pub fn consume_at(ctx: &egui::Context, modifiers: Modifiers, position: Key) -> bool {
-    let wanted = |m: &Modifiers| {
-        m.alt == modifiers.alt
-            && if modifiers.command {
-                m.command
-            } else {
-                m.ctrl == modifiers.ctrl && (modifiers.ctrl || !m.command)
-            }
-    };
-    ctx.input_mut(|i| {
-        let found = i.events.iter().position(|e| {
-            matches!(e, egui::Event::Key { key, physical_key, pressed: true, modifiers: m, .. }
-                if physical_key.unwrap_or(*key) == position && wanted(m))
-        });
-        found.map(|idx| i.events.remove(idx)).is_some()
-    })
 }
 
 /// The layout the system is set to, where that can be read (Linux: the
@@ -268,60 +265,6 @@ mod tests {
         assert_eq!(k.layout(), KeyboardLayout::Qwerty, "keys beat the system");
         k.choice = Some(KeyboardLayout::Qwertz);
         assert_eq!(k.layout(), KeyboardLayout::Qwertz, "the setting beats both");
-    }
-
-    /// Runs a frame with `events` and returns whether `consume_at` saw it.
-    fn consumed(events: Vec<egui::Event>, modifiers: Modifiers, position: Key) -> bool {
-        let ctx = egui::Context::default();
-        let mut hit = false;
-        let _ = ctx.run(
-            egui::RawInput {
-                events,
-                ..Default::default()
-            },
-            |ctx| hit = consume_at(ctx, modifiers, position),
-        );
-        hit
-    }
-
-    fn press(key: Key, physical: Key, modifiers: Modifiers) -> egui::Event {
-        egui::Event::Key {
-            key,
-            physical_key: Some(physical),
-            pressed: true,
-            repeat: false,
-            modifiers,
-        }
-    }
-
-    #[test]
-    fn position_shortcuts_match_the_key_not_the_character() {
-        let ctrl = Modifiers {
-            ctrl: true,
-            command: true,
-            ..Default::default()
-        };
-        // AZERTY: the 0 key types à (unnamed, so egui passes the position).
-        assert!(consumed(
-            vec![press(Key::Num0, Key::Num0, ctrl)],
-            Modifiers::COMMAND,
-            Key::Num0
-        ));
-        // QWERTZ: the / key types -, which egui does name.
-        let bang = press(Key::Minus, Key::Slash, Modifiers::NONE);
-        assert!(consumed(vec![bang.clone()], Modifiers::NONE, Key::Slash));
-        assert!(
-            !consumed(
-                vec![press(Key::Minus, Key::Slash, ctrl)],
-                Modifiers::NONE,
-                Key::Slash
-            ),
-            "Ctrl+- isn't plain -"
-        );
-        assert!(
-            !consumed(vec![bang], Modifiers::COMMAND, Key::Slash),
-            "plain - isn't Ctrl+-"
-        );
     }
 
     #[test]

@@ -60,6 +60,10 @@ impl eframe::App for PainterApp {
         self.workspace.frame_stats.begin(frame.info().cpu_usage);
         self.workspace.refresh.tick();
         self.workspace.keyboard.observe(ctx);
+        let label = self
+            .active_tool
+            .history_label(self.brush_state.eraser_active);
+        self.layer_state.history.set_tool_label(label);
         let mut needs_repaint = false;
         // Last frame's dropped textures, now safe to free.
         self.workspace.retired_textures.clear();
@@ -491,6 +495,7 @@ impl PainterApp {
         ui::palette_window::palette_window(self, ctx);
         ui::image_gallery::image_gallery(self, ctx);
         ui::general_settings::shortcuts_window(self, ctx);
+        ui::history_panel::history_window(self, ctx);
         ui::brush_list::presets_window(self, ctx);
         ui::radial_palette::radial_palette(self, ctx);
         ui::export_modal::export_modal(self, ctx);

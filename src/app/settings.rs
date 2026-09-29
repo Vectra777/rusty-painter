@@ -67,6 +67,8 @@ pub struct AppSettings {
     palette_dither: bool,
     /// Chosen in Settings; `None` = automatic.
     keyboard_layout: Option<KeyboardLayout>,
+    /// Shortcuts changed from their defaults: action → keys.
+    shortcuts: std::collections::BTreeMap<String, Vec<String>>,
     /// The New Canvas dialog (its size comes from the canvas open).
     new_canvas_unit: CanvasUnit,
     new_canvas_resolution: f32,
@@ -157,6 +159,7 @@ impl AppSettings {
             palette_count: ws.palette.count,
             palette_dither: ws.palette.dither,
             keyboard_layout: ws.keyboard.choice,
+            shortcuts: ws.keymap.to_settings(),
             new_canvas_unit: nc.unit,
             new_canvas_resolution: nc.resolution,
             new_canvas_background: nc.background,
@@ -226,6 +229,7 @@ impl AppSettings {
         ws.palette.count = self.palette_count;
         ws.palette.dither = self.palette_dither;
         ws.keyboard.choice = self.keyboard_layout;
+        ws.keymap = crate::app::input::keymap::Keymap::from_settings(&self.shortcuts);
         let nc = &mut app.modal_state.new_canvas;
         nc.unit = self.new_canvas_unit;
         nc.resolution = self.new_canvas_resolution.clamp(1.0, MAX_CANVAS_DPI);

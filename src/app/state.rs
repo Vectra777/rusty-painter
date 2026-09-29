@@ -315,6 +315,8 @@ pub struct ModalState {
     pub new_canvas: NewCanvasSettings,
     pub show_general_settings: bool,
     pub show_shortcuts: bool,
+    /// Edit → History: the list of steps, click one to go back to it.
+    pub show_history: bool,
     /// The selection tool's slide-out menu is open.
     pub select_menu_open: bool,
     /// The mirror painting menu is open.
@@ -336,6 +338,7 @@ impl ModalState {
             new_canvas,
             show_general_settings: false,
             show_shortcuts: false,
+            show_history: false,
             select_menu_open: false,
             symmetry_menu_open: false,
             shape_menu_open: false,
@@ -462,6 +465,11 @@ pub struct WorkspaceState {
     pub refresh: crate::app::frame_stats::RefreshRate,
     /// Keyboard layout, for where shortcuts are and how they're labelled.
     pub keyboard: crate::app::input::keyboard::KeyboardState,
+    /// The keys each command has (Help → Keyboard Shortcuts changes them).
+    pub keymap: crate::app::input::keymap::Keymap,
+    /// The command whose new key is being waited for in the shortcuts
+    /// window, and whether it's added to its keys (else it replaces them).
+    pub recording_shortcut: Option<(crate::app::input::keymap::Action, bool)>,
     /// The settings as last written (`None` until they're loaded).
     pub settings_saved: Option<crate::app::settings::Saved>,
 }
@@ -522,6 +530,8 @@ impl WorkspaceState {
             clipboard: Default::default(),
             refresh: Default::default(),
             keyboard: crate::app::input::keyboard::KeyboardState::new(),
+            keymap: Default::default(),
+            recording_shortcut: None,
             settings_saved: None,
         }
     }

@@ -427,6 +427,7 @@ impl PainterApp {
         if tiles.is_empty() {
             return;
         }
+        self.layer_state.history.label_next(session.filter.name());
         self.push_undo(UndoAction {
             tiles,
             selection: None,

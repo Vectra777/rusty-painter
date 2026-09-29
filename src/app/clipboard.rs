@@ -166,29 +166,31 @@ impl PainterApp {
         if !self.copy_selection(false) {
             return;
         }
-        if self.selection_manager.has_selection() {
-            self.delete_selection_contents();
-        } else if let Some(clip) = &self.workspace.clipboard.clip {
-            // The whole layer was copied: erase all of it.
-            let [x0, y0] = [clip.x, clip.y];
-            let full = SelectionMask::new(x0, y0, clip.w, clip.h, vec![255; clip.w * clip.h]);
-            self.erase_under(full, false);
-        }
+        self.labelled("Cut", |app| {
+            if app.selection_manager.has_selection() {
+                app.delete_selection_contents();
+            } else if let Some(clip) = &app.workspace.clipboard.clip {
+                // The whole layer was copied: erase all of it.
+                let [x0, y0] = [clip.x, clip.y];
+                let full = SelectionMask::new(x0, y0, clip.w, clip.h, vec![255; clip.w * clip.h]);
+                app.erase_under(full, false);
+            }
+        });
     }
 
     /// Paste as a new layer, with the Transform tool ready to place it.
     pub(crate) fn paste(&mut self) {
         let ours = self.workspace.clipboard.clip.clone();
-        match self.import_clip() {
+        let theirs = self.import_clip();
+        self.labelled("Paste", |app| match theirs {
             // Another program's image: centred, scaled to fit.
-            Some(img) => self.import_rgba("Pasted", img),
+            Some(img) => app.import_rgba("Pasted", img),
             None => {
-                let Some(clip) = ours else {
-                    return;
-                };
-                self.paste_clip(&clip);
+                if let Some(clip) = ours {
+                    app.paste_clip(&clip);
+                }
             }
-        }
+        });
     }
 
     /// Our own copy: exact pixels, where they came from (centred if that's
