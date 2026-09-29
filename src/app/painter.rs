@@ -117,6 +117,8 @@ impl eframe::App for PainterApp {
                     .unwrap_or_default();
                 self.viewport.touch.pen_active =
                     !pen.is_empty() || self.tablet.as_ref().is_some_and(|t| t.pen_active());
+                self.viewport.touch.pen_is_pointer =
+                    self.tablet.as_ref().is_some_and(|t| t.pen_is_pointer());
                 if crate::app::input::touch::handle_touch(self, ctx, &view.response) {
                     needs_repaint = true;
                 }

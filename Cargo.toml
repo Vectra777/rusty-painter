@@ -46,6 +46,12 @@ octotablet = "0.1"
 rfd = "0.17.2"
 # Images on the system clipboard (copy / paste between apps).
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# Telling an X11 window from a Wayland one (octotablet has no X11 backend).
+raw-window-handle = "0.6"
+
+# X11 pen pressure: the patched winit queues the pen's samples.
+[target.'cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "ios"))))'.dependencies]
+winit = { version = "0.30.12", default-features = false, features = ["x11"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30.12", features = ["android-native-activity"] }

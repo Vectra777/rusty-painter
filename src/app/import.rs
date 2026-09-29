@@ -69,11 +69,11 @@ impl PainterApp {
         for file in dropped {
             let path = file.path.as_deref();
             let name = path
-                .map_or_else(|| std::path::Path::new(&file.name), |p| p)
+                .unwrap_or_else(|| std::path::Path::new(&file.name))
                 .file_stem()
                 .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
             let extension = |ext: &str| {
-                path.map_or_else(|| std::path::Path::new(&file.name), |p| p)
+                path.unwrap_or_else(|| std::path::Path::new(&file.name))
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case(ext))
             };

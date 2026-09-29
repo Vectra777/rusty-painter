@@ -192,9 +192,9 @@ fn handle_events(
     // as pointer events; leave those to the touch handler.
     let suppress = app.viewport.touch.suppress_pointer;
     // The pen's own samples drive the canvas; the pointer events the same
-    // pen produces are ignored. On Android the pen is the mouse pointer; on
-    // Windows it arrives as touches, which egui turns into pointer events
-    // right after each touch event.
+    // pen produces are ignored. On Android and X11 the pen is the mouse
+    // pointer; on Windows it arrives as touches, which egui turns into
+    // pointer events right after each touch event.
     let pen_active = app.viewport.touch.pen_active || pen_samples;
     // Nothing else joins a pen stroke in progress (a mouse moved meanwhile).
     let pen_stroke = app.viewport.touch.pen_on_canvas;
@@ -213,7 +213,8 @@ fn handle_events(
             egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } => {}
             _ => from_touch = false,
         }
-        let pen_pointer = pen_stroke || (pen_active && (cfg!(target_os = "android") || from_touch));
+        let pen_pointer =
+            pen_stroke || (pen_active && (app.viewport.touch.pen_is_pointer || from_touch));
         match event {
             _ if is_pointer && (suppress || pen_pointer) => {}
             egui::Event::PointerButton {

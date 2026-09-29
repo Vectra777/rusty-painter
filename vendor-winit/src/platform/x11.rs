@@ -252,3 +252,42 @@ impl MonitorHandleExtX11 for MonitorHandle {
         self.inner.native_identifier()
     }
 }
+
+/// Where a pen sample falls in a contact (rusty-painter patch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PenPhase {
+    /// The pen touched the tablet.
+    Down,
+    /// The pen moved while touching.
+    Move,
+    /// The pen lifted.
+    Up,
+}
+
+/// One tablet pen sample (rusty-painter patch). Winit delivers a pen as mouse
+/// events without pressure; each XInput2 event from a device with a pressure
+/// axis is also queued here, in order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenSample {
+    /// Position in physical pixels, relative to the window.
+    pub x: f32,
+    pub y: f32,
+    /// Normalized pressure (0..=1).
+    pub pressure: f32,
+    /// Tilt along x and y in radians from upright (positive: leaning right
+    /// and towards the user), when the pen reports it.
+    pub tilt: Option<[f32; 2]>,
+    /// The device is an eraser (its name says so).
+    pub is_eraser: bool,
+    pub phase: PenPhase,
+}
+
+/// Take the pen samples queued since the last call, oldest first.
+pub fn take_pen_samples() -> Vec<PenSample> {
+    crate::platform_impl::x11::pen::take_pen_samples()
+}
+
+/// Whether the latest pointer motion came from a pen, hovering or touching.
+pub fn pen_in_range() -> bool {
+    crate::platform_impl::x11::pen::pen_in_range()
+}

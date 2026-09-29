@@ -229,6 +229,7 @@ impl EventProcessor {
                             false,
                             &mut callback,
                         );
+                        self.xinput2_pen(xev, Some(state == ElementState::Pressed));
                         self.xinput2_button_input(xev, state, &mut callback);
                     },
                     xinput2::XI_Motion => {
@@ -239,6 +240,7 @@ impl EventProcessor {
                             false,
                             &mut callback,
                         );
+                        self.xinput2_pen(xev, None);
                         self.xinput2_mouse_motion(xev, &mut callback);
                     },
                     xinput2::XI_Enter => {
@@ -359,7 +361,7 @@ impl EventProcessor {
         let mut devices = self.devices.borrow_mut();
         if let Some(info) = DeviceInfo::get(&window_target.xconn, device as _) {
             for info in info.iter() {
-                devices.insert(DeviceId(info.deviceid as _), Device::new(info));
+                devices.insert(DeviceId(info.deviceid as _), Device::new(&window_target.xconn, info));
             }
         }
     }
@@ -1099,6 +1101,20 @@ impl EventProcessor {
 
         let event = Event::WindowEvent { window_id, event };
         callback(&self.target, event);
+    }
+
+    /// rusty-painter patch: queue a pen's contact samples with their pressure
+    /// (see `pen.rs`). `button`: pressed, released, or `None` for a motion.
+    fn xinput2_pen(&self, event: &XIDeviceEvent, button: Option<bool>) {
+        if (event.flags & xinput2::XIPointerEmulated) != 0 {
+            return;
+        }
+        let mut devices = self.devices.borrow_mut();
+        match devices.get_mut(&DeviceId(event.sourceid as xinput::DeviceId)) {
+            Some(Device { pen: Some(pen), .. }) => pen.handle(event, button),
+            _ if button.is_none() => super::pen::pen_out_of_range(),
+            _ => {},
+        }
     }
 
     fn xinput2_mouse_motion<T: 'static, F>(&self, event: &XIDeviceEvent, mut callback: F)

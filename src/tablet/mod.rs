@@ -1,5 +1,6 @@
 //! Pen input with pressure, as a stream of contact samples: from octotablet
-//! on desktop (Windows Ink, Wayland) and from the patched winit on Android.
+//! on desktop (Windows Ink, Wayland), and from the patched winit on X11 and
+//! Android.
 //!
 //! The same pen also reaches egui as pointer (or touch) events, which the
 //! canvas must then ignore: see [`TabletInput::pen_active`].
@@ -124,17 +125,84 @@ impl ToolState {
     }
 }
 
-/// Pumps octotablet events into contact samples.
+/// Pumps octotablet events into contact samples, and on X11 the patched
+/// winit's pen samples.
 #[cfg(not(target_os = "android"))]
 pub struct TabletInput {
-    manager: octotablet::Manager,
+    /// `None` where octotablet has no backend (X11) or is turned off.
+    manager: Option<octotablet::Manager>,
     tools: HashMap<tool::ID, ToolState>,
+    #[cfg(x11_pen)]
+    x11: X11Pen,
+}
+
+/// The X11 pen's contact, from the samples the patched winit queues.
+#[cfg(x11_pen)]
+#[derive(Default)]
+struct X11Pen {
+    /// The pen is touching.
+    down: bool,
+    /// A pen sample has arrived: the pen is an X11 one.
+    seen: bool,
+}
+
+#[cfg(x11_pen)]
+impl X11Pen {
+    fn poll(&mut self, scale: f32, out: &mut Vec<TabletSample>) {
+        use winit::platform::x11::PenPhase;
+        for s in winit::platform::x11::take_pen_samples() {
+            self.seen = true;
+            let phase = match s.phase {
+                PenPhase::Down => TabletPhase::Down,
+                PenPhase::Move => TabletPhase::Move,
+                PenPhase::Up => TabletPhase::Up,
+            };
+            self.down = phase != TabletPhase::Up;
+            out.push(x11_sample(s, scale, phase));
+        }
+    }
+}
+
+/// An X11 pen sample in egui points (`scale`: physical pixels per point).
+#[cfg(x11_pen)]
+fn x11_sample(s: winit::platform::x11::PenSample, scale: f32, phase: TabletPhase) -> TabletSample {
+    TabletSample {
+        pos: [s.x / scale, s.y / scale],
+        pressure: s.pressure,
+        tilt: s.tilt.map(lean_from_xy),
+        is_eraser: s.is_eraser,
+        phase,
+    }
 }
 
 #[cfg(not(target_os = "android"))]
 impl TabletInput {
     /// Create a tablet input manager using the eframe creation context for a window handle.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
+        let manager = Self::octotablet(cc);
+        // On X11 the patched winit reports the pen whatever octotablet does.
+        if manager.is_none() && !cfg!(x11_pen) {
+            return None;
+        }
+        Some(Self {
+            manager,
+            tools: HashMap::new(),
+            #[cfg(x11_pen)]
+            x11: X11Pen::default(),
+        })
+    }
+
+    fn octotablet(cc: &eframe::CreationContext<'_>) -> Option<octotablet::Manager> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        // octotablet has no X11 backend.
+        if cc.window_handle().is_ok_and(|h| {
+            matches!(
+                h.as_raw(),
+                RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)
+            )
+        }) {
+            return None;
+        }
         if std::env::var_os("WAYLAND_DISPLAY").is_some()
             && std::env::var_os("RUSTY_PAINTER_ENABLE_WAYLAND_TABLET").is_none()
         {
@@ -154,10 +222,7 @@ impl TabletInput {
         }));
 
         match result {
-            Ok(Ok(manager)) => Some(Self {
-                manager,
-                tools: HashMap::new(),
-            }),
+            Ok(Ok(manager)) => Some(manager),
             Ok(Err(e)) => {
                 log::error!("Failed to initialize tablet: {:?}", e);
                 None
@@ -176,7 +241,9 @@ impl TabletInput {
         // those only by the UI zoom factor.
         let zoom = ctx.zoom_factor();
         let mut out = Vec::new();
-        let Ok(events) = self.manager.pump() else {
+        #[cfg(x11_pen)]
+        self.x11.poll(ctx.pixels_per_point(), &mut out);
+        let Some(Ok(events)) = self.manager.as_mut().map(|m| m.pump()) else {
             return out;
         };
         for event in events {
@@ -194,7 +261,22 @@ impl TabletInput {
     /// arrive as pointer or touch events (Windows reports a pen as touches),
     /// which the canvas ignores in favor of these samples.
     pub fn pen_active(&self) -> bool {
+        #[cfg(x11_pen)]
+        if self.x11.down {
+            return true;
+        }
         self.tools.values().any(|t| t.in_range || t.down)
+    }
+
+    /// The pen also moves the mouse pointer (X11), rather than arriving as
+    /// touches (Windows) or on its own (Wayland): the pointer events then
+    /// belong to the pen while it touches.
+    pub fn pen_is_pointer(&self) -> bool {
+        #[cfg(x11_pen)]
+        if self.x11.seen {
+            return true;
+        }
+        false
     }
 }
 
@@ -245,6 +327,11 @@ impl TabletInput {
     /// doesn't count, so fingers can still pinch with the pen nearby.
     pub fn pen_active(&self) -> bool {
         self.down
+    }
+
+    /// The pen is the mouse pointer.
+    pub fn pen_is_pointer(&self) -> bool {
+        true
     }
 }
 
@@ -325,5 +412,29 @@ mod tests {
         ]);
         let phases: Vec<_> = samples.iter().map(|s| s.0).collect();
         assert_eq!(phases, vec![TabletPhase::Down, TabletPhase::Up]);
+    }
+}
+
+#[cfg(all(test, x11_pen))]
+mod x11_tests {
+    use super::*;
+    use winit::platform::x11::{PenPhase, PenSample};
+
+    #[test]
+    fn x11_samples_are_in_points_with_a_lean() {
+        let s = PenSample {
+            x: 200.0,
+            y: 100.0,
+            pressure: 0.5,
+            tilt: Some([std::f32::consts::FRAC_PI_6, 0.0]),
+            is_eraser: true,
+            phase: PenPhase::Move,
+        };
+        let t = x11_sample(s, 2.0, TabletPhase::Move);
+        assert_eq!(t.pos, [100.0, 50.0]);
+        assert_eq!(t.pressure, 0.5);
+        assert!(t.is_eraser);
+        let [x, y] = t.tilt.unwrap();
+        assert!((x - 0.5).abs() < 1e-5 && y.abs() < 1e-6);
     }
 }

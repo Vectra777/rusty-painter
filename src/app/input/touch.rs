@@ -46,9 +46,12 @@ pub struct TouchState {
     /// Touches from the hand holding the pen, ignored until they lift.
     ignored: HashSet<u64>,
     /// The pen is in use this frame: its input also arrives as pointer
-    /// events (Android) or touches (Windows), which the canvas ignores in
+    /// events (Android, X11) or touches (Windows), which the canvas ignores in
     /// favor of the pen's own samples.
     pub(crate) pen_active: bool,
+    /// The pen moves the mouse pointer (Android, X11), so the pointer
+    /// events are the pen's while it touches.
+    pub(crate) pen_is_pointer: bool,
     /// How the pen leans at the latest sample (canvas terms); `None` for
     /// the mouse, fingers and tablets without tilt.
     pub(crate) pen_tilt: Option<crate::brush_engine::dynamics::PenTilt>,
