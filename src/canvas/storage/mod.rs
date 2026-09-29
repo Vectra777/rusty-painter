@@ -86,6 +86,8 @@ pub struct Layer {
     /// A text layer: its pixels are this text, rendered, and the Text tool
     /// can edit it again.
     pub text: Option<Box<crate::canvas::text::TextLayer>>,
+    /// A vector layer: its lines, which its pixels are drawn from.
+    pub vector: Option<Box<crate::canvas::vector::VectorLayer>>,
     /// Can't be moved or transformed.
     pub position_locked: bool,
     /// A draft: shown, but left out of export, merging and "all layers"
@@ -122,6 +124,8 @@ pub struct CanvasLayerSnapshot {
     /// A fill layer's content or a border around the paint.
     pub style: crate::canvas::layer_style::LayerStyle,
     pub text: Option<Box<crate::canvas::text::TextLayer>>,
+    /// A vector layer: its lines, which its pixels are drawn from.
+    pub vector: Option<Box<crate::canvas::vector::VectorLayer>>,
     pub position_locked: bool,
     pub draft: bool,
     pub reference: bool,
@@ -155,6 +159,7 @@ impl Layer {
             adjustment: self.adjustment,
             style: self.style,
             text: self.text.clone(),
+            vector: self.vector.clone(),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
@@ -191,6 +196,7 @@ impl Layer {
             adjustment: None,
             style: Default::default(),
             text: None,
+            vector: None,
             position_locked: false,
             draft: false,
             reference: false,
@@ -232,6 +238,7 @@ impl Layer {
             adjustment: self.adjustment,
             style: self.style,
             text: self.text.clone(),
+            vector: self.vector.clone(),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
@@ -265,6 +272,7 @@ impl Layer {
             adjustment: snapshot.adjustment,
             style: snapshot.style,
             text: snapshot.text,
+            vector: snapshot.vector,
             position_locked: snapshot.position_locked,
             draft: snapshot.draft,
             reference: snapshot.reference,
@@ -479,6 +487,7 @@ impl Canvas {
         layer.adjustment = meta.adjustment;
         layer.style = meta.style;
         layer.text = meta.text.clone();
+        layer.vector = meta.vector.clone();
         layer.position_locked = meta.position_locked;
         layer.draft = meta.draft;
         layer.reference = meta.reference;
@@ -536,6 +545,7 @@ impl Canvas {
             adjustment: layer.adjustment,
             style: layer.style,
             text: layer.text.clone(),
+            vector: layer.vector.clone(),
             position_locked: layer.position_locked,
             draft: layer.draft,
             reference: layer.reference,

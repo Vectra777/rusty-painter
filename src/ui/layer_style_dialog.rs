@@ -202,6 +202,75 @@ pub fn border_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     }
 }
 
+/// Layer → Vector → Line Width: every line of a vector layer thicker or
+/// thinner, shown as the slider moves.
+pub fn line_width_dialog(app: &mut PainterApp, ctx: &egui::Context) {
+    let Some((id, _, scale)) = &app.workspace.vector.width_editing else {
+        return;
+    };
+    let (id, mut new_scale) = (*id, *scale);
+    let Some(idx) = app.canvas.layer_index_of(id) else {
+        app.workspace.vector.width_editing = None;
+        return;
+    };
+    let title = format!("Line Width: {}", app.canvas.layers[idx].name);
+    let (mut open, mut ok, mut cancel) = (true, false, false);
+    egui::Window::new(title)
+        .id(egui::Id::new("line_width_dialog"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(300.0)
+        .show(ctx, |ui| {
+            slider_row(
+                ui,
+                "Width",
+                egui::Slider::new(&mut new_scale, 0.1..=5.0)
+                    .logarithmic(true)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                    .custom_parser(|t| {
+                        t.trim()
+                            .trim_end_matches('%')
+                            .parse::<f64>()
+                            .ok()
+                            .map(|v| v / 100.0)
+                    }),
+            );
+            ui.label(
+                RichText::new("Every line on the layer, thicker or thinner, pressure kept.")
+                    .small()
+                    .color(TEXT_DIM),
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                ok = ui.button("OK").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+    if new_scale != *scale_of(app) {
+        app.line_width_set(new_scale);
+    }
+    let (enter, esc) = ctx.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if ok || enter {
+        app.line_width_done(true);
+    } else if cancel || esc || !open {
+        app.line_width_done(false);
+    }
+}
+
+fn scale_of(app: &PainterApp) -> &f32 {
+    app.workspace
+        .vector
+        .width_editing
+        .as_ref()
+        .map_or(&1.0, |(_, _, s)| s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

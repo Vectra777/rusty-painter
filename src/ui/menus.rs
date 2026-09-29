@@ -265,6 +265,9 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "New Folder", keys(app, ctx, Action::NewFolder)) {
         app.add_folder();
     }
+    if menu_item(ui, "New Vector Layer", None) {
+        app.add_vector_layer();
+    }
     ui.menu_button("New Adjustment Layer", |ui| {
         for filter in crate::canvas::filters::Filter::ADJUSTMENTS {
             if menu_item(ui, filter.name(), None) {
@@ -292,6 +295,22 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     {
         app.workspace.filter.border_editing = app.canvas.layer_id_at(app.canvas.active_layer_idx);
     }
+    let active = app.canvas.active_layer_idx;
+    ui.add_enabled_ui(app.is_vector_layer(active), |ui| {
+        ui.menu_button("Vector", |ui| {
+            if menu_item(ui, "Line Width…", None) {
+                app.line_width_open(active);
+            }
+            if menu_item(ui, "Recolour Lines (brush colour)", None) {
+                app.recolour_vector_lines(active);
+            }
+            if menu_item(ui, "Rasterise Vector Layer", None) {
+                app.rasterise_vector_layer(active);
+            }
+        })
+    })
+    .response
+    .on_disabled_hover_text("For vector layers (Layer → New Vector Layer)");
     if menu_item(
         ui,
         "Duplicate Layer",

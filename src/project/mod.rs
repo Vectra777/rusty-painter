@@ -348,6 +348,9 @@ struct StoredLayer {
     /// A text layer's source; absent in older files (and on other layers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<convert::StoredText>,
+    /// A vector layer's lines; absent in older files (and on other layers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vector: Option<crate::canvas::vector::VectorLayer>,
     /// Layer flags; absent in older files.
     #[serde(default)]
     position_locked: bool,
@@ -379,6 +382,7 @@ impl StoredLayer {
             adjustment: layer.adjustment,
             style: layer.style,
             text: convert::StoredText::from_layer(layer.text.as_deref()),
+            vector: layer.vector.as_deref().cloned(),
             position_locked: layer.position_locked,
             draft: layer.draft,
             reference: layer.reference,
@@ -429,6 +433,7 @@ impl StoredLayer {
             adjustment: self.adjustment,
             style: self.style,
             text: convert::StoredText::into_layer(self.text),
+            vector: self.vector.map(Box::new),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,

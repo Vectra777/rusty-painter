@@ -189,8 +189,11 @@ below.
 - [ ] Pressure calibration from a test stroke.
 - [ ] Post-correction while drawing, not only when the pen lifts.
 - [ ] Tags and favourites carried in exported `.rpbrush` files.
-- [ ] Bigger: vector brushes, a spray/particle engine, wet paint simulation
-  and impasto.
+- [x] **Vector layers** (Layer → New Vector Layer): lines kept as points,
+  smoothed, erased whole or in part, thickened, thinned or recoloured
+  afterwards. Not yet: moving a line's points by hand, or erasing up to
+  where lines cross.
+- [ ] Bigger: a spray/particle engine, wet paint simulation and impasto.
 
 ### Quality rules for every feature
 

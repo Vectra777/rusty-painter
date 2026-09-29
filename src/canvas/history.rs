@@ -115,6 +115,7 @@ pub struct LayerMeta {
     /// A fill layer's content or a border around the paint.
     pub style: crate::canvas::layer_style::LayerStyle,
     pub text: Option<Box<crate::canvas::text::TextLayer>>,
+    pub vector: Option<Box<crate::canvas::vector::VectorLayer>>,
     pub position_locked: bool,
     pub draft: bool,
     pub reference: bool,
@@ -173,6 +174,14 @@ pub enum LayerHistoryOp {
         layers: Vec<(LayerId, Option<Box<crate::canvas::text::TextLayer>>)>,
         inner: Option<Box<LayerHistoryOp>>,
     },
+    /// Vector layers' lines ([`crate::canvas::storage::Layer::vector`]) as
+    /// they are on the other side of this step: a line drawn, erased or
+    /// changed, or a vector layer painted on with a pixel tool (which makes
+    /// it plain pixels). `inner` as for `Text`.
+    Vector {
+        layers: Vec<(LayerId, Option<Box<crate::canvas::vector::VectorLayer>>)>,
+        inner: Option<Box<LayerHistoryOp>>,
+    },
     /// Layers were merged: the entries on the other side of this step,
     /// swapped in place by undo and redo (see [`Canvas::swap_layers`]).
     Replaced(std::sync::Arc<std::sync::Mutex<crate::canvas::storage::LayerSwap>>),
@@ -180,12 +189,15 @@ pub enum LayerHistoryOp {
 
 impl LayerHistoryOp {
     /// The change to the layer list itself: this op, or the one a `Text`
-    /// op carries.
+    /// or `Vector` op carries (however they're nested).
     pub fn structural(op: Option<&LayerHistoryOp>) -> Option<&LayerHistoryOp> {
-        match op {
-            Some(LayerHistoryOp::Text { inner, .. }) => inner.as_deref(),
-            other => other,
+        let mut op = op;
+        while let Some(LayerHistoryOp::Text { inner, .. } | LayerHistoryOp::Vector { inner, .. }) =
+            op
+        {
+            op = inner.as_deref();
         }
+        op
     }
 
     /// For `Removed`: every index involved, ascending (the main layer and
@@ -274,6 +286,7 @@ fn describe(action: &UndoAction) -> Option<&'static str> {
         {
             "Text"
         }
+        Some(LayerHistoryOp::Vector { .. }) => "Vector",
         None if action.transform.is_some() => "Transform",
         None if action.tiles.is_empty() && action.selection.is_some() => "Selection",
         None => return None,
@@ -461,12 +474,28 @@ impl History {
     /// Exchange the text layers' source with the step's (both directions).
     /// Done while the same layers exist either way: after a removal is
     /// undone or an add redone, before an add is undone or a removal redone.
+    /// Vector layers' lines likewise, wherever they're nested.
     fn swap_text(canvas: &mut Canvas, layer_action: Option<&mut LayerHistoryOp>) {
-        if let Some(LayerHistoryOp::Text { layers, .. }) = layer_action {
-            for (id, text) in layers {
-                if let Some(idx) = canvas.layer_index_of(*id) {
-                    std::mem::swap(&mut canvas.layers[idx].text, text);
+        let mut op = layer_action;
+        loop {
+            match op {
+                Some(LayerHistoryOp::Text { layers, inner }) => {
+                    for (id, text) in layers {
+                        if let Some(idx) = canvas.layer_index_of(*id) {
+                            std::mem::swap(&mut canvas.layers[idx].text, text);
+                        }
+                    }
+                    op = inner.as_deref_mut();
                 }
+                Some(LayerHistoryOp::Vector { layers, inner }) => {
+                    for (id, vector) in layers {
+                        if let Some(idx) = canvas.layer_index_of(*id) {
+                            std::mem::swap(&mut canvas.layers[idx].vector, vector);
+                        }
+                    }
+                    op = inner.as_deref_mut();
+                }
+                _ => return,
             }
         }
     }
@@ -572,7 +601,7 @@ impl History {
                 Some(op.clone())
             }
             // (Given the structural part: never a `Text` op.)
-            Some(LayerHistoryOp::Text { .. }) | None => None,
+            Some(LayerHistoryOp::Text { .. } | LayerHistoryOp::Vector { .. }) | None => None,
         }
     }
 
@@ -619,6 +648,7 @@ impl History {
                 adjustment: None,
                 style: Default::default(),
                 text: None,
+                vector: None,
                 position_locked: false,
                 draft: false,
                 reference: false,
@@ -716,7 +746,7 @@ impl History {
                 Some(op.clone())
             }
             // (Given the structural part: never a `Text` op.)
-            Some(LayerHistoryOp::Text { .. }) | None => None,
+            Some(LayerHistoryOp::Text { .. } | LayerHistoryOp::Vector { .. }) | None => None,
         }
     }
 

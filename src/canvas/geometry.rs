@@ -166,6 +166,30 @@ impl Canvas {
                 }),
                 _ => None,
             };
+            // Vector lines likewise; a gradient fill's ends move with the
+            // frame too.
+            shell.vector = match op {
+                ImageOp::Reframe { x, y, .. } => shell.vector.take().map(|mut v| {
+                    for s in &mut v.strokes {
+                        for p in &mut s.points {
+                            p[0] -= x as f32;
+                            p[1] -= y as f32;
+                        }
+                    }
+                    v
+                }),
+                _ => None,
+            };
+            if let (
+                ImageOp::Reframe { x, y, .. },
+                Some(crate::canvas::layer_style::LayerFill::Gradient { start, end, .. }),
+            ) = (op, shell.style.fill.as_mut())
+            {
+                for p in [start, end] {
+                    p[0] -= x as f32;
+                    p[1] -= y as f32;
+                }
+            }
             new_layers.push((shell, tiles));
         }
         let mut doc = DocumentState {

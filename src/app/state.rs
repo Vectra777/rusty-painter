@@ -465,6 +465,8 @@ pub struct WorkspaceState {
     pub refresh: crate::app::frame_stats::RefreshRate,
     /// Keyboard layout, for where shortcuts are and how they're labelled.
     pub keyboard: crate::app::input::keyboard::KeyboardState,
+    /// Vector layers: the line being drawn, the eraser's mode.
+    pub vector: crate::app::tools::vector::VectorState,
     /// The keys each command has (Help → Keyboard Shortcuts changes them).
     pub keymap: crate::app::input::keymap::Keymap,
     /// The command whose new key is being waited for in the shortcuts
@@ -530,6 +532,7 @@ impl WorkspaceState {
             clipboard: Default::default(),
             refresh: Default::default(),
             keyboard: crate::app::input::keyboard::KeyboardState::new(),
+            vector: Default::default(),
             keymap: Default::default(),
             recording_shortcut: None,
             settings_saved: None,

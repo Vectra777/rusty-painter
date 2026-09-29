@@ -193,6 +193,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     let mut duplicate: Option<usize> = None;
     let mut edit_text: Option<usize> = None;
     let mut rasterise_text: Option<usize> = None;
+    let mut rasterise_vector: Option<usize> = None;
+    let mut line_width: Option<usize> = None;
     let mut active_idx = app.canvas.active_layer_idx;
     let mut needs_refresh = false;
     let mut rows: Vec<RowInfo> = Vec::new();
@@ -335,6 +337,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 let fill = current.style.fill.is_some();
                 let bordered = current.style.border.is_some();
                 let is_text = current.text.is_some();
+                let is_vector = current.vector.is_some();
                 let (id, kind, parent, expanded, blend) = (
                     current.id,
                     current.kind,
@@ -477,6 +480,13 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                                 ui.label(RichText::new("border").small().color(ACCENT))
                                     .on_hover_text("Has a border (Layer → Border…)");
                             }
+                            if is_vector {
+                                ui.label(RichText::new("vec").small().color(ACCENT))
+                                    .on_hover_text(
+                                        "Vector layer: lines stay editable (Layer → Vector); \
+                                         the eraser takes lines out",
+                                    );
+                            }
                             if alpha_locked {
                                 ui.label(RichText::new("α").small().color(ACCENT))
                                     .on_hover_text("Transparency locked");
@@ -556,6 +566,14 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     }
                     if is_text && ui.button("Rasterise text").clicked() {
                         rasterise_text = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_vector && ui.button("Line width…").clicked() {
+                        line_width = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_vector && ui.button("Rasterise vector layer").clicked() {
+                        rasterise_vector = Some(i);
                         ui.close_menu();
                     }
                     if !is_group && i != 0 && ui.button("Duplicate").clicked() {
@@ -696,6 +714,13 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     if let Some(idx) = rasterise_text {
         app.rasterise_text_layer(idx);
         needs_refresh = true;
+    }
+    if let Some(idx) = rasterise_vector {
+        app.rasterise_vector_layer(idx);
+        needs_refresh = true;
+    }
+    if let Some(idx) = line_width {
+        app.line_width_open(idx);
     }
     if let Some(idx) = to_delete {
         app.remove_layer(idx);

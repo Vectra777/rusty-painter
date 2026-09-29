@@ -15,5 +15,6 @@ pub mod liquify;
 pub mod palette;
 pub mod storage;
 pub mod text;
+pub mod vector;
 
 pub use storage::Canvas;

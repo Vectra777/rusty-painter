@@ -32,7 +32,14 @@ impl PainterApp {
         // A stroke still running (a second press without a release) is
         // ended first: replacing it would lose its undo step.
         self.finish_stroke();
+        // On a vector layer the brush and eraser draw and erase lines.
+        if matches!(self.active_tool, crate::app::tools::Tool::Brush)
+            && self.vector_stroke_begin(pos, pressure)
+        {
+            return;
+        }
         self.rasterise_text_for_stroke();
+        self.rasterise_vector_for_stroke();
         self.mark_action();
         if self.brush_state.brush.brush_options.blend_mode != BlendMode::Eraser {
             let color = self.brush_state.brush.brush_options.color;
@@ -88,6 +95,9 @@ impl PainterApp {
     }
 
     pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
+        if self.vector_stroke_add(pos, pressure) {
+            return;
+        }
         if !self.brush_state.is_drawing {
             return;
         }
@@ -102,7 +112,11 @@ impl PainterApp {
         }
     }
 
+    /// The pen lifted (or the stroke must end): a vector line is kept, a
+    /// brush stroke finished.
     pub(crate) fn finish_stroke(&mut self) {
+        // (A vector line ends first, and says it's no longer drawing.)
+        self.vector_stroke_end();
         if self.brush_state.is_drawing {
             self.stroke_worker.end();
         }
@@ -135,6 +149,7 @@ impl PainterApp {
         }
         for mut finished in self.stroke_worker.take_finished() {
             self.attach_stroke_rasterised(&mut finished.undo);
+            self.attach_vector_rasterised(&mut finished.undo);
             self.layer_state.history.push_action(finished.undo);
         }
         self.stroke_worker.is_busy()

@@ -477,7 +477,7 @@ impl PainterApp {
     }
 
     /// "`base` N" with N one more than the highest number already used.
-    fn next_layer_name(&self, base: &str) -> String {
+    pub(crate) fn next_layer_name(&self, base: &str) -> String {
         let prefix = format!("{base} ");
         let highest = self
             .canvas
@@ -609,6 +609,7 @@ impl PainterApp {
 
     pub(crate) fn push_undo(&mut self, mut action: UndoAction) {
         self.rasterise_painted_text(&mut action);
+        self.rasterise_painted_vector(&mut action);
         self.layer_state.history.push_action(action);
     }
 

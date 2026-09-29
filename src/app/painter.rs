@@ -505,6 +505,7 @@ impl PainterApp {
         ui::filter_dialog::adjustment_dialog(self, ctx);
         ui::layer_style_dialog::fill_dialog(self, ctx);
         ui::layer_style_dialog::border_dialog(self, ctx);
+        ui::layer_style_dialog::line_width_dialog(self, ctx);
         crate::app::autosave::recovery_dialog(self, ctx);
         ui::image_menu::size_dialog(self, ctx);
         ui::select_dialog::select_dialog(self, ctx);
@@ -607,7 +608,7 @@ impl PainterApp {
                         .clone();
                     self.replace_layer_states(&out, &put);
                 }
-                Some(LayerHistoryOp::Text { .. }) | None => {}
+                Some(LayerHistoryOp::Text { .. } | LayerHistoryOp::Vector { .. }) | None => {}
             }
 
             if layer_action.is_some() {

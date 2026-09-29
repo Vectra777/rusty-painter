@@ -223,10 +223,12 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
             .collect();
         let moved = info.is_some_and(|i| !i.is_identity());
         if moved && app.canvas.layer_index_of(session.source_id).is_some() {
-            // A whole text layer only moved stays text (at its new place).
-            let layer_action = info
-                .filter(|_| session.selection.is_none())
-                .and_then(|i| app.text_layer_moved(session.source_id, &i));
+            // A whole text or vector layer only moved stays text or lines
+            // (at its new place).
+            let layer_action = info.filter(|_| session.selection.is_none()).and_then(|i| {
+                app.text_layer_moved(session.source_id, &i)
+                    .or_else(|| app.vector_layer_moved(session.source_id, &i))
+            });
             let action = UndoAction {
                 tiles,
                 selection: Some(session.selection.clone()),

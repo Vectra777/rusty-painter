@@ -75,6 +75,8 @@ fn bar_slider(ui: &mut egui::Ui, label: &str, width: f32, slider: impl egui::Wid
 fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     let eraser = app.is_eraser_active();
     tool_title(ui, if eraser { "Eraser" } else { "Brush" });
+    // Vector lines have no flow, and are erased whole or in part.
+    let vector = app.is_vector_layer(app.canvas.active_layer_idx);
 
     let brush = &mut app.brush_state.brush;
     let mut changed = false;
@@ -89,26 +91,30 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                 .suffix(" px")
         }),
     );
-    ui.add_space(6.0);
-    changed |= bar_slider(
-        ui,
-        "Opacity",
-        100.0,
-        crate::ui::widgets::reset(&mut brush.brush_options.opacity, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
-        }),
-    );
-    ui.add_space(6.0);
-    changed |= bar_slider(
-        ui,
-        "Flow",
-        100.0,
-        crate::ui::widgets::reset(&mut brush.brush_options.flow, |v| {
-            egui::Slider::new(v, 0.0..=100.0)
-                .max_decimals(0)
-                .suffix("%")
-        }),
-    );
+    if !(vector && eraser) {
+        ui.add_space(6.0);
+        changed |= bar_slider(
+            ui,
+            "Opacity",
+            100.0,
+            crate::ui::widgets::reset(&mut brush.brush_options.opacity, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
+        );
+    }
+    if !vector {
+        ui.add_space(6.0);
+        changed |= bar_slider(
+            ui,
+            "Flow",
+            100.0,
+            crate::ui::widgets::reset(&mut brush.brush_options.flow, |v| {
+                egui::Slider::new(v, 0.0..=100.0)
+                    .max_decimals(0)
+                    .suffix("%")
+            }),
+        );
+    }
 
     if size_changed {
         brush.is_changed = true;
@@ -119,6 +125,27 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     }
     // Kept to the essentials: the rest is in the brush panel, the ruler in
     // the View menu (R).
+
+    // On a vector layer the eraser takes out lines, whole or in part.
+    if vector {
+        use crate::app::tools::vector::VectorErase;
+        ui.add_space(6.0);
+        if eraser {
+            ui.label(RichText::new("Erase").small().color(TEXT_DIM));
+            crate::ui::widgets::segmented(
+                ui,
+                &mut app.workspace.vector.erase,
+                &[
+                    (VectorErase::WholeLine, "Whole line"),
+                    (VectorErase::Touched, "Touched part"),
+                ],
+                true,
+            );
+        } else {
+            ui.label(RichText::new("Vector layer").small().color(ACCENT))
+                .on_hover_text("Lines stay editable: Layer → Vector");
+        }
+    }
 
     "{[} {]} size  ·  Alt+click pick color  ·  Space drag to pan"
 }

@@ -417,6 +417,8 @@ pub(super) struct StoredLayerMeta {
     style: crate::canvas::layer_style::LayerStyle,
     #[serde(default)]
     text: Option<StoredText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vector: Option<crate::canvas::vector::VectorLayer>,
     position_locked: bool,
     #[serde(default)]
     draft: bool,
@@ -439,6 +441,7 @@ impl From<&LayerMeta> for StoredLayerMeta {
             adjustment: meta.adjustment,
             style: meta.style,
             text: StoredText::from_layer(meta.text.as_deref()),
+            vector: meta.vector.as_deref().cloned(),
             position_locked: meta.position_locked,
             draft: meta.draft,
             reference: meta.reference,
@@ -465,6 +468,7 @@ impl StoredLayerMeta {
             adjustment: self.adjustment,
             style: self.style,
             text: StoredText::into_layer(self.text),
+            vector: self.vector.map(Box::new),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
@@ -516,6 +520,13 @@ pub(super) enum StoredLayerHistoryOp {
     /// own layer change.
     Text {
         layers: Vec<(u64, Option<StoredText>)>,
+        #[serde(default)]
+        inner: Option<Box<StoredLayerHistoryOp>>,
+    },
+    /// Vector layers' lines on the other side of the step, then the step's
+    /// own layer change.
+    Vector {
+        layers: Vec<(u64, Option<crate::canvas::vector::VectorLayer>)>,
         #[serde(default)]
         inner: Option<Box<StoredLayerHistoryOp>>,
     },
@@ -589,6 +600,13 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                     .collect(),
                 inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
             },
+            LayerHistoryOp::Vector { layers, inner } => Self::Vector {
+                layers: layers
+                    .iter()
+                    .map(|(id, v)| (id.0, v.as_deref().cloned()))
+                    .collect(),
+                inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
+            },
         }
     }
 }
@@ -652,6 +670,13 @@ impl StoredLayerHistoryOp {
                 layers: layers
                     .into_iter()
                     .map(|(id, text)| (LayerId(id), StoredText::into_layer(text)))
+                    .collect(),
+                inner: inner.map(|op| Box::new(op.into_op())),
+            },
+            Self::Vector { layers, inner } => LayerHistoryOp::Vector {
+                layers: layers
+                    .into_iter()
+                    .map(|(id, v)| (LayerId(id), v.map(Box::new)))
                     .collect(),
                 inner: inner.map(|op| Box::new(op.into_op())),
             },

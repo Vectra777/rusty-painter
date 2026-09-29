@@ -47,6 +47,7 @@ impl Layer {
         layer.kind = LayerKind::Paint;
         layer.adjustment = None;
         layer.style = Default::default();
+        layer.vector = None;
         layer
     }
 }
