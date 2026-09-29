@@ -38,6 +38,18 @@ cargo run --release
 
 That launches the native egui window with the default canvas and brush settings.
 
+### Where your data is kept
+Presets, settings, swatches, gradients, the autosave and any brush tips you add live in one folder per user, whichever folder the app is started from:
+
+| System | Folder |
+|---|---|
+| Linux | `$XDG_DATA_HOME/rusty-painter`, else `~/.local/share/rusty-painter` |
+| Windows | `%APPDATA%\rusty-painter` |
+| macOS | `~/Library/Application Support/rusty-painter` |
+| Android | the app's private storage |
+
+Set `RUSTY_PAINTER_DATA` to use another folder (a portable install, or a clean one to try things in). Delete the folder to start fresh.
+
 ## Android (APK build)
 This is an experimental setup and may need platform fixes. Building for Android needs more than the target and `cargo-apk` — this repo vendors and patches `winit` and ships its own NDK linker wrappers, both required for the build to work:
 
@@ -175,6 +187,9 @@ cargo test --locked
 cargo check --locked --benches --features bench
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
 ```
+
+## License
+GPL-3.0-only: see [LICENSE](LICENSE).
 
 ## Contributing
 The project is early-stage and focused on performance experiments. If you have ideas for improving brush quality, tiling performance, or UI/UX, feel free to open an issue or directly contact me. Tests and benchmarks are especially welcome.
