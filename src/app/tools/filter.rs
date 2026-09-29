@@ -200,6 +200,7 @@ impl PainterApp {
         let layer_id = l.id;
         self.release_canvas();
         let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let filter = filter.fitted(w as usize, h as usize);
         // The selection's area plus what a blur reads around it, or the
         // whole canvas.
         let (bounds, coverage) = match self.selection_manager.get_bounds() {

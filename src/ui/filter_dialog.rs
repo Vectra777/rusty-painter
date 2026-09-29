@@ -231,7 +231,171 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
                 .on_hover_text("Shift the colours without making them lighter or darker");
         }
         Filter::GradientMap(map) => gradient_map_settings(ui, map),
-        Filter::Invert | Filter::Desaturate => {}
+        Filter::Exposure { stops } => {
+            slider_row(
+                ui,
+                "Exposure",
+                egui::Slider::new(stops, -4.0..=4.0)
+                    .suffix(" stops")
+                    .max_decimals(2),
+            );
+        }
+        Filter::Temperature { temperature, tint } => {
+            slider_row(
+                ui,
+                "Cool ↔ Warm",
+                percent_of_unit(egui::Slider::new(temperature, -1.0..=1.0)),
+            );
+            slider_row(
+                ui,
+                "Magenta ↔ Green",
+                percent_of_unit(egui::Slider::new(tint, -1.0..=1.0)),
+            );
+        }
+        Filter::Vibrance { amount } => {
+            slider_row(
+                ui,
+                "Vibrance",
+                percent_of_unit(egui::Slider::new(amount, -1.0..=1.0)),
+            )
+            .on_hover_text("Saturation that lifts dull colours most and leaves rich ones");
+        }
+        Filter::Sepia { amount } => {
+            slider_row(
+                ui,
+                "Amount",
+                percent_of_unit(egui::Slider::new(amount, 0.0..=1.0)),
+            );
+        }
+        Filter::Solarize { level } => {
+            slider_row(
+                ui,
+                "From",
+                percent_of_unit(egui::Slider::new(level, 0.0..=1.0)),
+            )
+            .on_hover_text("Tones brighter than this are inverted");
+        }
+        Filter::Glow {
+            radius,
+            strength,
+            threshold,
+        } => {
+            slider_row(
+                ui,
+                "Radius",
+                egui::Slider::new(radius, 1.0..=reach / 3.0)
+                    .logarithmic(true)
+                    .suffix(" px"),
+            );
+            slider_row(
+                ui,
+                "Strength",
+                percent_of_unit(egui::Slider::new(strength, 0.0..=2.0)),
+            );
+            slider_row(
+                ui,
+                "From brightness",
+                percent_of_unit(egui::Slider::new(threshold, 0.0..=0.95)),
+            )
+            .on_hover_text("Only what's brighter than this glows");
+        }
+        Filter::ChromaticAberration { amount, .. } => {
+            slider_row(
+                ui,
+                "Amount",
+                egui::Slider::new(amount, 0.0..=40.0).suffix(" px"),
+            )
+            .on_hover_text("How far red and blue part at the corners; none in the middle");
+        }
+        Filter::Halftone {
+            size,
+            angle,
+            colour,
+        } => {
+            slider_row(
+                ui,
+                "Dot size",
+                egui::Slider::new(size, 2.0..=64.0)
+                    .logarithmic(true)
+                    .suffix(" px"),
+            );
+            slider_row(
+                ui,
+                "Angle",
+                egui::Slider::new(angle, 0.0..=90.0).suffix("°"),
+            );
+            ui.checkbox(colour, "Coloured dots");
+        }
+        Filter::Emboss { angle, depth } => {
+            slider_row(
+                ui,
+                "Light from",
+                egui::Slider::new(angle, -180.0..=180.0).suffix("°"),
+            );
+            slider_row(
+                ui,
+                "Depth",
+                egui::Slider::new(depth, 0.2..=10.0).logarithmic(true),
+            );
+        }
+        Filter::Clouds { scale, detail } => {
+            ui.label("Replaces the layer (or selection) with grey clouds.");
+            slider_row(
+                ui,
+                "Scale",
+                egui::Slider::new(scale, 8.0..=1024.0)
+                    .logarithmic(true)
+                    .suffix(" px"),
+            );
+            slider_row(ui, "Detail", egui::Slider::new(detail, 1..=8));
+        }
+        Filter::Median { radius } => {
+            slider_row(
+                ui,
+                "Radius",
+                egui::Slider::new(radius, 1..=12).suffix(" px"),
+            );
+        }
+        Filter::OilPaint { radius } => {
+            slider_row(
+                ui,
+                "Brush size",
+                egui::Slider::new(radius, 1..=16).suffix(" px"),
+            );
+        }
+        Filter::Vignette { amount, size, .. } => {
+            slider_row(
+                ui,
+                "Amount",
+                percent_of_unit(egui::Slider::new(amount, -1.0..=1.0)),
+            )
+            .on_hover_text("Darker edges; below zero, lighter");
+            slider_row(
+                ui,
+                "Starts at",
+                percent_of_unit(egui::Slider::new(size, 0.0..=0.95)),
+            )
+            .on_hover_text("How far from the middle it begins");
+        }
+        Filter::ZoomBlur { amount, .. } => {
+            slider_row(
+                ui,
+                "Amount",
+                percent_of_unit(egui::Slider::new(amount, 0.0..=1.0)),
+            );
+        }
+        Filter::SpinBlur { angle, .. } => {
+            slider_row(
+                ui,
+                "Angle",
+                egui::Slider::new(angle, 0.0..=90.0).suffix("°"),
+            );
+        }
+        Filter::Dither { levels } => {
+            slider_row(ui, "Levels", egui::Slider::new(levels, 2..=16))
+                .on_hover_text("Shades per channel");
+        }
+        Filter::Invert | Filter::Desaturate | Filter::FindEdges => {}
     }
 }
 

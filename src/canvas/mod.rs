@@ -4,6 +4,7 @@
 pub mod blend;
 pub mod blend_modes;
 pub mod color;
+pub mod effects;
 pub mod fill;
 pub mod filters;
 pub mod geometry;

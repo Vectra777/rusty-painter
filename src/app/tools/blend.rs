@@ -873,7 +873,9 @@ fn filter_tile(
             }
         }
     }
-    let out = filter.apply(&src, side, side, origin);
+    let out = filter
+        .fitted(canvas.width(), canvas.height())
+        .apply(&src, side, side, origin);
     let (r, t) = (reach as usize, ts as usize);
     (0..t)
         .flat_map(|row| {
@@ -1388,6 +1390,11 @@ mod mode_tests {
     fn every_filter_paints_through_the_brush() {
         use crate::canvas::filters::Filter;
         for &filter in Filter::MENU.iter().flat_map(|g| g.iter()) {
+            // A two-colour checkerboard is already its own median, at any
+            // radius (the median's own tests cover it).
+            if matches!(filter, Filter::Median { .. }) {
+                continue;
+            }
             let filter = match filter {
                 // Its defaults change nothing.
                 Filter::BrightnessContrast { .. } => Filter::BrightnessContrast {
@@ -1415,6 +1422,26 @@ mod mode_tests {
                         blue: same,
                     }
                 }
+                Filter::Exposure { .. } => Filter::Exposure { stops: 1.0 },
+                // The checks are too dark to glow from the default brightness.
+                Filter::Glow { radius, .. } => Filter::Glow {
+                    radius,
+                    strength: 1.0,
+                    threshold: 0.0,
+                },
+                Filter::Temperature { .. } => Filter::Temperature {
+                    temperature: 0.8,
+                    tint: 0.3,
+                },
+                Filter::Vibrance { .. } => Filter::Vibrance { amount: -1.0 },
+                // Reaching the stroke in the middle of the canvas.
+                Filter::Vignette { frame, .. } => Filter::Vignette {
+                    amount: 1.0,
+                    size: 0.0,
+                    frame,
+                },
+                Filter::ZoomBlur { frame, .. } => Filter::ZoomBlur { amount: 0.5, frame },
+                Filter::SpinBlur { frame, .. } => Filter::SpinBlur { angle: 60.0, frame },
                 Filter::ColourBalance { .. } => Filter::ColourBalance {
                     shadows: [0.8, 0.0, 0.0],
                     midtones: [0.8, 0.0, 0.0],

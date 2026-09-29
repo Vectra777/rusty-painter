@@ -7,8 +7,29 @@
 //! do; blurs average premultiplied pixels, so transparent ones don't darken
 //! the edges.
 
+use crate::canvas::effects::{self, Frame};
 use eframe::egui::Color32;
 use rayon::prelude::*;
+
+/// sRGB value (0..=1) to linear light.
+fn srgb_to_linear(v: f32) -> f32 {
+    let v = v.max(0.0);
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear light to an sRGB value (0..=1, unclamped above).
+fn linear_to_srgb(v: f32) -> f32 {
+    let v = v.max(0.0);
+    if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Filter {
@@ -90,6 +111,86 @@ pub enum Filter {
         black: f32,
         white: f32,
         keep_color: bool,
+    },
+    /// Stops of light (-4..=4), in linear light as a camera would.
+    Exposure {
+        stops: f32,
+    },
+    /// Warmer (+) or cooler (−), and greener (+) or more magenta (−): -1..=1.
+    Temperature {
+        temperature: f32,
+        tint: f32,
+    },
+    /// More (or less) saturation, the dull colours most (-1..=1).
+    Vibrance {
+        amount: f32,
+    },
+    /// Towards an old photograph's brown, `amount` 0..=1.
+    Sepia {
+        amount: f32,
+    },
+    /// Tones above `level` inverted, as over-exposed film.
+    Solarize {
+        level: f32,
+    },
+    /// The bright parts (above `threshold`) bleed light: blur `radius`,
+    /// `strength` 0..=2.
+    Glow {
+        radius: f32,
+        strength: f32,
+        threshold: f32,
+    },
+    /// Red and blue pulled apart towards the edges, `amount` pixels at the
+    /// corners.
+    ChromaticAberration {
+        amount: f32,
+        frame: crate::canvas::effects::Frame,
+    },
+    /// Printed dots, `size` pixels apart on a grid turned by `angle`.
+    Halftone {
+        size: f32,
+        angle: f32,
+        colour: bool,
+    },
+    /// A grey relief lit from `angle` degrees.
+    Emboss {
+        angle: f32,
+        depth: f32,
+    },
+    /// Edges as dark lines on white.
+    FindEdges,
+    /// Grey clouds over the whole layer: `scale` pixels, `detail` octaves.
+    Clouds {
+        scale: f32,
+        detail: u8,
+    },
+    /// Specks removed (median of each channel over `radius`).
+    Median {
+        radius: u32,
+    },
+    /// Flat painted areas with crisp edges (Kuwahara), `radius` pixels.
+    OilPaint {
+        radius: u32,
+    },
+    /// Darker (or lighter, negative) towards the edges, from `size` out.
+    Vignette {
+        amount: f32,
+        size: f32,
+        frame: crate::canvas::effects::Frame,
+    },
+    /// Streaks out from the middle, `amount` of each pixel's distance.
+    ZoomBlur {
+        amount: f32,
+        frame: crate::canvas::effects::Frame,
+    },
+    /// Turning around the middle by `angle` degrees.
+    SpinBlur {
+        angle: f32,
+        frame: crate::canvas::effects::Frame,
+    },
+    /// Fewer colours with an ordered pattern: `levels` per channel.
+    Dither {
+        levels: u8,
     },
 }
 
@@ -300,7 +401,7 @@ pub const MAX_REACH: i32 = 200;
 
 impl Filter {
     /// The Filter menu: groups of filters with their default settings.
-    pub const MENU: [&'static [Filter]; 4] = [
+    pub const MENU: [&'static [Filter]; 5] = [
         &[
             Filter::BrightnessContrast {
                 brightness: 0.0,
@@ -323,6 +424,14 @@ impl Filter {
             Filter::CURVES,
             Filter::COLOUR_BALANCE,
             Filter::GRADIENT_MAP,
+            Filter::Exposure { stops: 0.0 },
+            Filter::Temperature {
+                temperature: 0.0,
+                tint: 0.0,
+            },
+            Filter::Vibrance { amount: 0.0 },
+            Filter::Sepia { amount: 1.0 },
+            Filter::Solarize { level: 0.5 },
         ],
         &[
             Filter::GaussianBlur { radius: 4.0 },
@@ -334,6 +443,42 @@ impl Filter {
                 radius: 2.0,
                 amount: 0.8,
             },
+            Filter::ZoomBlur {
+                amount: 0.1,
+                frame: Frame::NONE,
+            },
+            Filter::SpinBlur {
+                angle: 10.0,
+                frame: Frame::NONE,
+            },
+            Filter::Median { radius: 2 },
+        ],
+        &[
+            Filter::Glow {
+                radius: 12.0,
+                strength: 0.8,
+                threshold: 0.6,
+            },
+            Filter::ChromaticAberration {
+                amount: 6.0,
+                frame: Frame::NONE,
+            },
+            Filter::Halftone {
+                size: 8.0,
+                angle: 45.0,
+                colour: false,
+            },
+            Filter::Emboss {
+                angle: 135.0,
+                depth: 2.0,
+            },
+            Filter::FindEdges,
+            Filter::OilPaint { radius: 4 },
+            Filter::Vignette {
+                amount: 0.6,
+                size: 0.4,
+                frame: Frame::NONE,
+            },
         ],
         &[
             Filter::Noise {
@@ -341,6 +486,11 @@ impl Filter {
                 mono: true,
             },
             Filter::Pixelate { size: 8 },
+            Filter::Dither { levels: 4 },
+            Filter::Clouds {
+                scale: 128.0,
+                detail: 5,
+            },
         ],
         &[Filter::LineArt {
             black: 0.25,
@@ -367,12 +517,29 @@ impl Filter {
             Filter::Curves { .. } => "Curves",
             Filter::ColourBalance { .. } => "Colour Balance",
             Filter::GradientMap(_) => "Gradient Map",
+            Filter::Exposure { .. } => "Exposure",
+            Filter::Temperature { .. } => "Temperature / Tint",
+            Filter::Vibrance { .. } => "Vibrance",
+            Filter::Sepia { .. } => "Sepia",
+            Filter::Solarize { .. } => "Solarize",
+            Filter::Glow { .. } => "Glow",
+            Filter::ChromaticAberration { .. } => "Chromatic Aberration",
+            Filter::Halftone { .. } => "Halftone",
+            Filter::Emboss { .. } => "Emboss",
+            Filter::FindEdges => "Find Edges",
+            Filter::Clouds { .. } => "Clouds",
+            Filter::Median { .. } => "Reduce Noise (Median)",
+            Filter::OilPaint { .. } => "Oil Paint",
+            Filter::Vignette { .. } => "Vignette",
+            Filter::ZoomBlur { .. } => "Zoom Blur",
+            Filter::SpinBlur { .. } => "Spin Blur",
+            Filter::Dither { .. } => "Dither",
         }
     }
 
     /// Filters that can be adjustment layers: each pixel changes on its own
     /// (no neighbours, no position), and its transparency stays.
-    pub const ADJUSTMENTS: [Filter; 10] = [
+    pub const ADJUSTMENTS: [Filter; 15] = [
         Filter::BrightnessContrast {
             brightness: 0.0,
             contrast: 0.0,
@@ -394,7 +561,30 @@ impl Filter {
         Filter::CURVES,
         Filter::COLOUR_BALANCE,
         Filter::GRADIENT_MAP,
+        Filter::Exposure { stops: 0.0 },
+        Filter::Temperature {
+            temperature: 0.0,
+            tint: 0.0,
+        },
+        Filter::Vibrance { amount: 0.0 },
+        Filter::Sepia { amount: 1.0 },
+        Filter::Solarize { level: 0.5 },
     ];
+
+    /// This filter set up for a `w`×`h` canvas: the ones that work from its
+    /// middle learn where that is.
+    pub fn fitted(self, w: usize, h: usize) -> Filter {
+        let canvas = Frame::of_canvas(w, h);
+        let mut f = self;
+        if let Filter::ChromaticAberration { frame, .. }
+        | Filter::Vignette { frame, .. }
+        | Filter::ZoomBlur { frame, .. }
+        | Filter::SpinBlur { frame, .. } = &mut f
+        {
+            *frame = canvas;
+        }
+        f
+    }
 
     const IDENTITY_CURVE: ToneCurve = {
         let mut points = [[0; 2]; CURVE_POINTS];
@@ -459,20 +649,29 @@ impl Filter {
                 | Filter::Levels { .. }
                 | Filter::Invert
                 | Filter::Posterize { .. }
+                | Filter::Exposure { .. }
+                | Filter::Temperature { .. }
+                | Filter::Solarize { .. }
         ) {
             return None;
         }
-        let mut table = [0u8; 256];
-        for (v, out) in table.iter_mut().enumerate() {
-            let v = v as u8;
-            *out = self.pixel(Color32::from_rgb(v, v, v)).r();
+        // Each channel on its own: a grey in gives each channel's table.
+        let mut lut = Box::new([[0u8; 256]; 3]);
+        for v in 0..=255u8 {
+            let [r, g, b, _] = self.pixel(Color32::from_rgb(v, v, v)).to_array();
+            lut[0][v as usize] = r;
+            lut[1][v as usize] = g;
+            lut[2][v as usize] = b;
         }
-        Some(Box::new([table; 3]))
+        Some(lut)
     }
 
     /// Has settings (the menu opens a dialog), rather than applying at once.
     pub fn has_settings(&self) -> bool {
-        !matches!(self, Filter::Invert | Filter::Desaturate)
+        !matches!(
+            self,
+            Filter::Invert | Filter::Desaturate | Filter::FindEdges
+        )
     }
 
     /// The same filter on a picture `block` times smaller (a quick
@@ -492,6 +691,55 @@ impl Filter {
             Filter::Pixelate { size } => Filter::Pixelate {
                 size: (size / block.max(1) as u32).max(1),
             },
+            Filter::Glow {
+                radius,
+                strength,
+                threshold,
+            } => Filter::Glow {
+                radius: radius / k,
+                strength,
+                threshold,
+            },
+            Filter::ChromaticAberration { amount, frame } => Filter::ChromaticAberration {
+                amount: amount / k,
+                frame: frame.shrunk(k),
+            },
+            Filter::Halftone {
+                size,
+                angle,
+                colour,
+            } => Filter::Halftone {
+                size: (size / k).max(2.0),
+                angle,
+                colour,
+            },
+            Filter::Clouds { scale, detail } => Filter::Clouds {
+                scale: scale / k,
+                detail,
+            },
+            Filter::Median { radius } => Filter::Median {
+                radius: (radius as f32 / k).round().max(1.0) as u32,
+            },
+            Filter::OilPaint { radius } => Filter::OilPaint {
+                radius: (radius as f32 / k).round().max(1.0) as u32,
+            },
+            Filter::Vignette {
+                amount,
+                size,
+                frame,
+            } => Filter::Vignette {
+                amount,
+                size,
+                frame: frame.shrunk(k),
+            },
+            Filter::ZoomBlur { amount, frame } => Filter::ZoomBlur {
+                amount,
+                frame: frame.shrunk(k),
+            },
+            Filter::SpinBlur { angle, frame } => Filter::SpinBlur {
+                angle,
+                frame: frame.shrunk(k),
+            },
             other => other,
         }
     }
@@ -504,6 +752,12 @@ impl Filter {
             }
             Filter::MotionBlur { distance, .. } => (distance * 0.5).ceil() as i32 + 1,
             Filter::Pixelate { size } => size as i32,
+            Filter::Glow { radius, .. } => (radius * 3.0).ceil() as i32,
+            Filter::ChromaticAberration { amount, .. } => amount.ceil() as i32 + 1,
+            Filter::Halftone { size, .. } => size.ceil() as i32 + 1,
+            Filter::Emboss { .. } | Filter::FindEdges => 2,
+            Filter::Median { radius } | Filter::OilPaint { radius } => radius as i32,
+            Filter::ZoomBlur { .. } | Filter::SpinBlur { .. } => MAX_REACH,
             _ => 0,
         }
         .min(MAX_REACH)
@@ -532,6 +786,36 @@ impl Filter {
                 })
                 .collect(),
             Filter::Pixelate { size } => pixelate(src, w, h, origin, size.max(1) as usize),
+            Filter::Glow {
+                radius,
+                strength,
+                threshold,
+            } => effects::glow(src, w, h, radius, strength, threshold),
+            Filter::ChromaticAberration { amount, frame } => {
+                effects::chromatic_aberration(src, w, h, origin, amount, frame)
+            }
+            Filter::Halftone {
+                size,
+                angle,
+                colour,
+            } => effects::halftone(src, w, h, origin, size, angle, colour),
+            Filter::Emboss { angle, depth } => effects::emboss(src, w, h, angle, depth),
+            Filter::FindEdges => effects::find_edges(src, w, h),
+            Filter::Clouds { scale, detail } => effects::clouds(w, h, origin, scale, detail),
+            Filter::Median { radius } => effects::median(src, w, h, radius),
+            Filter::OilPaint { radius } => effects::oil_paint(src, w, h, radius),
+            Filter::Vignette {
+                amount,
+                size,
+                frame,
+            } => effects::vignette(src, w, h, origin, amount, size, frame),
+            Filter::ZoomBlur { amount, frame } => {
+                effects::zoom_blur(src, w, h, origin, amount, frame)
+            }
+            Filter::SpinBlur { angle, frame } => {
+                effects::spin_blur(src, w, h, origin, angle, frame)
+            }
+            Filter::Dither { levels } => effects::dither(src, w, h, origin, levels),
             _ => match self.channel_lut() {
                 Some(lut) => src.par_iter().map(|&c| with_lut(c, &lut)).collect(),
                 None => src.par_iter().map(|&c| self.pixel(c)).collect(),
@@ -615,6 +899,38 @@ impl Filter {
                 rgb.map(|v| (v * n).round() / n)
             }
             Filter::Threshold { level } => [if luma(rgb) >= level { 1.0 } else { 0.0 }; 3],
+            Filter::Exposure { stops } => {
+                let k = 2f32.powf(stops);
+                rgb.map(|v| linear_to_srgb(srgb_to_linear(v) * k))
+            }
+            Filter::Temperature { temperature, tint } => {
+                // Gains in linear light, like a white balance.
+                let t = temperature * 0.35;
+                let g = tint * 0.25;
+                let gains = [1.0 + t, 1.0 + g, 1.0 - t];
+                [0, 1, 2].map(|i| linear_to_srgb(srgb_to_linear(rgb[i]) * gains[i]))
+            }
+            Filter::Vibrance { amount } => {
+                let [h, s, l] = rgb_to_hsl(rgb);
+                // Dull colours gain the most, rich ones barely move, greys
+                // (whose hue is noise) stay grey.
+                let s = if amount >= 0.0 {
+                    s * (1.0 + amount * 2.0 * (1.0 - s))
+                } else {
+                    s * (1.0 + amount * (1.0 - s * 0.5))
+                };
+                hsl_to_rgb([h, s.clamp(0.0, 1.0), l])
+            }
+            Filter::Sepia { amount } => {
+                let [r, g, b] = rgb;
+                let tone = [
+                    0.393 * r + 0.769 * g + 0.189 * b,
+                    0.349 * r + 0.686 * g + 0.168 * b,
+                    0.272 * r + 0.534 * g + 0.131 * b,
+                ];
+                [0, 1, 2].map(|i| rgb[i] + (tone[i] - rgb[i]) * amount.clamp(0.0, 1.0))
+            }
+            Filter::Solarize { level } => rgb.map(|v| if v > level { 1.0 - v } else { v }),
             Filter::Curves {
                 rgb: master,
                 red,
@@ -793,7 +1109,7 @@ fn box_radii(sigma: f32) -> [usize; 3] {
     })
 }
 
-fn gaussian_blur(src: &[Color32], w: usize, h: usize, sigma: f32) -> Vec<Color32> {
+pub(crate) fn gaussian_blur(src: &[Color32], w: usize, h: usize, sigma: f32) -> Vec<Color32> {
     if sigma < 0.3 || w == 0 || h == 0 {
         return src.to_vec();
     }
@@ -964,7 +1280,36 @@ mod tests {
                         mono: *mono,
                     },
                     Filter::Pixelate { .. } => Filter::Pixelate { size: 1 },
-                    Filter::Curves { .. } | Filter::ColourBalance { .. } => *f,
+                    Filter::Curves { .. }
+                    | Filter::ColourBalance { .. }
+                    | Filter::Exposure { .. }
+                    | Filter::Temperature { .. }
+                    | Filter::Vibrance { .. } => *f,
+                    Filter::Sepia { .. } => Filter::Sepia { amount: 0.0 },
+                    Filter::Solarize { .. } => Filter::Solarize { level: 1.0 },
+                    Filter::Median { .. } | Filter::OilPaint { .. } => continue,
+                    Filter::Glow { radius, .. } => Filter::Glow {
+                        radius: *radius,
+                        strength: 0.0,
+                        threshold: 0.5,
+                    },
+                    Filter::Vignette { size, .. } => Filter::Vignette {
+                        amount: 0.0,
+                        size: *size,
+                        frame: crate::canvas::effects::Frame::of_canvas(3, 1),
+                    },
+                    Filter::ZoomBlur { .. } => Filter::ZoomBlur {
+                        amount: 0.0,
+                        frame: crate::canvas::effects::Frame::of_canvas(3, 1),
+                    },
+                    Filter::SpinBlur { .. } => Filter::SpinBlur {
+                        angle: 0.0,
+                        frame: crate::canvas::effects::Frame::of_canvas(3, 1),
+                    },
+                    Filter::ChromaticAberration { .. } => Filter::ChromaticAberration {
+                        amount: 0.0,
+                        frame: crate::canvas::effects::Frame::of_canvas(3, 1),
+                    },
                     _ => continue,
                 };
                 let out = neutral.apply(&px, 3, 1, (0, 0));
@@ -1085,6 +1430,91 @@ mod tests {
             Color32::from_rgb(90, 90, 90),
         );
         assert!(r.abs_diff(90) <= 1 && r == g && g == b);
+    }
+
+    #[test]
+    fn the_new_colour_adjustments_do_what_they_say() {
+        let grey = Color32::from_rgb(128, 128, 128);
+        let brighter = rgb_of(Filter::Exposure { stops: 1.0 }, grey);
+        assert!(
+            brighter[0] > 170 && brighter[0] < 185,
+            "one stop: twice the light {brighter:?}"
+        );
+        let warm = rgb_of(
+            Filter::Temperature {
+                temperature: 1.0,
+                tint: 0.0,
+            },
+            grey,
+        );
+        assert!(warm[0] > 140 && warm[2] < 110, "{warm:?}");
+        let dull = Color32::from_rgb(140, 120, 110);
+        let rich = Color32::from_rgb(230, 20, 20);
+        let sat = |c: [u8; 3]| c.iter().max().unwrap() - c.iter().min().unwrap();
+        let v = |c| rgb_of(Filter::Vibrance { amount: 1.0 }, c);
+        let (d0, d1) = (sat([140, 120, 110]), sat(v(dull)));
+        let (r0, r1) = (sat([230, 20, 20]), sat(v(rich)));
+        assert!(
+            d1 as f32 / d0 as f32 > r1 as f32 / r0 as f32,
+            "dull colours gain most"
+        );
+        let sepia = rgb_of(
+            Filter::Sepia { amount: 1.0 },
+            Color32::from_rgb(40, 90, 200),
+        );
+        assert!(
+            sepia[0] > sepia[1] && sepia[1] > sepia[2],
+            "brown: {sepia:?}"
+        );
+        assert_eq!(
+            rgb_of(Filter::Solarize { level: 0.5 }, Color32::WHITE),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            rgb_of(Filter::Solarize { level: 0.5 }, Color32::from_gray(60)),
+            [60; 3]
+        );
+        // The per-channel ones have tables that agree with the maths.
+        for f in [
+            Filter::Exposure { stops: -1.3 },
+            Filter::Temperature {
+                temperature: -0.6,
+                tint: 0.4,
+            },
+            Filter::Solarize { level: 0.3 },
+        ] {
+            let lut = f.channel_lut().expect("per channel");
+            for v in (0..=255u8).step_by(3) {
+                let c = Color32::from_rgb(v, 255 - v, v / 3);
+                assert_eq!(f.adjust(c, Some(&lut)), f.pixel(c), "{}", f.name());
+            }
+        }
+        // All of them can be adjustment layers.
+        for f in [
+            Filter::Exposure { stops: 0.0 },
+            Filter::Vibrance { amount: 0.0 },
+            Filter::Sepia { amount: 1.0 },
+        ] {
+            assert!(Filter::ADJUSTMENTS.iter().any(|a| a.name() == f.name()));
+        }
+    }
+
+    #[test]
+    fn every_filter_keeps_a_transparent_pixel_transparent_or_says_why() {
+        // Only clouds (which paint over everything) and glow (whose light
+        // spreads) may fill transparent pixels.
+        let clear = vec![Color32::TRANSPARENT; 9];
+        for group in Filter::MENU {
+            for f in group.iter() {
+                let f = f.fitted(3, 3);
+                let out = f.apply(&clear, 3, 3, (0, 0));
+                let spreads = matches!(f, Filter::Clouds { .. } | Filter::Glow { .. });
+                if !spreads {
+                    assert!(out.iter().all(|c| c.a() == 0), "{}", f.name());
+                }
+                assert_eq!(out.len(), 9, "{}", f.name());
+            }
+        }
     }
 
     #[test]
