@@ -126,11 +126,9 @@ impl PainterApp {
     fn write_autosave(&mut self) {
         self.release_canvas();
         let path = self.autosave_path();
-        // Written beside, then renamed: a crash mid-write keeps the last one.
-        let tmp = path.with_extension("rpainter.tmp");
+        // A crash mid-write keeps the last one.
         let result = crate::project::encode_project(self)
-            .and_then(|bytes| std::fs::write(&tmp, bytes).map_err(|e| e.to_string()))
-            .and_then(|()| std::fs::rename(&tmp, &path).map_err(|e| e.to_string()));
+            .and_then(|bytes| crate::project::write_atomically(&path, &bytes));
         if let Err(err) = result {
             log::error!("Autosave failed: {err}");
         }

@@ -1257,4 +1257,17 @@ mod tests {
         assert!(app.canvas.layers.iter().any(|l| l.name == "Shade"));
         assert_eq!(app.render_cache.tiles_x, 2);
     }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_psd() {
+        let seed = encode_psd(&PsdDocument::from_canvas(&document())).unwrap();
+        crate::fuzz::fuzz("psd", &seed, std::time::Duration::from_secs(2), |b| {
+            if let Ok(doc) = decode_psd(b)
+                && let Ok(canvas) = doc.into_canvas()
+            {
+                canvas.flatten();
+            }
+        });
+    }
 }

@@ -580,4 +580,21 @@ mod tests {
         let names: Vec<&str> = imported.presets.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["Soft Ink", "Second"]);
     }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_krita_presets() {
+        // The preset XML (the PNG around it has checksums).
+        crate::fuzz::fuzz(
+            "kpp-xml",
+            AUTO.as_bytes(),
+            std::time::Duration::from_secs(2),
+            |b| {
+                let mut notes = Vec::new();
+                // Latin-1, as PNG text must be.
+                let xml: String = b.iter().map(|&c| c as char).collect();
+                let _ = read_kpp(&kpp(&xml), "fuzz", &HashMap::new(), &mut notes);
+            },
+        );
+    }
 }

@@ -449,7 +449,7 @@ impl Canvas {
 
     fn allocate_layer_id(&mut self) -> LayerId {
         let id = LayerId(self.next_layer_id);
-        self.next_layer_id += 1;
+        self.next_layer_id = self.next_layer_id.saturating_add(1);
         id
     }
 
@@ -494,7 +494,7 @@ impl Canvas {
         self.layers.insert(idx, layer);
         // `id` is a reused (previously-allocated) id, not a new one, but
         // guard against ever handing out a colliding id afterward.
-        self.next_layer_id = self.next_layer_id.max(id.0 + 1);
+        self.next_layer_id = self.next_layer_id.max(id.0.saturating_add(1));
     }
 
     /// Snapshot every non-empty tile of a layer as full-tile `TileSnapshot`s,
@@ -595,7 +595,7 @@ impl Canvas {
             .iter()
             .map(|layer| layer.id.0)
             .max()
-            .map_or(0, |max_id| max_id + 1);
+            .map_or(0, |max_id| max_id.saturating_add(1));
     }
 
     /// Size of a tile edge in pixels.

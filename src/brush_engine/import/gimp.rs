@@ -259,4 +259,21 @@ pub(super) mod tests {
         assert!(import_gih(b"Hose\n2 ncells:2\n", "f").is_err());
         assert!(import_gih(b"", "f").is_err());
     }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_gimp() {
+        let pixels: Vec<u8> = (0..16 * 8 * 4).map(|i| i as u8).collect();
+        let seed = gbr("Fuzz", 16, 8, 4, 25, &pixels);
+        crate::fuzz::fuzz("gbr", &seed, std::time::Duration::from_secs(2), |b| {
+            let _ = import_gbr(b, "fuzz");
+        });
+        // A pipe of two of them.
+        let mut gih = b"Fuzz pipe\n2 ncells:2 cellwidth:16 cellheight:8 step:10 dim:1 cols:1 rows:1 placement:constant rank0:2 sel0:incremental\n".to_vec();
+        gih.extend(gbr("a", 16, 8, 4, 25, &pixels));
+        gih.extend(gbr("b", 16, 8, 4, 25, &pixels));
+        crate::fuzz::fuzz("gih", &gih, std::time::Duration::from_secs(2), |b| {
+            let _ = import_gih(b, "fuzz");
+        });
+    }
 }

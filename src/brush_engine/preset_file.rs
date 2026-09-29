@@ -747,4 +747,14 @@ mod tests {
         assert_eq!(file_stem("a/b\\c:d"), "abcd");
         assert_eq!(file_stem("../"), "Brush");
     }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_preset_file() {
+        let presets = crate::PainterApp::default_brush_presets();
+        let seed = encode(&presets[..presets.len().min(6)]).unwrap();
+        crate::fuzz::fuzz("rpbrush", &seed, std::time::Duration::from_secs(2), |b| {
+            let _ = decode(b);
+        });
+    }
 }

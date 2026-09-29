@@ -105,6 +105,8 @@ fn layered(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
         num("width").ok_or("No width")?,
         num("height").ok_or("No height")?,
     );
+    // Before any buffer the size of the canvas is made.
+    crate::app::document::validate_canvas_size(w, h)?;
     let name = image.attr("name").unwrap_or_default();
     let mut reader = Reader {
         entries,
@@ -576,5 +578,59 @@ mod tests {
             flipped[i] ^= 0x5a;
         }
         let _ = decode_kra(&flipped);
+    }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_kra() {
+        let open = |b: &[u8]| {
+            if let Ok(doc) = decode_kra(b)
+                && let Ok(canvas) = doc.into_canvas()
+            {
+                canvas.flatten();
+            }
+        };
+        let seed = fixture("krita-layers-8bit.kra");
+        crate::fuzz::fuzz("kra", &seed, std::time::Duration::from_secs(2), open);
+        // Each file inside, damaged on its own (the archive stays sound).
+        for depth in ["8bit", "16bit"] {
+            let entries: HashMap<String, Vec<u8>> =
+                crate::project::zip::read_all(&fixture(&format!("krita-layers-{depth}.kra")))
+                    .unwrap()
+                    .into_iter()
+                    .collect();
+            for name in entries.keys().filter(|n| !n.ends_with(".png")) {
+                crate::fuzz::fuzz(
+                    &format!("kra-{depth}-{}", name.replace('/', "_")),
+                    &entries[name],
+                    std::time::Duration::from_secs(2),
+                    |b| {
+                        let mut damaged = entries.clone();
+                        damaged.insert(name.clone(), b.to_vec());
+                        if let Ok(doc) = layered(&damaged)
+                            && let Ok(canvas) = doc.into_canvas()
+                        {
+                            canvas.flatten();
+                        }
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_huge_canvas_claim_is_refused_before_anything_is_made_that_size() {
+        let mut entries: HashMap<String, Vec<u8>> =
+            crate::project::zip::read_all(&fixture("krita-layers-8bit.kra"))
+                .unwrap()
+                .into_iter()
+                .collect();
+        let xml = String::from_utf8(entries["maindoc.xml"].clone()).unwrap();
+        let xml = xml
+            .replacen(r#"width="200""#, r#"width="65536""#, 1)
+            .replacen(r#"height="120""#, r#"height="65536""#, 1);
+        entries.insert("maindoc.xml".into(), xml.into_bytes());
+        let err = layered(&entries).err().expect("refused");
+        assert!(err.contains("too large"), "{err}");
     }
 }

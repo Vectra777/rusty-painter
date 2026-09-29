@@ -156,8 +156,10 @@ fn canvas_size(db: &rusqlite::Connection) -> Option<(usize, usize, Option<i64>)>
     let canvas = rows(db, "Canvas").ok()?.into_iter().next()?;
     let w = int(&canvas, "CanvasWidth")?;
     let h = int(&canvas, "CanvasHeight")?;
-    ((1..=1 << 16).contains(&w) && (1..=1 << 16).contains(&h))
-        .then(|| (w as usize, h as usize, int(&canvas, "CanvasRootFolder")))
+    let (w, h) = (usize::try_from(w).ok()?, usize::try_from(h).ok()?);
+    // Before any buffer the size of the canvas is made.
+    crate::app::document::validate_canvas_size(w, h).ok()?;
+    Some((w, h, int(&canvas, "CanvasRootFolder")))
 }
 
 /// The preview, stretched to the canvas, as one full-canvas layer.
@@ -1014,5 +1016,22 @@ mod tests {
         assert_eq!(blend(26), LayerBlend::Luminosity);
         assert_eq!(blend(30), LayerBlend::Normal, "pass-through");
         assert_eq!(blend(999), LayerBlend::Normal);
+    }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_clip() {
+        crate::fuzz::fuzz(
+            "clip",
+            &document(),
+            std::time::Duration::from_secs(2),
+            |b| {
+                if let Ok(doc) = decode_clip(b)
+                    && let Ok(canvas) = doc.into_canvas()
+                {
+                    canvas.flatten();
+                }
+            },
+        );
     }
 }

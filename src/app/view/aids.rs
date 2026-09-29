@@ -194,9 +194,7 @@ impl PainterApp {
         }
         let result = serde_json::to_vec_pretty(&now)
             .map_err(|e| e.to_string())
-            .and_then(|bytes| {
-                std::fs::write(self.view_settings_path(), bytes).map_err(|e| e.to_string())
-            });
+            .and_then(|bytes| crate::project::write_atomically(&self.view_settings_path(), &bytes));
         if let Err(err) = result {
             log::warn!("Couldn't save the view settings: {err}");
         }

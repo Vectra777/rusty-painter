@@ -339,9 +339,7 @@ impl PainterApp {
         if settings_changed {
             let result = serde_json::to_vec_pretty(&settings)
                 .map_err(|e| e.to_string())
-                .and_then(|bytes| {
-                    std::fs::write(self.settings_path(), bytes).map_err(|e| e.to_string())
-                });
+                .and_then(|bytes| crate::project::write_atomically(&self.settings_path(), &bytes));
             if let Err(err) = result {
                 log::warn!("Couldn't save the settings: {err}");
             }
@@ -356,7 +354,7 @@ impl PainterApp {
             let result = std::fs::create_dir_all(&self.brush_state.brushes_path)
                 .map_err(|e| e.to_string())
                 .and_then(|()| preset_file::encode(&presets))
-                .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
+                .and_then(|bytes| crate::project::write_atomically(&path, &bytes));
             if let Err(err) = result {
                 log::warn!("Couldn't save the brushes in use: {err}");
             }

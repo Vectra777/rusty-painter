@@ -254,9 +254,7 @@ impl PainterApp {
         }
         let result = serde_json::to_vec_pretty(&widths)
             .map_err(|e| e.to_string())
-            .and_then(|bytes| {
-                std::fs::write(self.panel_widths_path(), bytes).map_err(|e| e.to_string())
-            });
+            .and_then(|bytes| crate::project::write_atomically(&self.panel_widths_path(), &bytes));
         if let Err(err) = result {
             log::warn!("Couldn't save the panel widths: {err}");
         }

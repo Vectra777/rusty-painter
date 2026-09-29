@@ -123,7 +123,23 @@ pub(crate) fn rows(
     table: &str,
 ) -> rusqlite::Result<Vec<HashMap<String, Cell>>> {
     let mut stmt = db.prepare(&format!("SELECT * FROM \"{table}\""))?;
-    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    // The names from the table's description: rusqlite panics on a column
+    // name that isn't UTF-8 (a damaged file), and this reads them as text.
+    let names: Vec<String> = {
+        let mut info = db.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
+        let mut rows = info.query([])?;
+        let mut names = Vec::new();
+        while let Some(row) = rows.next()? {
+            names.push(match row.get_ref(1)? {
+                ValueRef::Text(t) | ValueRef::Blob(t) => String::from_utf8_lossy(t).into_owned(),
+                _ => String::new(),
+            });
+        }
+        names
+    };
+    if names.len() != stmt.column_count() {
+        return Err(rusqlite::Error::InvalidColumnIndex(names.len()));
+    }
     let mut out = Vec::new();
     let mut query = stmt.query([])?;
     while let Some(row) = query.next()? {
@@ -244,5 +260,18 @@ mod tests {
         assert!(import(b"not sqlite", "x").is_err());
         let good = sut(10.0, None);
         assert!(import(&good[..good.len() / 2], "x").is_err());
+    }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_sut() {
+        crate::fuzz::fuzz(
+            "sut",
+            &sut(42.0, Some(png(20, 10))),
+            std::time::Duration::from_secs(2),
+            |b| {
+                let _ = import(b, "fuzz");
+            },
+        );
     }
 }

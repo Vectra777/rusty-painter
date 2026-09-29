@@ -74,7 +74,7 @@ impl Canvas {
         let mut put = Vec::with_capacity(incoming.len());
         for (i, layer) in incoming {
             let i = i.min(self.layers.len());
-            self.next_layer_id = self.next_layer_id.max(layer.id.0 + 1);
+            self.next_layer_id = self.next_layer_id.max(layer.id.0.saturating_add(1));
             self.layers.insert(i, layer);
             put.push(i);
         }

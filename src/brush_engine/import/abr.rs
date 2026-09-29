@@ -609,4 +609,12 @@ mod tests {
         }
         assert!(import(&[0, 99], "bad").is_err());
     }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_abr() {
+        crate::fuzz::fuzz("abr", &abr6(), std::time::Duration::from_secs(2), |b| {
+            let _ = import(b, "fuzz");
+        });
+    }
 }

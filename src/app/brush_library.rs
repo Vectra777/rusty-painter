@@ -323,7 +323,7 @@ impl PainterApp {
                 if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
                 }
-                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+                crate::project::write_atomically(&path, &bytes)
             });
         if let Err(err) = result {
             log::warn!("Couldn't save the brush library: {err}");

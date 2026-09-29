@@ -58,7 +58,30 @@ pub(crate) struct LoadedProject {
 }
 
 pub(crate) fn save_project(app: &PainterApp, path: impl AsRef<Path>) -> Result<(), String> {
-    fs::write(path, encode_project(app)?).map_err(|err| format!("Save failed: {err}"))
+    write_atomically(path.as_ref(), &encode_project(app)?)
+        .map_err(|err| format!("Save failed: {err}"))
+}
+
+/// Replace `path` with `bytes` so that a crash, a full disk or a power cut
+/// part-way leaves the old file whole: written beside it, flushed to the
+/// disk, then renamed over it.
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.map_err(|e| e.to_string())
 }
 
 /// Other apps' documents this opens (lower-case extensions).
@@ -118,6 +141,61 @@ impl PainterApp {
         self.workspace.select.saved = loaded.saved_selections;
         self.active_tool = Tool::Brush;
         Ok(())
+    }
+}
+
+/// Layer ids beyond this can only come from a damaged file (and would run
+/// out of room for new ones).
+const MAX_LAYER_ID: u64 = 1 << 53;
+
+/// A loaded layer list the rest of the app can trust: each id once, and
+/// folders that nest (a damaged file's ring of folders inside each other
+/// made the layers in it vanish, and "merge visible" loop for ever). A
+/// parent that isn't a folder, or would close a ring, is dropped: the layer
+/// shows at the top level.
+fn checked_layer_tree(
+    mut layers: Vec<CanvasLayerSnapshot>,
+) -> Result<Vec<CanvasLayerSnapshot>, String> {
+    use crate::canvas::storage::LayerKind;
+    use std::collections::{HashMap, HashSet};
+    let mut ids = HashSet::new();
+    if layers
+        .iter()
+        .any(|l| l.id.0 >= MAX_LAYER_ID || !ids.insert(l.id))
+    {
+        return Err("Damaged project: layer ids repeat".to_string());
+    }
+    let folders: HashSet<LayerId> = layers
+        .iter()
+        .filter(|l| l.kind == LayerKind::Group)
+        .map(|l| l.id)
+        .collect();
+    for l in &mut layers {
+        if l.parent.is_some_and(|p| p == l.id || !folders.contains(&p)) {
+            l.parent = None;
+        }
+    }
+    // Break rings: walking up from any layer must reach the top within as
+    // many steps as there are layers.
+    loop {
+        let parent: HashMap<LayerId, LayerId> = layers
+            .iter()
+            .filter_map(|l| Some((l.id, l.parent?)))
+            .collect();
+        let in_ring = layers.iter().position(|l| {
+            let mut at = l.id;
+            for _ in 0..=layers.len() {
+                match parent.get(&at) {
+                    Some(&p) => at = p,
+                    None => return false,
+                }
+            }
+            true
+        });
+        match in_ring {
+            Some(i) => layers[i].parent = None,
+            None => return Ok(layers),
+        }
     }
 }
 
@@ -298,6 +376,7 @@ impl ProjectFile {
             .enumerate()
             .map(|(idx, layer)| layer.into_snapshot(idx, self.tile_size, blobs))
             .collect::<Result<_, _>>()?;
+        let layers = checked_layer_tree(layers)?;
         let mut canvas = Canvas::new(
             self.width,
             self.height,
@@ -785,11 +864,12 @@ struct StoredTileSnapshot {
 impl StoredTileSnapshot {
     fn into_snapshot(self, tile_size: usize, blobs: &[u8]) -> Result<TileSnapshot, String> {
         let data = bytes_to_colors(read_blob(blobs, &self.rgba_zstd)?)?;
+        let fits = |at: usize, len: usize| at.checked_add(len).is_some_and(|end| end <= tile_size);
         if self.width == 0
             || self.height == 0
-            || self.x0 + self.width > tile_size
-            || self.y0 + self.height > tile_size
-            || data.len() != self.width * self.height
+            || !fits(self.x0, self.width)
+            || !fits(self.y0, self.height)
+            || Some(data.len()) != self.width.checked_mul(self.height)
         {
             return Err("Invalid undo tile snapshot".to_string());
         }
@@ -1757,6 +1837,201 @@ pub(crate) mod tests {
         assert_eq!(merged.to_rgba8().get_pixel(10, 10).0, [255, 255, 255, 255]);
         let thumb = png("Thumbnails/thumbnail.png");
         assert_eq!((thumb.width(), thumb.height()), (256, 128));
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    use super::*;
+    use eframe::egui::Vec2;
+
+    /// A small document with one of most things: paint, a folder, a mask,
+    /// vector lines, a fill layer, an adjustment layer and undo steps.
+    fn rich_app() -> PainterApp {
+        let canvas = Canvas::new(96, 64, Color32::WHITE, TILE_SIZE);
+        let mut app = tests::test_app_pub(canvas);
+        app.canvas_mut().active_layer_idx = 1;
+        app.filter_open(crate::canvas::filters::Filter::Invert);
+        app.add_folder();
+        app.add_vector_layer();
+        let idx = app.canvas.active_layer_idx;
+        app.add_vector_line(idx, &[Vec2::new(5.0, 5.0), Vec2::new(80.0, 50.0)]);
+        app.add_fill_layer(crate::canvas::layer_style::LayerFill::Colour([10, 200, 90]));
+        app.add_adjustment_layer(crate::canvas::filters::Filter::Levels {
+            black: 0.1,
+            white: 0.9,
+            gamma: 1.2,
+        });
+        app.canvas_mut().active_layer_idx = 1;
+        app.add_mask_to_active();
+        app
+    }
+
+    fn open(bytes: &[u8]) {
+        let Ok(loaded) = decode_project(bytes) else {
+            return;
+        };
+        let mut canvas = loaded.canvas;
+        let mut history = loaded.history;
+        canvas.flatten();
+        // Every step back and forward again.
+        let mut selection = crate::selection::SelectionManager::new();
+        let mut tool = crate::app::tools::Tool::Brush;
+        for _ in 0..64 {
+            history.undo(&mut canvas, &mut selection, &mut tool);
+        }
+        canvas.flatten();
+        for _ in 0..64 {
+            history.redo(&mut canvas, &mut selection, &mut tool);
+        }
+        canvas.flatten();
+    }
+
+    /// Every value in `v`, depth first (for picking one to change).
+    fn count(v: &serde_json::Value) -> usize {
+        1 + match v {
+            serde_json::Value::Array(a) => a.iter().map(count).sum(),
+            serde_json::Value::Object(o) => o.values().map(count).sum(),
+            _ => 0,
+        }
+    }
+
+    /// Replace value number `n` (depth first) with `with`.
+    fn replace(v: &mut serde_json::Value, n: &mut usize, with: &serde_json::Value) -> bool {
+        if *n == 0 {
+            *v = with.clone();
+            return true;
+        }
+        *n -= 1;
+        match v {
+            serde_json::Value::Array(a) => a.iter_mut().any(|x| replace(x, n, with)),
+            serde_json::Value::Object(o) => o.values_mut().any(|x| replace(x, n, with)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_project_values() {
+        // Well-formed files with nonsense in them: sizes, indices, ids and
+        // counts at extremes, wrong types, missing parts.
+        let bare = encode_project_data(&rich_app()).unwrap();
+        let start = MAGIC.len() + 8;
+        let len = u64::from_le_bytes(bare[MAGIC.len()..start].try_into().unwrap()) as usize;
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&bare[start..start + len]).unwrap();
+        let blobs = &bare[start + len..];
+        let extremes: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[0, 1, -1, 2, 7, 64, 65, 4294967295, 18446744073709551615, -9223372036854775808,
+                1e30, -1e30, 0.5, null, "", "x", [], {}, true, [0], [0, 0, 0, 0]]"#,
+        )
+        .unwrap();
+        let total = count(&manifest);
+        let rounds: usize = std::env::var("RP_FUZZ_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000);
+        // One value changed per input, walking every value with every
+        // extreme first, then random pairs.
+        let mut inputs = Vec::new();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for i in 0..rounds {
+            let mut m = manifest.clone();
+            for _ in 0..1 + i % 2 {
+                let mut n = rnd(total);
+                replace(&mut m, &mut n, &extremes[rnd(extremes.len())]);
+            }
+            let json = serde_json::to_vec(&m).unwrap();
+            let mut bytes = MAGIC.to_vec();
+            bytes.extend((json.len() as u64).to_le_bytes());
+            bytes.extend(json);
+            bytes.extend(blobs);
+            inputs.push(bytes);
+        }
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let mut failures = Vec::new();
+        let mut slowest = std::time::Duration::ZERO;
+        for (i, input) in inputs.iter().enumerate() {
+            let t = std::time::Instant::now();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open(input)));
+            slowest = slowest.max(t.elapsed());
+            if let Err(e) = r {
+                let msg = e
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                let path = std::env::temp_dir().join(format!("rp-fuzz-values-{i}.bin"));
+                std::fs::write(&path, input).unwrap();
+                failures.push(format!("{msg} ({})", path.display()));
+            } else if t.elapsed() > std::time::Duration::from_secs(2) {
+                failures.push(format!("round {i} took {:?}", t.elapsed()));
+            }
+        }
+        std::panic::set_hook(hook);
+        eprintln!(
+            "fuzz project values: {} rounds, slowest {slowest:?}, {} failures",
+            inputs.len(),
+            failures.len()
+        );
+        failures.sort();
+        failures.dedup_by(|a, b| a.split(" (").next() == b.split(" (").next());
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    #[ignore = "replays a saved fuzz input: RP_REPLAY=path"]
+    fn replay() {
+        open(&std::fs::read(std::env::var("RP_REPLAY").unwrap()).unwrap());
+    }
+
+    #[test]
+    fn folders_inside_each_other_in_a_damaged_file_are_undone() {
+        let mut app = rich_app();
+        app.add_folder();
+        let a = app.canvas.layers[app.canvas.active_layer_idx].id;
+        app.add_folder();
+        let bi = app.canvas.active_layer_idx;
+        let b = app.canvas.layers[bi].id;
+        let ai = app.canvas.layer_index_of(a).unwrap();
+        app.canvas_mut().layers[ai].parent = Some(b);
+        app.canvas_mut().layers[bi].parent = Some(a);
+        let loaded = decode_project(&encode_project_data(&app).unwrap()).unwrap();
+        let parent_of = |id| {
+            let c = &loaded.canvas;
+            c.layers[c.layer_index_of(id).unwrap()].parent
+        };
+        // One of the two lets go; the other stays inside it.
+        assert!(parent_of(a).is_none() != parent_of(b).is_none());
+        let mut canvas = loaded.canvas;
+        canvas.merge_visible().unwrap();
+    }
+
+    #[test]
+    fn a_damaged_file_giving_two_layers_one_id_is_refused() {
+        let mut app = rich_app();
+        let id = app.canvas.layers[1].id;
+        app.canvas_mut().layers[2].id = id;
+        let err = decode_project(&encode_project_data(&app).unwrap())
+            .err()
+            .unwrap();
+        assert!(err.contains("layer ids"), "{err}");
+    }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_project() {
+        let app = rich_app();
+        open(&encode_project(&app).unwrap());
+        let bare = encode_project_data(&app).unwrap();
+        crate::fuzz::fuzz("rpainter", &bare, std::time::Duration::from_secs(2), open);
     }
 }
 

@@ -144,4 +144,20 @@ mod tests {
         assert!(import(br#"{"version": 2, "settings": {}}"#, "x").is_err());
         assert!(import(b"radius 2.0", "x").is_err());
     }
+
+    #[test]
+    #[ignore = "fuzzing"]
+    fn fuzz_mypaint() {
+        let seed = br#"{"version": 3, "settings": {
+            "radius_logarithmic": {"base_value": 2.3, "inputs": {"pressure": [[0, -0.7], [1, 0.0]]}},
+            "hardness": {"base_value": 0.6, "inputs": {}},
+            "dabs_per_actual_radius": {"base_value": 4.0, "inputs": {}},
+            "opaque_multiply": {"base_value": 0.0, "inputs": {"pressure": [[0, 0], [1, 1]]}},
+            "elliptical_dab_ratio": {"base_value": 2.0, "inputs": {}},
+            "offset_by_random": {"base_value": 0.4, "inputs": {}}
+        }}"#;
+        crate::fuzz::fuzz("myb", seed, std::time::Duration::from_secs(2), |b| {
+            let _ = import(b, "fuzz");
+        });
+    }
 }

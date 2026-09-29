@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 const ZSTD_LEVEL: i32 = 6;
 
+/// The most one blob can hold: a selection mask over the largest canvas.
+const MAX_BLOB: u64 = crate::app::document::MAX_CANVAS_PIXELS as u64;
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredBlob {
     pub offset: u64,
@@ -61,11 +64,23 @@ pub(super) fn read_blob(blobs: &[u8], blob: &StoredBlob) -> Result<Vec<u8>, Stri
     if end > blobs.len() {
         return Err("Project blob is out of range".to_string());
     }
-    let raw_len = usize::try_from(blob.raw_len).map_err(|_| "Blob raw length is too large")?;
+    let raw_len = usize::try_from(blob.raw_len)
+        .ok()
+        .filter(|_| blob.raw_len <= MAX_BLOB)
+        .ok_or("Blob raw length is too large")?;
     let raw = if blob.compressed {
-        // Bounded by the stored raw_len so a corrupt/malicious blob claiming a huge
-        // decompressed size errors out instead of exhausting memory.
-        zstd::bulk::decompress(&blobs[start..end], raw_len)
+        let payload = &blobs[start..end];
+        // The length is the file's word, and room for it is made before
+        // decompressing: a damaged one claiming gigabytes must not get
+        // them. zstd's own frame says how long it really is.
+        match zstd::zstd_safe::get_frame_content_size(payload) {
+            Ok(Some(n)) if n != blob.raw_len => {
+                return Err("Decompressed blob size mismatch".to_string());
+            }
+            Err(_) => return Err("Damaged compressed blob".to_string()),
+            _ => {}
+        }
+        zstd::bulk::decompress(payload, raw_len)
             .map_err(|err| format!("Decompression failed: {err}"))?
     } else {
         blobs[start..end].to_vec()

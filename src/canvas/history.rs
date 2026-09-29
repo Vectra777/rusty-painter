@@ -779,9 +779,12 @@ impl History {
             let tile_size = canvas.tile_size();
             // (Tiles may sit off the canvas, at negative coordinates: pixels
             // moved past its edge are kept.)
-            if snapshot.x0 + snapshot.width > tile_size
-                || snapshot.y0 + snapshot.height > tile_size
-                || snapshot.data.len() != snapshot.width * snapshot.height
+            // (Checked: a damaged file's numbers mustn't wrap round.)
+            let fits =
+                |at: usize, len: usize| at.checked_add(len).is_some_and(|end| end <= tile_size);
+            if !fits(snapshot.x0, snapshot.width)
+                || !fits(snapshot.y0, snapshot.height)
+                || Some(snapshot.data.len()) != snapshot.width.checked_mul(snapshot.height)
             {
                 log::error!(
                     "Skipping invalid undo snapshot at tile ({}, {})",

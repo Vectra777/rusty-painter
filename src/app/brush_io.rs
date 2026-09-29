@@ -321,7 +321,7 @@ impl PainterApp {
             .find(|p| !p.exists())
             .expect("some name is free");
         let bytes = preset_file::encode(std::slice::from_ref(preset))?;
-        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        crate::project::write_atomically(&path, &bytes)?;
         Ok(path)
     }
 
@@ -407,10 +407,8 @@ impl PainterApp {
                     .filter(|p| p.file.as_ref() == Some(path))
                     .cloned()
                     .collect();
-                let tmp = path.with_extension("tmp");
                 preset_file::encode(&in_file)
-                    .and_then(|bytes| std::fs::write(&tmp, bytes).map_err(|e| e.to_string()))
-                    .and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string()))
+                    .and_then(|bytes| crate::project::write_atomically(path, &bytes))
             }
             None => self
                 .write_library_file(&preset)
@@ -557,7 +555,8 @@ pub(crate) fn export_presets(
     path: &std::path::Path,
 ) -> Result<(), String> {
     let bytes = preset_file::encode(presets)?;
-    std::fs::write(path, bytes).map_err(|e| format!("Couldn't write {}: {e}", path.display()))
+    crate::project::write_atomically(path, &bytes)
+        .map_err(|e| format!("Couldn't write {}: {e}", path.display()))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -650,9 +649,7 @@ impl PainterApp {
             .collect();
         let result = serde_json::to_vec_pretty(&hex)
             .map_err(|e| e.to_string())
-            .and_then(|bytes| {
-                std::fs::write(self.swatches_path(), bytes).map_err(|e| e.to_string())
-            });
+            .and_then(|bytes| crate::project::write_atomically(&self.swatches_path(), &bytes));
         if let Err(err) = result {
             log::warn!("Couldn't save swatches: {err}");
         }

@@ -9,6 +9,8 @@ mod app;
 pub mod bench_api;
 pub mod brush_engine;
 pub mod canvas;
+#[cfg(test)]
+mod fuzz;
 pub(crate) mod project;
 pub mod selection;
 mod tablet;
