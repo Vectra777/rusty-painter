@@ -2,7 +2,7 @@
 
 ## 0.1.0
 
-The first tagged version.
+The first version with a license. Earlier tagged versions (0.0.1 to 0.0.4) were unlicensed and kept their data in the folder the app was started from.
 
 ### Painting
 - Brush engines: soft, pixel, bristle, sketch and hatching; dual brushes, textures, tips (several, colour, ribbon), watercolour edges, airbrush.
