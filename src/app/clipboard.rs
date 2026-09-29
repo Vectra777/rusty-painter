@@ -123,9 +123,12 @@ impl PainterApp {
         };
         let (cw, ch) = ((x1 - x0) as usize, (y1 - y0) as usize);
         let mut pixels = if merged {
-            // The picture exactly as shown (blend modes, masks, background).
+            // The picture exactly as shown (blend modes, masks, background),
+            // without the draft layers.
             let mut img = egui::ColorImage::new([0, 0], Color32::TRANSPARENT);
-            self.canvas
+            let view = self.canvas.without_drafts();
+            view.as_ref()
+                .unwrap_or(&self.canvas)
                 .write_region_to_color_image(x0 as usize, y0 as usize, cw, ch, &mut img, 1);
             img.pixels
         } else {
@@ -230,6 +233,9 @@ impl PainterApp {
             source.alpha_locked,
             source.blend,
         );
+        let text = source.text.clone();
+        let (position_locked, draft, reference) =
+            (source.position_locked, source.draft, source.reference);
         let tiles: Vec<((i32, i32), Vec<Color32>)> = self
             .canvas
             .layer_tile_keys(active)
@@ -246,6 +252,10 @@ impl PainterApp {
             layer.opacity = opacity;
             layer.alpha_locked = alpha_locked;
             layer.blend = blend;
+            layer.text = text;
+            layer.position_locked = position_locked;
+            layer.draft = draft;
+            layer.reference = reference;
         });
     }
 

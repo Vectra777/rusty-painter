@@ -17,6 +17,7 @@
 //!   dropped or imported, brush tips on disk.
 pub(crate) mod autosave;
 pub(crate) mod brush_io;
+pub(crate) mod brush_library;
 pub(crate) mod canvas_ops;
 pub(crate) mod clipboard;
 pub(crate) mod document;

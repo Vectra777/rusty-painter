@@ -64,6 +64,40 @@ pub struct StrokeTiles {
     pub(crate) tail_newer: usize,
     /// Tiles a dual brush's mask grew in since they were last resolved.
     pub(crate) mask_tiles: HashSet<(usize, usize)>,
+    /// Where the stroke's grain sits, for a texture that isn't pinned to
+    /// the canvas (set by the first sample).
+    pub(crate) grain: crate::brush_engine::texture::StrokeGrain,
+}
+
+impl StrokeTiles {
+    /// Take the stroke back off: every tile it touched gets its pixels from
+    /// before the stroke again, and its buffer starts over (keeping the
+    /// tile's undo snapshot, already taken), ready to paint the stroke anew.
+    pub(crate) fn restart(&mut self, canvas: &Canvas) {
+        let tile_size = canvas.tile_size();
+        for (&key, buffer) in &self.buffers {
+            let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(tile) = canvas.lock_tile(key.0, key.1) {
+                let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(data) = tile.data.as_mut() {
+                    data.copy_from_slice(&buffer.original);
+                    tile.is_empty = buffer.original.iter().all(|&p| p == Color32::TRANSPARENT);
+                }
+            }
+            buffer.coverage.fill(0.0);
+            buffer.tail = [None, None];
+            buffer.tail_rect = [None, None];
+            buffer.colors = None;
+            buffer.tail_colors = [None, None];
+            buffer.mask = None;
+            buffer.mask_dirty = None;
+            buffer.damage = Some([0, 0, tile_size, tile_size]);
+            self.dirty.insert(key);
+        }
+        self.tail_tiles = Default::default();
+        self.tail_newer = 0;
+        self.mask_tiles.clear();
+    }
 }
 
 /// Shared drawing dependencies for adding points to a stroke.
@@ -426,6 +460,9 @@ pub struct StrokeState {
     /// when it started (for "time").
     stroke_random: f32,
     start_time: Option<f64>,
+    /// The stroke's random grain shift (a share of the pattern) and the
+    /// seed for each dab's.
+    grain_random: ([f32; 2], u32),
     /// Every dab's variation as painted, for tests.
     #[cfg(test)]
     pub(crate) painted: Vec<DabVar>,
@@ -473,6 +510,10 @@ impl StrokeState {
             mask_until_next: 0.0,
             stroke_random: SmallRng::seed_from_u64(seed ^ 0x5eed).random(),
             start_time: None,
+            grain_random: {
+                let mut g = SmallRng::seed_from_u64(seed ^ 0x6ea1_0f75);
+                ([g.random(), g.random()], g.random())
+            },
             #[cfg(test)]
             painted: Vec::new(),
         }
@@ -521,6 +562,19 @@ impl StrokeState {
         if dynamic {
             self.update_speed(raw_pos, time);
             self.update_lean(time);
+        }
+        if self.last_pos.is_none()
+            && brush
+                .texture
+                .as_ref()
+                .is_some_and(|t| t.placement.is_active())
+        {
+            let (offset, seed) = self.grain_random;
+            context.stroke_tiles.grain = crate::brush_engine::texture::StrokeGrain {
+                origin: [raw_pos.x, raw_pos.y],
+                offset,
+                seed,
+            };
         }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -584,8 +638,9 @@ impl StrokeState {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             apply_pressure(brush, original, p);
             let count = brush.dynamics.random.dabs_per_step();
+            let defer = scatter_deferred(brush);
             for _ in 0..ticks * count {
-                let at = self.scatter(brush, pos);
+                let at = if defer { pos } else { self.scatter(brush, pos) };
                 self.pending.push(Pending {
                     pos: at,
                     t: 1.0,
@@ -788,14 +843,22 @@ impl StrokeState {
                 return;
             }
             if brush.varies_per_dab() {
+                let defer = scatter_deferred(brush);
                 let plans: Vec<Plan> = pending
                     .iter()
                     .map(|d| {
                         let pressure = from + (p - from) * d.t;
+                        let var = self.dab_var(brush, d, pressure);
+                        // An input drives the scatter: now it's known.
+                        let pos = if defer {
+                            self.scatter_by(brush, d.pos, brush.jitter / 100.0 + var.scatter)
+                        } else {
+                            d.pos
+                        };
                         Plan {
-                            pos: d.pos,
+                            pos,
                             level: pressure_level(pressure),
-                            var: self.dab_var(brush, d, pressure),
+                            var,
                             along: d.along,
                         }
                     })
@@ -1161,9 +1224,11 @@ impl StrokeState {
             (Some(t0), Some(t1)) => Some((t1 - t0) as f32),
             _ => None,
         };
-        let pos =
-            self.stabilizer
-                .step_timed(&brush.stabilizer_settings(), self.last_pos, raw_pos, dt);
+        let mut settings = brush.stabilizer_settings();
+        settings.view_scale = self.view_scale;
+        let pos = self
+            .stabilizer
+            .step_timed(&settings, self.last_pos, raw_pos, dt);
 
         let spacing_dist = if brush.brush_type == crate::brush_engine::brush::BrushType::Bristle {
             // Each hair draws a continuous line.
@@ -1176,6 +1241,7 @@ impl StrokeState {
         };
         let spacing_dist = spacing_dist.max(0.5); // Avoid infinite loops
         let count = brush.dynamics.random.dabs_per_step();
+        let defer = scatter_deferred(brush);
 
         if let Some(prev) = self.last_pos {
             let delta = pos - prev;
@@ -1212,7 +1278,11 @@ impl StrokeState {
                 let along = self.travel + (length - dist_left);
                 let dir = angle(heading_at(length - dist_left)).or(self.dir);
                 for _ in 0..count {
-                    let p = self.scatter(brush, cur_pos);
+                    let p = if defer {
+                        cur_pos
+                    } else {
+                        self.scatter(brush, cur_pos)
+                    };
                     self.pending.push(Pending {
                         pos: p,
                         t: 1.0 - dist_left / length,
@@ -1230,7 +1300,7 @@ impl StrokeState {
         } else {
             // first point
             for _ in 0..count {
-                let p = self.scatter(brush, pos);
+                let p = if defer { pos } else { self.scatter(brush, pos) };
                 self.pending.push(Pending {
                     pos: p,
                     t: 1.0,
@@ -1248,6 +1318,16 @@ impl StrokeState {
     fn scatter(&mut self, brush: &Brush, mut p: Vec2) -> Vec2 {
         if brush.jitter > 0.0 {
             let jitter_amount = (brush.jitter / 100.0) * brush.brush_options.diameter;
+            p.x += self.rng.random_range(-jitter_amount..=jitter_amount);
+            p.y += self.rng.random_range(-jitter_amount..=jitter_amount);
+        }
+        p
+    }
+
+    /// `pos` moved at random up to `amount` brush widths each way.
+    fn scatter_by(&mut self, brush: &Brush, mut p: Vec2, amount: f32) -> Vec2 {
+        if amount > 0.0 {
+            let jitter_amount = amount * brush.brush_options.diameter;
             p.x += self.rng.random_range(-jitter_amount..=jitter_amount);
             p.y += self.rng.random_range(-jitter_amount..=jitter_amount);
         }
@@ -1319,6 +1399,16 @@ impl StrokeState {
         }
         self.last_pos = Some(pos);
     }
+}
+
+/// An input drives the brush's scatter, so each dab is scattered once its
+/// variation is known rather than when it's placed.
+fn scatter_deferred(brush: &Brush) -> bool {
+    !brush.pixel_perfect
+        && brush
+            .inputs
+            .iter()
+            .any(|m| m.setting == crate::brush_engine::dynamics::DabSetting::Scatter)
 }
 
 /// Paint `plans` in runs of equal pressure level, each with its variation.

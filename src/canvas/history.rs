@@ -112,6 +112,10 @@ pub struct LayerMeta {
     pub blend: crate::canvas::blend_modes::LayerBlend,
     pub clipped: bool,
     pub adjustment: Option<crate::canvas::filters::Filter>,
+    pub text: Option<Box<crate::canvas::text::TextLayer>>,
+    pub position_locked: bool,
+    pub draft: bool,
+    pub reference: bool,
 }
 
 /// A layer removed alongside the main one of a `Removed` op (its mask, or
@@ -159,9 +163,29 @@ pub enum LayerHistoryOp {
     /// size and every layer) as it is on the other side of this step.
     /// Shared so the op stays `Clone`; undo and redo swap it in place.
     Document(std::sync::Arc<std::sync::Mutex<crate::canvas::storage::DocumentState>>),
+    /// Text layers' source ([`crate::canvas::storage::Layer::text`]) as it
+    /// is on the other side of this step: text edited or moved, or a text
+    /// layer painted on (which makes it plain pixels). `inner` is the step's
+    /// own change to the layer list, if it has one.
+    Text {
+        layers: Vec<(LayerId, Option<Box<crate::canvas::text::TextLayer>>)>,
+        inner: Option<Box<LayerHistoryOp>>,
+    },
+    /// Layers were merged: the entries on the other side of this step,
+    /// swapped in place by undo and redo (see [`Canvas::swap_layers`]).
+    Replaced(std::sync::Arc<std::sync::Mutex<crate::canvas::storage::LayerSwap>>),
 }
 
 impl LayerHistoryOp {
+    /// The change to the layer list itself: this op, or the one a `Text`
+    /// op carries.
+    pub fn structural(op: Option<&LayerHistoryOp>) -> Option<&LayerHistoryOp> {
+        match op {
+            Some(LayerHistoryOp::Text { inner, .. }) => inner.as_deref(),
+            other => other,
+        }
+    }
+
     /// For `Removed`: every index involved, ascending (the main layer and
     /// `also`). Inserting at these in order restores the original layout.
     pub fn removed_indices(&self) -> Vec<usize> {
@@ -304,9 +328,12 @@ impl History {
         active_tool: &mut crate::app::tools::Tool,
     ) -> (Vec<(i32, i32)>, Option<LayerHistoryOp>) {
         if let Some(mut action) = self.undo_stack.pop() {
-            Self::prepare_for_undo(canvas, action.layer_action.as_ref());
+            let op = LayerHistoryOp::structural(action.layer_action.as_ref());
+            Self::prepare_for_undo(canvas, op);
             let tiles = self.swap_state(canvas, selection_manager, active_tool, &mut action);
-            let layer_action = Self::finalize_after_undo(canvas, action.layer_action.as_ref());
+            Self::swap_text(canvas, action.layer_action.as_mut());
+            let op = LayerHistoryOp::structural(action.layer_action.as_ref());
+            let layer_action = Self::finalize_after_undo(canvas, op);
             self.redo_stack.push(action);
             (tiles, layer_action)
         } else {
@@ -322,13 +349,29 @@ impl History {
         active_tool: &mut crate::app::tools::Tool,
     ) -> (Vec<(i32, i32)>, Option<LayerHistoryOp>) {
         if let Some(mut action) = self.redo_stack.pop() {
-            Self::prepare_for_redo(canvas, action.layer_action.as_ref());
+            let op = LayerHistoryOp::structural(action.layer_action.as_ref());
+            Self::prepare_for_redo(canvas, op);
             let tiles = self.swap_state(canvas, selection_manager, active_tool, &mut action);
-            let layer_action = Self::finalize_after_redo(canvas, action.layer_action.as_ref());
+            Self::swap_text(canvas, action.layer_action.as_mut());
+            let op = LayerHistoryOp::structural(action.layer_action.as_ref());
+            let layer_action = Self::finalize_after_redo(canvas, op);
             self.undo_stack.push(action);
             (tiles, layer_action)
         } else {
             (Vec::new(), None)
+        }
+    }
+
+    /// Exchange the text layers' source with the step's (both directions).
+    /// Done while the same layers exist either way: after a removal is
+    /// undone or an add redone, before an add is undone or a removal redone.
+    fn swap_text(canvas: &mut Canvas, layer_action: Option<&mut LayerHistoryOp>) {
+        if let Some(LayerHistoryOp::Text { layers, .. }) = layer_action {
+            for (id, text) in layers {
+                if let Some(idx) = canvas.layer_index_of(*id) {
+                    std::mem::swap(&mut canvas.layers[idx].text, text);
+                }
+            }
         }
     }
 
@@ -428,7 +471,12 @@ impl History {
                 canvas.swap_document(&mut doc.lock().unwrap_or_else(|e| e.into_inner()));
                 Some(op.clone())
             }
-            None => None,
+            Some(op @ LayerHistoryOp::Replaced(swap)) => {
+                canvas.swap_layers(&mut swap.lock().unwrap_or_else(|e| e.into_inner()));
+                Some(op.clone())
+            }
+            // (Given the structural part: never a `Text` op.)
+            Some(LayerHistoryOp::Text { .. }) | None => None,
         }
     }
 
@@ -473,6 +521,10 @@ impl History {
                 blend: Default::default(),
                 clipped: false,
                 adjustment: None,
+                text: None,
+                position_locked: false,
+                draft: false,
+                reference: false,
             });
             canvas.insert_layer_with_meta(*index, *id, &meta);
         }
@@ -562,7 +614,12 @@ impl History {
                 canvas.swap_document(&mut doc.lock().unwrap_or_else(|e| e.into_inner()));
                 Some(op.clone())
             }
-            None => None,
+            Some(op @ LayerHistoryOp::Replaced(swap)) => {
+                canvas.swap_layers(&mut swap.lock().unwrap_or_else(|e| e.into_inner()));
+                Some(op.clone())
+            }
+            // (Given the structural part: never a `Text` op.)
+            Some(LayerHistoryOp::Text { .. }) | None => None,
         }
     }
 

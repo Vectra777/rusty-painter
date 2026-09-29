@@ -68,6 +68,7 @@ impl PainterApp {
 
         app.load_brush_tips(cc.egui_ctx.clone());
         app.load_user_presets();
+        app.load_brush_library();
         // The user's gradients sit next to the brushes folder.
         let gradients = app
             .brush_state
@@ -76,6 +77,8 @@ impl PainterApp {
         app.workspace.gradient.library =
             crate::app::tools::gradient::GradientLibrary::load(gradients);
         app.load_swatches();
+        app.load_view_settings();
+        app.load_panel_widths(&cc.egui_ctx);
         app.workspace.autosave = crate::app::autosave::AutosaveState::new(&app.autosave_path());
         app
     }
@@ -441,6 +444,34 @@ impl PainterApp {
                 b.jitter = 60.0;
                 b.dynamics.tip.random_angle = 180.0;
                 b.dynamics.random.size = 0.6;
+                b
+            }),
+            preset("Two-Tone Chalk", {
+                // Chalk on a slanted, rough grain that moves with each
+                // stroke; light pressure softens the edge and lets more
+                // grain through, and each dab takes some of the secondary
+                // colour.
+                use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+                let mut b = Brush::new(30.0, 60.0, Color32::from_rgb(70, 110, 170), 12.0);
+                b.brush_options.pressure_min_size = 0.6;
+                b.jitter = 4.0;
+                b.texture = paper("Rough paper", TextureMode::Subtract, 0.7).map(|mut t| {
+                    t.placement.angle = 30.0;
+                    t.placement.follow_stroke = true;
+                    t.placement.random_offset = true;
+                    t
+                });
+                let map = |sensor, setting, amount| InputMapping {
+                    sensor,
+                    setting,
+                    amount,
+                    ..Default::default()
+                };
+                b.inputs = vec![
+                    map(Sensor::Pressure, DabSetting::Hardness, 0.4),
+                    map(Sensor::Pressure, DabSetting::TextureStrength, -0.5),
+                    map(Sensor::RandomDab, DabSetting::ColorMix, 0.35),
+                ];
                 b
             }),
             preset("Pixel Art", Brush::new_pixel(1.0, black)),

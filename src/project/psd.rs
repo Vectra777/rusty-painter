@@ -1,7 +1,8 @@
 //! Photoshop documents (`.psd`, 8-bit RGB or grayscale), read and written:
 //! raster layers with their name, opacity, visibility, blend mode,
 //! clipping, locked transparency and layer mask, and folders. Pixels are
-//! RLE-compressed (PackBits) as Photoshop writes them.
+//! RLE-compressed (PackBits) as Photoshop writes them. Our text layers are
+//! written as their pixels.
 //!
 //! Not kept: adjustment, text and smart-object layers come in as the
 //! pixels Photoshop stored for them; pass-through folders open as Normal;
@@ -48,6 +49,8 @@ pub struct PsdLayer {
     pub blend: LayerBlend,
     pub clipped: bool,
     pub alpha_locked: bool,
+    /// Photoshop's "lock position" (the `lspf` protection flags).
+    pub position_locked: bool,
     pub mask: Option<PsdMask>,
 }
 
@@ -108,7 +111,8 @@ impl PsdDocument {
     pub fn from_canvas(canvas: &Canvas) -> Self {
         let mut layers = Vec::new();
         push_children(canvas, None, &mut layers, 0);
-        let flat = canvas.flatten();
+        // As exported: without the draft layers.
+        let flat = canvas.flatten_final();
         PsdDocument {
             width: canvas.width(),
             height: canvas.height(),
@@ -155,6 +159,10 @@ impl PsdDocument {
             blend: LayerBlend::Normal,
             clipped: false,
             adjustment: None,
+            text: None,
+            position_locked: false,
+            draft: false,
+            reference: false,
             tiles: background.unwrap_or_default(),
         });
         // Folders being read: each GroupEnd opens one, its GroupStart closes it.
@@ -199,6 +207,10 @@ impl PsdDocument {
                 blend: layer.blend,
                 clipped: layer.clipped,
                 adjustment: None,
+                text: None,
+                position_locked: layer.position_locked,
+                draft: false,
+                reference: false,
                 tiles: if is_group {
                     Vec::new()
                 } else {
@@ -219,6 +231,10 @@ impl PsdDocument {
                     blend: LayerBlend::Normal,
                     clipped: false,
                     adjustment: None,
+                    text: None,
+                    position_locked: false,
+                    draft: false,
+                    reference: false,
                     tiles: mask_tiles(&mask, self.width, self.height, ts),
                 });
                 next_id += 1;
@@ -255,6 +271,7 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
             blend: layer.blend,
             clipped: layer.clipped && i != 0,
             alpha_locked: layer.alpha_locked,
+            position_locked: layer.position_locked,
             mask: None,
         };
         if layer.kind == LayerKind::Group {
@@ -646,6 +663,12 @@ pub fn encode_psd(doc: &PsdDocument) -> Result<Vec<u8>, String> {
             out.bytes(b"8BIM");
             out.bytes(blend_key(l.blend));
         }
+        if l.position_locked {
+            // Protection flags: bit 0 transparency, bit 2 position.
+            out.bytes(b"8BIMlspf");
+            out.u32(4);
+            out.u32(4 | l.alpha_locked as u32);
+        }
         out.close_len(extra, 1);
     }
     for ch in &channels {
@@ -829,6 +852,7 @@ pub fn decode_psd(bytes: &[u8]) -> Result<PsdDocument, String> {
             blend: LayerBlend::Normal,
             clipped: false,
             alpha_locked: false,
+            position_locked: false,
             mask: None,
         });
     }
@@ -894,6 +918,7 @@ fn read_layers(r: &mut In<'_>, gray: bool) -> Result<Vec<PsdLayer>, String> {
         extra.take(padded - name_len - 1)?;
         let mut kind = PsdKind::Pixels;
         let mut group_blend = None;
+        let mut protection = 0u32;
         while extra.b.len() - extra.pos >= 12 {
             let sig = extra.take(4)?;
             if sig != b"8BIM" && sig != b"8B64" {
@@ -920,6 +945,7 @@ fn read_layers(r: &mut In<'_>, gray: bool) -> Result<Vec<PsdLayer>, String> {
                         group_blend = Some(blend_from_key(data.take(4)?));
                     }
                 }
+                b"lspf" => protection = data.u32()?,
                 _ => {}
             }
         }
@@ -933,7 +959,8 @@ fn read_layers(r: &mut In<'_>, gray: bool) -> Result<Vec<PsdLayer>, String> {
                 visible: flags & 2 == 0,
                 blend: group_blend.unwrap_or(blend),
                 clipped,
-                alpha_locked: flags & 1 != 0,
+                alpha_locked: flags & 1 != 0 || protection & 1 != 0,
+                position_locked: protection & 4 != 0,
                 mask,
             },
             channels,
@@ -1095,6 +1122,7 @@ mod tests {
         canvas.set_layer_tile_data(hi, 0, 0, vec![Color32::BLUE; 64 * 64]);
         canvas.layers[hi].visible = false;
         canvas.layers[hi].alpha_locked = true;
+        canvas.layers[hi].position_locked = true;
         canvas
     }
 
@@ -1116,7 +1144,8 @@ mod tests {
         assert!((shade.opacity - 0.5).abs() < 0.01);
         assert!(find("Base ✓") < find("Shade"), "stacking order kept");
         let hidden = &back.layers[find("Hidden")];
-        assert!(!hidden.visible && hidden.alpha_locked);
+        assert!(!hidden.visible && hidden.alpha_locked && hidden.position_locked);
+        assert!(!base.position_locked);
         assert!(back.mask_index_of(base.id).is_some(), "the mask came along");
         // The pictures match.
         let (a, b) = (canvas.flatten(), back.flatten());

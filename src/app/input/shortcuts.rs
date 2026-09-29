@@ -36,6 +36,7 @@ impl PainterApp {
                 b.stabilizer,
                 b.stabilizer_mass,
                 b.stabilizer_drag,
+                b.stabilizer_modes,
             );
             std::mem::swap(&mut bs.brush, &mut bs.stashed_brush);
             std::mem::swap(&mut bs.active_preset, &mut bs.stashed_preset);
@@ -46,6 +47,7 @@ impl PainterApp {
                 b.stabilizer,
                 b.stabilizer_mass,
                 b.stabilizer_drag,
+                b.stabilizer_modes,
             ) = stabilizer;
             crate::ui::widgets::new_slider_defaults();
             bs.eraser_active = eraser;
@@ -82,6 +84,7 @@ impl PainterApp {
             b.stabilizer,
             b.stabilizer_mass,
             b.stabilizer_drag,
+            b.stabilizer_modes,
         );
         self.set_brush_tool(eraser);
         let bs = &mut self.brush_state;
@@ -97,9 +100,12 @@ impl PainterApp {
             b.stabilizer,
             b.stabilizer_mass,
             b.stabilizer_drag,
+            b.stabilizer_modes,
         ) = stabilizer;
         bs.brush.is_changed = true;
         bs.brush_preview.dirty = true;
+        bs.library.file.remember(&preset.name);
+        bs.library.dirty = true;
         bs.active_preset = Some(preset.name);
         // Double-clicking a slider now returns it to this preset's value.
         crate::ui::widgets::new_slider_defaults();
@@ -157,6 +163,10 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     if app.workspace.filter.session.is_some() {
         return false;
     }
+    // The pop-up palette takes Esc and its own key while it's open.
+    if app.brush_state.library.radial.is_some() {
+        return ui::radial_palette::palette_keys(app, ctx);
+    }
     use crate::app::input::keyboard::consume_at;
     // Before the keys below consume V (the Transform tool).
     let clipboard = app.clipboard_keys(ctx);
@@ -178,6 +188,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let import = pressed(cmd_shift, Key::O);
     let open = !import && pressed(cmd, Key::O);
     let save = pressed(cmd, Key::S);
+    // Before Ctrl+E, which would match them too.
+    let merge_visible = pressed(cmd_shift, Key::E);
+    let merge_down = pressed(cmd | Modifiers::ALT, Key::E);
     let export = pressed(cmd, Key::E);
     // Digits and symbols by key position (no Shift or AltGr needed on
     // AZERTY and the like), or by the character typed.
@@ -194,6 +207,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let eraser = pressed(none, Key::E);
     let select_rect = pressed(none, Key::M);
     let lasso = pressed(none, Key::L);
+    // Before Q, which would match it too.
+    let quick_mask = pressed(Modifiers::SHIFT, Key::Q);
     let wand = pressed(none, Key::Q);
     let flip = pressed(none, Key::H);
     let content_fill = pressed(Modifiers::SHIFT, Key::F5);
@@ -211,8 +226,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let swap = pressed(none, Key::X);
     let panels = pressed(none, Key::Tab);
     let presets = pressed(none, Key::P);
+    let palette = pressed(none, Key::K);
     let smaller = at(none, Key::OpenBracket);
     let bigger = at(none, Key::CloseBracket);
+    let grid = pressed(cmd, Key::Quote);
+    let guides = pressed(cmd, Key::Semicolon);
 
     let mut repaint = clipboard;
     if duplicate {
@@ -234,6 +252,14 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     if new_layer {
         app.add_layer_and_select();
+        repaint = true;
+    }
+    if merge_down {
+        app.merge_down();
+        repaint = true;
+    }
+    if merge_visible {
+        app.merge_visible();
         repaint = true;
     }
     if new_canvas {
@@ -292,8 +318,22 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         app.content_aware_fill();
         repaint = true;
     }
+    if quick_mask {
+        app.toggle_quick_mask();
+        repaint = true;
+    }
     if flip {
         app.viewport.flip_x = !app.viewport.flip_x;
+        repaint = true;
+    }
+    if grid {
+        let grid = &mut app.workspace.view_aids.grid;
+        grid.show = !grid.show;
+        repaint = true;
+    }
+    if guides {
+        let guides = &mut app.workspace.view_aids.guides;
+        guides.show = !guides.show;
         repaint = true;
     }
     if remove_anchor && app.workspace.select.magnetic.is_some() {
@@ -336,6 +376,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     if presets {
         app.brush_state.show_presets = !app.brush_state.show_presets;
+        repaint = true;
+    }
+    if palette {
+        let pos = ctx.input(|i| i.pointer.latest_pos());
+        app.open_radial_palette(pos.unwrap_or(ctx.screen_rect().center()), true);
         repaint = true;
     }
     if panels {
@@ -497,6 +542,7 @@ mod preset_tests {
         b.stabilizer = 0.7;
         b.stabilizer_mass = 0.3;
         b.stabilizer_drag = 0.4;
+        b.stabilizer_modes.string_length = 90.0;
         for i in 0..app.brush_state.presets.len() {
             app.apply_preset(i);
             let b = &app.brush_state.brush;
@@ -511,6 +557,7 @@ mod preset_tests {
                 (0.7, 0.3, 0.4),
                 "{name}"
             );
+            assert_eq!(b.stabilizer_modes.string_length, 90.0, "{name}");
         }
     }
 }

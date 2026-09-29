@@ -51,6 +51,12 @@ pub enum StabilizerAlgorithm {
     None,
     Simple,
     Dynamic,
+    /// Pulled string (lazy mouse): the brush trails the pen on a string.
+    String,
+    /// The path is smoothed when the pen lifts, and the stroke repainted.
+    PostCorrection,
+    /// Jitter filtered out by speed: smooth when slow, direct when fast.
+    MotionFilter,
 }
 
 /// Gaussian circle brush tip: per-pixel alpha as a function of distance from
@@ -166,6 +172,8 @@ pub struct Brush {
     pub stabilizer_algorithm: StabilizerAlgorithm,
     pub stabilizer_mass: f32, // 0.01..1.0
     pub stabilizer_drag: f32, // 0.0..1.0
+    /// The other stabiliser modes' settings.
+    pub stabilizer_modes: crate::brush_engine::stabilizer::StabilizerModes,
     /// What changes from dab to dab besides pressure: tip angle and squash,
     /// tapers, speed, randomness. All off by default.
     pub dynamics: crate::brush_engine::dynamics::BrushDynamics,
@@ -192,6 +200,9 @@ pub struct Brush {
     pub sketch: crate::brush_engine::sketch::Sketch,
     /// The lines of a [`BrushType::Hatching`] brush.
     pub hatching: crate::brush_engine::hatching::Hatching,
+    /// The secondary colour, for input mappings that mix it in (set when
+    /// a stroke starts; not part of the brush's settings).
+    pub second_color: Color32,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -225,6 +236,8 @@ struct BatchCtx<'a> {
     general: bool,
     /// Which tail segment is the newer.
     tail_newer: usize,
+    /// The stroke's grain, when the texture is placed (moved, turned...).
+    grain: Option<crate::brush_engine::texture::StrokeGrain>,
     /// A dual brush: how its mask combines with the coverage.
     dual: Option<crate::brush_engine::dual::DualMode>,
     /// The dabs paint their tips' own colours.
@@ -277,6 +290,14 @@ fn srgb_to_linear(v: f32) -> f32 {
     } else {
         ((v + 0.055) / 1.055).powf(2.4)
     }
+}
+
+/// `a` and `b` mixed, `t` (0..1) of the way to `b`, in unmultiplied sRGB.
+fn mix_colors(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let (a, b) = (a.to_srgba_unmultiplied(), b.to_srgba_unmultiplied());
+    let ch = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8;
+    Color32::from_rgb(ch(0), ch(1), ch(2))
 }
 
 /// Whether `m` only turns or mirrors (keeps a circle a circle).
@@ -411,7 +432,18 @@ fn paint_batch(
                     );
                 }
                 if let Some(texture) = ctx.texture {
-                    texture.apply_row(gy, overlap.min_x + first, &mut alphas[span.clone()]);
+                    let (x, row) = (overlap.min_x + first, &mut alphas[span.clone()]);
+                    match &ctx.grain {
+                        Some(grain) => texture.apply_row_placed(
+                            gy,
+                            x,
+                            row,
+                            dab.texture,
+                            grain,
+                            [dab.center.x, dab.center.y],
+                        ),
+                        None => texture.apply_row_scaled(gy, x, row, dab.texture),
+                    }
                 }
                 if let Some(sel) = selection_coverage {
                     for (alpha, &s) in alphas[span.clone()]
@@ -703,6 +735,14 @@ impl Brush {
         self.dynamics.is_active() || !self.inputs.is_empty()
     }
 
+    /// Whether the dabs' colours can differ (colour randomness, colour
+    /// tips, inputs driving the colour).
+    pub fn varies_color(&self) -> bool {
+        self.dynamics.random.has_color()
+            || self.paints_tip_colors()
+            || self.inputs.iter().any(|m| m.setting.is_color())
+    }
+
     /// Whether dabs can differ from one another (dynamics, several tips),
     /// so each is planned on its own.
     pub fn varies_per_dab(&self) -> bool {
@@ -753,6 +793,8 @@ impl Brush {
             strength: self.stabilizer,
             mass: self.stabilizer_mass,
             drag: self.stabilizer_drag,
+            modes: self.stabilizer_modes,
+            view_scale: 1.0,
         }
     }
 }
@@ -770,6 +812,7 @@ impl Brush {
             stabilizer_algorithm: StabilizerAlgorithm::None,
             stabilizer_mass: 0.1,
             stabilizer_drag: 0.5,
+            stabilizer_modes: Default::default(),
             is_changed: false,
             dynamics: Default::default(),
             inputs: Vec::new(),
@@ -782,6 +825,7 @@ impl Brush {
             bristles: Default::default(),
             sketch: Default::default(),
             hatching: Default::default(),
+            second_color: Color32::WHITE,
         }
     }
 
@@ -797,6 +841,7 @@ impl Brush {
             stabilizer_algorithm: StabilizerAlgorithm::None,
             stabilizer_mass: 0.1,
             stabilizer_drag: 0.5,
+            stabilizer_modes: Default::default(),
             is_changed: false,
             dynamics: Default::default(),
             inputs: Vec::new(),
@@ -809,6 +854,7 @@ impl Brush {
             bristles: Default::default(),
             sketch: Default::default(),
             hatching: Default::default(),
+            second_color: Color32::WHITE,
         }
     }
 
@@ -906,7 +952,7 @@ impl Brush {
         };
         let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
         let tile_size = canvas.tile_size();
-        let colored = self.dynamics.random.has_color() || self.paints_tip_colors();
+        let colored = self.varies_color();
         let linear = canvas.blend_space == BlendSpace::Linear;
         // How far past its radius a turned tip reaches: a square's (or an
         // image's) corners.
@@ -944,9 +990,15 @@ impl Brush {
                 dab.strength = var.strength;
                 dab.tip = var.tip.min(last_tip);
                 dab.hatch = var.hatch;
+                dab.hardness = var.hardness;
+                dab.texture = var.texture;
                 if colored {
-                    let srgb =
-                        crate::brush_engine::dynamics::shift_hsv(self.brush_options.color, var.hsv);
+                    let base = if var.mix > 0.0 {
+                        mix_colors(self.brush_options.color, self.second_color, var.mix)
+                    } else {
+                        self.brush_options.color
+                    };
+                    let srgb = crate::brush_engine::dynamics::shift_hsv(base, var.hsv);
                     dab.color = if linear {
                         srgb.map(srgb_to_linear)
                     } else {
@@ -1070,6 +1122,7 @@ impl Brush {
             &stroke_tiles.buffers,
             Target::Stroke,
             stroke_tiles.tail_newer,
+            stroke_tiles.grain,
         );
         let tile_size = canvas.tile_size();
         for key in keys {
@@ -1131,6 +1184,7 @@ impl Brush {
             &stroke_tiles.buffers,
             Target::Stroke,
             stroke_tiles.tail_newer,
+            stroke_tiles.grain,
         );
         for key in keys {
             let Some(buffer) = stroke_tiles.buffers.get(&key) else {
@@ -1221,6 +1275,7 @@ impl Brush {
             &stroke_tiles.buffers,
             Target::Stroke,
             stroke_tiles.tail_newer,
+            stroke_tiles.grain,
         );
         for (key, coverage) in after {
             let Some(buffer) = stroke_tiles.buffers.get(&key) else {
@@ -1250,6 +1305,7 @@ impl Brush {
     }
 
     /// What a batch needs to paint and resolve with this brush.
+    #[allow(clippy::too_many_arguments)]
     fn batch_ctx<'a>(
         &'a self,
         canvas: &'a Canvas,
@@ -1258,10 +1314,11 @@ impl Brush {
         buffers: &'a FxHashMap<(usize, usize), Mutex<StrokeBuffer>>,
         target: Target,
         tail_newer: usize,
+        grain: crate::brush_engine::texture::StrokeGrain,
     ) -> BatchCtx<'a> {
         let o = &self.brush_options;
         let tip_colors = self.paints_tip_colors();
-        let colored = self.dynamics.random.has_color() || tip_colors;
+        let colored = self.varies_color();
         let wash = o.painting_mode == PaintingMode::Wash;
         BatchCtx {
             canvas,
@@ -1284,6 +1341,11 @@ impl Brush {
             mode: self.paint_blend,
             general: colored || self.paint_blend != LayerBlend::Normal,
             tail_newer,
+            grain: self
+                .texture
+                .as_ref()
+                .is_some_and(|t| t.placement.is_active())
+                .then_some(grain),
             dual: self.dual.as_ref().map(|d| d.mode),
             tip_colors,
             hatch: (self.brush_type == BrushType::Hatching).then_some(&self.hatching),
@@ -1364,6 +1426,7 @@ impl Brush {
             &stroke_tiles.buffers,
             target,
             stroke_tiles.tail_newer,
+            stroke_tiles.grain,
         );
         let work_pixels: usize = dabs
             .iter()
@@ -1620,6 +1683,7 @@ impl Brush {
                 0.0
             };
             let strength = (strength * dab.strength).min(1.0);
+            let hardness_val = (hardness_val + dab.hardness).clamp(0.0, 1.0);
             let turned = custom || !dab.upright();
             let pdy_canvas = gy as f32 + 0.5 - dab.center.y;
             for (i, slot) in out.iter_mut().enumerate() {
@@ -1746,13 +1810,13 @@ impl Brush {
             && softness_selector == SoftnessSelector::Gaussian
             && matches!(pixel_shape, PixelBrushShape::Circle)
         {
-            let tip_for = |r: f32| {
+            let tip_for = |r: f32, hardness: f32| {
                 let fade_width = 1.5_f32.min(r);
                 GaussianTip {
                     r_ceil: r.ceil() as i32,
                     r_sq: r * r,
                     inv_radius: if r > 0.0 { 1.0 / r } else { 0.0 },
-                    hardness: hardness_val,
+                    hardness,
                     fade_start: (r - 1.5).max(0.0),
                     inv_fade_width: if fade_width > 0.0 {
                         1.0 / fade_width
@@ -1761,17 +1825,17 @@ impl Brush {
                     },
                 }
             };
-            let batch_tip = tip_for(ctx.r);
+            let batch_tip = tip_for(ctx.r, hardness_val);
             let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
                 // Turning a round tip changes nothing; squashing it does.
                 if !dab.rigid {
                     return general(dab, gy, x0, out);
                 }
                 let own;
-                let tip = if dab.r == ctx.r {
+                let tip = if dab.r == ctx.r && dab.hardness == 0.0 {
                     &batch_tip
                 } else {
-                    own = tip_for(dab.r);
+                    own = tip_for(dab.r, (hardness_val + dab.hardness).clamp(0.0, 1.0));
                     &own
                 };
                 let strength = (strength * dab.strength).min(1.0);

@@ -234,6 +234,105 @@ impl SelectionMask {
         Self::new(x0, y0, w, h, data).cropped()
     }
 
+    /// The selection with its edge blurred over `radius` pixels either side:
+    /// pixels further than that from the edge keep their coverage, those
+    /// nearer fade from selected to unselected (three box blurs, close to a
+    /// Gaussian). `None` if nothing is left selected.
+    pub fn feathered(&self, radius: u32) -> Option<Self> {
+        if radius == 0 {
+            return self.cropped();
+        }
+        let pad = radius as usize;
+        let (w, h) = (self.w + 2 * pad, self.h + 2 * pad);
+        let mut buf = vec![0.0f32; w * h];
+        for y in 0..self.h {
+            let (src, dst) = (y * self.w, (y + pad) * w + pad);
+            for (d, &s) in buf[dst..dst + self.w]
+                .iter_mut()
+                .zip(&self.data[src..src + self.w])
+            {
+                *d = s as f32;
+            }
+        }
+        // Three passes whose radii add up to `radius`, so the blur reaches
+        // exactly that far.
+        let r = radius as usize;
+        let passes = [r.div_ceil(3), (r + 1) / 3, r / 3];
+        use rayon::prelude::*;
+        let mut t = vec![0.0f32; w * h];
+        buf.par_chunks_mut(w).for_each(|row| {
+            let mut scratch = Vec::with_capacity(w);
+            for &b in &passes {
+                box_blur_1d(row, b, &mut scratch);
+            }
+        });
+        // Columns through a transposed copy, so each is contiguous.
+        t.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
+            for (y, v) in col.iter_mut().enumerate() {
+                *v = buf[y * w + x];
+            }
+            let mut scratch = Vec::with_capacity(h);
+            for &b in &passes {
+                box_blur_1d(col, b, &mut scratch);
+            }
+        });
+        let data: Vec<u8> = (0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                (t[x * h + y] + 0.5).clamp(0.0, 255.0) as u8
+            })
+            .collect();
+        Self::new(self.x0 - pad as i32, self.y0 - pad as i32, w, h, data).cropped()
+    }
+
+    /// A band `width` pixels wide along the selection's edge, half outside
+    /// and half inside it. `None` if the selection is empty.
+    pub fn border(&self, width: u32) -> Option<Self> {
+        let width = width.max(1);
+        let (outer, inner) = (width.div_ceil(2) as i32, (width / 2) as i32);
+        let grown = self.grown(outer)?;
+        match self.grown(-inner) {
+            Some(core) if inner > 0 => grown.combine(&core, SelectionMode::Subtract).cropped(),
+            // Too thin to have an inside: the band is all of it.
+            _ if inner > 0 => Some(grown),
+            // Only the outer half: take the selection itself away.
+            _ => grown.combine(self, SelectionMode::Subtract).cropped(),
+        }
+    }
+
+    /// The part of the selection inside the canvas `[0, w) × [0, h)`.
+    pub fn clipped_to(&self, w: usize, h: usize) -> Option<Self> {
+        let (w, h) = (
+            w.min(i32::MAX as usize) as i32,
+            h.min(i32::MAX as usize) as i32,
+        );
+        let (x0, y0) = (self.x0.max(0), self.y0.max(0));
+        let x1 = (self.x0 + self.w as i32).min(w);
+        let y1 = (self.y0 + self.h as i32).min(h);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        if (x0, y0, x1, y1)
+            == (
+                self.x0,
+                self.y0,
+                self.x0 + self.w as i32,
+                self.y0 + self.h as i32,
+            )
+        {
+            return self.cropped();
+        }
+        let (cw, ch) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let (ox, oy) = ((x0 - self.x0) as usize, (y0 - self.y0) as usize);
+        let mut data = Vec::with_capacity(cw * ch);
+        for y in 0..ch {
+            let start = (oy + y) * self.w + ox;
+            data.extend_from_slice(&self.data[start..start + cw]);
+        }
+        Self::new(x0, y0, cw, ch, data).cropped()
+    }
+
     /// Paint a soft round dab into the mask (growing nothing: the mask must
     /// already cover the area). `add` selects, otherwise deselects.
     pub fn stamp(&mut self, center: Vec2, radius: f32, hardness: f32, add: bool) {
@@ -392,6 +491,29 @@ fn squared_distance_transform(f: &mut [f32], w: usize, h: usize) {
     });
 }
 
+/// Average of each value's `2 * radius + 1` neighbourhood (zero past the
+/// ends), in place. `scratch` is reused between calls.
+fn box_blur_1d(f: &mut [f32], radius: usize, scratch: &mut Vec<f32>) {
+    if radius == 0 || f.is_empty() {
+        return;
+    }
+    scratch.clear();
+    scratch.extend_from_slice(f);
+    let n = f.len();
+    let inv = 1.0 / (2 * radius + 1) as f32;
+    // Running sum over [i - radius, i + radius], in f64 so it doesn't drift.
+    let mut sum: f64 = scratch[..radius.min(n)].iter().map(|&v| v as f64).sum();
+    for (i, out) in f.iter_mut().enumerate() {
+        if i + radius < n {
+            sum += scratch[i + radius] as f64;
+        }
+        if i > radius {
+            sum -= scratch[i - radius - 1] as f64;
+        }
+        *out = sum as f32 * inv;
+    }
+}
+
 /// One-dimensional squared distance transform, in place.
 fn transform_1d(f: &mut [f32]) {
     let n = f.len();
@@ -517,6 +639,99 @@ mod tests {
         m.stamp(Vec2::new(20.0, 20.0), 3.0, 1.0, false);
         assert!(!m.contains(20.0, 20.0) && m.contains(20.0, 26.0));
         assert_eq!(m.cropped().unwrap().content_bounds(), m.content_bounds());
+    }
+
+    /// Selected pixels (at least half covered) of `m`, in canvas coordinates.
+    fn selected(m: &SelectionMask) -> std::collections::BTreeSet<(i32, i32)> {
+        let mut out = std::collections::BTreeSet::new();
+        for y in 0..m.h {
+            for x in 0..m.w {
+                if m.data[y * m.w + x] >= 128 {
+                    out.insert((m.x0 + x as i32, m.y0 + y as i32));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn growing_then_shrinking_a_rectangle_gives_it_back() {
+        let rect = SelectionMask::new(20, 30, 40, 25, vec![255; 40 * 25]);
+        for r in [1, 3, 8] {
+            let back = rect.grown(r).unwrap().grown(-r).unwrap();
+            assert_eq!(selected(&back), selected(&rect), "radius {r}");
+        }
+        // And a shrink undone by a grow, away from the corners.
+        let back = rect.grown(-4).unwrap().grown(4).unwrap();
+        assert!(back.contains(22.5, 42.5) && back.contains(40.5, 31.5));
+        assert!(!back.contains(19.5, 42.5));
+    }
+
+    #[test]
+    fn border_is_a_band_of_the_given_width() {
+        let rect = SelectionMask::new(20, 20, 40, 40, vec![255; 40 * 40]);
+        for width in [1u32, 4, 7] {
+            let band = rect.border(width).unwrap();
+            // Across the left edge, along the middle row.
+            let across: Vec<i32> = (0..40)
+                .filter(|&x| band.contains(x as f32 + 0.5, 40.5))
+                .collect();
+            assert_eq!(across.len(), width as usize, "width {width}: {across:?}");
+            let (first, last) = (across[0], *across.last().unwrap());
+            assert_eq!(last - first + 1, width as i32, "one band");
+            assert!(first < 20 && last >= 20 - 1, "straddles the edge");
+            assert!(!band.contains(40.5, 40.5), "the middle isn't in it");
+        }
+        // A selection thinner than the band: all of it, plus the outside.
+        let thin = SelectionMask::new(0, 0, 2, 2, vec![255; 4]);
+        assert!(thin.border(10).unwrap().contains(0.5, 0.5));
+    }
+
+    #[test]
+    fn feathering_softens_only_near_the_edge() {
+        let rect = SelectionMask::new(50, 50, 60, 60, vec![255; 60 * 60]);
+        let soft = rect.feathered(9).unwrap();
+        assert_eq!(soft.value(80, 80), 255, "the inside stays full");
+        assert_eq!(soft.value(60, 80), 255, "10 px in");
+        assert_eq!(soft.value(40, 80), 0, "10 px out");
+        assert_eq!(soft.value(20, 80), 0);
+        let edge = soft.value(50, 80);
+        assert!(
+            (100..=160).contains(&edge),
+            "about half on the edge: {edge}"
+        );
+        // Coverage falls steadily across the edge.
+        let row: Vec<u8> = (38..62).map(|x| soft.value(x, 80)).collect();
+        assert!(row.windows(2).all(|p| p[0] <= p[1]), "{row:?}");
+        assert!(SelectionMask::empty(0, 0, 8, 8).feathered(3).is_none());
+    }
+
+    #[test]
+    #[ignore = "timing; run with --release --ignored --nocapture"]
+    fn modifying_a_4000_px_selection_is_quick() {
+        let n = 4000;
+        let all = SelectionMask::new(0, 0, n, n, vec![255; n * n]);
+        for (name, f) in [
+            (
+                "grow 50",
+                &(|m: &SelectionMask| m.grown(50)) as &dyn Fn(&_) -> _,
+            ),
+            ("shrink 50", &|m: &SelectionMask| m.grown(-50)),
+            ("feather 50", &|m: &SelectionMask| m.feathered(50)),
+            ("border 20", &|m: &SelectionMask| m.border(20)),
+        ] {
+            let t = std::time::Instant::now();
+            assert!(f(&all).is_some());
+            println!("{name}: {:?}", t.elapsed());
+        }
+    }
+
+    #[test]
+    fn clipping_keeps_the_part_on_the_canvas() {
+        let m = SelectionMask::new(-5, -5, 20, 20, vec![255; 400]);
+        let c = m.clipped_to(10, 10).unwrap();
+        assert_eq!((c.x0, c.y0, c.w, c.h), (0, 0, 10, 10));
+        assert!(m.clipped_to(0, 0).is_none());
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::{
     canvas::blend_modes::LayerBlend,
     canvas::history::{LayerHistoryOp, LayerMeta, RemovedLayer},
     canvas::storage::{LayerId, LayerKind},
+    canvas::text::{TextLayer, TextStyle},
     selection::{
         SelectionShape,
         transform::{TransformInfo, TransformState},
@@ -348,6 +349,47 @@ impl From<StoredLayerKind> for LayerKind {
     }
 }
 
+/// Mirrors `TextLayer`: a text layer's source. Absent in older files.
+#[derive(Serialize, Deserialize)]
+pub(super) struct StoredText {
+    text: String,
+    font: String,
+    #[serde(default)]
+    style: TextStyle,
+    color: StoredColor,
+    pos: StoredVec2,
+}
+
+impl From<&TextLayer> for StoredText {
+    fn from(text: &TextLayer) -> Self {
+        Self {
+            text: text.text.clone(),
+            font: text.font.clone(),
+            style: text.style,
+            color: StoredColor::from_color(text.color),
+            pos: text.pos.into(),
+        }
+    }
+}
+
+impl StoredText {
+    pub(super) fn from_layer(text: Option<&TextLayer>) -> Option<Self> {
+        text.map(Self::from)
+    }
+
+    pub(super) fn into_layer(stored: Option<Self>) -> Option<Box<TextLayer>> {
+        stored.map(|s| {
+            Box::new(TextLayer {
+                text: s.text,
+                font: s.font,
+                style: s.style,
+                color: s.color.to_color(),
+                pos: s.pos.into(),
+            })
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredLayerMeta {
     name: String,
@@ -367,6 +409,13 @@ pub(super) struct StoredLayerMeta {
     clipped: bool,
     #[serde(default)]
     adjustment: Option<crate::canvas::filters::Filter>,
+    #[serde(default)]
+    text: Option<StoredText>,
+    position_locked: bool,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    reference: bool,
 }
 
 impl From<&LayerMeta> for StoredLayerMeta {
@@ -382,6 +431,10 @@ impl From<&LayerMeta> for StoredLayerMeta {
             blend: Some(meta.blend.key().to_string()),
             clipped: meta.clipped,
             adjustment: meta.adjustment,
+            text: StoredText::from_layer(meta.text.as_deref()),
+            position_locked: meta.position_locked,
+            draft: meta.draft,
+            reference: meta.reference,
         }
     }
 }
@@ -403,6 +456,10 @@ impl StoredLayerMeta {
                 .unwrap_or_default(),
             clipped: self.clipped,
             adjustment: self.adjustment,
+            text: StoredText::into_layer(self.text),
+            position_locked: self.position_locked,
+            draft: self.draft,
+            reference: self.reference,
         }
     }
 }
@@ -446,6 +503,13 @@ pub(super) enum StoredLayerHistoryOp {
         parent_after: Option<u64>,
         active_before: usize,
         active_after: usize,
+    },
+    /// Text layers' source on the other side of the step, then the step's
+    /// own layer change.
+    Text {
+        layers: Vec<(u64, Option<StoredText>)>,
+        #[serde(default)]
+        inner: Option<Box<StoredLayerHistoryOp>>,
     },
 }
 
@@ -505,8 +569,18 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                 active_after: *active_after,
             },
             LayerHistoryOp::Document(_) => {
-                unreachable!("steps across a canvas resize aren't saved (StoredHistory)")
+                unreachable!("a resize step is saved as StoredUndoAction::document")
             }
+            LayerHistoryOp::Replaced(_) => {
+                unreachable!("a merge step is saved as StoredUndoAction::merge")
+            }
+            LayerHistoryOp::Text { layers, inner } => Self::Text {
+                layers: layers
+                    .iter()
+                    .map(|(id, text)| (id.0, StoredText::from_layer(text.as_deref())))
+                    .collect(),
+                inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
+            },
         }
     }
 }
@@ -565,6 +639,13 @@ impl StoredLayerHistoryOp {
                 parent_after: parent_after.map(LayerId),
                 active_before,
                 active_after,
+            },
+            Self::Text { layers, inner } => LayerHistoryOp::Text {
+                layers: layers
+                    .into_iter()
+                    .map(|(id, text)| (LayerId(id), StoredText::into_layer(text)))
+                    .collect(),
+                inner: inner.map(|op| Box::new(op.into_op())),
             },
         }
     }

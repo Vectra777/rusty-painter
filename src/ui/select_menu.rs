@@ -69,6 +69,7 @@ fn source_picker(ui: &mut egui::Ui, source: &mut SampleSource, compact: bool) ->
         &[
             (SampleSource::Layer, "Layer"),
             (SampleSource::AllVisible, "All layers"),
+            (SampleSource::Reference, "Reference"),
         ],
         compact,
     )

@@ -120,6 +120,7 @@ impl PainterApp {
             || ws.shapes.session.is_some()
             || self.layer_state.liquify.is_some()
             || self.layer_state.floating_layer_idx.is_some()
+            || ws.select.quick_mask.is_some()
     }
 
     fn write_autosave(&mut self) {

@@ -154,7 +154,9 @@ impl eframe::App for PainterApp {
                 self.gradient_update();
                 self.quickshape_tick();
                 self.text_update();
-                self.filter_update(ctx.input(|i| i.pointer.any_down()));
+                let dragging = ctx.input(|i| i.pointer.any_down());
+                let screen = render::preview_view(self, &view, ui.clip_rect());
+                self.filter_update(dragging.then_some(&screen));
                 // Twirl / pinch / bloat keep working while the brush is held.
                 if self.liquify_is_holding() && self.workspace.liquify.mode.is_continuous() {
                     let dt = ctx.input(|i| i.stable_dt).min(0.1);
@@ -180,6 +182,7 @@ impl eframe::App for PainterApp {
                 }
                 if self.render_cache.tiles.iter().any(|t| t.dirty) {
                     self.layer_state.thumbnails_dirty = true;
+                    self.workspace.view_aids.navigator.dirty = true;
                 }
                 self.workspace.frame_stats.mark(Stage::Stroke);
                 // Composite and paint after input, so this frame's dabs and any
@@ -211,6 +214,10 @@ impl eframe::App for PainterApp {
         self.workspace.frame_stats.mark(Stage::Windows);
         if std::mem::take(&mut self.brush_state.swatches_dirty) {
             self.save_swatches();
+        }
+        self.save_view_settings(ctx);
+        if std::mem::take(&mut self.brush_state.library.dirty) {
+            self.save_brush_library();
         }
         self.autosave_tick(ctx);
         self.timelapse_tick();
@@ -385,6 +392,7 @@ impl PainterApp {
         {
             self.magnetic_close();
         }
+        self.quick_mask_settle();
         // Likewise for liquify.
         if self.layer_state.liquify.is_some()
             && !matches!(self.active_tool, crate::app::tools::Tool::Liquify)
@@ -398,6 +406,9 @@ impl PainterApp {
     fn draw_overlays(&mut self, ctx: &egui::Context, ui: &egui::Ui, view: &render::CanvasView) {
         // Overlays follow the canvas exactly (zoom, pan and rotation).
         let map = render::screen_map(self, view);
+        let panel = view.response.rect;
+        crate::app::view::grid::draw_grid(self, ui.painter(), &map, panel);
+        crate::app::view::guide_lines::draw_guide_lines(self, ctx, ui.painter(), &map, panel);
         // With Transform, the outline shows where the box puts it.
         match self.active_tool {
             crate::app::tools::Tool::Transform(info) => {
@@ -413,6 +424,7 @@ impl PainterApp {
         }
         crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
+        crate::app::stroke_ops::draw_string(self, ui.painter(), &map);
         crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::blend::draw_clone_source(self, ui.painter(), &|p| map.to_screen(p));
@@ -473,6 +485,7 @@ impl PainterApp {
         ui::image_gallery::image_gallery(self, ctx);
         ui::general_settings::shortcuts_window(self, ctx);
         ui::brush_list::presets_window(self, ctx);
+        ui::radial_palette::radial_palette(self, ctx);
         ui::export_modal::export_modal(self, ctx);
         ui::frame_times::frame_times_window(self, ctx);
         ui::gradient_editor::gradient_editor_window(self, ctx);
@@ -480,7 +493,11 @@ impl PainterApp {
         ui::filter_dialog::adjustment_dialog(self, ctx);
         crate::app::autosave::recovery_dialog(self, ctx);
         ui::image_menu::size_dialog(self, ctx);
+        ui::select_dialog::select_dialog(self, ctx);
         ui::text_dialog::text_dialog(self, ctx);
+        ui::view_aids_menu::guides_window(self, ctx);
+        ui::reference_window::reference_window(self, ctx);
+        ui::navigator::navigator_window(self, ctx);
     }
 }
 
@@ -568,7 +585,15 @@ impl PainterApp {
                     self.reorder_layer_state(*from, *to);
                 }
                 Some(LayerHistoryOp::Document(_)) => self.after_document_swap(),
-                None => {}
+                Some(LayerHistoryOp::Replaced(swap)) => {
+                    let (out, put) = swap
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .applied
+                        .clone();
+                    self.replace_layer_states(&out, &put);
+                }
+                Some(LayerHistoryOp::Text { .. }) | None => {}
             }
 
             if layer_action.is_some() {

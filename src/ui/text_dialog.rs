@@ -91,10 +91,16 @@ pub fn text_dialog(app: &mut PainterApp, ctx: &egui::Context) {
                 edit.request_focus();
             }
             ui.horizontal_wrapped(|ui| {
+                if let Some(s) = app.workspace.text.session.as_mut() {
+                    ui.color_edit_button_srgba(&mut s.color)
+                        .on_hover_text("Text colour");
+                }
                 text_controls(app, ui);
             });
             ui.label(
-                egui::RichText::new("In the brush colour. Kept as pixels on a new layer.")
+                egui::RichText::new(
+                    "In the brush colour. Kept as a text layer: click it with the Text tool to edit it again.",
+                )
                     .small()
                     .color(crate::ui::style::TEXT_DIM),
             );

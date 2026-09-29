@@ -2,8 +2,14 @@
 //! stroke previews with the preset name inside, like Clip Studio's brush
 //! list. Picking a preset loads it into the tool it belongs to: eraser
 //! presets switch to the eraser, the others to the brush.
+//!
+//! Above the list, a search box (name or tag) and chips: all presets, the
+//! favourites (starred on their tile or from their menu), the recent ones,
+//! or one tag. A preset's right-click menu stars it and edits its tags.
 
 use crate::PainterApp;
+use crate::app::brush_library::{Shelf, shown_presets};
+use crate::app::state::BrushState;
 use crate::brush_engine::brush::{Brush, BrushPreset};
 use crate::brush_engine::brush_options::BlendMode;
 use crate::brush_engine::preview::stroke_preview_image;
@@ -45,6 +51,21 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
                     }
                 }
                 Some(PresetAction::Delete(index)) => app.delete_user_preset(index),
+                Some(PresetAction::ToggleFavourite(index)) => {
+                    let name = app.brush_state.presets[index].name.clone();
+                    app.edit_library(|lib| lib.toggle_favourite(&name));
+                }
+                Some(PresetAction::AddTag(index, tag)) => {
+                    let name = app.brush_state.presets[index].name.clone();
+                    app.edit_library(|lib| {
+                        lib.add_tag(&name, &tag);
+                    });
+                    app.brush_state.library.new_tag.clear();
+                }
+                Some(PresetAction::RemoveTag(index, tag)) => {
+                    let name = app.brush_state.presets[index].name.clone();
+                    app.edit_library(|lib| lib.remove_tag(&name, &tag));
+                }
                 #[cfg(not(target_os = "android"))]
                 Some(PresetAction::Export(index)) => {
                     let name = app.brush_state.presets[index].name.clone();
@@ -122,6 +143,9 @@ fn import_report_window(app: &mut PainterApp, ctx: &egui::Context) {
 enum PresetAction {
     Pick(usize),
     Delete(usize),
+    ToggleFavourite(usize),
+    AddTag(usize, String),
+    RemoveTag(usize, String),
     #[cfg(not(target_os = "android"))]
     Export(usize),
     #[cfg(not(target_os = "android"))]
@@ -197,14 +221,32 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
         });
     });
 
+    let all_tags = library_filters(&mut app.brush_state, ui);
+
     let tile_height = if m.touch { 76.0 } else { 58.0 };
     let pool = app.workspace.pool.clone();
     let eraser_first = app.brush_state.eraser_active;
+    let bs = &mut app.brush_state;
+    let lib = &bs.library;
+    let shown = shown_presets(&bs.presets, &lib.file, &lib.shelf, &lib.search);
+    let recent = lib.shelf == Shelf::Recent;
     egui::ScrollArea::vertical()
         .id_salt("brush_presets_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
+            if shown.is_empty() {
+                ui.label(RichText::new("No presets match").small().color(TEXT_DIM));
+                return;
+            }
+            // The recent ones newest first, in one list.
+            if recent {
+                for &index in &shown {
+                    let row = preset_row(ui, bs, index, &all_tags, &pool, tile_height);
+                    picked = row.or(picked.take());
+                }
+                return;
+            }
             // The active tool's presets first.
             let sections = if eraser_first {
                 [true, false]
@@ -212,44 +254,24 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
                 [false, true]
             };
             for erasers in sections {
+                let section: Vec<usize> = (shown.iter().copied())
+                    .filter(|&i| {
+                        let mode = bs.presets[i].brush.brush_options.blend_mode;
+                        (mode == BlendMode::Eraser) == erasers
+                    })
+                    .collect();
+                if section.is_empty() {
+                    continue;
+                }
                 ui.label(
                     RichText::new(if erasers { "ERASERS" } else { "BRUSHES" })
                         .small()
                         .strong()
                         .color(TEXT_DIM),
                 );
-                let bs = &mut app.brush_state;
-                for (index, preset) in bs.presets.iter().enumerate() {
-                    let is_eraser = preset.brush.brush_options.blend_mode == BlendMode::Eraser;
-                    if is_eraser != erasers {
-                        continue;
-                    }
-                    let texture = bs
-                        .preset_previews
-                        .entry(preset.name.clone())
-                        .or_insert_with(|| preview_texture(&preset.brush, &pool, ui.ctx()))
-                        .id();
-                    // Any brush can be the eraser's, so the name alone says
-                    // which is in use.
-                    let active = bs.active_preset.as_deref() == Some(preset.name.as_str());
-                    let tile = preset_tile(ui, &preset.name, texture, tile_height, active);
-                    if tile.clicked() {
-                        picked = Some(PresetAction::Pick(index));
-                    }
-                    let mine = preset.file.is_some();
-                    tile.context_menu(|ui| {
-                        #[cfg(not(target_os = "android"))]
-                        if ui.button("Export…").clicked() {
-                            picked = Some(PresetAction::Export(index));
-                        }
-                        if ui
-                            .add_enabled(mine, egui::Button::new("Delete"))
-                            .on_disabled_hover_text("Built-in presets can't be deleted")
-                            .clicked()
-                        {
-                            picked = Some(PresetAction::Delete(index));
-                        }
-                    });
+                for index in section {
+                    let row = preset_row(ui, bs, index, &all_tags, &pool, tile_height);
+                    picked = row.or(picked.take());
                 }
                 ui.add_space(6.0);
             }
@@ -257,14 +279,138 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
     picked
 }
 
-/// A wide preview tile with the name drawn inside it.
+/// The search box and the shelf chips. Returns every tag in use.
+fn library_filters(bs: &mut BrushState, ui: &mut egui::Ui) -> Vec<String> {
+    let lib = &mut bs.library;
+    let all_tags = lib.file.all_tags();
+    // A tag no preset has any more.
+    if let Shelf::Tag(tag) = &lib.shelf
+        && !all_tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
+    {
+        lib.shelf = Shelf::All;
+    }
+    ui.add(
+        egui::TextEdit::singleline(&mut lib.search)
+            .hint_text("Search names and tags")
+            .desired_width(f32::INFINITY),
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        let mut chip = |ui: &mut egui::Ui, shelf: Shelf, text: &str| {
+            let on = lib.shelf == shelf;
+            if ui
+                .selectable_label(on, RichText::new(text).small())
+                .clicked()
+            {
+                lib.shelf = if on { Shelf::All } else { shelf };
+            }
+        };
+        chip(ui, Shelf::All, "All");
+        chip(ui, Shelf::Favourites, "Favourites");
+        chip(ui, Shelf::Recent, "Recent");
+        for tag in &all_tags {
+            chip(ui, Shelf::Tag(tag.clone()), tag);
+        }
+    });
+    all_tags
+}
+
+/// One preset's tile, with its menu (favourite, tags, export, delete).
+fn preset_row(
+    ui: &mut egui::Ui,
+    bs: &mut BrushState,
+    index: usize,
+    all_tags: &[String],
+    pool: &ThreadPool,
+    tile_height: f32,
+) -> Option<PresetAction> {
+    let mut picked = None;
+    let preset = &bs.presets[index];
+    let texture = bs
+        .preset_previews
+        .entry(preset.name.clone())
+        .or_insert_with(|| preview_texture(&preset.brush, pool, ui.ctx()))
+        .id();
+    // Any brush can be the eraser's, so the name alone says which is in use.
+    let active = bs.active_preset.as_deref() == Some(preset.name.as_str());
+    let favourite = bs.library.file.is_favourite(&preset.name);
+    let (tile, star) = preset_tile(ui, &preset.name, texture, tile_height, active, favourite);
+    if star {
+        picked = Some(PresetAction::ToggleFavourite(index));
+    } else if tile.clicked() {
+        picked = Some(PresetAction::Pick(index));
+    }
+    let mine = preset.file.is_some();
+    let tags = bs.library.file.tags(&preset.name);
+    let new_tag = &mut bs.library.new_tag;
+    tile.context_menu(|ui| {
+        let star_text = if favourite {
+            "Remove from favourites"
+        } else {
+            "Add to favourites"
+        };
+        if ui.button(star_text).clicked() {
+            picked = Some(PresetAction::ToggleFavourite(index));
+            ui.close_menu();
+        }
+        ui.menu_button("Tags", |ui| {
+            for tag in all_tags {
+                let has = tags.iter().any(|t| t.eq_ignore_ascii_case(tag));
+                let mut on = has;
+                if ui.checkbox(&mut on, tag.as_str()).changed() {
+                    picked = Some(if on {
+                        PresetAction::AddTag(index, tag.clone())
+                    } else {
+                        let own = tags.iter().find(|t| t.eq_ignore_ascii_case(tag));
+                        PresetAction::RemoveTag(index, own.unwrap_or(tag).clone())
+                    });
+                }
+            }
+            if !all_tags.is_empty() {
+                ui.separator();
+            }
+            ui.horizontal(|ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(new_tag)
+                        .hint_text("New tag")
+                        .desired_width(110.0),
+                );
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let add = ui
+                    .add_enabled(!new_tag.trim().is_empty(), egui::Button::new("Add"))
+                    .clicked();
+                if (add || enter) && !new_tag.trim().is_empty() {
+                    picked = Some(PresetAction::AddTag(index, new_tag.trim().to_string()));
+                    ui.close_menu();
+                }
+            });
+        });
+        ui.separator();
+        #[cfg(not(target_os = "android"))]
+        if ui.button("Export…").clicked() {
+            picked = Some(PresetAction::Export(index));
+        }
+        if ui
+            .add_enabled(mine, egui::Button::new("Delete"))
+            .on_disabled_hover_text("Built-in presets can't be deleted")
+            .clicked()
+        {
+            picked = Some(PresetAction::Delete(index));
+        }
+    });
+    picked
+}
+
+/// A wide preview tile with the name drawn inside it, and a star in the
+/// top-right corner. Returns the tile and whether the star was clicked.
 fn preset_tile(
     ui: &mut egui::Ui,
     name: &str,
     texture: egui::TextureId,
     height: f32,
     active: bool,
-) -> egui::Response {
+    favourite: bool,
+) -> (egui::Response, bool) {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::click(),
@@ -309,10 +455,82 @@ fn preset_tile(
         Stroke::new(1.0_f32, BORDER)
     };
     painter.rect_stroke(rect, 0.0, stroke);
-    response.on_hover_text(name)
+
+    // The star: always shown on a favourite, on hover otherwise.
+    let star_size = (height * 0.3).clamp(14.0, 24.0);
+    let star_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - star_size - 4.0, rect.top() + 4.0),
+        egui::vec2(star_size, star_size),
+    );
+    let pointer = response.hover_pos();
+    let over_star = pointer.is_some_and(|p| star_rect.contains(p));
+    if favourite || response.hovered() {
+        let colour = if favourite || over_star {
+            TEXT_STRONG
+        } else {
+            TEXT_DIM
+        };
+        draw_star(
+            painter,
+            star_rect.center(),
+            star_size * 0.5,
+            favourite,
+            colour,
+        );
+    }
+    let star_clicked = response.clicked()
+        && (response.interact_pointer_pos()).is_some_and(|p| star_rect.contains(p));
+    let tip = if over_star {
+        if favourite {
+            "Remove from favourites"
+        } else {
+            "Add to favourites"
+        }
+    } else {
+        name
+    };
+    (response.on_hover_text(tip), star_clicked)
 }
 
-fn preview_texture(brush: &Brush, pool: &ThreadPool, ctx: &egui::Context) -> egui::TextureHandle {
+/// A five-pointed star, filled or outlined.
+fn draw_star(
+    painter: &egui::Painter,
+    centre: egui::Pos2,
+    radius: f32,
+    filled: bool,
+    colour: Color32,
+) {
+    let point = |k: usize| {
+        let r = if k.is_multiple_of(2) {
+            radius
+        } else {
+            radius * 0.45
+        };
+        let a = k as f32 * std::f32::consts::PI / 5.0 - std::f32::consts::FRAC_PI_2;
+        centre + egui::vec2(a.cos(), a.sin()) * r
+    };
+    let points: Vec<egui::Pos2> = (0..10).map(point).collect();
+    if filled {
+        // Convex pieces: the middle pentagon and the five points.
+        let inner: Vec<egui::Pos2> = (0..5).map(|k| points[2 * k + 1]).collect();
+        painter.add(egui::Shape::convex_polygon(inner, colour, Stroke::NONE));
+        for k in 0..5 {
+            let tip = vec![points[(2 * k + 9) % 10], points[2 * k], points[2 * k + 1]];
+            painter.add(egui::Shape::convex_polygon(tip, colour, Stroke::NONE));
+        }
+    } else {
+        painter.add(egui::Shape::closed_line(
+            points,
+            Stroke::new(1.2_f32, colour),
+        ));
+    }
+}
+
+pub(crate) fn preview_texture(
+    brush: &Brush,
+    pool: &ThreadPool,
+    ctx: &egui::Context,
+) -> egui::TextureHandle {
     let mut brush = brush.clone();
     let image = stroke_preview_image(
         &mut brush,

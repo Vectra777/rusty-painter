@@ -113,13 +113,17 @@ pub(crate) fn show_panels(app: &mut PainterApp, ctx: &egui::Context) {
                 ui.set_clip_rect(ui.max_rect());
                 right_panel(app, ui);
             });
+        let mut resized = false;
         if let Some(r) = left {
             let rect = r.response.rect;
-            resize_edge(ctx, "panel_brush", rect.right(), rect, left_w, 1.0);
+            resized |= resize_edge(ctx, "panel_brush", rect.right(), rect, left_w, 1.0);
         }
         if let Some(r) = right {
             let rect = r.response.rect;
-            resize_edge(ctx, "panel_right", rect.left(), rect, right_w, -1.0);
+            resized |= resize_edge(ctx, "panel_right", rect.left(), rect, right_w, -1.0);
+        }
+        if resized {
+            app.save_panel_widths(ctx);
         }
         return;
     }
@@ -165,10 +169,19 @@ pub(crate) fn show_panels(app: &mut PainterApp, ctx: &egui::Context) {
 }
 
 /// A handle on a panel's inner edge at `x`: dragging it changes the
-/// panel's width (`sign`: +1 grows to the right, -1 to the left).
-fn resize_edge(ctx: &egui::Context, id: &str, x: f32, panel: egui::Rect, width: f32, sign: f32) {
+/// panel's width (`sign`: +1 grows to the right, -1 to the left). Returns
+/// whether a drag ended this frame.
+fn resize_edge(
+    ctx: &egui::Context,
+    id: &str,
+    x: f32,
+    panel: egui::Rect,
+    width: f32,
+    sign: f32,
+) -> bool {
     let rect = egui::Rect::from_x_y_ranges(x - 4.0..=x + 4.0, panel.y_range());
     let key = egui::Id::new((id, "width"));
+    let mut released = false;
     egui::Area::new(egui::Id::new((id, "edge")))
         .fixed_pos(rect.min)
         .order(egui::Order::Middle)
@@ -186,7 +199,68 @@ fn resize_edge(ctx: &egui::Context, id: &str, x: f32, panel: egui::Rect, width: 
                 let w = width + sign * response.drag_delta().x;
                 ctx.data_mut(|d| d.insert_temp(key, w.max(PANEL_MIN_WIDTH)));
             }
+            released = response.drag_stopped();
         });
+    released
+}
+
+/// The side panels' widths as the user left them, saved beside the brushes
+/// folder. A panel never resized is left out (it opens at the default).
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PanelWidths {
+    #[serde(default)]
+    brush: Option<f32>,
+    #[serde(default)]
+    right: Option<f32>,
+}
+
+/// The panels whose widths are saved, by egui id, with their field.
+fn panel_width_slots(widths: &mut PanelWidths) -> [(&'static str, &mut Option<f32>); 2] {
+    [
+        ("panel_brush", &mut widths.brush),
+        ("panel_right", &mut widths.right),
+    ]
+}
+
+impl PainterApp {
+    fn panel_widths_path(&self) -> std::path::PathBuf {
+        self.brush_state.brushes_path.with_file_name("panels.json")
+    }
+
+    /// Restore the panel widths saved last time. They're fitted to the
+    /// screen each frame (at most 40% of it), so a width saved on a bigger
+    /// screen comes back narrower rather than squeezing the canvas.
+    pub(crate) fn load_panel_widths(&self, ctx: &egui::Context) {
+        let Ok(bytes) = std::fs::read(self.panel_widths_path()) else {
+            return;
+        };
+        let Ok(mut widths) = serde_json::from_slice::<PanelWidths>(&bytes) else {
+            log::warn!("Ignoring unreadable panel widths");
+            return;
+        };
+        for (id, width) in panel_width_slots(&mut widths) {
+            if let Some(w) = width.filter(|w| w.is_finite()) {
+                let key = egui::Id::new((id, "width"));
+                ctx.data_mut(|d| d.insert_temp(key, w.max(PANEL_MIN_WIDTH)));
+            }
+        }
+    }
+
+    /// Save the panel widths (after one was dragged).
+    fn save_panel_widths(&self, ctx: &egui::Context) {
+        let mut widths = PanelWidths::default();
+        for (id, width) in panel_width_slots(&mut widths) {
+            *width = ctx.data(|d| d.get_temp(egui::Id::new((id, "width"))));
+        }
+        let result = serde_json::to_vec_pretty(&widths)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                std::fs::write(self.panel_widths_path(), bytes).map_err(|e| e.to_string())
+            });
+        if let Err(err) = result {
+            log::warn!("Couldn't save the panel widths: {err}");
+        }
+    }
 }
 
 /// On a narrow screen, a press on the canvas closes floating panels (and
@@ -372,6 +446,72 @@ mod tests {
                 left
             })
             .collect()
+    }
+
+    /// The canvas width left beside the open panels on a `screen_w` wide
+    /// window, once they've slid in.
+    fn canvas_width_on(app: &mut crate::PainterApp, ctx: &egui::Context, screen_w: f32) -> f32 {
+        let mut left = 0.0;
+        for _ in 0..40 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(screen_w, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                super::show_panels(app, ctx);
+                left = ctx.available_rect().width();
+            });
+        }
+        left
+    }
+
+    #[test]
+    fn panel_widths_come_back_next_launch_fitted_to_the_screen() {
+        let dir = std::env::temp_dir().join(format!("rp-panels-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let panels_open = |app: &mut crate::PainterApp| {
+            app.brush_state.brushes_path = dir.join("brushes");
+            app.workspace.show_left_panel = true;
+            app.workspace.show_layers = true;
+        };
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        panels_open(&mut app);
+        let ctx = egui::Context::default();
+        let default_small = canvas_width_on(&mut app, &ctx, 900.0);
+        let default_canvas = canvas_width_on(&mut app, &ctx, 1400.0);
+        for (id, w) in [("panel_brush", 400.0_f32), ("panel_right", 350.0)] {
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new((id, "width")), w));
+        }
+        app.save_panel_widths(&ctx);
+
+        // Next launch: a new app and window.
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        panels_open(&mut app);
+        let ctx = egui::Context::default();
+        app.load_panel_widths(&ctx);
+        let canvas = canvas_width_on(&mut app, &ctx, 1400.0);
+        let grown = (400.0 - super::PANEL_WIDTH) + (350.0 - super::PANEL_WIDTH);
+        assert!(
+            (default_canvas - canvas - grown).abs() < 1.0,
+            "{default_canvas} - {canvas} != {grown}"
+        );
+        // On a smaller screen each panel takes at most 40% of it: the
+        // 400 px one comes back 360 px wide.
+        let small = canvas_width_on(&mut app, &ctx, 900.0);
+        let fitted = (360.0 - super::PANEL_WIDTH) + (350.0 - super::PANEL_WIDTH);
+        assert!(
+            (default_small - small - fitted).abs() < 1.0,
+            "{default_small} - {small} != {fitted}"
+        );
+        // A missing or broken file leaves the defaults.
+        std::fs::write(dir.join("panels.json"), b"not json").unwrap();
+        let ctx = egui::Context::default();
+        app.load_panel_widths(&ctx);
+        assert_eq!(canvas_width_on(&mut app, &ctx, 1400.0), default_canvas);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

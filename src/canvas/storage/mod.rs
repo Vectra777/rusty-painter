@@ -3,14 +3,18 @@
 //! in the submodules.
 
 mod composite;
+mod merge;
 mod pixels;
 #[cfg(test)]
 mod tests;
 mod transform;
 pub mod warp;
 
-pub use composite::BelowComposite;
+pub(crate) use composite::shrink_tile;
+pub use composite::{BelowComposite, SampleLayers};
+pub use merge::LayerSwap;
 pub use pixels::Region;
+pub(crate) use pixels::mix;
 pub(crate) use transform::rect_corners;
 pub use transform::{Distort, DistortKind, InverseMap, TransformParams, is_convex_quad};
 
@@ -77,6 +81,17 @@ pub struct Layer {
     /// An adjustment layer: this filter applies to everything below it
     /// (its own pixels aren't shown; its mask says where it applies).
     pub adjustment: Option<crate::canvas::filters::Filter>,
+    /// A text layer: its pixels are this text, rendered, and the Text tool
+    /// can edit it again.
+    pub text: Option<Box<crate::canvas::text::TextLayer>>,
+    /// Can't be moved or transformed.
+    pub position_locked: bool,
+    /// A draft: shown, but left out of export, merging and "all layers"
+    /// sampling.
+    pub draft: bool,
+    /// A reference layer: fills (and the wand) set to "Reference" find
+    /// their areas in it.
+    pub reference: bool,
     tiles: Mutex<TileMap>,
 }
 
@@ -102,6 +117,10 @@ pub struct CanvasLayerSnapshot {
     pub blend: LayerBlend,
     pub clipped: bool,
     pub adjustment: Option<crate::canvas::filters::Filter>,
+    pub text: Option<Box<crate::canvas::text::TextLayer>>,
+    pub position_locked: bool,
+    pub draft: bool,
+    pub reference: bool,
     pub tiles: Vec<CanvasTileSnapshot>,
 }
 
@@ -130,6 +149,10 @@ impl Layer {
             blend: self.blend,
             clipped: self.clipped,
             adjustment: self.adjustment,
+            text: self.text.clone(),
+            position_locked: self.position_locked,
+            draft: self.draft,
+            reference: self.reference,
             tiles: Mutex::new(TileMap::default()),
         }
     }
@@ -161,11 +184,55 @@ impl Layer {
             blend: LayerBlend::Normal,
             clipped: false,
             adjustment: None,
+            text: None,
+            position_locked: false,
+            draft: false,
+            reference: false,
             tiles: Mutex::new(TileMap::default()),
         }
     }
 
-    fn from_snapshot(snapshot: CanvasLayerSnapshot) -> Self {
+    /// The layer's settings and painted tiles, sorted row by row.
+    pub(crate) fn snapshot(&self) -> CanvasLayerSnapshot {
+        let mut tiles: Vec<_> = self
+            .tiles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|(&(tx, ty), cell)| {
+                let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.is_empty {
+                    return None;
+                }
+                guard
+                    .data
+                    .clone()
+                    .map(|data| CanvasTileSnapshot { tx, ty, data })
+            })
+            .collect();
+        tiles.sort_by_key(|tile| (tile.ty, tile.tx));
+        CanvasLayerSnapshot {
+            id: self.id,
+            name: self.name.clone(),
+            visible: self.visible,
+            opacity: self.opacity,
+            locked: self.locked,
+            alpha_locked: self.alpha_locked,
+            kind: self.kind,
+            parent: self.parent,
+            expanded: self.expanded,
+            blend: self.blend,
+            clipped: self.clipped,
+            adjustment: self.adjustment,
+            text: self.text.clone(),
+            position_locked: self.position_locked,
+            draft: self.draft,
+            reference: self.reference,
+            tiles,
+        }
+    }
+
+    pub(crate) fn from_snapshot(snapshot: CanvasLayerSnapshot) -> Self {
         let mut tiles = TileMap::default();
         for tile in snapshot.tiles {
             tiles.insert(
@@ -189,6 +256,10 @@ impl Layer {
             blend: snapshot.blend,
             clipped: snapshot.clipped,
             adjustment: snapshot.adjustment,
+            text: snapshot.text,
+            position_locked: snapshot.position_locked,
+            draft: snapshot.draft,
+            reference: snapshot.reference,
             tiles: Mutex::new(tiles),
         }
     }
@@ -387,6 +458,10 @@ impl Canvas {
         layer.blend = meta.blend;
         layer.clipped = meta.clipped;
         layer.adjustment = meta.adjustment;
+        layer.text = meta.text.clone();
+        layer.position_locked = meta.position_locked;
+        layer.draft = meta.draft;
+        layer.reference = meta.reference;
         self.layers.insert(idx, layer);
         // `id` is a reused (previously-allocated) id, not a new one, but
         // guard against ever handing out a colliding id afterward.
@@ -439,6 +514,10 @@ impl Canvas {
             blend: layer.blend,
             clipped: layer.clipped,
             adjustment: layer.adjustment,
+            text: layer.text.clone(),
+            position_locked: layer.position_locked,
+            draft: layer.draft,
+            reference: layer.reference,
         })
     }
 
@@ -457,43 +536,7 @@ impl Canvas {
     }
 
     pub fn layer_snapshots(&self) -> Vec<CanvasLayerSnapshot> {
-        self.layers
-            .iter()
-            .map(|layer| {
-                let mut tiles: Vec<_> = layer
-                    .tiles
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .iter()
-                    .filter_map(|(&(tx, ty), cell)| {
-                        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-                        if guard.is_empty {
-                            return None;
-                        }
-                        guard
-                            .data
-                            .clone()
-                            .map(|data| CanvasTileSnapshot { tx, ty, data })
-                    })
-                    .collect();
-                tiles.sort_by_key(|tile| (tile.ty, tile.tx));
-                CanvasLayerSnapshot {
-                    id: layer.id,
-                    name: layer.name.clone(),
-                    visible: layer.visible,
-                    opacity: layer.opacity,
-                    locked: layer.locked,
-                    alpha_locked: layer.alpha_locked,
-                    kind: layer.kind,
-                    parent: layer.parent,
-                    expanded: layer.expanded,
-                    blend: layer.blend,
-                    clipped: layer.clipped,
-                    adjustment: layer.adjustment,
-                    tiles,
-                }
-            })
-            .collect()
+        self.layers.iter().map(Layer::snapshot).collect()
     }
 
     pub fn replace_layers_from_snapshots(

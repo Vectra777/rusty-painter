@@ -151,6 +151,9 @@ struct StoredBrushTexture {
     scale: f32,
     strength: f32,
     invert: bool,
+    /// Where the grain sits (moved with the stroke, turned...).
+    #[serde(default)]
+    placement: crate::brush_engine::texture::GrainPlacement,
 }
 
 /// A brush's settings, flattened (the tip and texture by number).
@@ -187,6 +190,7 @@ struct StoredBrush {
     stabilizer_algorithm: StabilizerAlgorithm,
     stabilizer_mass: f32,
     stabilizer_drag: f32,
+    stabilizer_modes: crate::brush_engine::stabilizer::StabilizerModes,
     dynamics: BrushDynamics,
     #[serde(default)]
     inputs: Vec<crate::brush_engine::dynamics::InputMapping>,
@@ -267,6 +271,7 @@ impl StoredBrush {
             stabilizer_algorithm: b.stabilizer_algorithm,
             stabilizer_mass: b.stabilizer_mass,
             stabilizer_drag: b.stabilizer_drag,
+            stabilizer_modes: b.stabilizer_modes,
             dynamics: b.dynamics,
             inputs: b.inputs.clone(),
             texture: b.texture.as_ref().map(|t| StoredBrushTexture {
@@ -275,6 +280,7 @@ impl StoredBrush {
                 scale: t.scale,
                 strength: t.strength,
                 invert: t.invert,
+                placement: t.placement,
             }),
             paint_blend: b.paint_blend.key().to_string(),
             airbrush_rate: b.airbrush_rate,
@@ -325,6 +331,7 @@ impl StoredBrush {
         b.stabilizer_algorithm = self.stabilizer_algorithm;
         b.stabilizer_mass = self.stabilizer_mass;
         b.stabilizer_drag = self.stabilizer_drag;
+        b.stabilizer_modes = self.stabilizer_modes;
         b.dynamics = self.dynamics;
         b.inputs = self.inputs;
         b.texture = match self.texture {
@@ -339,6 +346,7 @@ impl StoredBrush {
                 scale: t.scale,
                 strength: t.strength,
                 invert: t.invert,
+                placement: t.placement,
             }),
         };
         b.paint_blend = LayerBlend::from_key(&self.paint_blend).unwrap_or_default();
@@ -537,6 +545,54 @@ mod tests {
         assert_eq!(b.brush_options.spacing, 25.0);
         assert_eq!(b.dynamics, BrushDynamics::default());
         assert!(b.texture.is_none());
+    }
+
+    #[test]
+    fn the_stabiliser_modes_survive_and_default_when_missing() {
+        use crate::brush_engine::stabilizer::StabilizerModes;
+        let mut brush = Brush::new(24.0, 20.0, Color32::BLACK, 25.0);
+        brush.stabilizer_algorithm = StabilizerAlgorithm::String;
+        brush.stabilizer_modes = StabilizerModes {
+            string_length: 75.0,
+            catch_up: false,
+            correction: 0.2,
+            filter_strength: 0.9,
+            filter_speed: 0.1,
+        };
+        let preset = BrushPreset {
+            name: "Lazy".into(),
+            brush: brush.clone(),
+            file: None,
+        };
+        let back = &decode(&encode(&[preset]).unwrap()).unwrap()[0].brush;
+        assert_eq!(back.stabilizer_algorithm, StabilizerAlgorithm::String);
+        assert_eq!(back.stabilizer_modes, brush.stabilizer_modes);
+        // Older files have neither: no new mode, default settings.
+        let json = br#"{"format":"rusty-painter-brushes","version":1,
+            "presets":[{"name":"Old","brush":{"stabilizer_algorithm":"Simple",
+            "stabilizer":0.4,"stabilizer_modes":{"string_length":12.0}}}]}"#;
+        let mut zip = zip::ZipWriter::default();
+        zip.add(PRESETS_ENTRY, json).unwrap();
+        let old = &decode(&zip.finish().unwrap()).unwrap()[0].brush;
+        assert_eq!(old.stabilizer_algorithm, StabilizerAlgorithm::Simple);
+        assert_eq!(old.stabilizer, 0.4);
+        assert_eq!(
+            old.stabilizer_modes,
+            StabilizerModes {
+                string_length: 12.0,
+                ..Default::default()
+            }
+        );
+        let bare = &decode(&{
+            let mut zip = zip::ZipWriter::default();
+            zip.add(PRESETS_ENTRY, br#"{"format":"rusty-painter-brushes","version":1,"presets":[{"name":"B","brush":{}}]}"#)
+                .unwrap();
+            zip.finish().unwrap()
+        })
+        .unwrap()[0]
+            .brush;
+        assert_eq!(bare.stabilizer_algorithm, StabilizerAlgorithm::None);
+        assert_eq!(bare.stabilizer_modes, StabilizerModes::default());
     }
 
     #[test]

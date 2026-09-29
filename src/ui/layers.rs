@@ -161,6 +161,19 @@ fn display_order(canvas: &crate::canvas::Canvas) -> Vec<(usize, usize)> {
 
 /// Sidebar that manages the canvas layer stack.
 pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp) {
+    // The layers stay as they are until the mask is turned back into the
+    // selection.
+    if app.workspace.select.quick_mask.is_some() {
+        ui.label(RichText::new("Quick mask").strong());
+        ui.label(
+            RichText::new("Paint to select, erase to deselect. The red shows what isn't selected.")
+                .color(TEXT_DIM),
+        );
+        if ui.button("Leave Quick Mask").clicked() {
+            app.quick_mask_leave();
+        }
+        return;
+    }
     let m = metrics(ctx);
     let row_height = m.layer_row_height;
     let mut add_layer = false;
@@ -168,12 +181,15 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     let mut add_mask = false;
     let mut to_delete = None;
     let mut duplicate: Option<usize> = None;
+    let mut edit_text: Option<usize> = None;
+    let mut rasterise_text: Option<usize> = None;
     let mut active_idx = app.canvas.active_layer_idx;
     let mut needs_refresh = false;
     let mut rows: Vec<RowInfo> = Vec::new();
     let mut pending_move: Option<(usize, usize, Option<LayerId>)> = None;
     let mut toggle_expanded: Option<usize> = None;
     let mut toggle_mask: Option<usize> = None;
+    let mut select_paint: Option<(usize, crate::selection::SelectionMode)> = None;
     let renaming_id = ui.id().with("renaming_layer");
     let mut renaming: Option<usize> = ui.data(|d| d.get_temp(renaming_id));
 
@@ -279,6 +295,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         if alpha_locked != app.canvas.layers[active_owner].alpha_locked {
             app.canvas_mut().layers[active_owner].alpha_locked = alpha_locked;
         }
+        layer_flags(app, ui, active_owner);
     }
     ui.add_space(2.0);
 
@@ -301,8 +318,11 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     current.opacity,
                 );
                 let alpha_locked = current.alpha_locked;
+                let (position_locked, draft, reference) =
+                    (current.position_locked, current.draft, current.reference);
                 let clipped = current.clipped;
                 let adjustment = current.adjustment.is_some();
+                let is_text = current.text.is_some();
                 let (id, kind, parent, expanded, blend) = (
                     current.id,
                     current.kind,
@@ -364,7 +384,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     let layer_targeted = active_idx == i;
                     let thumb = thumbnail(&mut content, app, i, layer_targeted && mask_idx.is_some());
                     if thumb.clicked() {
-                        active_idx = i;
+                        match paint_select_mode(&content) {
+                            Some(mode) => select_paint = Some((i, mode)),
+                            None => active_idx = i,
+                        }
                     }
                     if let Some(mi) = mask_idx {
                         let enabled = app.canvas.layers[mi].visible;
@@ -378,7 +401,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         if mask_thumb.double_clicked() {
                             toggle_mask = Some(mi);
                         } else if mask_thumb.clicked() {
-                            active_idx = mi;
+                            match paint_select_mode(&content) {
+                                Some(mode) => select_paint = Some((mi, mode)),
+                                None => active_idx = mi,
+                            }
                         }
                     }
                     // Color tag strip left of the thumbnails.
@@ -419,6 +445,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                                 ui.label(RichText::new("↓").color(ACCENT))
                                     .on_hover_text("Clipped to the layer below");
                             }
+                            if is_text {
+                                ui.label(RichText::new("T").strong().color(ACCENT))
+                                    .on_hover_text("Text layer: double-click to edit the text");
+                            }
                             ui.add(egui::Label::new(text).truncate());
                             if blend != LayerBlend::Normal {
                                 ui.label(RichText::new(blend.label()).small().color(ACCENT));
@@ -430,6 +460,18 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                             if alpha_locked {
                                 ui.label(RichText::new("α").small().color(ACCENT))
                                     .on_hover_text("Transparency locked");
+                            }
+                            if position_locked {
+                                ui.label(RichText::new("pos").small().color(ACCENT))
+                                    .on_hover_text("Position locked: can't be moved or transformed");
+                            }
+                            if draft {
+                                ui.label(RichText::new("draft").small().color(ACCENT))
+                                    .on_hover_text("Draft: left out of export, merging and \"all layers\"");
+                            }
+                            if reference {
+                                ui.label(RichText::new("ref").small().color(ACCENT))
+                                    .on_hover_text("Reference layer for fills and the magic wand");
                             }
                         });
                     }
@@ -453,6 +495,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     active_idx = i;
                     if adjustment {
                         app.workspace.filter.editing = Some(id);
+                    } else if is_text {
+                        edit_text = Some(i);
                     } else {
                         renaming = Some(i);
                     }
@@ -470,6 +514,14 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     }
                     if adjustment && ui.button("Edit adjustment…").clicked() {
                         app.workspace.filter.editing = Some(id);
+                        ui.close_menu();
+                    }
+                    if is_text && ui.button("Edit text…").clicked() {
+                        edit_text = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_text && ui.button("Rasterise text").clicked() {
+                        rasterise_text = Some(i);
                         ui.close_menu();
                     }
                     if !is_group && i != 0 && ui.button("Duplicate").clicked() {
@@ -561,6 +613,9 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
             }
         });
 
+    if let Some((i, mode)) = select_paint {
+        app.select_layer_paint(i, mode);
+    }
     // Structural changes after the rows, so this frame's edits were written
     // to the right layers before indices shift.
     if let Some(i) = toggle_expanded {
@@ -601,6 +656,13 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         app.canvas_mut().active_layer_idx = idx;
         app.duplicate_layer();
     }
+    if let Some(idx) = edit_text {
+        app.text_edit_layer(idx);
+    }
+    if let Some(idx) = rasterise_text {
+        app.rasterise_text_layer(idx);
+        needs_refresh = true;
+    }
     if let Some(idx) = to_delete {
         app.remove_layer(idx);
         renaming = None;
@@ -612,6 +674,34 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         app.mark_all_tiles_dirty();
         app.layer_state.thumbnails_dirty = true;
         ctx.request_repaint();
+    }
+}
+
+/// Lock position, draft and reference toggles for entry `idx` (a layer or
+/// folder; the background can't be a draft).
+fn layer_flags(app: &mut PainterApp, ui: &mut egui::Ui, idx: usize) {
+    let layer = &app.canvas.layers[idx];
+    let (mut position_locked, mut draft, mut reference) =
+        (layer.position_locked, layer.draft, layer.reference);
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut position_locked, "Lock position")
+            .on_hover_text("The layer can't be moved or transformed");
+        if idx != 0 {
+            ui.toggle_value(&mut draft, "Draft").on_hover_text(
+                "Shown, but left out of export, merging, copy merged and \"all layers\" sampling",
+            );
+        }
+        ui.toggle_value(&mut reference, "Reference").on_hover_text(
+            "Fills and the magic wand set to \"Reference\" find their areas in this layer",
+        );
+    });
+    let layer = &app.canvas.layers[idx];
+    if (position_locked, draft, reference) != (layer.position_locked, layer.draft, layer.reference)
+    {
+        let layer = &mut app.canvas_mut().layers[idx];
+        layer.position_locked = position_locked;
+        layer.draft = draft;
+        layer.reference = reference;
     }
 }
 
@@ -641,6 +731,19 @@ const INDENT: f32 = 16.0;
 
 /// A layer (or mask) thumbnail button; `targeted` outlines it as the
 /// painting target.
+/// Ctrl+click on a thumbnail selects the layer's paint: Shift adds it to the
+/// selection, Alt takes it away, both keep the overlap.
+fn paint_select_mode(ui: &egui::Ui) -> Option<crate::selection::SelectionMode> {
+    use crate::selection::SelectionMode;
+    let m = ui.input(|i| i.modifiers);
+    m.command.then_some(match (m.shift, m.alt) {
+        (true, true) => SelectionMode::Intersect,
+        (true, false) => SelectionMode::Add,
+        (false, true) => SelectionMode::Subtract,
+        (false, false) => SelectionMode::Replace,
+    })
+}
+
 fn thumbnail(ui: &mut egui::Ui, app: &PainterApp, idx: usize, targeted: bool) -> egui::Response {
     let (thumb_box, response) =
         ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::click());

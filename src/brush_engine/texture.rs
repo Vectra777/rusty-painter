@@ -3,7 +3,9 @@
 //! where it's low, the way a textured paper catches a dry brush.
 //!
 //! The pattern is pinned to the canvas (like real paper), so overlapping
-//! strokes share their grain. How it combines with a dab's alpha:
+//! strokes share their grain; [`GrainPlacement`] can instead move it with
+//! the stroke or each dab, turn it, and shift it at random. How it combines
+//! with a dab's alpha:
 //!
 //! - **Multiply**: the grain darkens the stroke evenly.
 //! - **Subtract**: low spots lose paint first; heavy strokes fill in.
@@ -81,6 +83,40 @@ impl TextureMode {
     }
 }
 
+/// Where a brush's grain sits. All off: pinned to the canvas, upright,
+/// the same for every stroke.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct GrainPlacement {
+    /// The grain moves with the stroke: anchored to where it starts rather
+    /// than to the canvas.
+    pub follow_stroke: bool,
+    /// The grain turned, degrees counter-clockwise.
+    pub angle: f32,
+    /// Shift the grain by a random amount each stroke (each dab, with
+    /// `per_dab`).
+    pub random_offset: bool,
+    /// Each dab gets the grain afresh, anchored to its own centre, rather
+    /// than the stroke sharing one sheet of it.
+    pub per_dab: bool,
+}
+
+impl GrainPlacement {
+    pub fn is_active(&self) -> bool {
+        self.follow_stroke || self.angle != 0.0 || self.random_offset || self.per_dab
+    }
+}
+
+/// What a stroke fixes about its grain when it starts (see
+/// [`GrainPlacement`]): where it began, its random shift (a share of the
+/// pattern's side) and a seed for each dab's.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StrokeGrain {
+    pub origin: [f32; 2],
+    pub offset: [f32; 2],
+    pub seed: u32,
+}
+
 /// A brush's texture settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrushTexture {
@@ -92,6 +128,8 @@ pub struct BrushTexture {
     pub strength: f32,
     /// Swap peaks and valleys.
     pub invert: bool,
+    /// Moved with the stroke, turned, shifted, per dab.
+    pub placement: GrainPlacement,
 }
 
 impl BrushTexture {
@@ -102,6 +140,7 @@ impl BrushTexture {
             scale: 1.0,
             strength: 0.8,
             invert: false,
+            placement: GrainPlacement::default(),
         }
     }
 
@@ -109,9 +148,16 @@ impl BrushTexture {
     /// `x0..x0 + alphas.len()`.
     #[inline]
     pub fn apply_row(&self, y: usize, x0: usize, alphas: &mut [f32]) {
+        self.apply_row_scaled(y, x0, alphas, 1.0);
+    }
+
+    /// [`Self::apply_row`] with the strength scaled by `factor` (a dab's
+    /// input mappings).
+    #[inline]
+    pub fn apply_row_scaled(&self, y: usize, x0: usize, alphas: &mut [f32], factor: f32) {
         let p = &*self.pattern;
         let inv = 1.0 / self.scale.max(0.05);
-        let s = self.strength.clamp(0.0, 1.0);
+        let s = (self.strength * factor).clamp(0.0, 1.0);
         let mask = p.size - 1;
         // What depends on the row, once: the two pattern rows and their
         // blend (canvas points are never negative, see `Pattern::at`).
@@ -146,6 +192,86 @@ impl BrushTexture {
                     *a * (1.0 - s + s * h)
                 }
             };
+        }
+    }
+}
+
+impl BrushTexture {
+    /// [`Self::apply_row_scaled`] with the grain placed by
+    /// [`Self::placement`]: `grain` is the stroke's, `center` the dab's.
+    pub fn apply_row_placed(
+        &self,
+        y: usize,
+        x0: usize,
+        alphas: &mut [f32],
+        factor: f32,
+        grain: &StrokeGrain,
+        center: [f32; 2],
+    ) {
+        let p = &*self.pattern;
+        let place = &self.placement;
+        let scale = self.scale.max(0.05);
+        let inv = 1.0 / scale;
+        let s = (self.strength * factor).clamp(0.0, 1.0);
+        let mask = p.size as i64 - 1;
+        let period = p.size as f32 * scale;
+        let anchor = if place.per_dab {
+            center
+        } else if place.follow_stroke {
+            grain.origin
+        } else {
+            [0.0, 0.0]
+        };
+        let shift = match (place.random_offset, place.per_dab) {
+            (false, _) => [0.0, 0.0],
+            (true, false) => grain.offset,
+            (true, true) => {
+                let (bx, by) = (center[0].to_bits(), center[1].to_bits());
+                [hash(bx, by, grain.seed), hash(by, bx, grain.seed ^ 0x51f1)]
+            }
+        };
+        let (sin, cos) = (-place.angle.to_radians()).sin_cos();
+        // Canvas point → pattern pixels: from the anchor, turned back by the
+        // grain's angle, then shifted.
+        let ry = y as f32 + 0.5 - anchor[1];
+        for (i, a) in alphas.iter_mut().enumerate() {
+            if *a <= 0.0 {
+                continue;
+            }
+            let rx = (x0 + i) as f32 + 0.5 - anchor[0];
+            // Screen y points down: a counter-clockwise turn on screen.
+            let tx = cos * rx + sin * ry + shift[0] * period;
+            let ty = -sin * rx + cos * ry + shift[1] * period;
+            let (u, v) = (tx * inv + 0.5, ty * inv + 0.5);
+            let (fu, fv) = (u.floor(), v.floor());
+            let (du, dv) = (u - fu, v - fv);
+            let (iu, iv) = (fu as i64, fv as i64);
+            let (c0, c1) = (((iu - 1) & mask) as usize, (iu & mask) as usize);
+            let (r0, r1) = (
+                ((iv - 1) & mask) as usize * p.size,
+                (iv & mask) as usize * p.size,
+            );
+            let top = p.data[r0 + c0] + (p.data[r0 + c1] - p.data[r0 + c0]) * du;
+            let bottom = p.data[r1 + c0] + (p.data[r1 + c1] - p.data[r1 + c0]) * du;
+            let mut t = top + (bottom - top) * dv;
+            if self.invert {
+                t = 1.0 - t;
+            }
+            *a = combine(self.mode, *a, s, t);
+        }
+    }
+}
+
+/// A dab alpha `a` with grain height `t` at strength `s`.
+#[inline]
+fn combine(mode: TextureMode, a: f32, s: f32, t: f32) -> f32 {
+    match mode {
+        TextureMode::Multiply => a * (1.0 - s + s * t),
+        TextureMode::Subtract => (a - s * (1.0 - t)).max(0.0),
+        TextureMode::Height => {
+            let floor = 1.0 - a;
+            let h = ((t - floor) * 4.0 + 0.5).clamp(0.0, 1.0);
+            a * (1.0 - s + s * h)
         }
     }
 }
@@ -339,6 +465,103 @@ mod tests {
                 .fold((1.0f32, 0.0f32), |(lo, hi), &a| (lo.min(a), hi.max(a)));
             assert!(hi - lo > 0.2, "{mode:?} varies: {lo}..{hi}");
         }
+    }
+
+    /// The grain's height (Multiply at full strength on full alphas) over
+    /// a `n`×`n` square from canvas pixel `(x0, y0)`.
+    fn heights(
+        tex: &BrushTexture,
+        grain: &StrokeGrain,
+        x0: usize,
+        y0: usize,
+        n: usize,
+    ) -> Vec<f32> {
+        let mut out = Vec::new();
+        for y in y0..y0 + n {
+            let mut row = vec![1.0; n];
+            tex.apply_row_placed(y, x0, &mut row, 1.0, grain, [0.0, 0.0]);
+            out.extend(row);
+        }
+        out
+    }
+
+    fn multiply(pattern: usize) -> BrushTexture {
+        let mut tex = BrushTexture::new(builtin()[pattern].clone());
+        tex.mode = TextureMode::Multiply;
+        tex.strength = 1.0;
+        tex
+    }
+
+    #[test]
+    fn placed_grain_matches_the_pinned_one_when_not_moved() {
+        let mut tex = multiply(1);
+        tex.scale = 1.7;
+        // Placed, but with nothing moved: the canvas-pinned grain.
+        tex.placement.random_offset = true;
+        let grain = StrokeGrain::default();
+        let placed = heights(&tex, &grain, 30, 40, 48);
+        let mut pinned = Vec::new();
+        for y in 40..88 {
+            let mut row = vec![1.0; 48];
+            tex.apply_row(y, 30, &mut row);
+            pinned.extend(row);
+        }
+        for (a, b) in placed.iter().zip(&pinned) {
+            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn a_rotated_grain_is_rotated() {
+        // Anchored at (100, 100): turned a quarter counter-clockwise, the
+        // grain at offset (i, j) from there is the upright grain's at
+        // (-j - 1, i).
+        let mut tex = multiply(4);
+        tex.placement.follow_stroke = true;
+        let grain = StrokeGrain {
+            origin: [100.0, 100.0],
+            ..Default::default()
+        };
+        let upright = heights(&tex, &grain, 36, 100, 64);
+        tex.placement.angle = 90.0;
+        let turned = heights(&tex, &grain, 100, 100, 64);
+        let mut differs = 0;
+        for j in 0..64 {
+            for i in 0..64 {
+                let t = turned[j * 64 + i];
+                // Upright square: columns 36..100, so x = 100 - j - 1.
+                let u = upright[i * 64 + (63 - j)];
+                assert!((t - u).abs() < 1e-3, "({i}, {j}): {t} vs {u}");
+                differs += usize::from((t - upright[j * 64 + i]).abs() > 0.05);
+            }
+        }
+        // Charcoal streaks along x: turning them shows.
+        assert!(differs > 500, "{differs}");
+    }
+
+    #[test]
+    fn the_grain_moves_with_its_anchor_and_offset() {
+        let mut tex = multiply(0);
+        tex.placement.follow_stroke = true;
+        let at = |origin: [f32; 2]| {
+            let grain = StrokeGrain {
+                origin,
+                ..Default::default()
+            };
+            heights(&tex, &grain, origin[0] as usize, origin[1] as usize, 32)
+        };
+        assert_eq!(at([10.0, 20.0]), at([47.0, 81.0]));
+        // A random offset shifts it.
+        tex.placement.random_offset = true;
+        let shifted = |offset: [f32; 2]| {
+            let grain = StrokeGrain {
+                offset,
+                ..Default::default()
+            };
+            heights(&tex, &grain, 0, 0, 32)
+        };
+        assert_ne!(shifted([0.0, 0.0]), shifted([0.3, 0.6]));
+        assert_eq!(shifted([0.3, 0.6]), shifted([0.3, 0.6]));
     }
 
     #[test]

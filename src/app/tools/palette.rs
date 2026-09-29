@@ -173,7 +173,7 @@ impl PainterApp {
             &mut action,
         );
         if let Some(rect) = changed {
-            self.layer_state.history.push_action(action);
+            self.push_undo(action);
             self.mark_tiles_in_bounds_dirty(rect);
             self.layer_state.thumbnails_dirty = true;
         }

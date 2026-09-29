@@ -560,6 +560,26 @@ impl SelectionManager {
         };
     }
 
+    /// The current selection as a per-pixel mask (shapes rasterized,
+    /// clipped to the canvas), or `None` if nothing is selected.
+    pub fn current_mask(&self) -> Option<SelectionMask> {
+        let shape = self.current_shape.as_ref()?;
+        let [w, h] = self.canvas_size;
+        rasterize_shape(shape, self.canvas_size)?.clipped_to(w, h)
+    }
+
+    /// Replace the selection with `f` of its mask (grow, feather...), kept
+    /// on the canvas. Nothing selected stays nothing.
+    pub fn modify(&mut self, f: impl FnOnce(&SelectionMask) -> Option<SelectionMask>) {
+        let Some(mask) = self.current_mask() else {
+            return;
+        };
+        let [w, h] = self.canvas_size;
+        self.current_shape = f(&mask)
+            .and_then(|m| m.clipped_to(w, h))
+            .map(|m| SelectionShape::Mask(Arc::new(m)));
+    }
+
     /// The selection being combined into during an add/subtract drag.
     pub fn drag_base(&self) -> Option<&SelectionShape> {
         self.drag_base.as_ref()

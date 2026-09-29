@@ -80,6 +80,87 @@ fn preview_level(drawing: bool, zoom: f32, pixels_per_point: f32) -> u32 {
     ((texels_per_pixel_log2 - 0.5).floor().max(0.0) as u32).min(MIP_LEVELS - 1)
 }
 
+/// Canvas pixels per pixel of a live preview (a power of two): about one
+/// per physical screen pixel, never finer than the level uploaded.
+fn live_preview_block(zoom: f32, pixels_per_point: f32) -> usize {
+    let lod = (1.0 / (zoom * pixels_per_point)).log2().floor().max(0.0) as u32;
+    let level = preview_level(true, zoom, pixels_per_point);
+    1 << lod.clamp(level, 6)
+}
+
+/// The part of the canvas on screen, and the resolution a live preview
+/// (a filter or adjustment setting being dragged) is computed at there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreviewView {
+    /// Tile columns and rows in view.
+    pub xs: std::ops::Range<usize>,
+    pub ys: std::ops::Range<usize>,
+    /// See [`live_preview_block`].
+    pub block: usize,
+}
+
+impl PreviewView {
+    pub(crate) fn contains(&self, tx: usize, ty: usize) -> bool {
+        self.xs.contains(&tx) && self.ys.contains(&ty)
+    }
+}
+
+/// What of the canvas the screen shows in `clip`.
+pub(crate) fn preview_view(app: &PainterApp, view: &CanvasView, clip: egui::Rect) -> PreviewView {
+    let (origin, center) = canvas_placement(app, view.rect);
+    let (cos, sin) = (app.viewport.rotation.cos(), app.viewport.rotation.sin());
+    let zoom = app.viewport.zoom;
+    let flip = app.viewport.flip_x.then_some(app.canvas.width() as f32);
+    let (xs, ys) = if app.workspace.wrap_around {
+        // Every tile may show in one of the repeats.
+        (0..app.render_cache.tiles_x, 0..app.render_cache.tiles_y)
+    } else {
+        visible_tile_range(
+            clip.intersect(view.rect),
+            |p| {
+                let c = (PainterApp::rotate_point(p, center, cos, -sin) - origin).to_pos2() / zoom;
+                flip.map_or(c, |w| egui::pos2(w - c.x, c.y))
+            },
+            app.render_cache.tiles_x,
+            app.render_cache.tiles_y,
+        )
+    };
+    PreviewView {
+        xs,
+        ys,
+        block: live_preview_block(zoom, view.response.ctx.pixels_per_point()),
+    }
+}
+
+/// `small` (a tile composited `block` times smaller) scaled up to mip
+/// `level` of a `tile_size` tile, each of its pixels repeated.
+fn preview_at_level(
+    small: &egui::ColorImage,
+    block: usize,
+    tile_size: [usize; 2],
+    level: u32,
+) -> egui::ColorImage {
+    let factor = (block >> level).max(1);
+    let size = [
+        tile_size[0].div_ceil(1 << level),
+        tile_size[1].div_ceil(1 << level),
+    ];
+    if factor == 1 {
+        return small.clone();
+    }
+    let mut img = egui::ColorImage::new(size, Color32::TRANSPARENT);
+    for y in 0..size[1] {
+        let src = &small.pixels[(y / factor) * small.size[0]..][..small.size[0]];
+        for (x, px) in img.pixels[y * size[0]..(y + 1) * size[0]]
+            .iter_mut()
+            .enumerate()
+        {
+            *px = src[x / factor];
+        }
+    }
+    img
+}
+
 /// Part of a tile to copy into an atlas texture, in level-0 texels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Destination {
@@ -242,42 +323,28 @@ pub fn update_dirty_textures(
     view: &CanvasView,
     clip: egui::Rect,
 ) -> (Vec<TileUpload>, bool) {
-    let level = preview_level(
-        app.brush_state.is_drawing,
-        app.viewport.zoom,
-        view.response.ctx.pixels_per_point(),
-    );
-    // Tiles last uploaded at a coarser level than we now need go again.
-    let stale: Vec<(usize, usize)> = app
-        .render_cache
-        .preview_tiles
-        .iter()
-        .filter(|&(_, &uploaded)| uploaded > level)
-        .map(|(&tile, _)| tile)
-        .collect();
-    for (tx, ty) in stale {
-        app.mark_tile_dirty(tx, ty);
+    // A filter or adjustment setting being dragged: a quick preview at
+    // about the screen's resolution, made exact when it's let go.
+    let live = app.workspace.filter.live();
+    let ppp = view.response.ctx.pixels_per_point();
+    let level = preview_level(app.brush_state.is_drawing || live, app.viewport.zoom, ppp);
+    let screen = preview_view(app, view, clip);
+    let live_block = live.then_some(screen.block);
+    // Tiles last uploaded at a coarser level than we now need go again
+    // (and live previews, once the drag is over).
+    if !live {
+        let stale: Vec<(usize, usize)> = app
+            .render_cache
+            .preview_tiles
+            .iter()
+            .filter(|&(_, &uploaded)| uploaded > level)
+            .map(|(&tile, _)| tile)
+            .collect();
+        for (tx, ty) in stale {
+            app.mark_tile_dirty(tx, ty);
+        }
     }
-
-    let (origin, center) = canvas_placement(app, view.rect);
-    let (cos, sin) = (app.viewport.rotation.cos(), app.viewport.rotation.sin());
-    let zoom = app.viewport.zoom;
-    let flip = app.viewport.flip_x.then_some(app.canvas.width() as f32);
-    let (visible_x, visible_y) = if app.workspace.wrap_around {
-        // Every tile may show in one of the repeats.
-        (0..app.render_cache.tiles_x, 0..app.render_cache.tiles_y)
-    } else {
-        visible_tile_range(
-            clip.intersect(view.rect),
-            |p| {
-                let c = (PainterApp::rotate_point(p, center, cos, -sin) - origin).to_pos2() / zoom;
-                flip.map_or(c, |w| egui::pos2(w - c.x, c.y))
-            },
-            app.render_cache.tiles_x,
-            app.render_cache.tiles_y,
-        )
-    };
-    let visible = |t: &CanvasTile| visible_x.contains(&t.tx) && visible_y.contains(&t.ty);
+    let visible = |t: &CanvasTile| screen.contains(t.tx, t.ty);
 
     refresh_below_cache(app, &visible);
 
@@ -285,13 +352,17 @@ pub fn update_dirty_textures(
     let cache = &app.render_cache;
     let active = canvas.active_layer_idx;
     let below_cache = cache.below_cache.as_ref();
+    let quick_mask = app.quick_mask_layer();
     let mut candidates = cache
         .tiles
         .iter()
         .enumerate()
         .filter(|(_, t)| t.dirty && visible(t))
         .map(|(idx, _)| idx);
-    let chosen: Vec<usize> = candidates.by_ref().take(MAX_TILES_PER_FRAME).collect();
+    // A preview tile costs about a block's area less.
+    let max_tiles = MAX_TILES_PER_FRAME * live_block.map_or(1, |b| b * b);
+    let chosen: Vec<usize> = candidates.by_ref().take(max_tiles).collect();
+    let filter = &app.workspace.filter;
     let more = candidates.next().is_some();
     let uploads: Vec<(usize, Vec<TileUpload>)> = app.workspace.pool.install(|| {
         chosen
@@ -320,6 +391,16 @@ pub fn update_dirty_textures(
                     ]
                 });
                 let mut img = egui::ColorImage::new([0, 0], Color32::TRANSPARENT);
+                if let Some(block) = live_block {
+                    let layer = filter.preview_pixels(canvas, tile.tx, tile.ty, block);
+                    canvas.write_tile_preview(tile.tx, tile.ty, block, &mut img, layer);
+                    let img = preview_at_level(&img, block, tile_size, level);
+                    let full = [0, 0, tile_size[0], tile_size[1]];
+                    return (
+                        idx,
+                        tile_uploads(cache, tile.tx, tile.ty, tile_size, full, &img, level),
+                    );
+                }
                 if level == 0 {
                     canvas.write_tile_rect_to_color_image(tile.tx, tile.ty, rect, &mut img, below);
                 } else {
@@ -328,6 +409,17 @@ pub fn update_dirty_textures(
                     let block = 1usize << level;
                     canvas.write_tile_rect_downsampled(
                         tile.tx, tile.ty, rect, block, &mut img, below,
+                    );
+                }
+                if let Some(mask) = quick_mask {
+                    crate::app::tools::quick_mask::tint_tile(
+                        canvas,
+                        mask,
+                        tile.tx,
+                        tile.ty,
+                        rect,
+                        1 << level,
+                        &mut img,
                     );
                 }
                 (
@@ -342,7 +434,10 @@ pub fn update_dirty_textures(
     for (idx, _) in &uploads {
         let tile = &mut cache.tiles[*idx];
         tile.clear();
-        if level > 0 {
+        if live {
+            // Approximate: redrawn exactly once the drag is over.
+            cache.preview_tiles.insert((tile.tx, tile.ty), u32::MAX);
+        } else if level > 0 {
             cache.preview_tiles.insert((tile.tx, tile.ty), level);
         } else {
             cache.preview_tiles.remove(&(tile.tx, tile.ty));
@@ -381,6 +476,14 @@ impl ScreenMap {
 
     pub fn zoom(self) -> f32 {
         self.zoom
+    }
+
+    /// The canvas point shown at screen point `p` (the inverse of
+    /// [`Self::to_screen`]).
+    pub fn to_canvas(self, p: egui::Pos2) -> eframe::egui::Vec2 {
+        let unrotated = PainterApp::rotate_point(p, self.center, self.cos, -self.sin);
+        let q = (unrotated - self.origin) / self.zoom.max(1e-6);
+        self.flip.map_or(q, |w| eframe::egui::vec2(w - q.x, q.y))
     }
 }
 
@@ -541,6 +644,8 @@ mod tests {
     struct ScreenSim {
         ctx: egui::Context,
         atlas: std::collections::HashMap<usize, Vec<[u8; 4]>>,
+        /// The pointer is down (a slider being dragged).
+        dragging: bool,
     }
 
     impl ScreenSim {
@@ -548,13 +653,25 @@ mod tests {
             Self {
                 ctx: egui::Context::default(),
                 atlas: Default::default(),
+                dragging: false,
             }
         }
 
         /// Run frames until no dirty tiles are left.
         fn settle(&mut self, app: &mut PainterApp) {
+            self.run_frames(app, true);
+        }
+
+        /// Run frames until no dirty tiles are left, without keeping the
+        /// uploads; returns how many it took and the time spent updating.
+        fn settle_counting(&mut self, app: &mut PainterApp) -> (usize, std::time::Duration) {
+            self.run_frames(app, false)
+        }
+
+        fn run_frames(&mut self, app: &mut PainterApp, keep: bool) -> (usize, std::time::Duration) {
             use crate::app::view::gpu_canvas::ATLAS_TEXTURE_SIZE;
-            for _ in 0..50 {
+            let mut spent = std::time::Duration::ZERO;
+            for frame in 1..=50 {
                 let mut more = false;
                 let mut uploads = Vec::new();
                 let input = egui::RawInput {
@@ -567,13 +684,25 @@ mod tests {
                 let _ = self.ctx.run(input, |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let view = draw_canvas(app, ui);
+                        let started = std::time::Instant::now();
+                        // As the frame does: a filter's run, then the screen.
+                        let screen = preview_view(app, &view, view.rect);
+                        app.filter_update(self.dragging.then_some(&screen));
                         let (u, m) = update_dirty_textures(app, &view, view.rect);
+                        spent += started.elapsed();
                         uploads = u;
                         more = m;
                     });
                 });
+                if !keep {
+                    uploads.clear();
+                }
                 for up in uploads {
-                    assert_eq!(up.level, 0, "not drawing: full resolution");
+                    if up.level > 0 {
+                        // (Only level 0 is simulated.)
+                        assert!(self.dragging, "not drawing: full resolution");
+                        continue;
+                    }
                     let tex = self
                         .atlas
                         .entry(up.atlas)
@@ -588,7 +717,7 @@ mod tests {
                     }
                 }
                 if !more && !app.render_cache.tiles.iter().any(|t| t.dirty) {
-                    return;
+                    return (frame, spent);
                 }
             }
             panic!("screen never settled");
@@ -615,6 +744,129 @@ mod tests {
             }
             bad
         }
+    }
+
+    /// The paint layer's pixels, tile by tile.
+    fn layer_pixels(app: &PainterApp, idx: usize) -> Vec<Vec<Color32>> {
+        let mut keys = app.canvas.layer_tile_keys(idx);
+        keys.sort_unstable();
+        keys.into_iter()
+            .filter_map(|(tx, ty)| app.canvas.get_layer_tile_data(idx, tx, ty))
+            .collect()
+    }
+
+    #[test]
+    fn a_dragged_filter_previews_on_screen_and_ends_exactly_as_before() {
+        use crate::canvas::filters::Filter;
+        use crate::selection::{SelectionMode, SelectionShape};
+        for filter in [
+            Filter::HueSaturation {
+                hue: 70.0,
+                saturation: 0.3,
+                lightness: 0.1,
+            },
+            Filter::GaussianBlur { radius: 6.0 },
+        ] {
+            let setup = || {
+                let mut app = painted(512);
+                app.viewport.zoom = 0.25;
+                app.viewport.offset = eframe::egui::Vec2::ZERO;
+                // A soft selection: only part changes, its edge blends.
+                app.selection_manager.apply_shape(
+                    SelectionShape::Circle {
+                        center: eframe::egui::Vec2::new(250.0, 240.0),
+                        radius: 180.0,
+                    },
+                    SelectionMode::Replace,
+                );
+                app
+            };
+            // The result as a filter always gave it: run once, then kept.
+            let mut direct = setup();
+            direct.filter_open(filter);
+            direct.filter_commit();
+            let expected = layer_pixels(&direct, 1);
+
+            let mut app = setup();
+            let mut screen = ScreenSim::new();
+            screen.settle(&mut app);
+            let before = layer_pixels(&app, 1);
+            app.filter_open(Filter::HueSaturation {
+                hue: 0.0,
+                saturation: 0.0,
+                lightness: 0.0,
+            });
+            screen.settle(&mut app);
+            app.workspace.filter.session.as_mut().unwrap().set_slow();
+            screen.dragging = true;
+            for step in [0.2_f32, 0.6, 1.0] {
+                // Part way there, then the value itself.
+                let session = app.workspace.filter.session.as_mut().unwrap();
+                session.filter = if step < 1.0 {
+                    Filter::GaussianBlur { radius: step }
+                } else {
+                    filter
+                };
+                session.dirty = true;
+                let (frames, _) = screen.settle_counting(&mut app);
+                assert_eq!(frames, 1, "{filter:?}: all on screen in one frame");
+                assert!(app.workspace.filter.live());
+            }
+            assert!(
+                layer_pixels(&app, 1) == before,
+                "{filter:?}: the preview leaves the layer as it was"
+            );
+            screen.dragging = false;
+            screen.settle(&mut app);
+            assert!(!app.workspace.filter.live());
+            assert!(
+                screen.mismatches(&app).is_empty(),
+                "{filter:?}: let go, the screen shows the layer exactly"
+            );
+            app.filter_commit();
+            assert!(
+                layer_pixels(&app, 1) == expected,
+                "{filter:?}: kept as before"
+            );
+            assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one step");
+            app.apply_history(false);
+            assert!(layer_pixels(&app, 1) == before, "{filter:?}: undone");
+        }
+    }
+
+    #[test]
+    fn a_dragged_adjustment_previews_then_shows_exactly() {
+        use crate::canvas::filters::Filter;
+        let mut app = painted(512);
+        app.viewport.zoom = 0.25;
+        app.viewport.offset = eframe::egui::Vec2::ZERO;
+        let mut screen = ScreenSim::new();
+        app.add_adjustment_layer(Filter::Levels {
+            black: 0.0,
+            white: 1.0,
+            gamma: 1.0,
+        });
+        app.add_mask_to_active();
+        screen.settle(&mut app);
+        let idx = app
+            .canvas
+            .layer_index_of(app.workspace.filter.editing.unwrap());
+        screen.dragging = true;
+        for gamma in [1.5, 2.0, 3.0] {
+            app.workspace.filter.adjusting = true;
+            app.canvas_mut().layers[idx.unwrap()].adjustment = Some(Filter::Levels {
+                black: 0.1,
+                white: 0.9,
+                gamma,
+            });
+            app.mark_all_tiles_dirty();
+            let (frames, _) = screen.settle_counting(&mut app);
+            assert_eq!(frames, 1, "all on screen in one frame");
+        }
+        screen.dragging = false;
+        screen.settle(&mut app);
+        assert!(!app.workspace.filter.adjusting);
+        assert!(screen.mismatches(&app).is_empty(), "let go: exact");
     }
 
     #[test]
@@ -999,11 +1251,113 @@ mod tests {
         ] {
             let back = app.screen_to_canvas_raw(map.to_screen(p), origin, center);
             assert!((back - p).length() < 1e-3, "{p:?} came back as {back:?}");
+            let back = map.to_canvas(map.to_screen(p));
+            assert!((back - p).length() < 1e-3, "{p:?} came back as {back:?}");
         }
         // Flipped: the canvas's left edge shows on the right.
         let left = map.to_screen(Vec2::new(0.0, 100.0));
         let right = map.to_screen(Vec2::new(300.0, 100.0));
         let unrotated = |q: eframe::egui::Pos2| (q - center).x * cos + (q - center).y * sin;
         assert!(unrotated(left) > unrotated(right));
+    }
+
+    /// A `size`² app whose layer 1 is painted all over (a colour field with
+    /// black lines, as `bench_api`'s `painted_app`), seen whole in a
+    /// 1200×900 window.
+    fn painted(size: usize) -> PainterApp {
+        let canvas = crate::canvas::Canvas::new(size, size, Color32::WHITE, TILE_SIZE);
+        let tiles = size.div_ceil(TILE_SIZE);
+        for ty in 0..tiles {
+            for tx in 0..tiles {
+                let tile: Vec<Color32> = (0..TILE_SIZE * TILE_SIZE)
+                    .map(|i| {
+                        let (x, y) = (
+                            tx * TILE_SIZE + i % TILE_SIZE,
+                            ty * TILE_SIZE + i / TILE_SIZE,
+                        );
+                        if x % 50 < 3 || y % 50 < 3 {
+                            Color32::BLACK
+                        } else {
+                            Color32::from_rgb((x / 16) as u8, (y / 16) as u8, ((x + y) / 32) as u8)
+                        }
+                    })
+                    .collect();
+                canvas.set_layer_tile_data(1, tx as i32, ty as i32, tile);
+            }
+        }
+        let mut app = crate::project::tests::test_app_pub(canvas);
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        app.workspace.pool = std::sync::Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap(),
+        );
+        app.recreate_render_cache(size, size);
+        app.canvas_mut().active_layer_idx = 1;
+        app.viewport.zoom = 880.0 / size as f32;
+        app.viewport.offset = eframe::egui::Vec2::new(150.0, 10.0);
+        app.workspace.auto_fit = false;
+        app
+    }
+
+    #[test]
+    #[ignore = "timing: cargo test --release -- --ignored --nocapture"]
+    fn adjustment_preview_timing_4k() {
+        use crate::canvas::filters::Filter;
+        let mut app = painted(4000);
+        let mut screen = ScreenSim::new();
+        screen.settle(&mut app);
+        let hue = |h: f32| Filter::HueSaturation {
+            hue: h,
+            saturation: 0.1,
+            lightness: 0.0,
+        };
+        let report = |what: &str, ticks: &[(usize, std::time::Duration)]| {
+            let frames: usize = ticks.iter().map(|t| t.0).sum();
+            let worst = ticks.iter().map(|t| t.1).max().unwrap_or_default();
+            let mean = ticks.iter().map(|t| t.1).sum::<std::time::Duration>() / ticks.len() as u32;
+            eprintln!(
+                "{what}: {:.1} frames a step, {mean:?} a step (worst {worst:?})",
+                frames as f32 / ticks.len() as f32
+            );
+        };
+        // A filter's slider dragged: each step, the frames until the
+        // screen shows it.
+        app.filter_open(hue(10.0));
+        screen.settle(&mut app);
+        screen.dragging = true;
+        let ticks: Vec<_> = (0..10)
+            .map(|step| {
+                let session = app.workspace.filter.session.as_mut().unwrap();
+                session.filter = hue(20.0 + step as f32);
+                session.dirty = true;
+                screen.settle_counting(&mut app)
+            })
+            .collect();
+        report("filter slider step", &ticks);
+        screen.dragging = false;
+        let (frames, spent) = screen.settle_counting(&mut app);
+        eprintln!("filter slider let go: exact in {frames} frames, {spent:?}");
+        app.filter_cancel();
+        screen.settle(&mut app);
+
+        // An adjustment layer's slider dragged.
+        app.add_adjustment_layer(hue(10.0));
+        screen.settle(&mut app);
+        let idx = app.canvas.active_layer_idx;
+        screen.dragging = true;
+        let ticks: Vec<_> = (0..10)
+            .map(|step| {
+                app.workspace.filter.adjusting = true;
+                app.canvas_mut().layers[idx].adjustment = Some(hue(20.0 + step as f32));
+                app.mark_all_tiles_dirty();
+                screen.settle_counting(&mut app)
+            })
+            .collect();
+        report("adjustment slider step", &ticks);
+        screen.dragging = false;
+        let (frames, spent) = screen.settle_counting(&mut app);
+        eprintln!("adjustment slider let go: exact in {frames} frames, {spent:?}");
     }
 }

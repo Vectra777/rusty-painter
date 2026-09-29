@@ -1,12 +1,13 @@
 //! Text rendering for the Text tool: lines of text in a font, as a coverage
-//! mask on the canvas (the tool paints it in the brush colour).
+//! mask on the canvas (the tool paints it in the text's colour), and the
+//! source a text layer keeps so it can be edited again ([`TextLayer`]).
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
-use eframe::egui::Vec2;
+use eframe::egui::{Color32, Vec2};
 
 use crate::selection::SelectionMask;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum TextAlign {
     #[default]
     Left,
@@ -15,7 +16,8 @@ pub enum TextAlign {
 }
 
 /// How to set the text.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TextStyle {
     /// Font size in canvas pixels (the height of a line without spacing).
     pub size: f32,
@@ -35,6 +37,21 @@ impl Default for TextStyle {
             align: TextAlign::Left,
         }
     }
+}
+
+/// What a text layer's pixels are made from, so the text can be edited
+/// again. Painting on the layer (anything but moving it) turns it into
+/// plain pixels and drops this.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextLayer {
+    pub text: String,
+    /// The font's name as the Text tool lists it (a shipped font, or a font
+    /// file's name).
+    pub font: String,
+    pub style: TextStyle,
+    pub color: Color32,
+    /// Top-left of the text block, canvas pixels.
+    pub pos: Vec2,
 }
 
 /// Where each line's glyphs go: `(glyph, x, baseline y)` relative to the

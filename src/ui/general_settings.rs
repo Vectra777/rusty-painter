@@ -203,6 +203,11 @@ const SHORTCUTS: &[ShortcutGroup] = &[
         &[
             ("{[}  /  {]}", "Smaller / larger brush"),
             ("P", "Brush presets window"),
+            ("K (hold or tap)", "Pop-up palette of favourite brushes"),
+            (
+                "Right-click, pen side button",
+                "Pop-up palette (right drag pans)",
+            ),
             ("X", "Swap brush and secondary color"),
         ],
     ),
@@ -218,6 +223,12 @@ const SHORTCUTS: &[ShortcutGroup] = &[
             ("Ctrl + {0}", "Fit to window"),
             ("Ctrl + {1}", "Actual pixels"),
             ("H", "Flip the view horizontally"),
+            ("Ctrl + '", "Show / hide the grid"),
+            ("Ctrl + ;", "Show / hide the guides"),
+            (
+                "Ctrl + drag a guide",
+                "Move it (from beside the canvas: a new one)",
+            ),
         ],
     ),
     (
@@ -231,6 +242,8 @@ const SHORTCUTS: &[ShortcutGroup] = &[
             ("Ctrl + J", "Duplicate layer"),
             ("Ctrl + G", "New folder"),
             ("Ctrl + Alt + G", "Clip to the layer below"),
+            ("Ctrl + Alt + E", "Merge down"),
+            ("Ctrl + Shift + E", "Merge visible"),
             ("Double-click a layer", "Rename it (folders too)"),
             ("Two-finger tap", "Undo"),
             ("Three-finger tap", "Redo"),
@@ -246,6 +259,12 @@ const SHORTCUTS: &[ShortcutGroup] = &[
             ("Delete, Backspace", "Delete the selected pixels"),
             ("Shift + F5", "Fill the selection from its surroundings"),
             ("Shift / Alt + drag", "Add to / erase from the selection"),
+            ("Shift + Q", "Quick mask: paint the selection"),
+            ("Ctrl + click a thumbnail", "Select the layer's paint"),
+            (
+                "Ctrl + Shift / Alt + click",
+                "Add it to / take it from the selection",
+            ),
             ("Backspace", "Remove the last magnetic lasso point"),
             (
                 "Enter, double-click",

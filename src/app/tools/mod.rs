@@ -11,6 +11,7 @@ pub(crate) mod guides;
 pub(crate) mod liquify;
 pub(crate) mod palette;
 pub(crate) mod patch;
+pub(crate) mod quick_mask;
 pub(crate) mod quickshape;
 pub(crate) mod select;
 pub(crate) mod shape;

@@ -313,7 +313,7 @@ impl PainterApp {
         if tiles.is_empty() {
             return;
         }
-        self.layer_state.history.push_action(UndoAction {
+        self.push_undo(UndoAction {
             tiles,
             selection: None,
             transform: None,

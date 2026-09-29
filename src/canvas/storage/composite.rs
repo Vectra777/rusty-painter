@@ -22,6 +22,62 @@ pub struct BelowComposite<'a> {
     pub pixels: &'a [Rgba],
 }
 
+/// Tiles read shrunk for a quick preview (see
+/// [`Canvas::write_tile_preview`]): each `block`×`block` square of the
+/// tile's `w`×`h` pixels on the canvas averaged into one.
+#[derive(Clone, Copy)]
+struct Shrink<'a> {
+    block: usize,
+    w: usize,
+    h: usize,
+    /// One layer's pixels given already shrunk (a filter's preview), by
+    /// layer index.
+    layer: Option<(usize, &'a [Color32])>,
+}
+
+/// `data` (a `tile_size`-wide tile) averaged over each `block`×`block`
+/// square of its top-left `w`×`h` pixels (premultiplied values, rounded):
+/// `w.div_ceil(block)` × `h.div_ceil(block)` pixels.
+pub(crate) fn shrink_tile(
+    data: &[Color32],
+    tile_size: usize,
+    w: usize,
+    h: usize,
+    block: usize,
+) -> Vec<Color32> {
+    let (sw, sh) = (w.div_ceil(block), h.div_ceil(block));
+    let mut out = Vec::with_capacity(sw * sh);
+    for sy in 0..sh {
+        let ys = sy * block..((sy + 1) * block).min(h);
+        for sx in 0..sw {
+            let xs = sx * block..((sx + 1) * block).min(w);
+            let mut sum = [0u32; 4];
+            for y in ys.clone() {
+                for px in &data[y * tile_size + xs.start..y * tile_size + xs.end] {
+                    for (s, v) in sum.iter_mut().zip(px.to_array()) {
+                        *s += v as u32;
+                    }
+                }
+            }
+            let n = (ys.len() * xs.len()) as u32;
+            let [r, g, b, a] = sum.map(|v| ((v + n / 2) / n) as u8);
+            out.push(Color32::from_rgba_premultiplied(r, g, b, a));
+        }
+    }
+    out
+}
+
+/// Which layers a fill or the magic wand looks at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleLayers {
+    /// This one layer.
+    Layer(usize),
+    /// Everything visible (drafts aside).
+    AllVisible,
+    /// The layers marked as reference.
+    Reference,
+}
+
 /// One visible layer's contribution to a tile, already in linear light.
 struct LayerInput {
     opacity: f32,
@@ -430,6 +486,55 @@ impl Canvas {
         self.write_single_tile_region(x, y, w, h, tx as i32, ty as i32, w, h, 1, out, below);
     }
 
+    /// A quick, approximate composite of tile `(tx, ty)` shrunk by `block`,
+    /// for the screen while a setting is dragged: each layer's tile is
+    /// averaged by `block` first (its stored values), and only the averages
+    /// are composited, so the work shrinks with the block's area. `layer`
+    /// gives one layer's pixels already shrunk (`(index, pixels)`), in place
+    /// of its tile. The exact composite
+    /// ([`Self::write_tile_rect_downsampled`]) follows once the drag ends.
+    pub fn write_tile_preview(
+        &self,
+        tx: usize,
+        ty: usize,
+        block: usize,
+        out: &mut ColorImage,
+        layer: Option<(usize, &[Color32])>,
+    ) {
+        let (x, y) = (tx * self.tile_size, ty * self.tile_size);
+        let w = self.tile_size.min(self.width.saturating_sub(x));
+        let h = self.tile_size.min(self.height.saturating_sub(y));
+        let block = block.max(1);
+        let (dst_w, dst_h) = (w.div_ceil(block), h.div_ceil(block));
+        out.size = [dst_w, dst_h];
+        out.pixels.clear();
+        out.pixels.resize(dst_w * dst_h, Color32::TRANSPARENT);
+        if dst_w == 0 || dst_h == 0 {
+            return;
+        }
+        let layer = layer.filter(|(_, pixels)| pixels.len() == dst_w * dst_h);
+        let shrink = Some(Shrink { block, w, h, layer });
+        let (tx, ty) = (tx as i32, ty as i32);
+        if self.needs_tree_compositing() {
+            let nodes = self.tile_nodes(tx, ty, shrink);
+            for (idx, px) in out.pixels.iter_mut().enumerate() {
+                let (gx, gy) = (x + idx % dst_w * block, y + idx / dst_w * block);
+                let c = composite_nodes(
+                    &nodes,
+                    idx,
+                    Rgba::TRANSPARENT,
+                    pixel_noise(gx as u32, gy as u32),
+                );
+                *px = self.encode_tree(c);
+            }
+        } else {
+            let layers = self.tile_layer_inputs(tx, ty, 0..self.layers.len(), shrink);
+            for (idx, px) in out.pixels.iter_mut().enumerate() {
+                *px = rgba_to_color32_fast(composite_pixel(&layers, idx, Rgba::TRANSPARENT));
+            }
+        }
+    }
+
     /// [`Self::write_tile_rect_to_color_image`] shrunk by `block` (a power of
     /// two, `rect` aligned to it): each output pixel is the linear-light
     /// average of its block's composites, computed directly instead of
@@ -548,7 +653,7 @@ impl Canvas {
     /// `layer_idx` for every pixel of one tile: exactly the value the
     /// compositor has accumulated just before reaching `layer_idx`.
     pub fn composite_below(&self, layer_idx: usize, tx: i32, ty: i32) -> Vec<Rgba> {
-        let layers = self.tile_layer_inputs(tx, ty, 0..layer_idx.min(self.layers.len()));
+        let layers = self.tile_layer_inputs(tx, ty, 0..layer_idx.min(self.layers.len()), None);
         (0..self.tile_size * self.tile_size)
             .map(|idx| composite_pixel(&layers, idx, Rgba::TRANSPARENT))
             .collect()
@@ -571,20 +676,36 @@ impl Canvas {
         tx: i32,
         ty: i32,
         range: std::ops::Range<usize>,
+        shrink: Option<Shrink<'_>>,
     ) -> Vec<LayerInput> {
         range
             .filter(|&i| self.layers[i].kind == LayerKind::Paint)
-            .filter_map(|i| self.layer_input(i, tx, ty, BlendSpace::Linear))
+            .filter_map(|i| self.layer_input(i, tx, ty, BlendSpace::Linear, shrink))
             .collect()
     }
 
     /// Layer `i`'s contribution to one tile, in `space` (linear light, or
     /// the stored sRGB values), or `None` if it contributes nothing (hidden,
     /// fully transparent or no content there).
-    fn layer_input(&self, i: usize, tx: i32, ty: i32, space: BlendSpace) -> Option<LayerInput> {
+    fn layer_input(
+        &self,
+        i: usize,
+        tx: i32,
+        ty: i32,
+        space: BlendSpace,
+        shrink: Option<Shrink<'_>>,
+    ) -> Option<LayerInput> {
         let layer = &self.layers[i];
         if !(layer.visible && layer.opacity > 0.0) {
             return None;
+        }
+        if let Some(Shrink {
+            layer: Some((given, pixels)),
+            ..
+        }) = shrink
+            && given == i
+        {
+            return Some(self.shrunk_input(i, pixels, space));
         }
         let cell = layer_tile(layer, tx, ty);
         let guard = cell
@@ -598,6 +719,23 @@ impl Canvas {
             BlendSpace::Linear => color32_to_linear(c),
             BlendSpace::Gamma => gamma_color32_to_rgba(c),
         };
+        let data = guard.as_ref().and_then(|g| g.data.as_deref());
+        if let Some(shrink) = shrink {
+            let shrunk =
+                data.map(|d| shrink_tile(d, self.tile_size, shrink.w, shrink.h, shrink.block));
+            return Some(match shrunk {
+                Some(pixels) => self.shrunk_input(i, &pixels, space),
+                None => LayerInput {
+                    opacity: layer.opacity,
+                    fill: if i == 0 {
+                        convert(self.clear_color)
+                    } else {
+                        Rgba::TRANSPARENT
+                    },
+                    linear: None,
+                },
+            });
+        }
         Some(LayerInput {
             opacity: layer.opacity,
             fill: if i == 0 {
@@ -605,21 +743,34 @@ impl Canvas {
             } else {
                 Rgba::TRANSPARENT
             },
-            linear: guard
-                .as_ref()
-                .and_then(|g| g.data.as_deref())
-                .map(|data| match space {
-                    BlendSpace::Linear => color32s_to_linear(data),
-                    BlendSpace::Gamma => {
-                        let gamma = crate::canvas::blend::GammaReader::new();
-                        data.iter().map(|&c| gamma.read(c)).collect()
-                    }
-                }),
+            linear: data.map(|data| match space {
+                BlendSpace::Linear => color32s_to_linear(data),
+                BlendSpace::Gamma => {
+                    let gamma = crate::canvas::blend::GammaReader::new();
+                    data.iter().map(|&c| gamma.read(c)).collect()
+                }
+            }),
         })
     }
 
+    /// Layer `i`'s input from pixels already shrunk.
+    fn shrunk_input(&self, i: usize, pixels: &[Color32], space: BlendSpace) -> LayerInput {
+        let layer = &self.layers[i];
+        LayerInput {
+            opacity: layer.opacity,
+            fill: Rgba::TRANSPARENT,
+            linear: Some(match space {
+                BlendSpace::Linear => color32s_to_linear(pixels),
+                BlendSpace::Gamma => {
+                    let gamma = crate::canvas::blend::GammaReader::new();
+                    pixels.iter().map(|&c| gamma.read(c)).collect()
+                }
+            }),
+        }
+    }
+
     /// The composite tree (folders and masks) for one tile.
-    fn tile_nodes(&self, tx: i32, ty: i32) -> Vec<CompositeNode> {
+    fn tile_nodes(&self, tx: i32, ty: i32, shrink: Option<Shrink<'_>>) -> Vec<CompositeNode> {
         let masks: HashMap<LayerId, usize> = self
             .layers
             .iter()
@@ -629,7 +780,7 @@ impl Canvas {
                 _ => None,
             })
             .collect();
-        self.child_nodes(tx, ty, None, &masks, 0)
+        self.child_nodes(tx, ty, None, &masks, 0, shrink)
     }
 
     /// Nodes for the children of `parent`, bottom to top.
@@ -640,6 +791,7 @@ impl Canvas {
         parent: Option<LayerId>,
         masks: &HashMap<LayerId, usize>,
         depth: usize,
+        shrink: Option<Shrink<'_>>,
     ) -> Vec<CompositeNode> {
         let mut nodes: Vec<CompositeNode> = Vec::new();
         if depth > self.layers.len() {
@@ -658,7 +810,7 @@ impl Canvas {
                 continue;
             }
             let node = if layer.visible && layer.opacity > 0.0 {
-                self.layer_node(i, tx, ty, masks, depth)
+                self.layer_node(i, tx, ty, masks, depth, shrink)
             } else {
                 None
             };
@@ -688,12 +840,13 @@ impl Canvas {
         ty: i32,
         masks: &HashMap<LayerId, usize>,
         depth: usize,
+        shrink: Option<Shrink<'_>>,
     ) -> Option<CompositeNode> {
         let layer = &self.layers[i];
         match layer.kind {
             LayerKind::Mask { .. } => None,
             LayerKind::Group => {
-                let children = self.child_nodes(tx, ty, Some(layer.id), masks, depth + 1);
+                let children = self.child_nodes(tx, ty, Some(layer.id), masks, depth + 1, shrink);
                 (!children.is_empty()).then_some(CompositeNode::Group {
                     opacity: layer.opacity,
                     children,
@@ -706,14 +859,14 @@ impl Canvas {
                 opacity: layer.opacity,
                 mask: masks
                     .get(&layer.id)
-                    .and_then(|&m| self.mask_input(m, tx, ty)),
+                    .and_then(|&m| self.mask_input(m, tx, ty, shrink)),
                 space: self.blend_space,
             }),
             LayerKind::Paint => {
-                let input = self.layer_input(i, tx, ty, self.blend_space)?;
+                let input = self.layer_input(i, tx, ty, self.blend_space, shrink)?;
                 let mask = masks
                     .get(&layer.id)
-                    .and_then(|&m| self.mask_input(m, tx, ty));
+                    .and_then(|&m| self.mask_input(m, tx, ty, shrink));
                 Some(CompositeNode::Layer {
                     input,
                     mask,
@@ -724,7 +877,13 @@ impl Canvas {
     }
 
     /// Mask coverage for one tile, or `None` when the mask is disabled.
-    fn mask_input(&self, mask_idx: usize, tx: i32, ty: i32) -> Option<MaskInput> {
+    fn mask_input(
+        &self,
+        mask_idx: usize,
+        tx: i32,
+        ty: i32,
+        shrink: Option<Shrink<'_>>,
+    ) -> Option<MaskInput> {
         let layer = &self.layers[mask_idx];
         if !layer.visible {
             return None;
@@ -736,7 +895,13 @@ impl Canvas {
         let values = guard
             .as_ref()
             .and_then(|g| g.data.as_deref())
-            .map(|data| data.iter().copied().map(mask_coverage).collect());
+            .map(|data| match shrink {
+                Some(s) => shrink_tile(data, self.tile_size, s.w, s.h, s.block)
+                    .into_iter()
+                    .map(mask_coverage)
+                    .collect(),
+                None => data.iter().copied().map(mask_coverage).collect(),
+            });
         Some(MaskInput { values })
     }
 
@@ -764,12 +929,12 @@ impl Canvas {
         let first_layer = below.map_or(0, |b| b.first_layer);
         // Folders/masks need the tree compositor (never with a below-cache,
         // which assumes a plain stack).
-        let nodes =
-            (below.is_none() && self.needs_tree_compositing()).then(|| self.tile_nodes(tx, ty));
+        let nodes = (below.is_none() && self.needs_tree_compositing())
+            .then(|| self.tile_nodes(tx, ty, None));
         let layers = if nodes.is_some() {
             Vec::new()
         } else {
-            self.tile_layer_inputs(tx, ty, first_layer..self.layers.len())
+            self.tile_layer_inputs(tx, ty, first_layer..self.layers.len(), None)
         };
         let start = |idx: usize| below.map_or(Rgba::TRANSPARENT, |b| b.pixels[idx]);
         let composite_at = |idx: usize, gx: usize, gy: usize| match &nodes {
@@ -1000,7 +1165,9 @@ impl Canvas {
                 let global_x = x + dst_x * step;
                 let tx = (global_x / self.tile_size) as i32;
                 let local_x = global_x % self.tile_size;
-                let nodes = cache.entry(tx).or_insert_with(|| self.tile_nodes(tx, ty));
+                let nodes = cache
+                    .entry(tx)
+                    .or_insert_with(|| self.tile_nodes(tx, ty, None));
                 let idx = local_y * self.tile_size + local_x;
                 let noise = pixel_noise(global_x as u32, global_y as u32);
                 let composite = composite_nodes(nodes, idx, Rgba::TRANSPARENT, noise);
@@ -1138,11 +1305,6 @@ impl Canvas {
         w: usize,
         h: usize,
     ) -> Vec<Color32> {
-        let ts = self.tile_size as i32;
-        let mut out = vec![Color32::TRANSPARENT; w * h];
-        if w == 0 || h == 0 {
-            return out;
-        }
         // Every visible paint layer, bottom first, with its effective opacity
         // (folders included). Blend modes and masks are ignored: this only
         // has to show where the lines are, and plain "over" is fast.
@@ -1150,13 +1312,76 @@ impl Canvas {
             Some(idx) => vec![(idx, 1.0)],
             None => self.reference_layers(),
         };
+        self.render_layers(&layers, x, y, w, h)
+    }
+
+    /// [`Self::render_reference`] of the layers `source` names.
+    pub fn render_sample(
+        &self,
+        source: SampleLayers,
+        x: i32,
+        y: i32,
+        w: usize,
+        h: usize,
+    ) -> Vec<Color32> {
+        match source {
+            SampleLayers::Layer(idx) => self.render_reference(Some(idx), x, y, w, h),
+            SampleLayers::AllVisible => self.render_reference(None, x, y, w, h),
+            SampleLayers::Reference => self.render_marked_reference(x, y, w, h),
+        }
+    }
+
+    /// [`Self::render_reference`] of the layers marked as reference (and
+    /// those in folders marked so), shown or not, bottom first.
+    pub fn render_marked_reference(&self, x: i32, y: i32, w: usize, h: usize) -> Vec<Color32> {
+        let by_id: HashMap<LayerId, &Layer> = self.layers.iter().map(|l| (l.id, l)).collect();
+        let layers: Vec<(usize, f32)> = self
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == LayerKind::Paint && l.adjustment.is_none())
+            .filter(|(_, l)| {
+                let mut current = Some(*l);
+                while let Some(e) = current {
+                    if e.reference {
+                        return true;
+                    }
+                    current = e.parent.and_then(|p| by_id.get(&p).copied());
+                }
+                false
+            })
+            .map(|(i, _)| (i, 1.0))
+            .collect();
+        self.render_layers(&layers, x, y, w, h)
+    }
+
+    /// Whether any layer (or folder) is marked as reference.
+    pub fn has_reference_layer(&self) -> bool {
+        self.layers.iter().any(|l| l.reference)
+    }
+
+    /// `layers` (index, opacity), bottom first, "over" each other across
+    /// the canvas rectangle `(x, y, w, h)`.
+    fn render_layers(
+        &self,
+        layers: &[(usize, f32)],
+        x: i32,
+        y: i32,
+        w: usize,
+        h: usize,
+    ) -> Vec<Color32> {
+        let ts = self.tile_size as i32;
+        let mut out = vec![Color32::TRANSPARENT; w * h];
+        if w == 0 || h == 0 {
+            return out;
+        }
         let (x1, y1) = (x + w as i32, y + h as i32);
         let mut tile = vec![Color32::TRANSPARENT; (ts * ts) as usize];
         for ty in y.div_euclid(ts)..=(y1 - 1).div_euclid(ts) {
             for tx in x.div_euclid(ts)..=(x1 - 1).div_euclid(ts) {
                 tile.fill(Color32::TRANSPARENT);
                 let mut any = false;
-                for &(idx, opacity) in &layers {
+                for &(idx, opacity) in layers {
                     let Some(cell) = self.layer_tile_cell(idx, tx, ty) else {
                         continue;
                     };
@@ -1191,18 +1416,19 @@ impl Canvas {
     }
 
     /// Paint layers that show, bottom first, with opacity multiplied down
-    /// through their folders.
+    /// through their folders. Drafts (and what's in draft folders) are left
+    /// out.
     fn reference_layers(&self) -> Vec<(usize, f32)> {
         let by_id: HashMap<LayerId, &Layer> = self.layers.iter().map(|l| (l.id, l)).collect();
         self.layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.kind == LayerKind::Paint && l.visible)
+            .filter(|(_, l)| l.kind == LayerKind::Paint && l.visible && !l.draft)
             .filter_map(|(i, l)| {
                 let mut opacity = l.opacity;
                 let mut parent = l.parent;
                 while let Some(p) = parent.and_then(|id| by_id.get(&id)) {
-                    if !p.visible {
+                    if !p.visible || p.draft {
                         return None;
                     }
                     opacity *= p.opacity;

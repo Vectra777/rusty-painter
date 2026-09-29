@@ -223,4 +223,21 @@ pub fn canvas_sliders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
     }
     faders(app, ctx, area);
     context_action(app, ctx, area);
+    palette_button(app, ctx, area);
+}
+
+/// A button in the bottom-left corner that opens the pop-up brush palette
+/// (a right click does on the desktop).
+fn palette_button(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
+    let size = HIT_WIDTH;
+    egui::Area::new(egui::Id::new("canvas_palette_button"))
+        .fixed_pos(egui::pos2(area.left() + 6.0, area.bottom() - size - 12.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let icon = crate::ui::icons::Icon::Brush;
+            let open = app.brush_state.library.radial.is_some();
+            if crate::ui::widgets::icon_button(ui, icon, size, open, "Brush palette").clicked() {
+                app.open_radial_palette(area.center(), false);
+            }
+        });
 }

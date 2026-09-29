@@ -276,6 +276,28 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ) {
         app.toggle_clip_active();
     }
+    let active = app.canvas.active_layer_idx;
+    let is_text = app.is_text_layer(active);
+    if ui
+        .add_enabled_ui(is_text, |ui| menu_item(ui, "Rasterise Text", None))
+        .inner
+    {
+        app.rasterise_text_layer(active);
+    }
+    ui.separator();
+    if menu_item(
+        ui,
+        "Merge Down",
+        Some(shortcut(ctx, cmd | Modifiers::ALT, Key::E)),
+    ) {
+        app.merge_down();
+    }
+    if menu_item(ui, "Merge Visible", Some(shortcut(ctx, cmd_shift, Key::E))) {
+        app.merge_visible();
+    }
+    if menu_item(ui, "Flatten Image", None) {
+        app.flatten_image();
+    }
 }
 
 fn select_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
@@ -295,6 +317,7 @@ fn select_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ) {
         app.invert_selection();
     }
+    crate::ui::select_dialog::select_menu_items(app, ui, menu_item);
 }
 
 /// Filters on the active layer (inside the selection, if any).
@@ -360,6 +383,8 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     {
         app.mark_all_tiles_dirty();
     }
+    ui.separator();
+    crate::ui::view_aids_menu::view_aids_items(app, ui, menu_item);
     ui.separator();
     if menu_item(ui, "Show / Hide Panels", Some("Tab".into())) {
         app.toggle_all_panels();

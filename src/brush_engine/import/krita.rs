@@ -215,6 +215,7 @@ fn read_kpp(
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0),
                     invert: yes("Texture/Pattern/Invert"),
+                    placement: Default::default(),
                 });
             }
             None => notes.push(format!("{name}: its texture {base} is missing")),

@@ -3,6 +3,7 @@
 //!
 //! A shape stays editable (drag its handles, or inside it to move it) until
 //! it's applied: Enter, a press outside it, or another tool. Esc cancels.
+//! An ellipse also has a round handle above it that turns it.
 //! Applying paints it as one undo step, mirrored like any stroke.
 
 use crate::app::PainterApp;
@@ -75,6 +76,9 @@ enum ShapeDrag {
     Point(usize),
     /// Moving the whole shape.
     Move { last: Vec2 },
+    /// Turning an ellipse: its angle when the drag began, and the
+    /// pointer's direction from the centre then.
+    Turn { from: f32, grab: f32 },
 }
 
 /// A shape being drawn or edited.
@@ -88,6 +92,9 @@ pub struct ShapeSession {
     pub building: bool,
     /// The pointer, for the polygon's rubber band.
     cursor: Option<Vec2>,
+    /// Ellipse: how far it's turned about its centre (radians, clockwise
+    /// on screen). `points` is then its box before turning.
+    pub angle: f32,
 }
 
 pub struct ShapeToolState {
@@ -98,14 +105,20 @@ pub struct ShapeToolState {
 }
 
 impl ShapeToolState {
-    /// Start editing a finished shape (QuickShape hands one over).
-    pub(crate) fn start_editing(&mut self, kind: ShapeKind, points: Vec<Vec2>) {
+    /// Start editing a finished shape (QuickShape hands one over), turned
+    /// by `angle` if it's an ellipse.
+    pub(crate) fn start_editing(&mut self, kind: ShapeKind, points: Vec<Vec2>, angle: f32) {
         self.session = Some(ShapeSession {
             kind,
             points,
             drag: None,
             building: false,
             cursor: None,
+            angle: if kind == ShapeKind::Ellipse {
+                angle
+            } else {
+                0.0
+            },
         });
     }
 }
@@ -124,6 +137,8 @@ impl Default for ShapeToolState {
 const HANDLE_HIT: f32 = 12.0;
 const HANDLE_SIZE: f32 = 4.5;
 const TINY: f32 = 2.0;
+/// How far the turning handle sits above an ellipse's box.
+const TURN_HANDLE_GAP: f32 = 24.0;
 
 /// Modifier keys that shape a drag.
 #[derive(Clone, Copy, Default)]
@@ -149,6 +164,19 @@ fn square(a: Vec2, b: Vec2) -> Vec2 {
     a + Vec2::new(side.copysign(d.x), side.copysign(d.y))
 }
 
+/// `v` turned by `angle` (clockwise on screen).
+pub(crate) fn turned(v: Vec2, angle: f32) -> Vec2 {
+    let (sin, cos) = angle.sin_cos();
+    Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos)
+}
+
+/// `angle` in (-π, π].
+fn wrap_angle(angle: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let a = angle.rem_euclid(TAU);
+    if a > PI { a - TAU } else { a }
+}
+
 /// The box corners of `[p, q]`, clockwise from the top left.
 fn corners(p: Vec2, q: Vec2) -> [Vec2; 4] {
     let (min, max) = (p.min(q), p.max(q));
@@ -156,14 +184,63 @@ fn corners(p: Vec2, q: Vec2) -> [Vec2; 4] {
 }
 
 impl ShapeSession {
+    /// Whether this is an ellipse turned away from upright.
+    fn is_turned(&self) -> bool {
+        self.kind == ShapeKind::Ellipse && self.angle != 0.0
+    }
+
+    /// The centre of the box (what an ellipse turns about).
+    fn box_center(&self) -> Vec2 {
+        (self.points[0] + self.points[1]) * 0.5
+    }
+
+    /// Canvas point `p` of the unturned box, where it is once turned.
+    fn to_canvas(&self, p: Vec2) -> Vec2 {
+        if !self.is_turned() {
+            return p;
+        }
+        let c = self.box_center();
+        c + turned(p - c, self.angle)
+    }
+
+    /// Canvas point `p` in the unturned box's frame.
+    fn to_box(&self, p: Vec2) -> Vec2 {
+        if !self.is_turned() {
+            return p;
+        }
+        let c = self.box_center();
+        c + turned(p - c, -self.angle)
+    }
+
     /// The points handles sit on.
     fn handles(&self) -> Vec<Vec2> {
         match self.kind {
-            ShapeKind::Rectangle | ShapeKind::Ellipse => {
-                corners(self.points[0], self.points[1]).to_vec()
-            }
+            ShapeKind::Rectangle | ShapeKind::Ellipse => corners(self.points[0], self.points[1])
+                .map(|p| self.to_canvas(p))
+                .to_vec(),
             ShapeKind::Line | ShapeKind::Polygon => self.points.clone(),
         }
+    }
+
+    /// An ellipse's turning handle: above the middle of its top side,
+    /// `TURN_HANDLE_GAP` screen points out.
+    fn turn_handle(&self, zoom: f32) -> Option<Vec2> {
+        if self.kind != ShapeKind::Ellipse || self.building {
+            return None;
+        }
+        let (min, max) = (
+            self.points[0].min(self.points[1]),
+            self.points[0].max(self.points[1]),
+        );
+        let top = Vec2::new((min.x + max.x) * 0.5, min.y - TURN_HANDLE_GAP / zoom);
+        let c = self.box_center();
+        Some(c + turned(top - c, self.angle))
+    }
+
+    /// The middle of the top side, where the turning handle's stem starts.
+    fn top_middle(&self) -> Vec2 {
+        let min_y = self.points[0].y.min(self.points[1].y);
+        self.to_canvas(Vec2::new(self.box_center().x, min_y))
     }
 
     fn bounds(&self) -> (Vec2, Vec2) {
@@ -194,10 +271,15 @@ impl ShapeSession {
                 // dabs along them, so the curve stays smooth.
                 let perimeter = std::f32::consts::TAU * ((r.x * r.x + r.y * r.y) * 0.5).sqrt();
                 let n = ((perimeter / 2.0).ceil() as usize).clamp(24, 4096);
+                let turned_by = self.is_turned().then_some(self.angle);
                 (0..=n)
                     .map(|i| {
                         let a = std::f32::consts::TAU * i as f32 / n as f32;
-                        center + Vec2::new(a.cos() * r.x, a.sin() * r.y)
+                        let v = Vec2::new(a.cos() * r.x, a.sin() * r.y);
+                        match turned_by {
+                            Some(angle) => center + turned(v, angle),
+                            None => center + v,
+                        }
                     })
                     .collect()
             }
@@ -255,6 +337,16 @@ impl PainterApp {
                 session.drag = Some(ShapeDrag::Point(session.points.len() - 1));
                 return;
             }
+            if let Some(h) = session.turn_handle(self.viewport.zoom.max(0.01))
+                && (h - pos).length() <= hit
+            {
+                let d = pos - session.box_center();
+                session.drag = Some(ShapeDrag::Turn {
+                    from: session.angle,
+                    grab: d.y.atan2(d.x),
+                });
+                return;
+            }
             if let Some(i) = session
                 .handles()
                 .iter()
@@ -263,6 +355,8 @@ impl PainterApp {
                 session.drag = Some(ShapeDrag::Point(i));
                 return;
             }
+            // (A turned ellipse: in its own frame.)
+            let pos = session.to_box(pos);
             let (min, max) = session.bounds();
             let inside = pos.x >= min.x - hit
                 && pos.y >= min.y - hit
@@ -287,6 +381,7 @@ impl PainterApp {
                 drag: None,
                 building: true,
                 cursor: Some(pos),
+                angle: 0.0,
             },
             _ => ShapeSession {
                 kind,
@@ -294,6 +389,7 @@ impl PainterApp {
                 drag: Some(ShapeDrag::Create { anchor: pos }),
                 building: false,
                 cursor: Some(pos),
+                angle: 0.0,
             },
         });
     }
@@ -322,6 +418,19 @@ impl PainterApp {
                 };
             }
             Some(ShapeDrag::Point(i)) => match session.kind {
+                ShapeKind::Ellipse if session.is_turned() => {
+                    // The opposite corner stays put; the box is kept square
+                    // to the ellipse's own axes.
+                    let angle = session.angle;
+                    let opposite = session.handles()[(i + 2) % 4];
+                    let mut d = turned(pos - opposite, -angle);
+                    if mods.constrain {
+                        d = square(Vec2::ZERO, d);
+                    }
+                    let center = opposite + turned(d, angle) * 0.5;
+                    let local = |p: Vec2| center + turned(p - center, -angle);
+                    session.points = vec![local(opposite), local(opposite + turned(d, angle))];
+                }
                 ShapeKind::Rectangle | ShapeKind::Ellipse => {
                     let c = corners(session.points[0], session.points[1]);
                     let opposite = c[(i + 2) % 4];
@@ -351,6 +460,19 @@ impl PainterApp {
                     *p += d;
                 }
                 session.drag = Some(ShapeDrag::Move { last: pos });
+            }
+            Some(ShapeDrag::Turn { from, grab }) => {
+                let d = pos - session.box_center();
+                let mut angle = from + d.y.atan2(d.x) - grab;
+                if mods.constrain {
+                    let step = std::f32::consts::PI / 12.0;
+                    angle = (angle / step).round() * step;
+                }
+                session.angle = wrap_angle(angle);
+                // Close enough to upright is upright.
+                if session.angle.abs() < 1e-4 {
+                    session.angle = 0.0;
+                }
             }
         }
     }
@@ -491,7 +613,7 @@ impl PainterApp {
         if undo.tiles.is_empty() {
             return;
         }
-        self.layer_state.history.push_action(undo);
+        self.push_undo(undo);
         if let Some(rect) = changed {
             self.mark_tiles_in_bounds_dirty(rect);
         }
@@ -594,6 +716,13 @@ pub(crate) fn draw_shape(
             egui::Rect::from_center_size(to_screen(h), egui::vec2(HANDLE_SIZE, HANDLE_SIZE) * 2.0);
         painter.rect_filled(r.expand(1.0), 0.0, Color32::BLACK);
         painter.rect_filled(r, 0.0, Color32::WHITE);
+    }
+    if let Some(h) = session.turn_handle(app.viewport.zoom.max(0.01)) {
+        let (from, to) = (to_screen(session.top_middle()), to_screen(h));
+        painter.line_segment([from, to], Stroke::new(3.0_f32, Color32::BLACK));
+        painter.line_segment([from, to], Stroke::new(1.0_f32, Color32::WHITE));
+        painter.circle_filled(to, HANDLE_SIZE + 1.0, Color32::BLACK);
+        painter.circle_filled(to, HANDLE_SIZE, Color32::WHITE);
     }
 }
 
@@ -711,6 +840,112 @@ mod tests {
         // A press away from it applies it and starts another.
         app.shape_press(ShapeKind::Line, Vec2::new(120.0, 120.0));
         assert!(painted(&app, 45, 50));
+    }
+
+    #[test]
+    fn the_round_handle_turns_an_ellipse_and_applying_paints_it_turned() {
+        let mut app = app();
+        app.viewport.zoom = 1.0;
+        app.workspace.shapes.settings.style = ShapeStyle::Fill;
+        // A long, thin ellipse across the middle.
+        drag(
+            &mut app,
+            ShapeKind::Ellipse,
+            Vec2::new(14.0, 54.0),
+            Vec2::new(114.0, 74.0),
+            ShapeMods::default(),
+        );
+        let session = app.workspace.shapes.session.as_ref().unwrap();
+        let handle = session.turn_handle(1.0).unwrap();
+        assert_eq!(handle, Vec2::new(64.0, 54.0 - TURN_HANDLE_GAP));
+        // Drag the handle round to the right of the centre (64, 64): a
+        // quarter turn clockwise, snapped with Shift.
+        let snap = ShapeMods {
+            constrain: true,
+            from_center: false,
+        };
+        drag(
+            &mut app,
+            ShapeKind::Ellipse,
+            handle,
+            Vec2::new(64.0 + 40.0, 66.0),
+            snap,
+        );
+        let session = app.workspace.shapes.session.as_ref().unwrap();
+        assert!((session.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        // Its handles turned with it: the top left corner is now top right.
+        let h = session.handles();
+        assert!((h[0] - Vec2::new(74.0, 14.0)).length() < 1e-3, "{h:?}");
+        app.shape_commit();
+        assert!(
+            painted(&app, 64, 20) && painted(&app, 64, 108),
+            "upright now"
+        );
+        assert!(!painted(&app, 20, 64) && !painted(&app, 108, 64));
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one step");
+        app.apply_history(false);
+        assert!(!painted(&app, 64, 20) && !painted(&app, 64, 64), "undone");
+    }
+
+    #[test]
+    fn a_turned_ellipse_is_matched_by_the_same_shape_drawn_upright() {
+        // An ellipse turned a quarter paints exactly what the same one
+        // drawn tall does (its outline points agree to rounding).
+        let paint = |points: Vec<Vec2>, angle: f32| {
+            let mut app = app();
+            app.workspace.shapes.settings.style = ShapeStyle::Both;
+            app.workspace
+                .shapes
+                .start_editing(ShapeKind::Ellipse, points, angle);
+            app.shape_commit();
+            (0..128)
+                .flat_map(|y| (0..128).map(move |x| (x, y)))
+                .filter(|&(x, y)| painted(&app, x, y))
+                .count()
+        };
+        let turned = paint(
+            vec![Vec2::new(24.0, 44.0), Vec2::new(104.0, 84.0)],
+            std::f32::consts::FRAC_PI_2,
+        );
+        let tall = paint(vec![Vec2::new(44.0, 24.0), Vec2::new(84.0, 104.0)], 0.0);
+        let diff = turned.abs_diff(tall);
+        assert!(diff * 100 < tall, "{turned} vs {tall}");
+    }
+
+    #[test]
+    fn a_turned_ellipse_resizes_along_its_own_axes() {
+        let mut app = app();
+        app.viewport.zoom = 1.0;
+        let angle = 30f32.to_radians();
+        app.workspace.shapes.start_editing(
+            ShapeKind::Ellipse,
+            vec![Vec2::new(34.0, 44.0), Vec2::new(94.0, 84.0)],
+            angle,
+        );
+        let before = app.workspace.shapes.session.as_ref().unwrap().handles();
+        // Pull the bottom right corner out along the ellipse's width.
+        let out = before[2] + turned(Vec2::new(10.0, 0.0), angle);
+        drag(
+            &mut app,
+            ShapeKind::Ellipse,
+            before[2],
+            out,
+            ShapeMods::default(),
+        );
+        let session = app.workspace.shapes.session.as_ref().unwrap();
+        let after = session.handles();
+        assert!(
+            (after[0] - before[0]).length() < 1e-3,
+            "opposite corner kept"
+        );
+        assert!(
+            (after[2] - out).length() < 1e-3,
+            "{:?} vs {out:?}",
+            after[2]
+        );
+        let size = (session.points[1] - session.points[0]).abs();
+        assert!((size - Vec2::new(70.0, 40.0)).length() < 1e-3, "{size:?}");
+        assert_eq!(session.angle, angle);
     }
 
     #[test]

@@ -341,6 +341,7 @@ impl PainterApp {
         }
         let preset = self.brush_state.presets.remove(index);
         self.brush_state.preset_previews.remove(&preset.name);
+        self.edit_library(|lib| lib.forget(&preset.name));
         for active in [
             &mut self.brush_state.active_preset,
             &mut self.brush_state.stashed_preset,
@@ -369,8 +370,20 @@ impl PainterApp {
             (imported.presets, imported.notes)
         };
         let count = presets.len();
+        let app = crate::app::brush_library::source_app(name);
         for preset in presets {
             self.add_user_preset(preset);
+            // Tagged so they can be found again: "Imported", and the app.
+            let name = self.brush_state.presets.last().map(|p| p.name.clone());
+            if let Some(name) = name {
+                self.edit_library(|lib| {
+                    lib.tags.remove(&name);
+                    lib.add_tag(&name, "Imported");
+                    if let Some(app) = app {
+                        lib.add_tag(&name, app);
+                    }
+                });
+            }
         }
         if !is_preset_file {
             let report = self

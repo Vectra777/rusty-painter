@@ -81,6 +81,9 @@ pub(crate) struct StoredGuides {
     symmetry_count: u32,
     symmetry_mirrored: bool,
     wrap_around: bool,
+    /// The horizontal and vertical guide lines (View → Guides).
+    guide_lines: Vec<crate::app::view::guide_lines::GuideLine>,
+    guides_locked: bool,
 }
 
 impl StoredGuides {
@@ -105,6 +108,8 @@ impl StoredGuides {
             symmetry_count: s.count,
             symmetry_mirrored: s.mirrored,
             wrap_around: app.workspace.wrap_around,
+            guide_lines: app.workspace.view_aids.guides.lines.clone(),
+            guides_locked: app.workspace.view_aids.guides.locked,
         }
     }
 
@@ -136,6 +141,10 @@ impl StoredGuides {
         }
         s.mirrored = self.symmetry_mirrored;
         app.workspace.wrap_around = self.wrap_around;
+        let lines = &mut app.workspace.view_aids.guides;
+        lines.lines = self.guide_lines;
+        lines.locked = self.guides_locked;
+        lines.end_drag();
         app.keep_guides_on_canvas();
     }
 }

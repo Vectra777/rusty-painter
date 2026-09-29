@@ -201,6 +201,27 @@ impl Filter {
         !matches!(self, Filter::Invert | Filter::Desaturate)
     }
 
+    /// The same filter on a picture `block` times smaller (a quick
+    /// preview): its distances shrink with it.
+    pub fn shrunk(&self, block: usize) -> Filter {
+        let k = block.max(1) as f32;
+        match *self {
+            Filter::GaussianBlur { radius } => Filter::GaussianBlur { radius: radius / k },
+            Filter::MotionBlur { angle, distance } => Filter::MotionBlur {
+                angle,
+                distance: distance / k,
+            },
+            Filter::Sharpen { radius, amount } => Filter::Sharpen {
+                radius: radius / k,
+                amount,
+            },
+            Filter::Pixelate { size } => Filter::Pixelate {
+                size: (size / block.max(1) as u32).max(1),
+            },
+            other => other,
+        }
+    }
+
     /// How far (pixels) a result pixel reads from its source position.
     pub fn reach(&self) -> i32 {
         match *self {

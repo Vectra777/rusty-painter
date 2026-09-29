@@ -46,10 +46,17 @@ impl Region {
         }
         out
     }
+
+    /// Each tile's key and its pixels as they were.
+    pub fn original_tiles(&self) -> impl Iterator<Item = ((i32, i32), &[Color32])> {
+        self.tiles
+            .iter()
+            .map(|(key, data, _)| (*key, data.as_slice()))
+    }
 }
 
 /// `a` to `b` by `t` (0..=255), premultiplied.
-fn mix(a: Color32, b: Color32, t: u8) -> Color32 {
+pub(crate) fn mix(a: Color32, b: Color32, t: u8) -> Color32 {
     match t {
         0 => a,
         255 => b,

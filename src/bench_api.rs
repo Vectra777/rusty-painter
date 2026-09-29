@@ -160,6 +160,13 @@ pub fn set_blend_modes(app: &mut PainterApp, deform: bool, clone: bool, sharpen:
         .set_clone_source(centre - Vec2::new(100.0, 0.0));
 }
 
+/// The Blur tool painting `filter` (its Filter mode).
+pub fn set_brush_filter(app: &mut PainterApp, filter: crate::canvas::filters::Filter) {
+    use crate::app::tools::blend::FilterMode;
+    app.workspace.blend.filter_mode = FilterMode::Filter;
+    app.workspace.blend.brush_filter = filter;
+}
+
 pub fn set_symmetry(app: &mut PainterApp, mode: SymmetryMode, count: u32, mirrored: bool) {
     app.workspace.symmetry.mode = mode;
     app.workspace.symmetry.count = count;
@@ -420,5 +427,5 @@ pub fn composite_all(app: &PainterApp) -> usize {
 
 /// QuickShape's guess for a hand-drawn stroke.
 pub fn fit_shape(points: &[Vec2]) -> Option<ShapeKind> {
-    crate::app::tools::quickshape::fit_shape(points).map(|(kind, _)| kind)
+    crate::app::tools::quickshape::fit_shape(points).map(|(kind, ..)| kind)
 }

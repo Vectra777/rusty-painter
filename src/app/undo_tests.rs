@@ -207,14 +207,58 @@ fn image_menu_steps_undo_and_redo_with_the_canvas_size() {
 }
 
 #[test]
-fn a_saved_file_keeps_the_steps_after_a_resize_only() {
+fn a_saved_file_keeps_the_steps_from_before_a_resize() {
+    use crate::canvas::geometry::ImageOp;
+    let state = |app: &PainterApp| (snapshot(app), app.canvas.width(), app.canvas.height());
     let mut app = app();
+    let mut states = vec![state(&app)];
     gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(256.0, 0.0));
-    app.apply_image_op(crate::canvas::geometry::ImageOp::Rotate180);
+    states.push(state(&app));
+    app.add_layer_and_select();
+    states.push(state(&app));
     gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(0.0, 128.0));
+    states.push(state(&app));
+    app.apply_image_op(ImageOp::Resize {
+        w: 100,
+        h: 60,
+        smooth: true,
+    });
+    states.push(state(&app));
+    app.apply_image_op(ImageOp::RotateCw);
+    states.push(state(&app));
+    gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(60.0, 100.0));
+    states.push(state(&app));
+    // The last step undone: it's saved on the redo side.
+    app.apply_history(false);
+    let last = states.len() - 1;
+
     let bytes = crate::project::encode_project(&app).unwrap();
     let loaded = crate::project::decode_project(&bytes).unwrap();
-    assert_eq!(loaded.history.stacks().0.len(), 1, "the gradient after it");
+    let mut app = self::app();
+    app.replace_document(loaded.canvas, loaded.history);
+    assert!(state(&app) == states[last - 1], "opens as saved");
+    for i in (0..last - 1).rev() {
+        app.apply_history(false);
+        assert!(state(&app) == states[i], "undo back to state {i}");
+        assert_eq!(app.render_cache.tiles_x, app.canvas.width().div_ceil(64));
+    }
+    for (i, s) in states.iter().enumerate().skip(1) {
+        app.apply_history(true);
+        assert!(state(&app) == *s, "redo to state {i}");
+    }
+}
+
+#[test]
+fn a_file_without_resize_steps_has_no_document_in_its_header() {
+    // A step's `document` is left out of the file when it has none, so
+    // the header reads exactly as older builds wrote it.
+    let mut app = app();
+    gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(256.0, 0.0));
+    let bytes = crate::project::encode_project(&app).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(!text.contains("\"document\""));
+    let loaded = crate::project::decode_project(&bytes).unwrap();
+    assert_eq!(loaded.history.stacks().0.len(), 1);
 }
 
 #[test]

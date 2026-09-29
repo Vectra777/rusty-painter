@@ -269,10 +269,19 @@ pub enum DabSetting {
     Hue,
     Saturation,
     Value,
+    /// Scales the paper texture's strength.
+    TextureStrength,
+    /// Hardens the tip's edge (softens it the other way), up to 100%.
+    Hardness,
+    /// Scatters the dab, up to a brush width at full amount.
+    Scatter,
+    /// Mixes the brush colour with the secondary colour, all the way at
+    /// full amount.
+    ColorMix,
 }
 
 impl DabSetting {
-    pub const ALL: [DabSetting; 7] = [
+    pub const ALL: [DabSetting; 11] = [
         DabSetting::Size,
         DabSetting::Opacity,
         DabSetting::Angle,
@@ -280,6 +289,10 @@ impl DabSetting {
         DabSetting::Hue,
         DabSetting::Saturation,
         DabSetting::Value,
+        DabSetting::TextureStrength,
+        DabSetting::Hardness,
+        DabSetting::Scatter,
+        DabSetting::ColorMix,
     ];
 
     pub fn label(self) -> &'static str {
@@ -291,7 +304,19 @@ impl DabSetting {
             DabSetting::Hue => "Hue",
             DabSetting::Saturation => "Saturation",
             DabSetting::Value => "Value",
+            DabSetting::TextureStrength => "Texture strength",
+            DabSetting::Hardness => "Hardness",
+            DabSetting::Scatter => "Scatter",
+            DabSetting::ColorMix => "Secondary colour mix",
         }
+    }
+
+    /// It changes the dab's colour.
+    pub fn is_color(self) -> bool {
+        matches!(
+            self,
+            DabSetting::Hue | DabSetting::Saturation | DabSetting::Value | DabSetting::ColorMix
+        )
     }
 }
 
@@ -382,6 +407,10 @@ impl InputMapping {
             DabSetting::Hue => v.hsv[0] += a * x * 180.0,
             DabSetting::Saturation => v.hsv[1] += a * x,
             DabSetting::Value => v.hsv[2] += a * x,
+            DabSetting::TextureStrength => v.texture *= factor.max(0.0),
+            DabSetting::Hardness => v.hardness += a * x,
+            DabSetting::Scatter => v.scatter += a * x,
+            DabSetting::ColorMix => v.mix += a * x,
         }
     }
 }
@@ -409,6 +438,14 @@ pub struct DabVar {
     /// input mappings, folded into `orient`.
     pub turn: f32,
     pub squash: f32,
+    /// Texture strength factor (1 = the brush's).
+    pub texture: f32,
+    /// Hardness added to the brush's (0..1 is the whole range).
+    pub hardness: f32,
+    /// Scatter added to the brush's, in brush widths.
+    pub scatter: f32,
+    /// How much of the secondary colour is mixed in (0..1).
+    pub mix: f32,
 }
 
 impl Default for DabVar {
@@ -423,6 +460,10 @@ impl Default for DabVar {
             hatch: 1,
             turn: 0.0,
             squash: 1.0,
+            texture: 1.0,
+            hardness: 0.0,
+            scatter: 0.0,
+            mix: 0.0,
         }
     }
 }

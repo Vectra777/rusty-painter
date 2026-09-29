@@ -65,6 +65,10 @@ fn lift_pixels(app: &mut PainterApp) -> bool {
     if layer.locked || !matches!(layer.kind, LayerKind::Paint) {
         return false;
     }
+    if layer.position_locked {
+        app.export_state.message = Some("The layer's position is locked".into());
+        return false;
+    }
     let Some(source_id) = app.canvas.layer_id_at(active) else {
         return false;
     };
@@ -219,13 +223,17 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
             .collect();
         let moved = info.is_some_and(|i| !i.is_identity());
         if moved && app.canvas.layer_index_of(session.source_id).is_some() {
+            // A whole text layer only moved stays text (at its new place).
+            let layer_action = info
+                .filter(|_| session.selection.is_none())
+                .and_then(|i| app.text_layer_moved(session.source_id, &i));
             let action = UndoAction {
                 tiles,
                 selection: Some(session.selection.clone()),
                 transform: None,
-                layer_action: None,
+                layer_action,
             };
-            app.layer_state.history.push_action(action);
+            app.push_undo(action);
         }
     }
 
@@ -315,6 +323,7 @@ fn layer_under(app: &PainterApp, pos: Vec2) -> Option<usize> {
         let l = &app.canvas.layers[i];
         l.visible
             && !l.locked
+            && !l.position_locked
             && l.kind == LayerKind::Paint
             && app
                 .canvas
@@ -329,6 +338,7 @@ pub(crate) fn transform_press(app: &mut PainterApp, pos: Vec2) {
     // current box, which moves / scales it as usual).
     if app.workspace.transform_pick_layer
         && app.layer_state.floating_layer_idx.is_none()
+        && app.workspace.select.quick_mask.is_none()
         && !app.selection_manager.has_selection()
         && let Tool::Transform(info) = app.active_tool
     {
@@ -976,6 +986,26 @@ mod tests {
         app.active_tool = Tool::Select(crate::selection::SelectionType::Rectangle);
         commit_floating_layer(&mut app);
         assert!(app.selection_manager.contains(Vec2::new(68.0, 30.0)));
+    }
+
+    #[test]
+    fn a_position_locked_layer_stays_put() {
+        let mut app = app();
+        app.canvas_mut().layers[1].position_locked = true;
+        // The whole layer: nothing floats, and a notice says why.
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        transform_press(&mut app, Vec2::new(20.0, 20.0));
+        transform_drag(&mut app, Vec2::new(60.0, 20.0), false);
+        transform_release(&mut app);
+        commit_floating_layer(&mut app);
+        assert!(app.layer_state.floating_layer_idx.is_none());
+        assert!(app.export_state.message.is_some());
+        // A selection moves as an outline; the pixels stay.
+        move_square(&mut app, 40.0);
+        commit_floating_layer(&mut app);
+        assert_eq!(app.canvas.layers.len(), 2);
+        assert_eq!(pixel(&app, 1, 20, 20), RED);
+        assert_eq!(pixel(&app, 1, 60, 20).a(), 0);
     }
 
     #[test]

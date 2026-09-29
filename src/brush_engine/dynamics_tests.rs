@@ -1771,3 +1771,285 @@ fn mappings_survive_a_preset_file() {
     let back = crate::brush_engine::preset_file::decode(&bytes).unwrap();
     assert_eq!(back[0].brush.inputs, b.inputs);
 }
+
+fn map_pressure(
+    setting: crate::brush_engine::dynamics::DabSetting,
+    amount: f32,
+) -> crate::brush_engine::dynamics::InputMapping {
+    crate::brush_engine::dynamics::InputMapping {
+        sensor: crate::brush_engine::dynamics::Sensor::Pressure,
+        setting,
+        amount,
+        ..Default::default()
+    }
+}
+
+/// Partly painted pixels down column `x` (the soft edge).
+fn soft_edge(canvas: &Canvas, x: usize) -> usize {
+    (0..H)
+        .filter(|&y| (1..250).contains(&alpha(canvas, x, y)))
+        .count()
+}
+
+#[test]
+fn an_input_mapped_to_hardness_changes_the_edge() {
+    use crate::brush_engine::dynamics::DabSetting;
+    let soft = || {
+        let mut b = Brush::new(30.0, 0.0, Color32::BLACK, 5.0);
+        b.brush_options.pressure_size = false;
+        b
+    };
+    let (plain, _) = paint(&mut soft(), &line(64.0, 0.5), 1, true);
+    let mut hard = soft();
+    hard.inputs = vec![map_pressure(DabSetting::Hardness, 1.0)];
+    let (hardened, _) = paint(&mut hard, &line(64.0, 0.5), 1, true);
+    assert!(
+        soft_edge(&hardened, 128) * 3 < soft_edge(&plain, 128),
+        "crisper: {} vs {}",
+        soft_edge(&hardened, 128),
+        soft_edge(&plain, 128)
+    );
+    // The other way softens a hard brush.
+    let mut softened = Brush::new(30.0, 100.0, Color32::BLACK, 5.0);
+    softened.brush_options.pressure_size = false;
+    let (crisp, _) = paint(&mut softened.clone(), &line(64.0, 0.5), 1, true);
+    softened.inputs = vec![map_pressure(DabSetting::Hardness, -1.0)];
+    let (blurry, _) = paint(&mut softened, &line(64.0, 0.5), 1, true);
+    assert!(soft_edge(&blurry, 128) > soft_edge(&crisp, 128) * 3);
+}
+
+fn textured() -> Brush {
+    let mut b = brush(BrushDynamics::default());
+    b.brush_options.diameter = 30.0;
+    let mut t = crate::brush_engine::texture::BrushTexture::new(
+        crate::brush_engine::texture::builtin()[1].clone(),
+    );
+    t.strength = 1.0;
+    b.texture = Some(t);
+    b
+}
+
+#[test]
+fn an_input_mapped_to_texture_strength_scales_the_grain() {
+    use crate::brush_engine::dynamics::DabSetting;
+    let (grainy, _) = paint(&mut textured(), &line(64.0, 0.5), 1, true);
+    let mut none = textured();
+    none.texture = None;
+    let (smooth, _) = paint(&mut none, &line(64.0, 0.5), 1, true);
+    // Full pressure, amount -1: no grain at all.
+    let mut off = textured();
+    off.inputs = vec![map_pressure(DabSetting::TextureStrength, -1.0)];
+    let (mapped, _) = paint(&mut off, &line(64.0, 0.5), 1, true);
+    assert!(pixels(&mapped) == pixels(&smooth), "no grain left");
+    assert!(pixels(&grainy) != pixels(&smooth));
+    // Halfway: in between.
+    let mut half = textured();
+    half.inputs = vec![map_pressure(DabSetting::TextureStrength, -0.5)];
+    let (halfway, _) = paint(&mut half, &line(64.0, 0.5), 1, true);
+    let sum = |c: &Canvas| pixels(c).iter().map(|&a| a as u32).sum::<u32>();
+    assert!(sum(&grainy) < sum(&halfway) && sum(&halfway) < sum(&smooth));
+}
+
+#[test]
+fn an_input_mapped_to_scatter_scatters_repeatably() {
+    use crate::brush_engine::dynamics::DabSetting;
+    let mut b = brush(BrushDynamics::default());
+    b.inputs = vec![map_pressure(DabSetting::Scatter, 1.0)];
+    let (a, _) = paint(&mut b.clone(), &line(64.0, 0.5), 3, true);
+    let (again, _) = paint(&mut b.clone(), &line(64.0, 0.5), 3, true);
+    assert!(pixels(&a) == pixels(&again), "the same seed, the same dabs");
+    let (other, _) = paint(&mut b.clone(), &line(64.0, 0.5), 4, true);
+    assert!(pixels(&a) != pixels(&other));
+    // Up to a brush width each way: paint well off the line.
+    let far = |c: &Canvas| {
+        (0..W)
+            .flat_map(|x| (0..H).map(move |y| (x, y)))
+            .filter(|&(x, y)| (y as i32 - 64).abs() > 14 && alpha(c, x, y) > 0)
+            .count()
+    };
+    assert!(far(&a) > 50, "{}", far(&a));
+    let (plain, _) = paint(
+        &mut brush(BrushDynamics::default()),
+        &line(64.0, 0.5),
+        3,
+        true,
+    );
+    assert_eq!(far(&plain), 0);
+}
+
+#[test]
+fn an_input_mapped_to_colour_mix_paints_the_secondary_colour() {
+    use crate::brush_engine::dynamics::DabSetting;
+    let colour = |amount: f32| {
+        let mut b = brush(BrushDynamics::default());
+        b.second_color = Color32::from_rgb(220, 20, 20);
+        b.inputs = vec![map_pressure(DabSetting::ColorMix, amount)];
+        let (c, _) = paint(&mut b, &line(64.0, 0.5), 1, true);
+        pixel(&c, 128, 64)
+    };
+    let full = colour(1.0);
+    assert!(full.r() > 200 && full.g() < 40, "red: {full:?}");
+    let half = colour(0.5);
+    assert!(
+        (95..135).contains(&half.r()) && half.g() < 30,
+        "half way to red: {half:?}"
+    );
+    assert_eq!(colour(0.0), Color32::BLACK);
+}
+
+#[test]
+fn new_input_settings_survive_a_preset_file() {
+    use crate::brush_engine::dynamics::DabSetting;
+    let mut b = textured();
+    b.inputs = [
+        DabSetting::TextureStrength,
+        DabSetting::Hardness,
+        DabSetting::Scatter,
+        DabSetting::ColorMix,
+    ]
+    .into_iter()
+    .map(|s| map_pressure(s, 0.4))
+    .collect();
+    if let Some(t) = b.texture.as_mut() {
+        t.placement = crate::brush_engine::texture::GrainPlacement {
+            follow_stroke: true,
+            angle: 30.0,
+            random_offset: true,
+            per_dab: true,
+        };
+    }
+    let preset = crate::brush_engine::brush::BrushPreset {
+        name: "new inputs".into(),
+        brush: b.clone(),
+        file: None,
+    };
+    let bytes = crate::brush_engine::preset_file::encode(&[preset]).unwrap();
+    let back = crate::brush_engine::preset_file::decode(&bytes).unwrap();
+    assert_eq!(back[0].brush.inputs, b.inputs);
+    assert_eq!(back[0].brush.texture, b.texture);
+}
+
+/// A stroke with the texture placed by `placement`, starting at `x0`.
+fn placed_stroke(
+    placement: crate::brush_engine::texture::GrainPlacement,
+    x0: f32,
+    seed: u64,
+) -> Canvas {
+    let mut b = textured();
+    if let Some(t) = b.texture.as_mut() {
+        t.placement = placement;
+    }
+    let points: Vec<(Vec2, f64)> = (0..=30)
+        .map(|i| (Vec2::new(x0 + i as f32 * 3.0, 64.0), i as f64 * 0.01))
+        .collect();
+    paint(&mut b, &points, seed, true).0
+}
+
+/// How many pixels of two windows differ by more than the alpha dither
+/// (which goes by canvas position).
+fn unlike(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).filter(|(a, b)| a.abs_diff(**b) > 3).count()
+}
+
+/// The canvas from column `x0`, `n` wide.
+fn window(c: &Canvas, x0: usize, n: usize) -> Vec<u8> {
+    (0..H)
+        .flat_map(|y| (x0..x0 + n).map(move |x| (x, y)))
+        .map(|(x, y)| alpha(c, x, y))
+        .collect()
+}
+
+#[test]
+fn grain_can_move_with_the_stroke() {
+    use crate::brush_engine::texture::GrainPlacement;
+    let moving = GrainPlacement {
+        follow_stroke: true,
+        ..Default::default()
+    };
+    // Started 37 px further along: the same stroke, grain and all.
+    let (a, b) = (
+        placed_stroke(moving, 20.0, 1),
+        placed_stroke(moving, 57.0, 1),
+    );
+    assert_eq!(unlike(&window(&a, 10, 100), &window(&b, 47, 100)), 0);
+    // Pinned to the canvas, the grain stays put instead.
+    let pinned = GrainPlacement::default();
+    let (a, b) = (
+        placed_stroke(pinned, 20.0, 1),
+        placed_stroke(pinned, 57.0, 1),
+    );
+    assert!(unlike(&window(&a, 10, 100), &window(&b, 47, 100)) > 200);
+}
+
+#[test]
+fn a_random_offset_differs_each_stroke_but_repeats_with_a_seed() {
+    use crate::brush_engine::texture::GrainPlacement;
+    let random = GrainPlacement {
+        random_offset: true,
+        ..Default::default()
+    };
+    let one = pixels(&placed_stroke(random, 20.0, 1));
+    assert!(one == pixels(&placed_stroke(random, 20.0, 1)), "repeatable");
+    assert!(
+        one != pixels(&placed_stroke(random, 20.0, 2)),
+        "each stroke its own"
+    );
+    // Without it, strokes share the grain whatever the seed.
+    let plain = GrainPlacement::default();
+    assert!(pixels(&placed_stroke(plain, 20.0, 1)) == pixels(&placed_stroke(plain, 20.0, 2)));
+}
+
+#[test]
+fn texture_each_dab_gives_every_dab_the_same_grain() {
+    use crate::brush_engine::texture::GrainPlacement;
+    // Two dabs whole pixels apart look the same, grain and all.
+    let dab = |placement, at: Vec2| {
+        let mut b = textured();
+        if let Some(t) = b.texture.as_mut() {
+            t.placement = placement;
+        }
+        paint(&mut b, &[(at, 0.0)], 1, true).0
+    };
+    let each = GrainPlacement {
+        per_dab: true,
+        ..Default::default()
+    };
+    let (a, b) = (
+        dab(each, Vec2::new(60.25, 64.0)),
+        dab(each, Vec2::new(141.25, 64.0)),
+    );
+    assert_eq!(unlike(&window(&a, 40, 40), &window(&b, 121, 40)), 0);
+    let pinned = GrainPlacement::default();
+    let (a, b) = (
+        dab(pinned, Vec2::new(60.25, 64.0)),
+        dab(pinned, Vec2::new(141.25, 64.0)),
+    );
+    assert!(unlike(&window(&a, 40, 40), &window(&b, 121, 40)) > 50);
+}
+
+#[test]
+fn placed_grain_and_new_inputs_undo_exactly() {
+    use crate::brush_engine::texture::GrainPlacement;
+    let mut b = textured();
+    if let Some(t) = b.texture.as_mut() {
+        t.placement = GrainPlacement {
+            follow_stroke: true,
+            angle: 40.0,
+            random_offset: true,
+            per_dab: false,
+        };
+    }
+    b.inputs = vec![map_pressure(
+        crate::brush_engine::dynamics::DabSetting::Hardness,
+        0.5,
+    )];
+    let (mut canvas, undo) = paint(&mut b, &line(64.0, 0.5), 1, true);
+    let blank = pixels(&Canvas::new(W, H, Color32::WHITE, 64));
+    assert!(pixels(&canvas) != blank);
+    let mut history = History::new();
+    history.push_action(undo);
+    let mut selection = crate::selection::SelectionManager::new();
+    let mut tool = crate::app::tools::Tool::Brush;
+    history.undo(&mut canvas, &mut selection, &mut tool);
+    assert!(pixels(&canvas) == blank);
+}

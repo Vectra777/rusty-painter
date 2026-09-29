@@ -756,6 +756,55 @@ fn bench_feature_strokes(c: &mut Criterion) {
         ];
         b
     }));
+    // The new input targets: hardness, texture strength, scatter and the
+    // secondary colour mix, on a textured brush.
+    let paper = || {
+        rusty_painter::brush_engine::texture::BrushTexture::new(
+            rusty_painter::brush_engine::texture::builtin()[0].clone(),
+        )
+    };
+    cases.push(("input_targets", {
+        use rusty_painter::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+        let mut b = base();
+        b.texture = Some(paper());
+        let map = |sensor, setting, amount| InputMapping {
+            sensor,
+            setting,
+            amount,
+            ..Default::default()
+        };
+        b.inputs = vec![
+            map(Sensor::Pressure, DabSetting::Hardness, 0.5),
+            map(Sensor::Pressure, DabSetting::TextureStrength, -0.5),
+            map(Sensor::RandomDab, DabSetting::Scatter, 0.2),
+            map(Sensor::RandomDab, DabSetting::ColorMix, 0.5),
+        ];
+        b
+    }));
+    // Paper texture pinned (for comparison), then turned and moving with
+    // the stroke, then applied to each dab.
+    cases.push(("texture_pinned", {
+        let mut b = base();
+        b.texture = Some(paper());
+        b
+    }));
+    cases.push(("texture_turned_following", {
+        let mut b = base();
+        let mut t = paper();
+        t.placement.angle = 30.0;
+        t.placement.follow_stroke = true;
+        t.placement.random_offset = true;
+        b.texture = Some(t);
+        b
+    }));
+    cases.push(("texture_each_dab", {
+        let mut b = base();
+        let mut t = paper();
+        t.placement.per_dab = true;
+        t.placement.random_offset = true;
+        b.texture = Some(t);
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {

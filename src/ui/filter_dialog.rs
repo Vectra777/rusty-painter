@@ -225,6 +225,8 @@ pub fn adjustment_dialog(app: &mut PainterApp, ctx: &egui::Context) {
             done = ui.button("Done").clicked();
         });
     if app.canvas.layers[idx].adjustment != Some(filter) {
+        // Dragged: the screen previews at its own resolution until let go.
+        app.workspace.filter.adjusting = ctx.input(|i| i.pointer.any_down());
         app.canvas_mut().layers[idx].adjustment = Some(filter);
         app.mark_all_tiles_dirty();
         app.layer_state.thumbnails_dirty = true;

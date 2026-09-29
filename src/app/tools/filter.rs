@@ -2,13 +2,23 @@
 //! a dialog and previews on the layer as its sliders move; OK keeps it as
 //! one undo step, Cancel puts the layer back. Inside a selection only the
 //! selected pixels change (soft edges blend).
+//!
+//! A filter too slow to rerun on every slider step (a big layer) shows a
+//! quick preview while the slider is dragged instead: only the part on
+//! screen, at about the screen's resolution, from a shrunk copy of the
+//! layer made once. The layer itself gets the exact result when the slider
+//! is let go. Adjustment layers' sliders preview the same way (the screen
+//! composites at the screen's resolution until they're let go).
 
 use crate::app::PainterApp;
+use crate::app::view::render::PreviewView;
 use crate::canvas::filters::{Filter, MAX_REACH};
 use crate::canvas::history::UndoAction;
-use crate::canvas::storage::{LayerId, LayerKind, Region};
+use crate::canvas::storage::{LayerId, LayerKind, Region, shrink_tile};
 use crate::selection::SelectionMask;
-use eframe::egui;
+use eframe::egui::{self, Color32};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 /// A filter being previewed.
@@ -22,9 +32,116 @@ pub struct FilterSession {
     coverage: Option<SelectionMask>,
     /// Needs running again (a setting changed).
     pub dirty: bool,
-    /// The last run took long enough to stall a slider drag: wait for the
-    /// release before running again.
+    /// The last run took long enough to stall a slider drag: while one is
+    /// dragged, show a quick preview instead.
     slow: bool,
+    /// The layer holds this filter's exact result (not a preview's).
+    exact: bool,
+    /// The area's pixels shrunk for previews, made once per resolution.
+    source: Option<ShrunkSource>,
+    /// What the screen shows while a slider is dragged.
+    preview: Option<FilterPreview>,
+}
+
+/// The session's area before the filter, shrunk by `block` (each
+/// `block`×`block` square of the canvas averaged), with the selection's
+/// coverage shrunk the same way.
+struct ShrunkSource {
+    block: usize,
+    /// In shrunk pixels: `[u0, v0, u1, v1)`.
+    bounds: [i32; 4],
+    pixels: Vec<Color32>,
+    coverage: Option<Vec<u8>>,
+}
+
+/// The layer's tiles on screen as the filter would make them, shrunk by
+/// `block`, for the screen to composite in place of the layer's.
+struct FilterPreview {
+    view: PreviewView,
+    tiles: FxHashMap<(i32, i32), Vec<Color32>>,
+}
+
+impl ShrunkSource {
+    fn new(original: &Region, coverage: Option<&SelectionMask>, block: usize, ts: usize) -> Self {
+        let [x0, y0, x1, y1] = original.bounds;
+        let pixels = original.pixels(ts);
+        let b = block as i32;
+        let bounds = [
+            x0.div_euclid(b),
+            y0.div_euclid(b),
+            (x1 + b - 1).div_euclid(b),
+            (y1 + b - 1).div_euclid(b),
+        ];
+        if block == 1 {
+            let coverage = coverage.map(|mask| {
+                (y0..y1)
+                    .flat_map(|y| (x0..x1).map(move |x| mask.value(x, y)))
+                    .collect()
+            });
+            return Self {
+                block,
+                bounds,
+                pixels,
+                coverage,
+            };
+        }
+        let w = (x1 - x0) as usize;
+        let sw = (bounds[2] - bounds[0]) as usize;
+        let sh = (bounds[3] - bounds[1]) as usize;
+        // The canvas pixels of shrunk row `v` or column `u`, in the area.
+        let span = |start: i32, lo: i32, hi: i32| (start * b).max(lo)..((start + 1) * b).min(hi);
+        let mut shrunk = vec![Color32::TRANSPARENT; sw * sh];
+        let mut shrunk_coverage = coverage.map(|_| vec![0u8; sw * sh]);
+        let rows: Vec<(&mut [Color32], Option<&mut [u8]>)> = match shrunk_coverage.as_mut() {
+            Some(c) => shrunk
+                .chunks_mut(sw)
+                .zip(c.chunks_mut(sw).map(Some))
+                .collect(),
+            None => shrunk.chunks_mut(sw).map(|r| (r, None)).collect(),
+        };
+        rows.into_par_iter()
+            .enumerate()
+            .for_each(|(row, (out, mut cov_out))| {
+                let ys = span(bounds[1] + row as i32, y0, y1);
+                for (col, px) in out.iter_mut().enumerate() {
+                    let xs = span(bounds[0] + col as i32, x0, x1);
+                    let mut sum = [0u32; 4];
+                    let mut cov = 0u32;
+                    for y in ys.clone() {
+                        let base = (y - y0) as usize * w;
+                        for x in xs.clone() {
+                            let c = pixels[base + (x - x0) as usize].to_array();
+                            for (s, v) in sum.iter_mut().zip(c) {
+                                *s += v as u32;
+                            }
+                            if let Some(mask) = coverage {
+                                cov += mask.value(x, y) as u32;
+                            }
+                        }
+                    }
+                    let n = (ys.len() * xs.len()).max(1) as u32;
+                    let [r, g, bl, a] = sum.map(|v| ((v + n / 2) / n) as u8);
+                    *px = Color32::from_rgba_premultiplied(r, g, bl, a);
+                    if let Some(cov_out) = cov_out.as_deref_mut() {
+                        cov_out[col] = ((cov + n / 2) / n) as u8;
+                    }
+                }
+            });
+        Self {
+            block,
+            bounds,
+            pixels: shrunk,
+            coverage: shrunk_coverage,
+        }
+    }
+}
+
+#[cfg(test)]
+impl FilterSession {
+    /// As if the last run had been slow.
+    pub(crate) fn set_slow(&mut self) {
+        self.slow = true;
+    }
 }
 
 /// A run slower than this waits for the slider to be let go.
@@ -35,6 +152,33 @@ pub struct FilterState {
     pub session: Option<FilterSession>,
     /// The adjustment layer whose settings are open.
     pub editing: Option<LayerId>,
+    /// One of its settings is being dragged.
+    pub adjusting: bool,
+}
+
+impl FilterState {
+    /// Whether the screen shows a quick preview (a setting is dragged).
+    pub(crate) fn live(&self) -> bool {
+        self.adjusting || self.session.as_ref().is_some_and(|s| s.preview.is_some())
+    }
+
+    /// The previewed layer's shrunk pixels for tile `(tx, ty)` at `block`,
+    /// with the layer's index, if the preview has them.
+    pub(crate) fn preview_pixels(
+        &self,
+        canvas: &crate::canvas::Canvas,
+        tx: usize,
+        ty: usize,
+        block: usize,
+    ) -> Option<(usize, &[Color32])> {
+        let session = self.session.as_ref()?;
+        let preview = session.preview.as_ref()?;
+        if preview.view.block != block {
+            return None;
+        }
+        let pixels = preview.tiles.get(&(tx as i32, ty as i32))?;
+        Some((canvas.layer_index_of(session.layer)?, pixels))
+    }
 }
 
 impl PainterApp {
@@ -79,23 +223,144 @@ impl PainterApp {
             coverage,
             dirty: true,
             slow: false,
+            exact: false,
+            source: None,
+            preview: None,
         });
         if !filter.has_settings() {
             self.filter_commit();
         }
     }
 
-    /// Run the filter again if its settings changed (once a frame; a slow
-    /// filter only once the pointer is up).
-    pub(crate) fn filter_update(&mut self, pointer_down: bool) {
-        if self
-            .workspace
-            .filter
-            .session
-            .as_ref()
-            .is_some_and(|s| s.dirty && !(s.slow && pointer_down))
-        {
-            self.filter_run();
+    /// Run the filter again if its settings changed, once a frame (so only
+    /// the latest value of a dragged slider). `dragging` is what's on
+    /// screen while the pointer is down: a slow filter then previews there
+    /// instead, and runs exactly once the pointer is up.
+    pub(crate) fn filter_update(&mut self, dragging: Option<&PreviewView>) {
+        if dragging.is_none() {
+            self.workspace.filter.adjusting = false;
+        }
+        let Some(session) = self.workspace.filter.session.as_ref() else {
+            return;
+        };
+        match dragging {
+            Some(view) if session.slow => {
+                let moved = session.preview.as_ref().is_some_and(|p| p.view != *view);
+                if session.dirty || moved {
+                    self.filter_preview(view);
+                }
+            }
+            _ => {
+                if session.dirty || !session.exact {
+                    self.filter_run();
+                }
+            }
+        }
+    }
+
+    /// Show the filter's effect on the part of the layer on screen, from
+    /// the shrunk source (see the module docs). The layer isn't changed.
+    fn filter_preview(&mut self, view: &PreviewView) {
+        let Some(layer) = self.filter_layer() else {
+            return;
+        };
+        let pool = Arc::clone(&self.workspace.pool);
+        let canvas = &self.canvas;
+        let alpha_lock = canvas.layers[layer].alpha_locked;
+        let (ts, cw, ch) = (canvas.tile_size(), canvas.width(), canvas.height());
+        let Some(session) = self.workspace.filter.session.as_mut() else {
+            return;
+        };
+        let block = view.block;
+        let preview_tiles = pool.install(|| {
+            if session.source.as_ref().is_none_or(|s| s.block != block) {
+                session.source = Some(ShrunkSource::new(
+                    &session.original,
+                    session.coverage.as_ref(),
+                    block,
+                    ts,
+                ));
+            }
+            let Some(source) = session.source.as_ref() else {
+                return FxHashMap::default();
+            };
+            let shown: Vec<((i32, i32), &[Color32])> = session
+                .original
+                .original_tiles()
+                .filter(|&((tx, ty), _)| view.contains(tx as usize, ty as usize))
+                .collect();
+            if shown.is_empty() {
+                return FxHashMap::default();
+            }
+            // The shrunk area those tiles cover, plus what the filter reads
+            // around it.
+            let (b, tsb) = (block as i32, (ts / block) as i32);
+            let margin = (session.filter.reach() + b - 1) / b + 1;
+            let (mut u0, mut v0, mut u1, mut v1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+            for &((tx, ty), _) in &shown {
+                (u0, v0) = (u0.min(tx * tsb), v0.min(ty * tsb));
+                (u1, v1) = (u1.max((tx + 1) * tsb), v1.max((ty + 1) * tsb));
+            }
+            let [su0, sv0, su1, sv1] = source.bounds;
+            let (u0, v0) = ((u0 - margin).max(su0), (v0 - margin).max(sv0));
+            let (u1, v1) = ((u1 + margin).min(su1), (v1 + margin).min(sv1));
+            if u1 <= u0 || v1 <= v0 {
+                return FxHashMap::default();
+            }
+            let (w, h) = ((u1 - u0) as usize, (v1 - v0) as usize);
+            let sw = (su1 - su0) as usize;
+            let mut src = Vec::with_capacity(w * h);
+            for v in v0..v1 {
+                let row = (v - sv0) as usize * sw + (u0 - su0) as usize;
+                src.extend_from_slice(&source.pixels[row..row + w]);
+            }
+            let out = session.filter.shrunk(block).apply(&src, w, h, (u0, v0));
+            let at = |u: i32, v: i32| -> Option<usize> {
+                ((u0..u1).contains(&u) && (v0..v1).contains(&v))
+                    .then(|| (v - v0) as usize * w + (u - u0) as usize)
+            };
+            let in_source = |u: i32, v: i32| -> Option<usize> {
+                ((su0..su1).contains(&u) && (sv0..sv1).contains(&v))
+                    .then(|| (v - sv0) as usize * sw + (u - su0) as usize)
+            };
+            shown
+                .into_par_iter()
+                .map(|((tx, ty), original)| {
+                    let tw = ts.min(cw.saturating_sub(tx as usize * ts));
+                    let th = ts.min(ch.saturating_sub(ty as usize * ts));
+                    let mut pixels = shrink_tile(original, ts, tw, th, block);
+                    let row_len = tw.div_ceil(block);
+                    for (i, px) in pixels.iter_mut().enumerate() {
+                        let (u, v) = (
+                            tx * tsb + (i % row_len) as i32,
+                            ty * tsb + (i / row_len) as i32,
+                        );
+                        let (Some(o), Some(k)) = (at(u, v), in_source(u, v)) else {
+                            continue;
+                        };
+                        let old = *px;
+                        let mut new = out[o];
+                        if let Some(cov) = source.coverage.as_ref() {
+                            new = crate::canvas::storage::mix(old, new, cov[k]);
+                        }
+                        if alpha_lock {
+                            new = crate::canvas::blend::with_alpha_of(new, old.a());
+                        }
+                        *px = new;
+                    }
+                    ((tx, ty), pixels)
+                })
+                .collect()
+        });
+        session.dirty = false;
+        session.exact = false;
+        let keys: Vec<(i32, i32)> = preview_tiles.keys().copied().collect();
+        session.preview = Some(FilterPreview {
+            view: view.clone(),
+            tiles: preview_tiles,
+        });
+        for (tx, ty) in keys {
+            self.mark_tile_dirty(tx as usize, ty as usize);
         }
     }
 
@@ -129,6 +394,8 @@ impl PainterApp {
             canvas.replace_region(layer, &session.original, &out, session.coverage.as_ref());
         });
         session.dirty = false;
+        session.exact = true;
+        session.preview = None;
         session.slow = started.elapsed() > LIVE_BUDGET;
         let area = egui::Rect::from_min_max(
             egui::pos2(x0 as f32, y0 as f32),
@@ -145,7 +412,7 @@ impl PainterApp {
             .filter
             .session
             .as_ref()
-            .is_some_and(|s| s.dirty)
+            .is_some_and(|s| s.dirty || !s.exact)
         {
             self.filter_run();
         }
@@ -160,7 +427,7 @@ impl PainterApp {
         if tiles.is_empty() {
             return;
         }
-        self.layer_state.history.push_action(UndoAction {
+        self.push_undo(UndoAction {
             tiles,
             selection: None,
             transform: None,
@@ -232,7 +499,7 @@ mod tests {
             saturation: 0.0,
             lightness: 0.0,
         });
-        app.filter_update(false);
+        app.filter_update(None);
         assert_eq!(
             pixel(&app, 10, 10),
             Color32::from_rgb(0, 255, 0),
@@ -251,7 +518,7 @@ mod tests {
             saturation: 0.0,
             lightness: 0.0,
         });
-        app.filter_update(false);
+        app.filter_update(None);
         let session = app.workspace.filter.session.as_mut().unwrap();
         session.filter = Filter::HueSaturation {
             hue: -120.0,

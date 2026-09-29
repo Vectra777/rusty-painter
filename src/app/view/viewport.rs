@@ -146,7 +146,10 @@ impl PainterApp {
         let x = (pos.x.max(0.0) as usize).min(self.canvas.width().saturating_sub(1));
         let y = (pos.y.max(0.0) as usize).min(self.canvas.height().saturating_sub(1));
         let mut image = egui::ColorImage::new([1, 1], egui::Color32::TRANSPARENT);
-        self.canvas
+        // Draft layers aren't sampled.
+        let view = self.canvas.without_drafts();
+        view.as_ref()
+            .unwrap_or(&self.canvas)
             .write_region_to_color_image(x, y, 1, 1, &mut image, 1);
         let Some(&sample) = image.pixels.first() else {
             return;

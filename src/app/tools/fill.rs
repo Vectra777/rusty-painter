@@ -6,7 +6,7 @@ use crate::PainterApp;
 use crate::app::stroke_ops::exclusive;
 use crate::canvas::fill::{self, FillSettings};
 use crate::canvas::history::UndoAction;
-use crate::canvas::storage::LayerKind;
+use crate::canvas::storage::{LayerKind, SampleLayers};
 use crate::selection::SelectionMask;
 use eframe::egui::Vec2;
 
@@ -42,6 +42,8 @@ pub enum FillSource {
     CurrentLayer,
     LayerBelow,
     AllVisible,
+    /// The layers marked as reference (painting on the active one).
+    Reference,
 }
 
 pub struct FillToolState {
@@ -66,12 +68,13 @@ impl Default for FillToolState {
 }
 
 impl PainterApp {
-    fn fill_source_layer(&self) -> Option<usize> {
+    fn fill_source_layer(&self) -> SampleLayers {
         let active = self.canvas.active_layer_idx;
         match self.workspace.fill.source {
-            FillSource::CurrentLayer => Some(active),
-            FillSource::LayerBelow => Some(active.saturating_sub(1)),
-            FillSource::AllVisible => None,
+            FillSource::CurrentLayer => SampleLayers::Layer(active),
+            FillSource::LayerBelow => SampleLayers::Layer(active.saturating_sub(1)),
+            FillSource::AllVisible => SampleLayers::AllVisible,
+            FillSource::Reference => SampleLayers::Reference,
         }
     }
 
@@ -88,7 +91,7 @@ impl PainterApp {
                 let (x, y) = (pos.x.floor() as i32, pos.y.floor() as i32);
                 self.run_fill(|app, source, settings| {
                     let canvas = &app.canvas;
-                    let reference = |x, y, w, h| canvas.render_reference(source, x, y, w, h);
+                    let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
                     fill::bucket_fill(
                         &reference,
                         canvas.width(),
@@ -141,7 +144,7 @@ impl PainterApp {
         }
         self.run_fill(|app, source, settings| {
             let canvas = &app.canvas;
-            let reference = |x, y, w, h| canvas.render_reference(source, x, y, w, h);
+            let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
             fill::enclose_fill(&reference, canvas.width(), canvas.height(), &path, settings)
         });
     }
@@ -195,7 +198,7 @@ impl PainterApp {
         };
         let changed = exclusive(&mut self.canvas).erase_mask(target, &mask, &mut action);
         if let Some(rect) = changed {
-            self.layer_state.history.push_action(action);
+            self.push_undo(action);
             self.mark_tiles_in_bounds_dirty(rect);
             self.layer_state.thumbnails_dirty = true;
         }
@@ -223,14 +226,20 @@ impl PainterApp {
     /// it with the brush colour as one undo step.
     fn run_fill(
         &mut self,
-        make: impl FnOnce(&Self, Option<usize>, &FillSettings) -> Option<SelectionMask>,
+        make: impl FnOnce(&Self, SampleLayers, &FillSettings) -> Option<SelectionMask>,
     ) {
         let Some(target) = self.fill_target() else {
             return;
         };
+        let source = self.fill_source_layer();
+        if source == SampleLayers::Reference && !self.canvas.has_reference_layer() {
+            self.export_state.message =
+                Some("No reference layer: mark one in the Layers panel".into());
+            return;
+        }
         self.release_canvas();
         let settings = self.workspace.fill.settings;
-        let Some(mut mask) = make(self, self.fill_source_layer(), &settings) else {
+        let Some(mut mask) = make(self, source, &settings) else {
             return;
         };
         self.clip_to_selection(&mut mask);
@@ -243,7 +252,7 @@ impl PainterApp {
         };
         let changed = exclusive(&mut self.canvas).paint_mask(target, &mask, color, &mut action);
         if let Some(rect) = changed {
-            self.layer_state.history.push_action(action);
+            self.push_undo(action);
             self.mark_tiles_in_bounds_dirty(rect);
         }
     }

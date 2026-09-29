@@ -57,13 +57,15 @@ impl PainterApp {
     }
 
     /// Import every image file dropped on the window this frame. Dropped on
-    /// the open Palette window, a picture gives its colours instead.
+    /// the open Palette window, a picture gives its colours instead; on the
+    /// Reference window, it becomes the reference image.
     pub(crate) fn import_dropped_files(&mut self, ctx: &eframe::egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
             return;
         }
         let to_palette = self.drop_is_on_palette(ctx);
+        let to_reference = self.drop_is_on_reference(ctx);
         for file in dropped {
             let path = file.path.as_deref();
             let name = path
@@ -96,7 +98,11 @@ impl PainterApp {
                     (None, None) => continue,
                 };
                 bytes.and_then(|bytes| {
-                    if to_palette {
+                    if to_reference {
+                        self.open_reference_bytes(&file.name, &bytes)?;
+                        self.workspace.view_aids.reference.path = path.map(|p| p.to_path_buf());
+                        Ok(())
+                    } else if to_palette {
                         self.extract_palette_from_image(&name, &bytes)
                     } else {
                         self.import_image_bytes(&name, &bytes)

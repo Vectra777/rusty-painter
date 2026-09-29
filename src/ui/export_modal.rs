@@ -15,6 +15,8 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
     if !app.export_state.show_modal {
         return;
     }
+    // The quick mask layer isn't part of the picture.
+    app.quick_mask_leave();
 
     let mut open = app.export_state.show_modal;
     egui::Window::new("Export Canvas")
@@ -100,7 +102,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                             &app.canvas,
                         )))
                     } else {
-                        Data::Image(app.canvas.flatten())
+                        Data::Image(app.canvas.flatten_final())
                     };
 
                     app.export_state.in_progress = true;

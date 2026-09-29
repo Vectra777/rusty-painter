@@ -141,9 +141,15 @@ fn handle_pen_drag(
     pressure: f32,
 ) {
     let snap = ctx.input(|i| i.modifiers.shift);
-    if app.guides_drag(raw, snap) {
+    if app.guide_lines_drag(raw)
+        || (app.guides_dragging() && app.guides_drag(app.snap_point(raw), snap))
+    {
         return;
     }
+    let (pos, raw) = (
+        app.tool_snap(pos, false, true),
+        app.tool_snap(raw, false, false),
+    );
     match app.active_tool {
         Tool::Brush => app.add_stroke_point(raw, pressure),
         Tool::Select(_) => app.select_move(pos),
@@ -255,6 +261,7 @@ fn handle_mouse_button(
         }
         egui::PointerButton::Secondary => {
             app.viewport.is_panning = pressed && response.hovered();
+            app.radial_right_button(pos, pressed, response.hovered());
         }
         egui::PointerButton::Middle => {
             app.viewport.is_rotating = pressed && response.hovered();
@@ -317,6 +324,10 @@ fn handle_primary_press(
     if app.viewport.is_panning || !over {
         return;
     }
+    // Ctrl on a guide line (or beside the canvas) moves (or pulls out) one.
+    if app.guide_lines_press(raw, response.ctx.input(|i| i.modifiers.command)) {
+        return;
+    }
     // A guide handle under the press is the guide's, not the tool's.
     if app.guides_press(raw) {
         return;
@@ -333,6 +344,9 @@ fn handle_primary_press(
         }
         return;
     }
+    // Onto guides and the grid, when snapping to them.
+    let canvas_pos = (app.tool_snap(canvas_pos.0, true, true), canvas_pos.1);
+    let raw = app.tool_snap(raw, true, false);
 
     match app.active_tool {
         Tool::Brush => app.start_stroke_with_pressure(raw, pressure),
@@ -367,7 +381,7 @@ fn handle_primary_press(
 }
 
 fn handle_primary_release(app: &mut PainterApp) {
-    if app.guides_release() {
+    if app.guide_lines_release() || app.guides_release() {
         return;
     }
     if matches!(app.active_tool, Tool::Transform(_)) {
@@ -436,29 +450,46 @@ fn handle_pointer_move(
         app.viewport.offset.x += delta.x;
         app.viewport.offset.y += delta.y;
         ctx.request_repaint();
+    } else if app.guide_lines_dragging() {
+        let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+        app.guide_lines_drag(raw);
+        ctx.request_repaint();
     } else if app.guides_dragging() {
         let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
-        app.guides_drag(raw, ctx.input(|i| i.modifiers.shift));
+        app.guides_drag(app.snap_point(raw), ctx.input(|i| i.modifiers.shift));
         ctx.request_repaint();
     } else {
         let (clamped, is_inside) = app.screen_to_canvas(pos, placement.origin, placement.center);
+        let clamped = app.tool_snap(clamped, false, true);
         if matches!(app.active_tool, Tool::Brush) {
             let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
             handle_brush_move(app, response, raw);
         } else if matches!(app.active_tool, Tool::Shape(_)) {
             // Shapes may reach off the canvas, like strokes.
-            let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+            let raw = app.tool_snap(
+                app.screen_to_canvas_raw(pos, placement.origin, placement.center),
+                false,
+                false,
+            );
             app.shape_move(raw, shape_mods(ctx));
             ctx.request_repaint();
         } else if matches!(app.active_tool, Tool::Gradient) {
             if app.viewport.is_primary_down {
-                let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+                let raw = app.tool_snap(
+                    app.screen_to_canvas_raw(pos, placement.origin, placement.center),
+                    false,
+                    false,
+                );
                 app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift));
                 ctx.request_repaint();
             }
         } else if matches!(app.active_tool, Tool::Text) {
             if app.viewport.is_primary_down {
-                let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+                let raw = app.tool_snap(
+                    app.screen_to_canvas_raw(pos, placement.origin, placement.center),
+                    false,
+                    false,
+                );
                 app.text_drag(raw);
                 ctx.request_repaint();
             }

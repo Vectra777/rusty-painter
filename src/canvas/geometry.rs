@@ -156,7 +156,17 @@ impl Canvas {
                 let out = op.apply(&src, w, h, fill);
                 split_tiles(&out, nw, nh, ts, fill)
             };
-            new_layers.push((layer.shell(), tiles));
+            let mut shell = layer.shell();
+            // Text keeps its source when only the frame moves; resampled,
+            // turned or flipped, it's plain pixels.
+            shell.text = match op {
+                ImageOp::Reframe { x, y, .. } => shell.text.take().map(|mut t| {
+                    t.pos -= eframe::egui::vec2(x as f32, y as f32);
+                    t
+                }),
+                _ => None,
+            };
+            new_layers.push((shell, tiles));
         }
         let mut doc = DocumentState {
             width: nw,

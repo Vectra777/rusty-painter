@@ -3,11 +3,12 @@
 //! the Shape tool's handles until it's applied (a press elsewhere, Enter,
 //! or another tool), then the brush is back.
 //!
-//! Ellipses come out upright (the Shape tool's ellipses have no rotation).
+//! Ellipses keep the slant they were drawn with: their axes come from the
+//! stroke's second moments. One drawn nearly upright comes out upright.
 
 use crate::app::PainterApp;
 use crate::app::tools::Tool;
-use crate::app::tools::shape::ShapeKind;
+use crate::app::tools::shape::{ShapeKind, turned};
 use eframe::egui::Vec2;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,11 @@ const HOLD: Duration = Duration::from_millis(600);
 const DRIFT: f32 = 4.0;
 /// Shortest stroke (screen points) that can become a shape.
 const MIN_LENGTH: f32 = 40.0;
+/// An ellipse slanted less than this comes out upright.
+const UPRIGHT: f32 = 4.0 * std::f32::consts::PI / 180.0;
+/// Axes closer than this ratio (of their spreads) make a circle, whose
+/// slant means nothing: it comes out upright.
+const ROUND: f32 = 1.1;
 
 pub struct QuickShapeState {
     pub enabled: bool,
@@ -84,7 +90,7 @@ impl PainterApp {
         if length * zoom < MIN_LENGTH {
             return;
         }
-        let Some((kind, points)) = fit_shape(&q.path) else {
+        let Some((kind, points, angle)) = fit_shape(&q.path) else {
             // Not a shape: stop checking until the pen moves on.
             self.workspace.quickshape.rest = None;
             return;
@@ -95,7 +101,7 @@ impl PainterApp {
         self.workspace.quickshape.rest = None;
         self.workspace.quickshape.from_stroke = true;
         self.active_tool = Tool::Shape(kind);
-        self.workspace.shapes.start_editing(kind, points);
+        self.workspace.shapes.start_editing(kind, points, angle);
     }
 
     /// The shape from a stroke was applied or dropped: back to the brush.
@@ -135,8 +141,50 @@ fn simplify(pts: &[Vec2], eps: f32) -> Vec<Vec2> {
     left
 }
 
-/// The clean shape a hand-drawn stroke was meant to be, if any.
-pub fn fit_shape(pts: &[Vec2]) -> Option<(ShapeKind, Vec<Vec2>)> {
+/// The slant of the ellipse through `pts` (radians, clockwise on screen,
+/// within ±45°: the box can take either axis across), from the second
+/// moments of the stroke weighted by length, so a slower part of the
+/// stroke doesn't count more. 0 for a nearly upright ellipse or a circle.
+fn ellipse_slant(pts: &[Vec2]) -> f32 {
+    let mut total = 0.0;
+    let mut mean = Vec2::ZERO;
+    for w in pts.windows(2) {
+        let len = (w[1] - w[0]).length();
+        total += len;
+        mean += (w[0] + w[1]) * 0.5 * len;
+    }
+    if total <= 0.0 {
+        return 0.0;
+    }
+    mean /= total;
+    let (mut xx, mut yy, mut xy) = (0.0, 0.0, 0.0);
+    for w in pts.windows(2) {
+        let len = (w[1] - w[0]).length();
+        let d = (w[0] + w[1]) * 0.5 - mean;
+        xx += d.x * d.x * len;
+        yy += d.y * d.y * len;
+        xy += d.x * d.y * len;
+    }
+    // Eigenvalues of the covariance: the spread along each axis.
+    let half_diff = ((xx - yy) * 0.5).hypot(xy);
+    let (big, small) = ((xx + yy) * 0.5 + half_diff, (xx + yy) * 0.5 - half_diff);
+    if small <= 0.0 || big < small * ROUND * ROUND {
+        return 0.0;
+    }
+    let quarter = std::f32::consts::FRAC_PI_2;
+    let mut angle = 0.5 * (2.0 * xy).atan2(xx - yy);
+    // The major axis, or the minor one, whichever is nearer across.
+    if angle > quarter * 0.5 {
+        angle -= quarter;
+    } else if angle <= -quarter * 0.5 {
+        angle += quarter;
+    }
+    if angle.abs() < UPRIGHT { 0.0 } else { angle }
+}
+
+/// The clean shape a hand-drawn stroke was meant to be, if any: its kind,
+/// its points (as the Shape tool keeps them) and, for an ellipse, its slant.
+pub fn fit_shape(pts: &[Vec2]) -> Option<(ShapeKind, Vec<Vec2>, f32)> {
     if pts.len() < 3 {
         return None;
     }
@@ -155,19 +203,32 @@ pub fn fit_shape(pts: &[Vec2]) -> Option<(ShapeKind, Vec<Vec2>)> {
         .map(|&p| to_segment(p, first, last))
         .fold(0.0, f32::max);
     if chord > size * 0.9 && off_line <= (chord * 0.04).max(2.0) {
-        return Some((ShapeKind::Line, vec![first, last]));
+        return Some((ShapeKind::Line, vec![first, last], 0.0));
     }
     // Otherwise only closed shapes: the end near the start.
     if chord > size * 0.25 {
         return None;
     }
-    let half = ((max.x - min.x) + (max.y - min.y)) * 0.25;
-    // As an upright ellipse in its box: how far points stray from it.
-    let c = (min + max) * 0.5;
-    let r = ((max - min) * 0.5).max(Vec2::splat(1.0));
+    // As an ellipse in its box (turned with the stroke's slant): how far
+    // points stray from it.
+    let slant = ellipse_slant(pts);
+    let (box_min, box_max) = if slant == 0.0 {
+        (min, max)
+    } else {
+        pts.iter().map(|&p| turned(p, -slant)).fold(
+            (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+            |(lo, hi), p| (lo.min(p), hi.max(p)),
+        )
+    };
+    // (Sizes are measured in that box too, so a slanted shape is judged
+    // like the same shape upright.)
+    let half = ((box_max.x - box_min.x) + (box_max.y - box_min.y)) * 0.25;
+    let c = (box_min + box_max) * 0.5;
+    let r = ((box_max - box_min) * 0.5).max(Vec2::splat(1.0));
     let ellipse_err = pts
         .iter()
         .map(|&p| {
+            let p = if slant == 0.0 { p } else { turned(p, -slant) };
             let q = (p - c) / r;
             (q.length() - 1.0).abs()
         })
@@ -207,12 +268,21 @@ pub fn fit_shape(pts: &[Vec2]) -> Option<(ShapeKind, Vec<Vec2>)> {
                     .fold((corners[0], corners[0]), |(lo, hi), &p| {
                         (lo.min(p), hi.max(p))
                     });
-                return Some((ShapeKind::Rectangle, vec![lo, hi]));
+                return Some((ShapeKind::Rectangle, vec![lo, hi], 0.0));
             }
         }
-        return Some((ShapeKind::Polygon, corners));
+        return Some((ShapeKind::Polygon, corners, 0.0));
     }
-    (ellipse_err < 0.12).then(|| (ShapeKind::Ellipse, vec![min, max]))
+    if ellipse_err >= 0.12 {
+        return None;
+    }
+    if slant == 0.0 {
+        return Some((ShapeKind::Ellipse, vec![min, max], 0.0));
+    }
+    // The box before turning, about the ellipse's centre on the canvas.
+    let center = turned(c, slant);
+    let r = (box_max - box_min) * 0.5;
+    Some((ShapeKind::Ellipse, vec![center - r, center + r], slant))
 }
 
 #[cfg(test)]
@@ -239,7 +309,7 @@ mod tests {
             along(Vec2::new(10.0, 10.0), Vec2::new(300.0, 120.0), 80),
             3.0,
         );
-        let (kind, p) = fit_shape(&pts).unwrap();
+        let (kind, p, _) = fit_shape(&pts).unwrap();
         assert_eq!(kind, ShapeKind::Line);
         assert_eq!(p[0], pts[0]);
     }
@@ -250,10 +320,84 @@ mod tests {
             let a = i as f32 / 90.0 * std::f32::consts::TAU;
             Vec2::new(200.0 + 100.0 * a.cos(), 150.0 + 60.0 * a.sin())
         });
-        let (kind, p) = fit_shape(&wobble(circle, 4.0)).unwrap();
+        let (kind, p, _) = fit_shape(&wobble(circle, 4.0)).unwrap();
         assert_eq!(kind, ShapeKind::Ellipse);
         assert!((p[0] - Vec2::new(100.0, 90.0)).length() < 8.0, "{p:?}");
         assert!((p[1] - Vec2::new(300.0, 210.0)).length() < 8.0, "{p:?}");
+    }
+
+    /// An ellipse of half-axes `a` × `b` about `c`, turned by `angle`.
+    fn ellipse(c: Vec2, a: f32, b: f32, angle: f32, n: usize) -> impl Iterator<Item = Vec2> {
+        (0..=n).map(move |i| {
+            let t = i as f32 / n as f32 * std::f32::consts::TAU;
+            c + turned(Vec2::new(a * t.cos(), b * t.sin()), angle)
+        })
+    }
+
+    #[test]
+    fn a_slanted_ellipse_keeps_its_slant_and_axes() {
+        let c = Vec2::new(200.0, 150.0);
+        for degrees in [0.0_f32, 30.0, -25.0, 60.0, 90.0] {
+            let angle = degrees.to_radians();
+            let pts = wobble(ellipse(c, 120.0, 60.0, angle, 120), 3.0);
+            let (kind, p, slant) = fit_shape(&pts).unwrap();
+            assert_eq!(kind, ShapeKind::Ellipse, "{degrees}°");
+            let center = (p[0] + p[1]) * 0.5;
+            let size = (p[1] - p[0]).abs();
+            assert!((center - c).length() < 4.0, "{degrees}°: {center:?}");
+            // Either axis may lie across: the same ellipse turned a
+            // quarter the other way.
+            let (along, across) = if size.x >= size.y {
+                (slant, size)
+            } else {
+                (
+                    slant + std::f32::consts::FRAC_PI_2,
+                    Vec2::new(size.y, size.x),
+                )
+            };
+            let off = (along - angle).rem_euclid(std::f32::consts::PI);
+            let off = off.min(std::f32::consts::PI - off);
+            if degrees == 90.0 {
+                assert_eq!(slant, 0.0, "upright on its end");
+            } else {
+                assert!(off < 3f32.to_radians(), "{degrees}°: slant {slant}");
+            }
+            assert!((across.x - 240.0).abs() < 10.0, "{degrees}°: {size:?}");
+            assert!((across.y - 120.0).abs() < 10.0, "{degrees}°: {size:?}");
+        }
+    }
+
+    #[test]
+    fn an_upright_ellipse_and_a_circle_stay_upright() {
+        let upright = wobble(ellipse(Vec2::new(200.0, 150.0), 100.0, 60.0, 0.0, 90), 4.0);
+        let (kind, p, slant) = fit_shape(&upright).unwrap();
+        assert_eq!((kind, slant), (ShapeKind::Ellipse, 0.0));
+        let (min, max) = upright
+            .iter()
+            .fold((upright[0], upright[0]), |(lo, hi), &q| {
+                (lo.min(q), hi.max(q))
+            });
+        assert_eq!(p, vec![min, max], "the stroke's box, as before");
+        let circle = wobble(ellipse(Vec2::new(200.0, 150.0), 80.0, 80.0, 0.7, 90), 4.0);
+        let (kind, _, slant) = fit_shape(&circle).unwrap();
+        assert_eq!((kind, slant), (ShapeKind::Ellipse, 0.0));
+    }
+
+    #[test]
+    fn a_slanted_box_is_still_a_polygon() {
+        let (a, b, c, d) = (
+            Vec2::new(100.0, 50.0),
+            Vec2::new(260.0, 140.0),
+            Vec2::new(220.0, 210.0),
+            Vec2::new(60.0, 120.0),
+        );
+        let quad: Vec<Vec2> = along(a, b, 30)
+            .chain(along(b, c, 15))
+            .chain(along(c, d, 30))
+            .chain(along(d, a + Vec2::new(2.0, 2.0), 15))
+            .collect();
+        let (kind, p, _) = fit_shape(&wobble(quad.into_iter(), 2.0)).unwrap();
+        assert_eq!(kind, ShapeKind::Polygon, "{p:?}");
     }
 
     #[test]
@@ -269,7 +413,7 @@ mod tests {
             .chain(along(c, d, 30))
             .chain(along(d, a + Vec2::new(3.0, 2.0), 20))
             .collect();
-        let (kind, p) = fit_shape(&wobble(quad.into_iter(), 2.0)).unwrap();
+        let (kind, p, _) = fit_shape(&wobble(quad.into_iter(), 2.0)).unwrap();
         assert_eq!(kind, ShapeKind::Rectangle, "{p:?}");
         let (t1, t2, t3) = (
             Vec2::new(100.0, 200.0),
@@ -280,7 +424,7 @@ mod tests {
             .chain(along(t2, t3, 30))
             .chain(along(t3, t1 + Vec2::new(4.0, 0.0), 30))
             .collect();
-        let (kind, p) = fit_shape(&wobble(tri.into_iter(), 2.0)).unwrap();
+        let (kind, p, _) = fit_shape(&wobble(tri.into_iter(), 2.0)).unwrap();
         assert_eq!(kind, ShapeKind::Polygon);
         assert_eq!(p.len(), 3, "{p:?}");
     }

@@ -589,19 +589,89 @@ fn brush_settings_contents(
 
     section(ui, "Stabilizer", true, |ui| {
         property_row(ui, "Method", |ui| {
-            changed |= segmented(
-                ui,
-                &mut brush.stabilizer_algorithm,
-                &[
-                    (StabilizerAlgorithm::None, "None"),
-                    (StabilizerAlgorithm::Simple, "Simple"),
-                    (StabilizerAlgorithm::Dynamic, "Dynamic"),
-                ],
-                false,
-            );
+            let label = |a: StabilizerAlgorithm| match a {
+                StabilizerAlgorithm::None => "None",
+                StabilizerAlgorithm::Simple => "Simple",
+                StabilizerAlgorithm::Dynamic => "Dynamic",
+                StabilizerAlgorithm::String => "Pulled string",
+                StabilizerAlgorithm::PostCorrection => "Post-correction",
+                StabilizerAlgorithm::MotionFilter => "Motion filter",
+            };
+            egui::ComboBox::from_id_salt("stabilizer_algorithm")
+                .selected_text(label(brush.stabilizer_algorithm))
+                .show_ui(ui, |ui| {
+                    for a in [
+                        StabilizerAlgorithm::None,
+                        StabilizerAlgorithm::Simple,
+                        StabilizerAlgorithm::Dynamic,
+                        StabilizerAlgorithm::String,
+                        StabilizerAlgorithm::PostCorrection,
+                        StabilizerAlgorithm::MotionFilter,
+                    ] {
+                        changed |= ui
+                            .selectable_value(&mut brush.stabilizer_algorithm, a, label(a))
+                            .changed();
+                    }
+                });
         });
+        let modes = &mut brush.stabilizer_modes;
         match brush.stabilizer_algorithm {
             StabilizerAlgorithm::None => {}
+            StabilizerAlgorithm::String => {
+                changed |= slider_row(
+                    ui,
+                    "Length",
+                    crate::ui::widgets::reset(&mut modes.string_length, |v| {
+                        egui::Slider::new(v, 2.0..=300.0).suffix(" pt")
+                    }),
+                )
+                .on_hover_text(
+                    "The brush trails the pen on a string this long: it only moves once \
+                     the pen is further away, so the line stays steady.",
+                )
+                .changed();
+                changed |= ui
+                    .checkbox(&mut modes.catch_up, "Catch up")
+                    .on_hover_text("When the pen lifts, the line goes on to it.")
+                    .changed();
+            }
+            StabilizerAlgorithm::PostCorrection => {
+                changed |= slider_row(
+                    ui,
+                    "Strength",
+                    crate::ui::widgets::reset(&mut modes.correction, |v| {
+                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    }),
+                )
+                .on_hover_text(
+                    "When the pen lifts, the stroke's path is smoothed and the stroke \
+                     painted again along it.",
+                )
+                .changed();
+            }
+            StabilizerAlgorithm::MotionFilter => {
+                changed |= slider_row(
+                    ui,
+                    "Strength",
+                    crate::ui::widgets::reset(&mut modes.filter_strength, |v| {
+                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    }),
+                )
+                .on_hover_text("How much shake is taken out of slow, careful lines.")
+                .changed();
+                changed |= slider_row(
+                    ui,
+                    "Speed",
+                    crate::ui::widgets::reset(&mut modes.filter_speed, |v| {
+                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    }),
+                )
+                .on_hover_text(
+                    "How quickly the smoothing lets go as the pen speeds up: higher \
+                     keeps fast lines direct, with no lag.",
+                )
+                .changed();
+            }
             StabilizerAlgorithm::Simple => {
                 changed |= slider_row(
                     ui,
@@ -880,9 +950,10 @@ fn inputs_section(
                     percent_of_unit(egui::Slider::new(&mut m.amount, -1.0..=1.0)),
                 )
                 .on_hover_text(
-                    "Size and opacity: above 0 a high input keeps them full and a low one \
-                     reduces them; below 0 the other way. Others: how far a full input moves \
-                     them.",
+                    "Size, opacity and texture strength: above 0 a high input keeps them full \
+                     and a low one reduces them; below 0 the other way. Others: how far a full \
+                     input moves them (scatter up to a brush width, colour mix all the way to \
+                     the secondary colour).",
                 )
                 .changed();
                 if m.sensor.has_length() {
@@ -1260,6 +1331,38 @@ fn texture_section(
         )
         .changed();
         changed |= ui.checkbox(&mut t.invert, "Invert").changed();
+        let place = &mut t.placement;
+        changed |= slider_row(
+            ui,
+            "Angle",
+            crate::ui::widgets::reset(&mut place.angle, |v| {
+                egui::Slider::new(v, -180.0..=180.0)
+                    .max_decimals(0)
+                    .suffix("°")
+            }),
+        )
+        .on_hover_text("Turn the grain.")
+        .changed();
+        changed |= ui
+            .checkbox(&mut place.follow_stroke, "Moves with the stroke")
+            .on_hover_text(
+                "The grain starts where each stroke starts, rather than being pinned to the \
+                 canvas like paper.",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(&mut place.random_offset, "Random offset each stroke")
+            .on_hover_text(
+                "Shift the grain by a random amount for every stroke (every dab, with Each dab).",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(&mut place.per_dab, "Each dab")
+            .on_hover_text(
+                "Every dab gets the grain afresh, centred on itself, rather than the stroke \
+                 sharing one sheet of it: a stamped look.",
+            )
+            .changed();
         ui.label(
             egui::RichText::new(match t.mode {
                 TextureMode::Multiply => "The grain darkens the stroke evenly.",

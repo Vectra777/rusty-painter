@@ -88,6 +88,18 @@ fn main() {
             },
             10,
         ),
+        "placed_paper_stroke" => stroke(
+            &mut {
+                let mut b = base();
+                let paper = rusty_painter::brush_engine::texture::builtin()[0].clone();
+                let mut t = rusty_painter::brush_engine::texture::BrushTexture::new(paper);
+                t.placement.angle = 30.0;
+                t.placement.follow_stroke = true;
+                b.texture = Some(t);
+                b
+            },
+            10,
+        ),
         "composite_linear_fast" => composite(BlendSpace::Linear, LayerBlend::Normal, 1, 20),
         "composite_gamma_normal" => composite(BlendSpace::Gamma, LayerBlend::Normal, 1, 20),
         "composite_gamma_soft_light" => composite(BlendSpace::Gamma, LayerBlend::SoftLight, 1, 5),
@@ -96,8 +108,8 @@ fn main() {
         other => {
             eprintln!(
                 "unknown workload {other:?}: plain_stroke, airbrush_stroke, paper_stroke, \
-                 composite_linear_fast, composite_gamma_normal, composite_gamma_soft_light, \
-                 preview_linear, preview_gamma"
+                 placed_paper_stroke, composite_linear_fast, composite_gamma_normal, \
+                 composite_gamma_soft_light, preview_linear, preview_gamma"
             );
             std::process::exit(2);
         }

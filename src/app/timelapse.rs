@@ -227,7 +227,7 @@ fn video_frames(frames: &[Frame]) -> impl Iterator<Item = (usize, usize, Vec<u8>
             };
             // On white: videos have no transparency.
             let mut rgb = img.into_raw();
-            for px in rgb.chunks_exact_mut(4) {
+            for px in rgb.as_chunks_mut::<4>().0 {
                 let a = px[3] as u32;
                 for c in &mut px[..3] {
                     *c = ((*c as u32 * a + 255 * (255 - a) + 127) / 255) as u8;

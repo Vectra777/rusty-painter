@@ -99,6 +99,10 @@ pub(super) struct PlacedDab {
     pub seg: u32,
     /// A hatching brush: how many directions it hatches in (1..=3).
     pub hatch: u8,
+    /// Hardness added to the brush's (its input mappings), and its
+    /// texture's strength factor.
+    pub hardness: f32,
+    pub texture: f32,
 }
 
 impl PlacedDab {
@@ -122,6 +126,8 @@ impl PlacedDab {
             tip: 0,
             seg: 0,
             hatch: 1,
+            hardness: 0.0,
+            texture: 1.0,
         }
     }
 

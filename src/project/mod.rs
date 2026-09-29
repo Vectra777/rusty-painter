@@ -14,8 +14,10 @@ use crate::{
     },
     canvas::{
         Canvas,
-        history::{History, TileSnapshot, UndoAction},
-        storage::{CanvasLayerSnapshot, CanvasTileSnapshot, LayerId},
+        history::{History, LayerHistoryOp, TileSnapshot, UndoAction},
+        storage::{
+            CanvasLayerSnapshot, CanvasTileSnapshot, DocumentState, Layer, LayerId, LayerSwap,
+        },
     },
 };
 use eframe::egui::Color32;
@@ -48,6 +50,7 @@ pub(crate) struct LoadedProject {
     pub color_model: ColorModel,
     pub history: History,
     pub guides: Option<crate::app::tools::guides::StoredGuides>,
+    pub saved_selections: Vec<crate::app::tools::select::SavedSelection>,
 }
 
 pub(crate) fn save_project(app: &PainterApp, path: impl AsRef<Path>) -> Result<(), String> {
@@ -62,6 +65,8 @@ impl PainterApp {
     pub(crate) fn save_project_to_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         // Saves every painted pixel and files the stroke into undo history.
         self.release_canvas();
+        // The mask layer isn't part of the document.
+        self.quick_mask_leave();
         save_project(self, with_project_extension(path.as_ref()))?;
         self.saved_by_user();
         Ok(())
@@ -85,6 +90,7 @@ impl PainterApp {
         if let Some(guides) = loaded.guides {
             guides.apply(self);
         }
+        self.workspace.select.saved = loaded.saved_selections;
         self.active_tool = Tool::Brush;
         Ok(())
     }
@@ -92,7 +98,7 @@ impl PainterApp {
 
 pub(crate) fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
     let data = encode_project_data(app)?;
-    let flat = app.canvas.flatten();
+    let flat = app.canvas.flatten_final();
     let thumbnail = preview::encode_png(preview::thumbnail(&flat, preview::THUMBNAIL_MAX_EDGE))?;
     let [w, h] = flat.size;
     let merged = preview::encode_png(flat)?;
@@ -212,6 +218,9 @@ struct ProjectFile {
     /// The ruler, assistants and mirror painting; absent in older files.
     #[serde(default)]
     guides: Option<crate::app::tools::guides::StoredGuides>,
+    /// Select → Save Selection; absent in older files.
+    #[serde(default)]
+    saved_selections: Vec<StoredSavedSelection>,
 }
 
 impl ProjectFile {
@@ -240,6 +249,7 @@ impl ProjectFile {
                 blobs,
             )?],
             guides: Some(crate::app::tools::guides::StoredGuides::from_app(app)),
+            saved_selections: StoredSavedSelection::from_app(app, blobs)?,
         })
     }
 
@@ -283,11 +293,18 @@ impl ProjectFile {
         // Version 2's per-layer histories become one.
         let history = History::merged(histories);
 
+        let saved_selections = self
+            .saved_selections
+            .into_iter()
+            .map(|s| s.into_saved(blobs))
+            .collect::<Result<_, _>>()?;
+
         Ok(LoadedProject {
             canvas,
             color_model: self.color_model.into(),
             history,
             guides: self.guides,
+            saved_selections,
         })
     }
 }
@@ -322,6 +339,16 @@ struct StoredLayer {
     /// Adjustment layer's filter; absent in older files.
     #[serde(default)]
     adjustment: Option<crate::canvas::filters::Filter>,
+    /// A text layer's source; absent in older files (and on other layers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<convert::StoredText>,
+    /// Layer flags; absent in older files.
+    #[serde(default)]
+    position_locked: bool,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    reference: bool,
     tiles: Vec<StoredTile>,
 }
 
@@ -344,6 +371,10 @@ impl StoredLayer {
             blend: Some(layer.blend.key().to_string()),
             clipped: layer.clipped,
             adjustment: layer.adjustment,
+            text: convert::StoredText::from_layer(layer.text.as_deref()),
+            position_locked: layer.position_locked,
+            draft: layer.draft,
+            reference: layer.reference,
             tiles: {
                 use rayon::prelude::*;
                 let raws: Vec<Vec<u8>> = layer
@@ -389,11 +420,59 @@ impl StoredLayer {
                 .unwrap_or_default(),
             clipped: self.clipped,
             adjustment: self.adjustment,
+            text: convert::StoredText::into_layer(self.text),
+            position_locked: self.position_locked,
+            draft: self.draft,
+            reference: self.reference,
             tiles: self
                 .tiles
                 .into_iter()
                 .map(|tile| tile.into_snapshot(tile_size, blobs))
                 .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+/// A saved selection: its name, box and coverage bytes.
+#[derive(Serialize, Deserialize)]
+struct StoredSavedSelection {
+    name: String,
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    coverage: StoredBlob,
+}
+
+impl StoredSavedSelection {
+    fn from_app(app: &PainterApp, blobs: &mut Vec<u8>) -> Result<Vec<Self>, String> {
+        let saved = &app.workspace.select.saved;
+        let raws: Vec<Vec<u8>> = saved.iter().map(|s| s.mask.data.clone()).collect();
+        let stored = push_blobs(blobs, &raws)?;
+        Ok(saved
+            .iter()
+            .zip(stored)
+            .map(|(s, coverage)| Self {
+                name: s.name.clone(),
+                x0: s.mask.x0,
+                y0: s.mask.y0,
+                w: s.mask.w,
+                h: s.mask.h,
+                coverage,
+            })
+            .collect())
+    }
+
+    fn into_saved(self, blobs: &[u8]) -> Result<crate::app::tools::select::SavedSelection, String> {
+        let data = read_blob(blobs, &self.coverage)?;
+        if Some(data.len()) != self.w.checked_mul(self.h) {
+            return Err("Invalid saved selection size".to_string());
+        }
+        Ok(crate::app::tools::select::SavedSelection {
+            name: self.name,
+            mask: std::sync::Arc::new(crate::selection::SelectionMask::new(
+                self.x0, self.y0, self.w, self.h, data,
+            )),
         })
     }
 }
@@ -426,25 +505,8 @@ struct StoredHistory {
 }
 
 impl StoredHistory {
-    /// Steps from before a canvas resize, crop or rotation aren't saved:
-    /// each would need a copy of the whole document. Undo in a reopened
-    /// file stops at the resize.
     fn from_history(history: &History, blobs: &mut Vec<u8>) -> Result<Self, String> {
         let (undo, redo) = history.stacks();
-        // Both stacks are taken from the end: keep what comes before the
-        // first resize reached that way.
-        let reachable = |stack: &'_ [UndoAction]| -> usize {
-            stack
-                .iter()
-                .rposition(|a| {
-                    matches!(
-                        a.layer_action,
-                        Some(crate::canvas::history::LayerHistoryOp::Document(_))
-                    )
-                })
-                .map_or(0, |i| i + 1)
-        };
-        let (undo, redo) = (&undo[reachable(undo)..], &redo[reachable(redo)..]);
         Ok(Self {
             undo: undo
                 .iter()
@@ -481,6 +543,112 @@ struct StoredUndoAction {
     /// any to begin with), same reasoning as the LayerId migration above.
     #[serde(default)]
     layer_action: Option<StoredLayerHistoryOp>,
+    /// A canvas resize, crop or rotation: the whole document on the other
+    /// side of the step. Absent in older files, which didn't save steps
+    /// from before a resize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    document: Option<StoredDocument>,
+    /// A merge: the layers it puts in and the ids it takes out. Absent in
+    /// older files, which didn't save steps from before a merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge: Option<StoredMerge>,
+}
+
+/// The layers a merge step swaps: see [`crate::canvas::storage::LayerSwap`].
+#[derive(Serialize, Deserialize)]
+struct StoredMerge {
+    /// Entries to put in, at these final positions (ascending).
+    layers: Vec<(usize, StoredLayer)>,
+    remove: Vec<u64>,
+    active_layer_idx: usize,
+    applied: (Vec<usize>, Vec<usize>),
+}
+
+impl StoredMerge {
+    fn from_swap(swap: &LayerSwap, blobs: &mut Vec<u8>) -> Result<Self, String> {
+        Ok(Self {
+            layers: swap
+                .layers
+                .iter()
+                .map(|(idx, layer)| {
+                    Ok((*idx, StoredLayer::from_snapshot(layer.snapshot(), blobs)?))
+                })
+                .collect::<Result<_, String>>()?,
+            remove: swap.remove.iter().map(|id| id.0).collect(),
+            active_layer_idx: swap.active_layer_idx,
+            applied: swap.applied.clone(),
+        })
+    }
+
+    fn into_op(self, tile_size: usize, blobs: &[u8]) -> Result<LayerHistoryOp, String> {
+        let layers = self
+            .layers
+            .into_iter()
+            .map(|(idx, layer)| {
+                layer
+                    .into_snapshot(idx, tile_size, blobs)
+                    .map(|snapshot| (idx, Layer::from_snapshot(snapshot)))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(LayerHistoryOp::Replaced(std::sync::Arc::new(
+            std::sync::Mutex::new(LayerSwap {
+                layers,
+                remove: self.remove.into_iter().map(LayerId).collect(),
+                active_layer_idx: self.active_layer_idx,
+                applied: self.applied,
+            }),
+        )))
+    }
+}
+
+/// The document a resize step swaps in: its size and every layer.
+#[derive(Serialize, Deserialize)]
+struct StoredDocument {
+    width: usize,
+    height: usize,
+    active_layer_idx: usize,
+    layers: Vec<StoredLayer>,
+}
+
+impl StoredDocument {
+    fn from_state(doc: &DocumentState, blobs: &mut Vec<u8>) -> Result<Self, String> {
+        Ok(Self {
+            width: doc.width,
+            height: doc.height,
+            active_layer_idx: doc.active_layer_idx,
+            layers: doc
+                .layers
+                .iter()
+                .map(|layer| StoredLayer::from_snapshot(layer.snapshot(), blobs))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    fn into_op(self, tile_size: usize, blobs: &[u8]) -> Result<LayerHistoryOp, String> {
+        validate_canvas_size(self.width, self.height)?;
+        if self.layers.is_empty() {
+            return Err("Invalid resize step in undo history".to_string());
+        }
+        let layers: Vec<Layer> = self
+            .layers
+            .into_iter()
+            .enumerate()
+            .map(|(idx, layer)| {
+                layer
+                    .into_snapshot(idx, tile_size, blobs)
+                    .map(Layer::from_snapshot)
+            })
+            .collect::<Result<_, _>>()?;
+        let active_layer_idx = self.active_layer_idx.min(layers.len() - 1);
+        Ok(LayerHistoryOp::Document(std::sync::Arc::new(
+            std::sync::Mutex::new(DocumentState {
+                width: self.width,
+                height: self.height,
+                layers,
+                active_layer_idx,
+            }),
+        )))
+    }
 }
 
 impl StoredUndoAction {
@@ -516,13 +684,35 @@ impl StoredUndoAction {
                 .as_ref()
                 .map(|shape| shape.as_ref().map(StoredSelectionShape::from)),
             transform: action.transform.as_ref().map(StoredTransformInfo::from),
-            layer_action: action.layer_action.as_ref().map(StoredLayerHistoryOp::from),
+            layer_action: match &action.layer_action {
+                Some(LayerHistoryOp::Document(_) | LayerHistoryOp::Replaced(_)) | None => None,
+                Some(op) => Some(StoredLayerHistoryOp::from(op)),
+            },
+            document: match &action.layer_action {
+                Some(LayerHistoryOp::Document(doc)) => Some(StoredDocument::from_state(
+                    &doc.lock().unwrap_or_else(|e| e.into_inner()),
+                    blobs,
+                )?),
+                _ => None,
+            },
+            merge: match &action.layer_action {
+                Some(LayerHistoryOp::Replaced(swap)) => Some(StoredMerge::from_swap(
+                    &swap.lock().unwrap_or_else(|e| e.into_inner()),
+                    blobs,
+                )?),
+                _ => None,
+            },
         })
     }
 
     fn into_action(self, tile_size: usize, blobs: &[u8]) -> Result<UndoAction, String> {
+        let layer_action = match (self.document, self.merge) {
+            (Some(document), _) => Some(document.into_op(tile_size, blobs)?),
+            (None, Some(merge)) => Some(merge.into_op(tile_size, blobs)?),
+            (None, None) => self.layer_action.map(StoredLayerHistoryOp::into_op),
+        };
         Ok(UndoAction {
-            layer_action: self.layer_action.map(StoredLayerHistoryOp::into_op),
+            layer_action,
             tiles: self
                 .tiles
                 .into_iter()

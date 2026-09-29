@@ -73,6 +73,8 @@ pub struct GalleryState {
     /// Tells the thumbnail thread to stop (gallery closed).
     cancel: Arc<AtomicBool>,
     last_access_check: f64,
+    /// The picked image becomes the reference image, not a new layer.
+    for_reference: bool,
 }
 
 impl Default for GalleryState {
@@ -86,6 +88,7 @@ impl Default for GalleryState {
             rx,
             cancel: Arc::new(AtomicBool::new(false)),
             last_access_check: 0.0,
+            for_reference: false,
         }
     }
 }
@@ -98,6 +101,7 @@ impl GalleryState {
             return;
         }
         self.error = None;
+        self.for_reference = false;
         if photos::has_image_access() {
             self.start_listing();
         } else {
@@ -106,6 +110,14 @@ impl GalleryState {
             }
             self.phase = Phase::NeedAccess;
         }
+    }
+
+    /// Open the gallery to pick the reference image (View → Reference
+    /// Image).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn open_for_reference(&mut self) {
+        self.open();
+        self.for_reference = true;
     }
 
     fn close(&mut self) {
@@ -204,7 +216,11 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
     match decoded {
         Some(Ok((name, img))) => {
             app.workspace.gallery.close();
-            app.import_rgba(&name, img);
+            if std::mem::take(&mut app.workspace.gallery.for_reference) {
+                app.set_reference_image(&name, img);
+            } else {
+                app.import_rgba(&name, img);
+            }
             return;
         }
         Some(Err(e)) => {

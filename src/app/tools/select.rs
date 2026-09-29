@@ -1,5 +1,7 @@
 //! The Select tool at the app level: selection changes as undo steps, the
-//! click tools (magic wand, colour range) and the magnetic lasso.
+//! click tools (magic wand, colour range), the magnetic lasso, and the
+//! Select menu's changes (grow, shrink, feather, border, a layer's paint,
+//! saved selections).
 //!
 //! [`SelectionManager`](crate::selection::SelectionManager) owns the shapes;
 //! this wraps each change (a drag, a click, select all, invert, deselect) so
@@ -7,8 +9,10 @@
 //! selection back.
 
 use crate::app::PainterApp;
+use crate::canvas::Canvas;
 use crate::canvas::fill::{self, ColorMatch, FillSettings};
 use crate::canvas::history::UndoAction;
+use crate::canvas::storage::SampleLayers;
 use crate::selection::magnetic::{self, LiveWire};
 use crate::selection::{SelectionMask, SelectionMode, SelectionShape, SelectionType};
 use eframe::egui::{self, Vec2};
@@ -20,6 +24,8 @@ pub enum SampleSource {
     Layer,
     /// Everything visible.
     AllVisible,
+    /// The layers marked as reference.
+    Reference,
 }
 
 /// Magic wand settings.
@@ -123,6 +129,92 @@ pub struct SelectToolState {
     before: Option<Option<SelectionShape>>,
     last_pick: Option<LastPick>,
     pub magnetic: Option<MagneticSession>,
+    /// Select → Modify: the last radius used for each change.
+    pub modify: ModifyRadii,
+    /// The Modify or Save Selection dialog, while open.
+    pub dialog: Option<crate::ui::select_dialog::SelectDialog>,
+    /// Selections saved with the document (Select → Save Selection).
+    pub saved: Vec<SavedSelection>,
+    /// Quick mask, while it's on.
+    pub quick_mask: Option<crate::app::tools::quick_mask::QuickMaskSession>,
+}
+
+/// Select → Modify: what happens to the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionModify {
+    /// Push the edge outwards.
+    Grow,
+    /// Pull the edge inwards.
+    Shrink,
+    /// Soften the edge.
+    Feather,
+    /// A band along the edge.
+    Border,
+}
+
+impl SelectionModify {
+    pub const ALL: [SelectionModify; 4] = [
+        SelectionModify::Grow,
+        SelectionModify::Shrink,
+        SelectionModify::Feather,
+        SelectionModify::Border,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SelectionModify::Grow => "Grow",
+            SelectionModify::Shrink => "Shrink",
+            SelectionModify::Feather => "Feather",
+            SelectionModify::Border => "Border",
+        }
+    }
+
+    /// What the radius means, for the dialog.
+    pub fn radius_label(self) -> &'static str {
+        match self {
+            SelectionModify::Border => "Width",
+            _ => "Radius",
+        }
+    }
+
+    /// `mask` changed by `radius` pixels.
+    pub fn apply(self, mask: &SelectionMask, radius: u32) -> Option<SelectionMask> {
+        let r = radius.min(i32::MAX as u32) as i32;
+        match self {
+            SelectionModify::Grow => mask.grown(r),
+            SelectionModify::Shrink => mask.grown(-r),
+            SelectionModify::Feather => mask.feathered(radius),
+            SelectionModify::Border => mask.border(radius),
+        }
+    }
+}
+
+/// The last radius picked for each [`SelectionModify`], in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModifyRadii([u32; 4]);
+
+impl Default for ModifyRadii {
+    fn default() -> Self {
+        Self([4, 4, 8, 6])
+    }
+}
+
+impl ModifyRadii {
+    pub fn get(&self, op: SelectionModify) -> u32 {
+        self.0[op as usize]
+    }
+
+    pub fn set(&mut self, op: SelectionModify, radius: u32) {
+        self.0[op as usize] = radius;
+    }
+}
+
+/// A selection kept under a name (Select → Save Selection), saved in the
+/// project file.
+#[derive(Clone, Debug)]
+pub struct SavedSelection {
+    pub name: String,
+    pub mask: std::sync::Arc<SelectionMask>,
 }
 
 /// Magnetic lasso distances, in screen points (divided by the zoom).
@@ -247,6 +339,73 @@ impl PainterApp {
         }
     }
 
+    // --- Modify, layer paint, saved selections ----------------------------
+
+    /// Grow, shrink, feather or border the selection, as one undo step.
+    pub(crate) fn modify_selection(&mut self, op: SelectionModify, radius: u32) {
+        if !self.selection_manager.has_selection() {
+            return;
+        }
+        self.workspace.select.modify.set(op, radius);
+        let pool = self.workspace.pool.clone();
+        self.change_selection(|s| pool.install(|| s.modify(|m| op.apply(m, radius))));
+    }
+
+    /// Select the paint of layer `idx` (its alpha as coverage; a mask's
+    /// grey), combined with the selection by `mode`, as one undo step.
+    pub(crate) fn select_layer_paint(&mut self, idx: usize, mode: SelectionMode) {
+        if idx >= self.canvas.layers.len() {
+            return;
+        }
+        self.release_canvas();
+        let canvas = &self.canvas;
+        let mask = self
+            .workspace
+            .pool
+            .install(|| layer_paint_mask(canvas, idx));
+        self.change_selection(|s| s.apply_mask_or_nothing(mask, mode));
+    }
+    /// Keep the selection under `name` (replacing one of the same name).
+    pub(crate) fn save_selection(&mut self, name: String) {
+        let Some(mask) = self.selection_manager.current_mask() else {
+            return;
+        };
+        let saved = SavedSelection {
+            name,
+            mask: std::sync::Arc::new(mask),
+        };
+        let list = &mut self.workspace.select.saved;
+        match list.iter_mut().find(|s| s.name == saved.name) {
+            Some(slot) => *slot = saved,
+            None => list.push(saved),
+        }
+    }
+
+    /// Bring back saved selection `index`, combined by `mode`, as one undo
+    /// step.
+    pub(crate) fn load_selection(&mut self, index: usize, mode: SelectionMode) {
+        let Some(saved) = self.workspace.select.saved.get(index) else {
+            return;
+        };
+        let mask = (*saved.mask).clone();
+        self.change_selection(|s| s.apply_mask(mask, mode));
+    }
+
+    pub(crate) fn delete_saved_selection(&mut self, index: usize) {
+        if index < self.workspace.select.saved.len() {
+            self.workspace.select.saved.remove(index);
+        }
+    }
+
+    /// A name for the next saved selection.
+    pub(crate) fn next_saved_selection_name(&self) -> String {
+        let saved = &self.workspace.select.saved;
+        (1..)
+            .map(|n| format!("Selection {n}"))
+            .find(|name| saved.iter().all(|s| &s.name != name))
+            .unwrap_or_default()
+    }
+
     // --- Magic wand and colour range ---------------------------------------
 
     fn select_pick(&mut self, pos: Vec2, kind: SelectionType, mode: SelectionMode) {
@@ -281,10 +440,11 @@ impl PainterApp {
         self.workspace.select.last_pick = Some(pick);
     }
 
-    fn sample_layer(&self, source: SampleSource) -> Option<usize> {
+    fn sample_layer(&self, source: SampleSource) -> SampleLayers {
         match source {
-            SampleSource::Layer => Some(self.canvas.active_layer_idx),
-            SampleSource::AllVisible => None,
+            SampleSource::Layer => SampleLayers::Layer(self.canvas.active_layer_idx),
+            SampleSource::AllVisible => SampleLayers::AllVisible,
+            SampleSource::Reference => SampleLayers::Reference,
         }
     }
 
@@ -301,7 +461,7 @@ impl PainterApp {
             SelectionType::Wand => {
                 let s = self.workspace.select.wand;
                 let source = self.sample_layer(s.source);
-                let reference = |x, y, w, h| canvas.render_reference(source, x, y, w, h);
+                let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
                 let mask = pool.install(|| {
                     if s.contiguous {
                         let settings = FillSettings {
@@ -312,7 +472,7 @@ impl PainterApp {
                         };
                         fill::bucket_fill(&reference, w, h, (x, y), &settings)
                     } else {
-                        let target = canvas.render_reference(source, x, y, 1, 1)[0];
+                        let target = canvas.render_sample(source, x, y, 1, 1)[0];
                         let matching = ColorMatch::Channels {
                             tolerance: s.tolerance,
                         };
@@ -328,8 +488,8 @@ impl PainterApp {
             SelectionType::ColorRange => {
                 let s = self.workspace.select.color;
                 let source = self.sample_layer(s.source);
-                let reference = |x, y, w, h| canvas.render_reference(source, x, y, w, h);
-                let target = canvas.render_reference(source, x, y, 1, 1)[0];
+                let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
+                let target = canvas.render_sample(source, x, y, 1, 1)[0];
                 let matching = ColorMatch::Perceptual {
                     tolerance: s.tolerance,
                     softness: s.softness,
@@ -505,6 +665,78 @@ impl PainterApp {
             .apply_shape(crate::selection::new_lasso_shape(points), session.mode);
         self.record_selection_change(session.before);
     }
+}
+
+/// Layer `idx`'s coverage over the canvas: alpha for paint, grey for a
+/// mask. `None` if it has none (or is a folder).
+pub(crate) fn layer_paint_mask(canvas: &Canvas, idx: usize) -> Option<SelectionMask> {
+    use crate::canvas::storage::LayerKind;
+    use rayon::prelude::*;
+    let layer = canvas.layers.get(idx)?;
+    let is_mask = match layer.kind {
+        LayerKind::Group => return None,
+        LayerKind::Mask { .. } => true,
+        _ => false,
+    };
+    let (w, h, ts) = (canvas.width(), canvas.height(), canvas.tile_size());
+    let (tiles_x, tiles_y) = (w.div_ceil(ts), h.div_ceil(ts));
+    // Unpainted tiles read as the background colour on the bottom
+    // layer, white on a mask, and nothing elsewhere.
+    let blank = if idx == 0 {
+        canvas.clear_color().a()
+    } else if is_mask {
+        255
+    } else {
+        0
+    };
+    // Only the tiles it holds, unless blank tiles count.
+    let keys = canvas.layer_tile_keys(idx);
+    let [tx0, ty0, tx1, ty1] = if blank > 0 {
+        [0, 0, tiles_x as i32, tiles_y as i32]
+    } else {
+        let in_canvas = keys
+            .iter()
+            .filter(|&&(tx, ty)| {
+                tx >= 0 && ty >= 0 && (tx as usize) < tiles_x && (ty as usize) < tiles_y
+            })
+            .copied();
+        in_canvas.fold([i32::MAX, i32::MAX, i32::MIN, i32::MIN], |b, (tx, ty)| {
+            [
+                b[0].min(tx),
+                b[1].min(ty),
+                b[2].max(tx + 1),
+                b[3].max(ty + 1),
+            ]
+        })
+    };
+    if tx1 <= tx0 || ty1 <= ty0 {
+        return None;
+    }
+    let (x0, y0) = (tx0 as usize * ts, ty0 as usize * ts);
+    let x1 = (tx1 as usize * ts).min(w);
+    let y1 = (ty1 as usize * ts).min(h);
+    let mw = x1 - x0;
+    let mut data = vec![blank; mw * (y1 - y0)];
+    // One band of tile rows per task.
+    data.par_chunks_mut(mw * ts)
+        .enumerate()
+        .for_each(|(band, rows)| {
+            let ty = ty0 + band as i32;
+            for tx in tx0..tx1 {
+                let Some(tile) = canvas.get_layer_tile_data(idx, tx, ty) else {
+                    continue;
+                };
+                let ox = tx as usize * ts - x0;
+                let cols = ts.min(mw - ox);
+                for (ly, row) in rows.chunks_mut(mw).enumerate() {
+                    let src = &tile[ly * ts..ly * ts + cols];
+                    for (dst, p) in row[ox..ox + cols].iter_mut().zip(src) {
+                        *dst = if is_mask { p.r() } else { p.a() };
+                    }
+                }
+            }
+        });
+    SelectionMask::new(x0 as i32, y0 as i32, mw, y1 - y0, data).cropped()
 }
 
 /// Draw the magnetic outline in progress.
@@ -741,5 +973,164 @@ mod tests {
         app.select_cancel();
         assert_eq!(points(&app), None);
         assert!(!app.selection_manager.has_selection());
+    }
+
+    #[test]
+    fn modifying_the_selection_is_one_undo_step_each() {
+        use crate::app::tools::select::SelectionModify;
+        let mut app = app();
+        drag(&mut app, Vec2::new(40.0, 40.0), Vec2::new(80.0, 80.0));
+        let depth = app.layer_state.history.stacks().0.len();
+        app.modify_selection(SelectionModify::Grow, 5);
+        assert!(app.selection_manager.contains(Vec2::new(36.5, 60.5)));
+        app.modify_selection(SelectionModify::Shrink, 10);
+        assert!(!app.selection_manager.contains(Vec2::new(42.5, 60.5)));
+        assert!(app.selection_manager.contains(Vec2::new(46.5, 60.5)));
+        app.modify_selection(SelectionModify::Border, 4);
+        assert!(
+            !app.selection_manager.contains(Vec2::new(60.5, 60.5)),
+            "hollow"
+        );
+        app.modify_selection(SelectionModify::Feather, 3);
+        assert_eq!(app.layer_state.history.stacks().0.len(), depth + 4);
+        assert_eq!(app.workspace.select.modify.get(SelectionModify::Shrink), 10);
+        // Back one by one to the rectangle.
+        for _ in 0..4 {
+            app.apply_history(false);
+        }
+        let sel = &app.selection_manager;
+        assert!(sel.contains(Vec2::new(41.5, 60.5)) && sel.contains(Vec2::new(60.5, 60.5)));
+        assert!(!sel.contains(Vec2::new(38.5, 60.5)));
+        // Nothing selected: nothing to do, nothing recorded.
+        app.deselect();
+        let depth = app.layer_state.history.stacks().0.len();
+        app.modify_selection(SelectionModify::Grow, 5);
+        assert!(!app.selection_manager.has_selection());
+        assert_eq!(app.layer_state.history.stacks().0.len(), depth);
+    }
+
+    #[test]
+    fn a_rectangle_selection_can_be_grown_past_the_canvas_edge() {
+        use crate::app::tools::select::SelectionModify;
+        let mut app = app();
+        app.select_all();
+        app.modify_selection(SelectionModify::Shrink, 8);
+        assert!(!app.selection_manager.contains(Vec2::new(4.5, 60.5)));
+        app.modify_selection(SelectionModify::Grow, 20);
+        let b = app.selection_manager.get_bounds().unwrap();
+        assert_eq!((b.min.x, b.max.x), (0.0, 128.0), "kept on the canvas");
+    }
+
+    #[test]
+    fn a_layers_paint_becomes_the_selection() {
+        let mut app = app_with_squares(&[(10, 10), (90, 90)]);
+        // Half-transparent paint selects partly.
+        app.canvas_mut().set_layer_tile_data(
+            1,
+            1,
+            0,
+            vec![Color32::from_rgba_premultiplied(40, 0, 0, 100); 64 * 64],
+        );
+        app.select_layer_paint(1, SelectionMode::Replace);
+        let sel = &app.selection_manager;
+        assert!(sel.contains(Vec2::new(15.5, 15.5)));
+        assert!(sel.contains(Vec2::new(95.5, 95.5)));
+        assert!(!sel.contains(Vec2::new(50.5, 50.5)), "transparent");
+        let mut cov = [0.0];
+        sel.row_coverage(20, 100, &mut cov);
+        assert!((cov[0] - 100.0 / 255.0).abs() < 0.01, "alpha as coverage");
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+
+        // Subtract, then add back, then intersect.
+        app.select_all();
+        app.select_layer_paint(1, SelectionMode::Subtract);
+        assert!(!app.selection_manager.contains(Vec2::new(15.5, 15.5)));
+        assert!(app.selection_manager.contains(Vec2::new(50.5, 50.5)));
+        app.select_layer_paint(1, SelectionMode::Add);
+        assert!(app.selection_manager.contains(Vec2::new(15.5, 15.5)));
+        drag(&mut app, Vec2::new(0.0, 0.0), Vec2::new(40.0, 40.0));
+        app.select_layer_paint(1, SelectionMode::Intersect);
+        let sel = &app.selection_manager;
+        assert!(sel.contains(Vec2::new(15.5, 15.5)));
+        assert!(!sel.contains(Vec2::new(35.5, 35.5)) && !sel.contains(Vec2::new(95.5, 95.5)));
+        // The background is paint everywhere.
+        app.select_layer_paint(0, SelectionMode::Replace);
+        assert!(app.selection_manager.contains(Vec2::new(127.5, 127.5)));
+        // An empty layer selects nothing.
+        app.add_layer_and_select();
+        let empty = app.canvas.active_layer_idx;
+        app.select_layer_paint(empty, SelectionMode::Replace);
+        assert!(!app.selection_manager.has_selection());
+        app.apply_history(false);
+        assert!(app.selection_manager.contains(Vec2::new(127.5, 127.5)));
+    }
+
+    #[test]
+    fn saved_selections_load_with_each_mode_and_round_trip_through_the_file() {
+        let mut app = app();
+        drag(&mut app, Vec2::new(10.0, 10.0), Vec2::new(40.0, 40.0));
+        let name = app.next_saved_selection_name();
+        assert_eq!(name, "Selection 1");
+        app.save_selection(name);
+        drag(&mut app, Vec2::new(30.0, 30.0), Vec2::new(60.0, 60.0));
+        app.save_selection("Second".into());
+        assert_eq!(app.next_saved_selection_name(), "Selection 2");
+
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let loaded = crate::project::decode_project(&bytes).unwrap();
+        let names: Vec<&str> = loaded
+            .saved_selections
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["Selection 1", "Second"]);
+        for (a, b) in loaded
+            .saved_selections
+            .iter()
+            .zip(&app.workspace.select.saved)
+        {
+            assert_eq!(
+                (a.mask.x0, a.mask.y0, a.mask.w, a.mask.h),
+                (b.mask.x0, b.mask.y0, b.mask.w, b.mask.h)
+            );
+            assert_eq!(a.mask.data, b.mask.data);
+        }
+
+        app.deselect();
+        let depth = app.layer_state.history.stacks().0.len();
+        app.load_selection(0, SelectionMode::Replace);
+        assert!(app.selection_manager.contains(Vec2::new(15.5, 15.5)));
+        app.load_selection(1, SelectionMode::Add);
+        assert!(app.selection_manager.contains(Vec2::new(55.5, 55.5)));
+        app.load_selection(0, SelectionMode::Subtract);
+        assert!(!app.selection_manager.contains(Vec2::new(15.5, 15.5)));
+        assert!(app.selection_manager.contains(Vec2::new(55.5, 55.5)));
+        app.load_selection(0, SelectionMode::Replace);
+        app.load_selection(1, SelectionMode::Intersect);
+        let sel = &app.selection_manager;
+        assert!(sel.contains(Vec2::new(35.5, 35.5)));
+        assert!(!sel.contains(Vec2::new(15.5, 15.5)) && !sel.contains(Vec2::new(55.5, 55.5)));
+        assert_eq!(app.layer_state.history.stacks().0.len(), depth + 5);
+        app.apply_history(false);
+        assert!(app.selection_manager.contains(Vec2::new(15.5, 15.5)));
+
+        // Saving under a used name replaces; deleting removes.
+        app.save_selection("Second".into());
+        assert_eq!(app.workspace.select.saved.len(), 2);
+        app.delete_saved_selection(0);
+        assert_eq!(app.workspace.select.saved[0].name, "Second");
+
+        // Opening the file brings them back; a new canvas has none.
+        let path =
+            std::env::temp_dir().join(format!("rp-saved-sel-{}.rpainter", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        app.load_project_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(app.workspace.select.saved.len(), 2);
+        app.modal_state.new_canvas.width = 64.0;
+        app.modal_state.new_canvas.height = 64.0;
+        app.modal_state.new_canvas.unit = crate::app::document::CanvasUnit::Pixels;
+        app.apply_new_canvas();
+        assert!(app.workspace.select.saved.is_empty());
     }
 }

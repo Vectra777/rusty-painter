@@ -56,6 +56,10 @@ pub struct BrushState {
     /// Brushes just imported from other apps: per file, how many presets
     /// and what was approximated (shown until dismissed).
     pub import_report: Option<Vec<(String, usize, Vec<String>)>>,
+    /// The pulled string of the stroke being drawn, shown on the canvas.
+    pub string: Option<crate::app::stroke_ops::PulledString>,
+    /// Tags, favourites and recent presets, and the pop-up palette.
+    pub library: crate::app::brush_library::BrushLibrary,
 }
 
 /// A tip in the brush settings' tip list: one tip, or a set the dabs take
@@ -109,6 +113,8 @@ impl BrushState {
             show_presets: false,
             blend_stroke: None,
             import_report: None,
+            string: None,
+            library: Default::default(),
         }
     }
 
@@ -419,6 +425,8 @@ pub struct WorkspaceState {
     pub wrap_around: bool,
     /// On-canvas guides and their handles.
     pub guides: crate::app::tools::guides::GuideState,
+    /// The grid, guide lines, snapping, reference image and navigator.
+    pub view_aids: crate::app::view::aids::ViewAids,
     /// Shape tool settings and the shape being edited.
     pub shapes: crate::app::tools::shape::ShapeToolState,
     /// Gradient tool settings and the gradient being placed.
@@ -493,6 +501,7 @@ impl WorkspaceState {
             symmetry: Default::default(),
             wrap_around: false,
             guides: Default::default(),
+            view_aids: Default::default(),
             shapes: Default::default(),
             gradient: Default::default(),
             patch: Default::default(),

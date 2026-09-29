@@ -7,7 +7,8 @@
 //! structural change to the canvas (layers, undo, loading) must first end the
 //! stroke and [`StrokeWorker::wait_idle`], which releases the worker's `Arc`.
 
-use crate::brush_engine::brush::Brush;
+use crate::brush_engine::brush::{Brush, StabilizerAlgorithm};
+use crate::brush_engine::dynamics::PenTilt;
 use crate::brush_engine::stroke::{StrokeContext, StrokeState, StrokeTiles};
 use crate::brush_engine::symmetry::{Copy2, Symmetry};
 use crate::canvas::Canvas;
@@ -130,12 +131,7 @@ impl StrokeWorker {
                                     let result = std::panic::catch_unwind(
                                         std::panic::AssertUnwindSafe(|| {
                                             if let Some(session) = session.as_mut() {
-                                                session.paint(
-                                                    &thread_shared,
-                                                    |stroke, brush, context| {
-                                                        stroke.airbrush(brush, now, context)
-                                                    },
-                                                );
+                                                session.airbrush(&thread_shared, now);
                                             }
                                         }),
                                     );
@@ -274,16 +270,49 @@ struct Session {
     tiles: StrokeTiles,
     /// The symmetry's copy maps, computed once per stroke.
     copies: Vec<Copy2>,
+    /// The stroke's random seed, to paint it again the same.
+    seed: u64,
+    /// The last sample, for a pulled string catching up when the pen lifts.
+    last_sample: Option<Sample>,
+    /// Post-correction: the brush as the stroke started, and everything
+    /// the stroke was given, to paint it again along the smoothed path
+    /// when the pen lifts.
+    correction: Option<(Brush, Vec<Event>)>,
+}
+
+/// A pen sample as the worker got it.
+#[derive(Clone, Copy)]
+struct Sample {
+    pos: Vec2,
+    pressure: f32,
+    time: f64,
+    tilt: Option<PenTilt>,
+}
+
+/// What a stroke was given, in order, for post-correction.
+#[derive(Clone, Copy)]
+enum Event {
+    Sample(Sample),
+    /// The airbrush's timer, at this time.
+    Airbrush(f64),
 }
 
 fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
     match job {
         Job::Begin(setup) => {
             let copies = setup.symmetry.copies();
-            let mut stroke = StrokeState::new();
+            let seed = rand::random();
+            let mut stroke = StrokeState::with_seed(seed);
             stroke.view_scale = setup.view_scale;
+            let brush = &setup.brush;
+            let correction = (brush.stabilizer_algorithm == StabilizerAlgorithm::PostCorrection
+                && brush.stabilizer_modes.correction > 0.0)
+                .then(|| (brush.clone(), Vec::new()));
             *session = Some(Session {
                 copies,
+                seed,
+                last_sample: None,
+                correction,
                 setup: *setup,
                 stroke,
                 undo: UndoAction {
@@ -304,6 +333,16 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
             let Some(session) = session else {
                 return;
             };
+            let sample = Sample {
+                pos,
+                pressure,
+                time,
+                tilt,
+            };
+            session.last_sample = Some(sample);
+            if let Some((_, events)) = session.correction.as_mut() {
+                events.push(Event::Sample(sample));
+            }
             session.paint(shared, |stroke, brush, context| {
                 stroke.tilt = tilt;
                 stroke.add_sample(brush, pos, pressure, Some(time), context);
@@ -312,6 +351,8 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
         Job::End => {
             // The pen lifted: the end of the stroke (an end taper) first.
             if let Some(session) = session.as_mut() {
+                session.catch_up(shared);
+                session.correct(shared);
                 session.paint(shared, |stroke, brush, context| {
                     stroke.finish(brush, context)
                 });
@@ -330,6 +371,78 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
 }
 
 impl Session {
+    /// The airbrush's timer: dabs where the pen rests.
+    fn airbrush(&mut self, shared: &Shared, now: f64) {
+        if let Some((_, events)) = self.correction.as_mut() {
+            events.push(Event::Airbrush(now));
+        }
+        self.paint(shared, |stroke, brush, context| {
+            stroke.airbrush(brush, now, context)
+        });
+    }
+
+    /// A pulled string with catch-up: the line goes on to where the pen
+    /// lifted.
+    fn catch_up(&mut self, shared: &Shared) {
+        let brush = &self.setup.brush;
+        let Some(last) = self.last_sample else {
+            return;
+        };
+        if brush.stabilizer_algorithm != StabilizerAlgorithm::String
+            || !brush.stabilizer_modes.catch_up
+            || self.stroke.last_pos == Some(last.pos)
+        {
+            return;
+        }
+        self.paint(shared, |stroke, brush, context| {
+            brush.stabilizer_algorithm = StabilizerAlgorithm::None;
+            stroke.tilt = last.tilt;
+            stroke.add_sample(brush, last.pos, last.pressure, Some(last.time), context);
+            brush.stabilizer_algorithm = StabilizerAlgorithm::String;
+        });
+    }
+
+    /// Post-correction: take the stroke off and paint it again along its
+    /// path smoothed, in the same undo step (the tiles' snapshots from
+    /// before the stroke stay as they are).
+    fn correct(&mut self, shared: &Shared) {
+        let Some((brush, events)) = self.correction.take() else {
+            return;
+        };
+        let points: Vec<Vec2> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Sample(s) => Some(s.pos),
+                Event::Airbrush(_) => None,
+            })
+            .collect();
+        if points.len() < 3 {
+            return;
+        }
+        let smoothed = crate::brush_engine::stabilizer::smooth_path(
+            &points,
+            brush.stabilizer_modes.correction,
+            self.setup.view_scale,
+        );
+        self.tiles.restart(&self.setup.canvas);
+        self.stroke = StrokeState::with_seed(self.seed);
+        self.stroke.view_scale = self.setup.view_scale;
+        self.setup.brush = brush;
+        self.paint(shared, |stroke, brush, context| {
+            let mut smoothed = smoothed.into_iter();
+            for event in events {
+                match event {
+                    Event::Sample(s) => {
+                        let pos = smoothed.next().unwrap_or(s.pos);
+                        stroke.tilt = s.tilt;
+                        stroke.add_sample(brush, pos, s.pressure, Some(s.time), context);
+                    }
+                    Event::Airbrush(now) => stroke.airbrush(brush, now, context),
+                }
+            }
+        });
+    }
+
     /// Run `f` on the stroke, then hand the tiles it painted to the UI.
     fn paint(
         &mut self,
@@ -342,6 +455,7 @@ impl Session {
             undo,
             tiles,
             copies,
+            ..
         } = self;
         let StrokeSetup {
             canvas,
@@ -458,6 +572,102 @@ mod tests {
             1,
             "an idle worker holds no canvas"
         );
+    }
+
+    /// `samples` painted with `brush` on the worker, on a fresh canvas.
+    fn paint_on_worker(
+        brush: Brush,
+        samples: &[(Vec2, f32)],
+    ) -> (Arc<Canvas>, Vec<FinishedStroke>) {
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+        let canvas = Arc::new(Canvas::new(128, 128, Color32::TRANSPARENT, 64));
+        let worker = StrokeWorker::new();
+        worker.begin(StrokeSetup {
+            canvas: Arc::clone(&canvas),
+            brush,
+            selection: None,
+            pool,
+            layer_idx: 1,
+            symmetry: Default::default(),
+            view_scale: 1.0,
+            wrap: false,
+        });
+        for &(pos, pressure) in samples {
+            worker.sample(pos, pressure);
+        }
+        worker.end();
+        worker.wait_idle();
+        let finished = worker.take_finished();
+        (canvas, finished)
+    }
+
+    #[test]
+    fn post_correction_repaints_the_stroke_along_the_smoothed_path() {
+        let shaky: Vec<(Vec2, f32)> = samples()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (p, pressure))| {
+                let wobble = if i % 2 == 0 { 3.0 } else { -3.0 };
+                (p + Vec2::new(0.0, wobble), pressure)
+            })
+            .collect();
+        let mut brush = Brush::new(8.0, 80.0, Color32::from_rgb(200, 40, 40), 10.0);
+        brush.stabilizer_algorithm = StabilizerAlgorithm::PostCorrection;
+        brush.stabilizer_modes.correction = 0.8;
+        let (canvas, finished) = paint_on_worker(brush.clone(), &shaky);
+        assert_eq!(finished.len(), 1, "one undo step");
+
+        // The same as painting the smoothed path straight away.
+        let points: Vec<Vec2> = shaky.iter().map(|s| s.0).collect();
+        let smoothed = crate::brush_engine::stabilizer::smooth_path(&points, 0.8, 1.0);
+        let along: Vec<(Vec2, f32)> = smoothed
+            .iter()
+            .zip(&shaky)
+            .map(|(&p, s)| (p, s.1))
+            .collect();
+        brush.stabilizer_algorithm = StabilizerAlgorithm::None;
+        let (direct, _) = paint_on_worker(brush.clone(), &along);
+        assert!(tiles_of(&canvas) == tiles_of(&direct));
+        // Not as painted raw.
+        let (raw, raw_finished) = paint_on_worker(brush, &shaky);
+        assert!(tiles_of(&canvas) != tiles_of(&raw));
+
+        // Undo restores the canvas as it was before the stroke: every tile
+        // either stroke touched is snapshotted once, blank.
+        let undo = &finished[0].undo;
+        let mut keys: Vec<_> = undo.tiles.iter().map(|t| (t.tx, t.ty)).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), undo.tiles.len(), "one snapshot per tile");
+        assert!(undo.tiles.len() >= raw_finished[0].undo.tiles.len());
+        for t in &undo.tiles {
+            assert!(t.data.to_vec().iter().all(|&p| p == Color32::TRANSPARENT));
+        }
+    }
+
+    #[test]
+    fn a_pulled_string_catches_up_with_the_pen_when_it_lifts() {
+        let line: Vec<(Vec2, f32)> = (0..=40)
+            .map(|i| (Vec2::new(10.0 + i as f32 * 2.5, 64.0), 1.0))
+            .collect();
+        let end_painted = |catch_up: bool| {
+            let mut brush = Brush::new(6.0, 100.0, Color32::BLACK, 10.0);
+            brush.stabilizer_algorithm = StabilizerAlgorithm::String;
+            brush.stabilizer_modes.string_length = 30.0;
+            brush.stabilizer_modes.catch_up = catch_up;
+            let (canvas, _) = paint_on_worker(brush, &line);
+            let tile = canvas.get_layer_tile_data(1, 1, 1).unwrap();
+            // (108, 64): near the pen's last position, 110.
+            let near_end = tile[108 - 64].a();
+            // (75, 64): well behind the string's length from the end.
+            let behind = tile[75 - 64].a();
+            (near_end, behind)
+        };
+        let (with, behind) = end_painted(true);
+        assert!(behind > 200 && with > 200, "{behind} {with}");
+        let (without, behind) = end_painted(false);
+        assert!(behind > 200, "{behind}");
+        assert_eq!(without, 0, "the brush stops the string's length short");
     }
 
     #[test]

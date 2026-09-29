@@ -136,6 +136,18 @@ fn painting(c: &mut Criterion) {
     );
     bench(
         &mut g,
+        "filter_brush_blur_60_samples_80px",
+        |a| {
+            b::set_brush(a, 80.0);
+            b::set_brush_filter(
+                a,
+                rusty_painter::canvas::filters::Filter::GaussianBlur { radius: 4.0 },
+            );
+        },
+        |a| b::blend_stroke(a, &short, false),
+    );
+    bench(
+        &mut g,
         "eyedropper_x100",
         |_| {},
         |a| {

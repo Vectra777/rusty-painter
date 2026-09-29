@@ -7,7 +7,8 @@
 //! along, grow, shrink or swirl it, like Krita's deform brush) or
 //! **clone** (paint with the pixels from another place, set with
 //! Ctrl+click); Blur can instead **sharpen** or **adjust** colours (hue,
-//! saturation, brightness) under the brush, like Krita's filter brush.
+//! saturation, brightness) under the brush, or paint any of the Filter
+//! menu's filters (**filter**), like Krita's filter brush.
 //!
 //! Smudge carries a patch of paint along the stroke: every dab mixes the
 //! carried paint into the canvas under the tip, then picks up some of the
@@ -48,6 +49,8 @@ pub struct BlendToolSettings {
     pub adjust_hue: f32,
     pub adjust_saturation: f32,
     pub adjust_value: f32,
+    /// Filter: the filter painted, with its settings.
+    pub brush_filter: crate::canvas::filters::Filter,
     /// Clone: where to copy from (canvas), set with Ctrl+click.
     pub clone_source: Option<Vec2>,
     /// Clone: keep the same offset from stroke to stroke (else each stroke
@@ -73,6 +76,7 @@ impl Default for BlendToolSettings {
             adjust_hue: 30.0,
             adjust_saturation: 0.0,
             adjust_value: 0.0,
+            brush_filter: crate::canvas::filters::Filter::GaussianBlur { radius: 4.0 },
             clone_source: None,
             clone_aligned: true,
             clone_merged: false,
@@ -110,6 +114,9 @@ pub enum FilterMode {
     Sharpen,
     /// Shift hue, saturation and brightness.
     Adjust,
+    /// Paint one of the Filter menu's filters (see
+    /// [`BlendToolSettings::brush_filter`]).
+    Filter,
 }
 
 /// How Deform moves the paint.
@@ -154,6 +161,8 @@ enum BlendKind {
     Blur,
     Sharpen(f32),
     Adjust([f32; 3]),
+    /// A filter, over the layer as it was before the stroke.
+    Filter(crate::canvas::filters::Filter),
     Deform(DeformMode, f32),
     /// Copy from `offset` pixels away (whole pixels), from all layers when
     /// `merged`.
@@ -187,6 +196,11 @@ pub struct BlendStroke {
     /// Mirror painting for this stroke.
     symmetry: crate::brush_engine::symmetry::Symmetry,
     copies: Vec<crate::brush_engine::symmetry::Copy2>,
+    /// Filter: each tile of the layer filtered as it was before the stroke
+    /// (worked out when the brush first reaches it), and how much of it the
+    /// stroke has laid down so far (0..1 per pixel).
+    filtered: HashMap<(i32, i32), Vec<Color32>>,
+    coverage: HashMap<(i32, i32), Vec<f32>>,
 }
 
 /// Pixels are mixed as linear-light premultiplied colour, the same space
@@ -387,6 +401,7 @@ impl PainterApp {
                 b.adjust_saturation.clamp(-1.0, 1.0),
                 b.adjust_value.clamp(-1.0, 1.0),
             ]),
+            (_, _, FilterMode::Filter) => BlendKind::Filter(b.brush_filter),
         };
         self.release_canvas();
         // Like a brush stroke: a second press ends the running one first.
@@ -403,6 +418,8 @@ impl PainterApp {
             carries: Vec::new(),
             symmetry: self.workspace.symmetry,
             copies: self.workspace.symmetry.copies(),
+            filtered: HashMap::new(),
+            coverage: HashMap::new(),
         });
         self.blend_mirrored(pos, pressure);
     }
@@ -467,7 +484,7 @@ impl PainterApp {
                 data: data.into(),
             })
             .collect();
-        self.layer_state.history.push_action(UndoAction {
+        self.push_undo(UndoAction {
             tiles,
             selection: None,
             transform: None,
@@ -661,6 +678,41 @@ impl PainterApp {
                     v
                 })
                 .collect()
+        } else if let BlendKind::Filter(filter) = stroke.kind {
+            // The filtered layer laid down through the brush, its coverage
+            // building up like paint: going over a spot again never
+            // filters it twice.
+            weights_are_mask = false;
+            let ts = self.canvas.tile_size() as i32;
+            let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+            let mut target = under.clone();
+            for (i, &m) in mask.iter().enumerate() {
+                if m <= 0.0 {
+                    continue;
+                }
+                let (mut x, mut y) = (x0 + (i % side) as i32, y0 + (i / side) as i32);
+                if wrap {
+                    (x, y) = (x.rem_euclid(cw), y.rem_euclid(ch));
+                } else if x < 0 || y < 0 || x >= cw || y >= ch {
+                    continue;
+                }
+                let key = (x.div_euclid(ts), y.div_euclid(ts));
+                let at = ((y - key.1 * ts) * ts + (x - key.0 * ts)) as usize;
+                if !stroke.filtered.contains_key(&key) {
+                    let tile = filter_tile(&self.canvas, idx, &stroke.before, key, filter, wrap);
+                    stroke.filtered.insert(key, tile);
+                }
+                let filtered = to_f(stroke.filtered[&key][at]);
+                let original = stroke.before.get(&key).map_or(under[i], |t| to_f(t[at]));
+                let cov = &mut stroke
+                    .coverage
+                    .entry(key)
+                    .or_insert_with(|| vec![0.0; (ts * ts) as usize])[at];
+                *cov += m * (1.0 - *cov);
+                let c = *cov;
+                target[i] = std::array::from_fn(|k| original[k] + (filtered[k] - original[k]) * c);
+            }
+            target
         } else if let BlendKind::Adjust(hsv) = stroke.kind {
             under.iter().map(|&u| adjust_hsv(u, hsv)).collect()
         } else if stroke.kind == BlendKind::Smudge {
@@ -776,6 +828,56 @@ impl PainterApp {
             self.mark_rect_damage(rect);
         }
     }
+}
+
+/// Tile `key` of layer `idx` as it was before the stroke (`before` holds
+/// the tiles it changed), through `filter`: read with the margin the filter
+/// reaches into, so its edges come out as they would filtering the layer.
+fn filter_tile(
+    canvas: &crate::canvas::Canvas,
+    idx: usize,
+    before: &HashMap<(i32, i32), Vec<Color32>>,
+    key: (i32, i32),
+    filter: crate::canvas::filters::Filter,
+    wrap: bool,
+) -> Vec<Color32> {
+    let ts = canvas.tile_size() as i32;
+    let reach = filter.reach().max(0);
+    let side = (ts + 2 * reach) as usize;
+    let origin = (key.0 * ts - reach, key.1 * ts - reach);
+    let mut src = read_patch(canvas, Some(idx), origin, side, side, wrap);
+    if !before.is_empty() {
+        let (cw, ch) = (canvas.width() as i32, canvas.height() as i32);
+        // The last tile looked up, and its pixels before the stroke.
+        let mut last_key = None;
+        let mut last_tile = None;
+        for (i, px) in src.iter_mut().enumerate() {
+            let (mut x, mut y) = (origin.0 + (i % side) as i32, origin.1 + (i / side) as i32);
+            if wrap {
+                (x, y) = (x.rem_euclid(cw), y.rem_euclid(ch));
+            } else if x < 0 || y < 0 || x >= cw || y >= ch {
+                continue;
+            }
+            let k = (x.div_euclid(ts), y.div_euclid(ts));
+            if last_key != Some(k) {
+                last_key = Some(k);
+                last_tile = before.get(&k);
+            }
+            let tile = last_tile;
+            if let Some(t) = tile {
+                *px = t[((y - k.1 * ts) * ts + (x - k.0 * ts)) as usize];
+            }
+        }
+    }
+    let out = filter.apply(&src, side, side, origin);
+    let (r, t) = (reach as usize, ts as usize);
+    (0..t)
+        .flat_map(|row| {
+            out[(row + r) * side + r..(row + r) * side + r + t]
+                .iter()
+                .copied()
+        })
+        .collect()
 }
 
 /// Clone: a cross where it copies from (following the brush during a
@@ -1200,5 +1302,113 @@ mod mode_tests {
         stroke(&mut a, Vec2::new(40.0, 32.0), Vec2::new(80.0, 32.0));
         let c = px(&a, 60, 32);
         assert!(c.g() > 150 && c.r() < 80, "red turned green: {c:?}");
+    }
+    fn filter_brush(
+        paint: impl Fn(i32, i32) -> Color32,
+        filter: crate::canvas::filters::Filter,
+    ) -> crate::PainterApp {
+        let mut a = app(paint);
+        a.active_tool = crate::app::tools::Tool::Blur;
+        a.workspace.blend.filter_mode = FilterMode::Filter;
+        a.workspace.blend.brush_filter = filter;
+        a
+    }
+
+    fn checks(x: i32, y: i32) -> Color32 {
+        if (x / 4 + y / 4) % 2 == 0 {
+            Color32::from_rgb(200, 40, 30)
+        } else {
+            Color32::from_rgb(20, 90, 230)
+        }
+    }
+
+    #[test]
+    fn the_filter_brush_changes_only_what_it_covers_and_undoes_exactly() {
+        use crate::canvas::filters::Filter;
+        let mut a = filter_brush(checks, Filter::Invert);
+        let before = all(&a);
+        // There and back in one stroke: going over a spot again doesn't
+        // invert it back (nothing is filtered twice).
+        a.blend_press(Vec2::new(30.0, 32.0), 1.0);
+        for i in 1..=20 {
+            let t = if i <= 10 { i } else { 20 - i } as f32 / 10.0;
+            a.blend_drag(Vec2::new(30.0 + 60.0 * t, 32.0), 1.0);
+        }
+        a.blend_release();
+        assert_eq!(a.layer_state.history.push_count(), 1, "one undo step");
+        let inverted = |c: Color32| Color32::from_rgb(255 - c.r(), 255 - c.g(), 255 - c.b());
+        for y in 0..64 {
+            for x in 0..128 {
+                let got = px(&a, x, y);
+                let was = before[(y * 128 + x) as usize];
+                // The brush: 30 px across along y = 32, from x 30 to 90.
+                let dx = ((x - 60).abs() - 30).max(0);
+                let d = ((dx * dx + (y - 32) * (y - 32)) as f32).sqrt();
+                if d > 16.0 {
+                    assert_eq!(got, was, "({x}, {y}) is outside the brush");
+                } else if d < 12.0 {
+                    let want = inverted(was);
+                    for (g, w) in got.to_array().iter().zip(want.to_array()) {
+                        assert!(g.abs_diff(w) <= 1, "({x}, {y}): {got:?} vs {want:?}");
+                    }
+                }
+            }
+        }
+        undo(&mut a);
+        assert_eq!(all(&a), before);
+    }
+
+    #[test]
+    fn the_filter_brush_reads_the_layer_as_it_was_before_the_stroke() {
+        use crate::canvas::filters::Filter;
+        let blur = Filter::GaussianBlur { radius: 3.0 };
+        let mut a = filter_brush(checks, blur);
+        let before = all(&a);
+        // Back and forth, dabs overlapping many times.
+        stroke(&mut a, Vec2::new(30.0, 32.0), Vec2::new(90.0, 32.0));
+        let want = blur.apply(&before, 128, 64, (0, 0));
+        let mut changed = 0;
+        for x in 35..85 {
+            for y in 26..38 {
+                let (got, w) = (px(&a, x, y), want[(y * 128 + x) as usize]);
+                for (g, v) in got.to_array().iter().zip(w.to_array()) {
+                    assert!(g.abs_diff(v) <= 2, "({x}, {y}): {got:?} vs {w:?}");
+                }
+                changed += usize::from(got != before[(y * 128 + x) as usize]);
+            }
+        }
+        assert!(changed > 400, "blurred: {changed}");
+    }
+
+    #[test]
+    fn every_filter_paints_through_the_brush() {
+        use crate::canvas::filters::Filter;
+        for &filter in Filter::MENU.iter().flat_map(|g| g.iter()) {
+            let filter = match filter {
+                // Its defaults change nothing.
+                Filter::BrightnessContrast { .. } => Filter::BrightnessContrast {
+                    brightness: 0.4,
+                    contrast: 0.2,
+                },
+                Filter::HueSaturation { .. } => Filter::HueSaturation {
+                    hue: 90.0,
+                    saturation: 0.0,
+                    lightness: 0.0,
+                },
+                Filter::Levels { .. } => Filter::Levels {
+                    black: 0.2,
+                    white: 0.8,
+                    gamma: 1.0,
+                },
+                f => f,
+            };
+            let mut a = filter_brush(checks, filter);
+            let before = all(&a);
+            stroke(&mut a, Vec2::new(30.0, 32.0), Vec2::new(90.0, 32.0));
+            assert!(all(&a) != before, "{}", filter.name());
+            assert_eq!(px(&a, 5, 5), before[5 * 128 + 5], "{}", filter.name());
+            undo(&mut a);
+            assert!(all(&a) == before, "{} undoes", filter.name());
+        }
     }
 }

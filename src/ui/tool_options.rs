@@ -141,6 +141,7 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
             (false, _, FilterMode::Blur) => "Blur",
             (false, _, FilterMode::Sharpen) => "Sharpen",
             (false, _, FilterMode::Adjust) => "Adjust",
+            (false, _, FilterMode::Filter) => "Filter",
         },
     );
     {
@@ -164,6 +165,7 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                     (FilterMode::Blur, "Blur"),
                     (FilterMode::Sharpen, "Sharpen"),
                     (FilterMode::Adjust, "Adjust"),
+                    (FilterMode::Filter, "Filter"),
                 ],
                 true,
             );
@@ -318,6 +320,34 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                 }),
             );
             "Paint to shift the colours under the brush"
+        }
+        (false, _, FilterMode::Filter) => {
+            use crate::canvas::filters::Filter;
+            let current = b.brush_filter;
+            egui::ComboBox::from_id_salt("brush_filter")
+                .selected_text(current.name())
+                .show_ui(ui, |ui| {
+                    for (i, group) in Filter::MENU.iter().enumerate() {
+                        if i > 0 {
+                            ui.separator();
+                        }
+                        for &f in group.iter() {
+                            let same =
+                                std::mem::discriminant(&f) == std::mem::discriminant(&current);
+                            if ui.selectable_label(same, f.name()).clicked() && !same {
+                                b.brush_filter = f;
+                            }
+                        }
+                    }
+                });
+            if b.brush_filter.has_settings() {
+                ui.add_space(6.0);
+                ui.menu_button("Settings…", |ui| {
+                    ui.set_min_width(300.0);
+                    crate::ui::filter_dialog::settings(ui, &mut b.brush_filter);
+                });
+            }
+            "Paint the filter on through the brush  ·  going over a spot again doesn't filter it twice"
         }
     };
     if size_changed {
@@ -709,6 +739,7 @@ pub(crate) fn fill_options(app: &mut PainterApp, ui: &mut egui::Ui, compact: boo
             (FillSource::CurrentLayer, "Layer"),
             (FillSource::LayerBelow, "Below"),
             (FillSource::AllVisible, "All"),
+            (FillSource::Reference, "Reference"),
         ],
         compact,
     );

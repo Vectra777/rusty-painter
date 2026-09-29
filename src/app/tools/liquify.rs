@@ -210,7 +210,7 @@ impl PainterApp {
             transform: None,
             layer_action: None,
         };
-        self.layer_state.history.push_action(action);
+        self.push_undo(action);
     }
 
     /// Put the layer back as it was before the session.
