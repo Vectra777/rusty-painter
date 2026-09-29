@@ -409,6 +409,12 @@ pub(super) struct StoredLayerMeta {
     clipped: bool,
     #[serde(default)]
     adjustment: Option<crate::canvas::filters::Filter>,
+    /// Fill layer and border; absent in older files.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::canvas::layer_style::LayerStyle::is_plain"
+    )]
+    style: crate::canvas::layer_style::LayerStyle,
     #[serde(default)]
     text: Option<StoredText>,
     position_locked: bool,
@@ -431,6 +437,7 @@ impl From<&LayerMeta> for StoredLayerMeta {
             blend: Some(meta.blend.key().to_string()),
             clipped: meta.clipped,
             adjustment: meta.adjustment,
+            style: meta.style,
             text: StoredText::from_layer(meta.text.as_deref()),
             position_locked: meta.position_locked,
             draft: meta.draft,
@@ -456,6 +463,7 @@ impl StoredLayerMeta {
                 .unwrap_or_default(),
             clipped: self.clipped,
             adjustment: self.adjustment,
+            style: self.style,
             text: StoredText::into_layer(self.text),
             position_locked: self.position_locked,
             draft: self.draft,

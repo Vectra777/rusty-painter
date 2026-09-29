@@ -272,6 +272,26 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
             }
         }
     });
+    ui.menu_button("New Fill Layer", |ui| {
+        if menu_item(ui, "Colour", None) {
+            app.add_colour_fill_layer();
+        }
+        if menu_item(ui, "Gradient", None) {
+            app.add_gradient_fill_layer();
+        }
+    });
+    let active = app.canvas.layers.get(app.canvas.active_layer_idx);
+    let can_border = active.is_some_and(|l| {
+        l.kind == crate::canvas::storage::LayerKind::Paint
+            && l.adjustment.is_none()
+            && l.style.fill.is_none()
+    });
+    if ui
+        .add_enabled_ui(can_border, |ui| menu_item(ui, "Border…", None))
+        .inner
+    {
+        app.workspace.filter.border_editing = app.canvas.layer_id_at(app.canvas.active_layer_idx);
+    }
     if menu_item(
         ui,
         "Duplicate Layer",

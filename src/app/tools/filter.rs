@@ -152,6 +152,10 @@ pub struct FilterState {
     pub session: Option<FilterSession>,
     /// The adjustment layer whose settings are open.
     pub editing: Option<LayerId>,
+    /// The fill layer whose settings are open.
+    pub fill_editing: Option<LayerId>,
+    /// The layer whose border settings are open.
+    pub border_editing: Option<LayerId>,
     /// One of its settings is being dragged.
     pub adjusting: bool,
 }

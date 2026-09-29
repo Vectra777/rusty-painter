@@ -46,6 +46,7 @@ impl Layer {
         let mut layer = self.shell();
         layer.kind = LayerKind::Paint;
         layer.adjustment = None;
+        layer.style = Default::default();
         layer
     }
 }
@@ -283,6 +284,9 @@ impl Canvas {
         }
         if lower.adjustment.is_some() {
             return Err("The layer below is an adjustment layer");
+        }
+        if lower.style.fill.is_some() {
+            return Err("The layer below is a fill layer");
         }
         if lower.locked && below != 0 {
             return Err("The layer below is locked");

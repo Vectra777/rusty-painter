@@ -10,8 +10,8 @@ mod tests;
 mod transform;
 pub mod warp;
 
-pub(crate) use composite::shrink_tile;
 pub use composite::{BelowComposite, SampleLayers};
+pub(crate) use composite::{gamma_over, shrink_tile};
 pub use merge::LayerSwap;
 pub use pixels::Region;
 pub(crate) use pixels::mix;
@@ -81,6 +81,8 @@ pub struct Layer {
     /// An adjustment layer: this filter applies to everything below it
     /// (its own pixels aren't shown; its mask says where it applies).
     pub adjustment: Option<crate::canvas::filters::Filter>,
+    /// A fill layer's content or a border around the paint.
+    pub style: crate::canvas::layer_style::LayerStyle,
     /// A text layer: its pixels are this text, rendered, and the Text tool
     /// can edit it again.
     pub text: Option<Box<crate::canvas::text::TextLayer>>,
@@ -117,6 +119,8 @@ pub struct CanvasLayerSnapshot {
     pub blend: LayerBlend,
     pub clipped: bool,
     pub adjustment: Option<crate::canvas::filters::Filter>,
+    /// A fill layer's content or a border around the paint.
+    pub style: crate::canvas::layer_style::LayerStyle,
     pub text: Option<Box<crate::canvas::text::TextLayer>>,
     pub position_locked: bool,
     pub draft: bool,
@@ -149,6 +153,7 @@ impl Layer {
             blend: self.blend,
             clipped: self.clipped,
             adjustment: self.adjustment,
+            style: self.style,
             text: self.text.clone(),
             position_locked: self.position_locked,
             draft: self.draft,
@@ -184,6 +189,7 @@ impl Layer {
             blend: LayerBlend::Normal,
             clipped: false,
             adjustment: None,
+            style: Default::default(),
             text: None,
             position_locked: false,
             draft: false,
@@ -224,6 +230,7 @@ impl Layer {
             blend: self.blend,
             clipped: self.clipped,
             adjustment: self.adjustment,
+            style: self.style,
             text: self.text.clone(),
             position_locked: self.position_locked,
             draft: self.draft,
@@ -256,6 +263,7 @@ impl Layer {
             blend: snapshot.blend,
             clipped: snapshot.clipped,
             adjustment: snapshot.adjustment,
+            style: snapshot.style,
             text: snapshot.text,
             position_locked: snapshot.position_locked,
             draft: snapshot.draft,
@@ -361,6 +369,16 @@ impl Canvas {
         self.blend_space != BlendSpace::Linear || !self.is_plain_stack()
     }
 
+    /// How far past their paint layers show (the widest visible border).
+    pub fn style_reach(&self) -> i32 {
+        self.layers
+            .iter()
+            .filter(|l| l.visible)
+            .map(|l| l.style.reach())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// No folders, masks, clipping or blend modes: a plain stack of Normal
     /// layers (in either blend space).
     fn is_plain_stack(&self) -> bool {
@@ -370,6 +388,7 @@ impl Canvas {
                 && l.blend == LayerBlend::Normal
                 && !l.clipped
                 && l.adjustment.is_none()
+                && l.style.is_plain()
         })
     }
 
@@ -458,6 +477,7 @@ impl Canvas {
         layer.blend = meta.blend;
         layer.clipped = meta.clipped;
         layer.adjustment = meta.adjustment;
+        layer.style = meta.style;
         layer.text = meta.text.clone();
         layer.position_locked = meta.position_locked;
         layer.draft = meta.draft;
@@ -514,6 +534,7 @@ impl Canvas {
             blend: layer.blend,
             clipped: layer.clipped,
             adjustment: layer.adjustment,
+            style: layer.style,
             text: layer.text.clone(),
             position_locked: layer.position_locked,
             draft: layer.draft,

@@ -339,6 +339,12 @@ struct StoredLayer {
     /// Adjustment layer's filter; absent in older files.
     #[serde(default)]
     adjustment: Option<crate::canvas::filters::Filter>,
+    /// Fill layer and border; absent in older files.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::canvas::layer_style::LayerStyle::is_plain"
+    )]
+    style: crate::canvas::layer_style::LayerStyle,
     /// A text layer's source; absent in older files (and on other layers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text: Option<convert::StoredText>,
@@ -371,6 +377,7 @@ impl StoredLayer {
             blend: Some(layer.blend.key().to_string()),
             clipped: layer.clipped,
             adjustment: layer.adjustment,
+            style: layer.style,
             text: convert::StoredText::from_layer(layer.text.as_deref()),
             position_locked: layer.position_locked,
             draft: layer.draft,
@@ -420,6 +427,7 @@ impl StoredLayer {
                 .unwrap_or_default(),
             clipped: self.clipped,
             adjustment: self.adjustment,
+            style: self.style,
             text: convert::StoredText::into_layer(self.text),
             position_locked: self.position_locked,
             draft: self.draft,

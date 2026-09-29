@@ -38,6 +38,21 @@ impl PainterApp {
         ty: usize,
         rect: crate::app::document::TileRect,
     ) {
+        // A layer's border shows past its paint: the tiles around change too.
+        let reach = self.canvas.style_reach();
+        if reach > 0 {
+            let ts = TILE_SIZE;
+            let (ox, oy) = ((tx * ts) as i32, (ty * ts) as i32);
+            let [x0, y0, x1, y1] = rect.map(|v| v as i32);
+            let grown = [
+                ox + x0 - reach,
+                oy + y0 - reach,
+                ox + x1 + reach,
+                oy + y1 + reach,
+            ];
+            self.mark_rect_damage_exact(grown);
+            return;
+        }
         if let Some(tile) = self.tile_mut(tx, ty) {
             tile.mark_rect(rect);
         }
@@ -47,6 +62,17 @@ impl PainterApp {
     /// gets just its part as damage, so the display recomposites and
     /// uploads that part rather than whole tiles (as brush strokes do).
     pub(crate) fn mark_rect_damage(&mut self, rect: [i32; 4]) {
+        let reach = self.canvas.style_reach();
+        self.mark_rect_damage_exact([
+            rect[0] - reach,
+            rect[1] - reach,
+            rect[2] + reach,
+            rect[3] + reach,
+        ]);
+    }
+
+    /// [`Self::mark_rect_damage`] without growing it for borders.
+    fn mark_rect_damage_exact(&mut self, rect: [i32; 4]) {
         let ts = TILE_SIZE as i32;
         let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
         let [x0, y0, x1, y1] = [
@@ -67,14 +93,22 @@ impl PainterApp {
                     (x1.min(ox + ts) - ox) as usize,
                     (y1.min(oy + ts) - oy) as usize,
                 ];
-                self.mark_tile_damage(tx as usize, ty as usize, local);
+                if let Some(tile) = self.tile_mut(tx as usize, ty as usize) {
+                    tile.mark_rect(local);
+                }
             }
         }
     }
 
     pub(crate) fn mark_tile_dirty(&mut self, tx: usize, ty: usize) {
-        if let Some(tile) = self.tile_mut(tx, ty) {
-            tile.mark_full();
+        // A layer's border shows past its paint: the tiles around change too.
+        let around = if self.canvas.style_reach() > 0 { 1 } else { 0 };
+        for ny in ty.saturating_sub(around)..=ty + around {
+            for nx in tx.saturating_sub(around)..=tx + around {
+                if let Some(tile) = self.tile_mut(nx, ny) {
+                    tile.mark_full();
+                }
+            }
         }
     }
 
@@ -317,6 +351,8 @@ impl PainterApp {
         if bounds.is_negative() {
             return;
         }
+        // A layer's border shows past its paint.
+        let bounds = bounds.expand(self.canvas.style_reach() as f32);
 
         let min_x = bounds.min.x.floor().max(0.0) as usize;
         let min_y = bounds.min.y.floor().max(0.0) as usize;
@@ -360,10 +396,7 @@ impl PainterApp {
                     })
                     .unwrap_or(false);
                 if has_data {
-                    let idx = ty * tiles_x + tx;
-                    if let Some(tile) = self.render_cache.tiles.get_mut(idx) {
-                        tile.mark_full();
-                    }
+                    self.mark_tile_dirty(tx, ty);
                 }
             }
         }
@@ -658,6 +691,68 @@ impl PainterApp {
             l.locked = true;
         });
         self.workspace.filter.editing = self.canvas.layer_id_at(idx);
+    }
+
+    /// Add a fill layer (a colour or gradient everywhere) above the
+    /// selected layer, select it and open its settings. It's locked: it
+    /// can't be painted on (a mask or clipping says where it shows).
+    pub(crate) fn add_fill_layer(&mut self, fill: crate::canvas::layer_style::LayerFill) {
+        self.quick_mask_leave();
+        let (index, parent) = self.insertion_point(true);
+        let name = self.next_layer_name(fill.name());
+        let idx = self.insert_entry_with(index, name, LayerKind::Paint, parent, true, |l| {
+            l.style.fill = Some(fill);
+            l.locked = true;
+        });
+        // Unlike a new empty layer, it changes the whole picture.
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+        self.workspace.filter.fill_editing = self.canvas.layer_id_at(idx);
+    }
+
+    /// A colour fill in the brush colour.
+    pub(crate) fn add_colour_fill_layer(&mut self) {
+        let [r, g, b, _] = self
+            .brush_state
+            .brush
+            .brush_options
+            .color
+            .to_srgba_unmultiplied();
+        self.add_fill_layer(crate::canvas::layer_style::LayerFill::Colour([r, g, b]));
+    }
+
+    /// A gradient fill from the brush colour to the secondary colour,
+    /// left to right across the canvas.
+    pub(crate) fn add_gradient_fill_layer(&mut self) {
+        let rgb = |c: Color32| {
+            let [r, g, b, _] = c.to_srgba_unmultiplied();
+            [r, g, b]
+        };
+        let colours = crate::canvas::filters::GradientMap::from_stops(&[
+            (0.0, rgb(self.brush_state.brush.brush_options.color)),
+            (1.0, rgb(self.brush_state.secondary_color)),
+        ]);
+        let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
+        self.add_fill_layer(crate::canvas::layer_style::LayerFill::Gradient {
+            colours,
+            shape: crate::canvas::gradient::GradientShape::Linear,
+            start: [0.0, h / 2.0],
+            end: [w, h / 2.0],
+        });
+    }
+
+    /// Change layer `idx`'s fill or border (live, from their dialogs).
+    pub(crate) fn set_layer_style(
+        &mut self,
+        idx: usize,
+        style: crate::canvas::layer_style::LayerStyle,
+    ) {
+        if self.canvas.layers.get(idx).is_none_or(|l| l.style == style) {
+            return;
+        }
+        self.canvas_mut().layers[idx].style = style;
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
     }
 
     /// Add an empty folder above the selected layer and select it.

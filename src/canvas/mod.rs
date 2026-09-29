@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod gradient;
 pub mod history;
 pub mod inpaint;
+pub mod layer_style;
 pub mod liquify;
 pub mod palette;
 pub mod storage;

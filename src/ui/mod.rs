@@ -15,6 +15,7 @@ pub(crate) mod history_panel;
 pub(crate) mod icons;
 pub(crate) mod image_gallery;
 pub(crate) mod image_menu;
+pub(crate) mod layer_style_dialog;
 pub(crate) mod layers;
 pub(crate) mod menus;
 pub(crate) mod navigator;

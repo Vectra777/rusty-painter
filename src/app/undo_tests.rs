@@ -305,3 +305,75 @@ fn an_adjustment_layer_undoes_redoes_and_saves_with_its_filter() {
         "redoing the add"
     );
 }
+
+#[test]
+fn a_fill_layer_and_a_border_undo_redo_and_save() {
+    use crate::canvas::layer_style::{Border, LayerStyle};
+    let mut app = app();
+    app.add_gradient_fill_layer();
+    let idx = app.canvas.active_layer_idx;
+    let fill = app.canvas.layers[idx].style.fill.expect("a fill layer");
+    assert!(app.canvas.layers[idx].locked, "not painted on");
+    assert_eq!(
+        app.workspace.filter.fill_editing,
+        app.canvas.layer_id_at(idx)
+    );
+    // A border on the layer below.
+    let below = idx - 1;
+    let border = LayerStyle {
+        fill: None,
+        border: Some(Border::default()),
+    };
+    app.set_layer_style(below, border);
+    let bytes = crate::project::encode_project(&app).unwrap();
+    let loaded = crate::project::decode_project(&bytes).unwrap();
+    assert!(
+        loaded
+            .canvas
+            .layers
+            .iter()
+            .any(|l| l.style.fill == Some(fill))
+    );
+    assert!(loaded.canvas.layers.iter().any(|l| l.style == border));
+    app.remove_layer(idx);
+    app.apply_history(false);
+    let idx = app.canvas.active_layer_idx;
+    assert_eq!(
+        app.canvas.layers[idx].style.fill,
+        Some(fill),
+        "undoing the delete"
+    );
+    app.apply_history(false);
+    assert!(app.canvas.layers.iter().all(|l| l.style.fill.is_none()));
+    app.apply_history(true);
+    assert!(
+        app.canvas.layers.iter().any(|l| l.style.fill == Some(fill)),
+        "redoing the add"
+    );
+}
+
+#[test]
+fn painting_a_bordered_layer_redraws_the_tiles_around() {
+    use crate::canvas::layer_style::{Border, LayerStyle};
+    let mut app = app();
+    let idx = app.canvas.active_layer_idx;
+    app.set_layer_style(
+        idx,
+        LayerStyle {
+            fill: None,
+            border: Some(Border::default()),
+        },
+    );
+    app.render_cache = crate::app::state::RenderCache::new(app.canvas.width(), app.canvas.height());
+    for tile in app.render_cache.tiles.iter_mut() {
+        tile.dirty = false;
+    }
+    let ts = crate::app::document::TILE_SIZE as i32;
+    // A change right at a tile's edge.
+    app.mark_rect_damage([ts - 2, ts + 4, ts, ts + 6]);
+    let tiles_x = app.render_cache.tiles_x;
+    let dirty = |tx: usize, ty: usize| app.render_cache.tiles[ty * tiles_x + tx].dirty;
+    assert!(dirty(0, 1), "its own tile");
+    assert!(dirty(1, 1), "the next one, where the border spills");
+    assert!(!dirty(3, 0), "not far away");
+}

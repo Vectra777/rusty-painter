@@ -276,7 +276,7 @@ fn curves_settings(ui: &mut egui::Ui, curves: [&mut ToneCurve; 4]) {
 }
 
 /// The map's colours as a strip, each stop's colour and place, and presets.
-fn gradient_map_settings(ui: &mut egui::Ui, map: &mut GradientMap) {
+pub(crate) fn gradient_map_settings(ui: &mut egui::Ui, map: &mut GradientMap) {
     let stops: Vec<crate::canvas::gradient::Stop> = map
         .stops()
         .iter()

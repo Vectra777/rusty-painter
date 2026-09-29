@@ -112,6 +112,8 @@ pub struct LayerMeta {
     pub blend: crate::canvas::blend_modes::LayerBlend,
     pub clipped: bool,
     pub adjustment: Option<crate::canvas::filters::Filter>,
+    /// A fill layer's content or a border around the paint.
+    pub style: crate::canvas::layer_style::LayerStyle,
     pub text: Option<Box<crate::canvas::text::TextLayer>>,
     pub position_locked: bool,
     pub draft: bool,
@@ -615,6 +617,7 @@ impl History {
                 blend: Default::default(),
                 clipped: false,
                 adjustment: None,
+                style: Default::default(),
                 text: None,
                 position_locked: false,
                 draft: false,

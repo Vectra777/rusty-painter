@@ -79,6 +79,16 @@ pub fn refresh_thumbnails(app: &mut PainterApp, ctx: &egui::Context) {
             Color32::TRANSPARENT
         };
         let mut image = egui::ColorImage::new([tw, th], base);
+        // A fill layer has no paint: its colours, sampled.
+        if let Some(fill) = canvas.layers[idx].style.fill {
+            for (&(tx, ty), samples) in &by_tile {
+                for &(dst, src) in samples {
+                    let x = (tx * tile_size + src % tile_size) as i32;
+                    let y = (ty * tile_size + src / tile_size) as i32;
+                    image.pixels[dst] = fill.pixel(x, y);
+                }
+            }
+        }
         for (&(tx, ty), samples) in &by_tile {
             let Some(cell) = canvas.lock_layer_tile_if_exists(idx, tx, ty) else {
                 continue;
@@ -322,6 +332,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     (current.position_locked, current.draft, current.reference);
                 let clipped = current.clipped;
                 let adjustment = current.adjustment.is_some();
+                let fill = current.style.fill.is_some();
+                let bordered = current.style.border.is_some();
                 let is_text = current.text.is_some();
                 let (id, kind, parent, expanded, blend) = (
                     current.id,
@@ -457,6 +469,14 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                                 ui.label(egui::RichText::new("◐").color(ACCENT))
                                     .on_hover_text("Adjustment layer: double-click to change it");
                             }
+                            if fill {
+                                ui.label(RichText::new("fill").small().color(ACCENT))
+                                    .on_hover_text("Fill layer: double-click to change it");
+                            }
+                            if bordered {
+                                ui.label(RichText::new("border").small().color(ACCENT))
+                                    .on_hover_text("Has a border (Layer → Border…)");
+                            }
                             if alpha_locked {
                                 ui.label(RichText::new("α").small().color(ACCENT))
                                     .on_hover_text("Transparency locked");
@@ -495,6 +515,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     active_idx = i;
                     if adjustment {
                         app.workspace.filter.editing = Some(id);
+                    } else if fill {
+                        app.workspace.filter.fill_editing = Some(id);
                     } else if is_text {
                         edit_text = Some(i);
                     } else {
@@ -514,6 +536,18 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     }
                     if adjustment && ui.button("Edit adjustment…").clicked() {
                         app.workspace.filter.editing = Some(id);
+                        ui.close_menu();
+                    }
+                    if fill && ui.button("Edit fill…").clicked() {
+                        app.workspace.filter.fill_editing = Some(id);
+                        ui.close_menu();
+                    }
+                    if kind == LayerKind::Paint
+                        && !adjustment
+                        && !fill
+                        && ui.button("Border…").clicked()
+                    {
+                        app.workspace.filter.border_editing = Some(id);
                         ui.close_menu();
                     }
                     if is_text && ui.button("Edit text…").clicked() {

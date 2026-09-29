@@ -503,6 +503,8 @@ impl PainterApp {
         ui::gradient_editor::gradient_editor_window(self, ctx);
         ui::filter_dialog::filter_dialog(self, ctx);
         ui::filter_dialog::adjustment_dialog(self, ctx);
+        ui::layer_style_dialog::fill_dialog(self, ctx);
+        ui::layer_style_dialog::border_dialog(self, ctx);
         crate::app::autosave::recovery_dialog(self, ctx);
         ui::image_menu::size_dialog(self, ctx);
         ui::select_dialog::select_dialog(self, ctx);
@@ -616,9 +618,8 @@ impl PainterApp {
                 if tx < 0 || ty < 0 {
                     continue;
                 }
-                if let Some(tile) = self.tile_mut(tx as usize, ty as usize) {
-                    tile.mark_full();
-                }
+                // (With the tiles a border spills into.)
+                self.mark_tile_dirty(tx as usize, ty as usize);
             }
 
             // Reset transform tool state if active so it recalculates bounds

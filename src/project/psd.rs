@@ -159,6 +159,7 @@ impl PsdDocument {
             blend: LayerBlend::Normal,
             clipped: false,
             adjustment: None,
+            style: Default::default(),
             text: None,
             position_locked: false,
             draft: false,
@@ -207,6 +208,7 @@ impl PsdDocument {
                 blend: layer.blend,
                 clipped: layer.clipped,
                 adjustment: None,
+                style: Default::default(),
                 text: None,
                 position_locked: layer.position_locked,
                 draft: false,
@@ -231,6 +233,7 @@ impl PsdDocument {
                     blend: LayerBlend::Normal,
                     clipped: false,
                     adjustment: None,
+                    style: Default::default(),
                     text: None,
                     position_locked: false,
                     draft: false,
@@ -254,10 +257,12 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
         return;
     }
     for (i, layer) in canvas.layers.iter().enumerate() {
-        // Adjustment layers have no PSD form here: the composite shows them.
+        // Adjustment and fill layers have no PSD form here: the composite
+        // shows them.
         if layer.parent != parent
             || matches!(layer.kind, LayerKind::Mask { .. })
             || layer.adjustment.is_some()
+            || layer.style.fill.is_some()
         {
             continue;
         }

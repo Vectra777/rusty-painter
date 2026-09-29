@@ -1064,6 +1064,71 @@ fn curves_colour_balance_and_gradient_map_work_as_adjustment_layers() {
 }
 
 #[test]
+fn a_fill_layer_covers_what_is_below_within_its_mask_and_clipping() {
+    use crate::canvas::layer_style::LayerFill;
+    let mut canvas = one_tile_canvas();
+    fill(&canvas, 1, Color32::RED);
+    let f = canvas.insert_new_layer(2, "fill".into(), LayerKind::Paint, None);
+    let fi = canvas.layer_index_of(f).unwrap();
+    canvas.layers[fi].style.fill = Some(LayerFill::Colour([0, 0, 255]));
+    assert!(canvas.needs_tree_compositing());
+    assert_eq!(pixel(&canvas), Color32::BLUE);
+    // Half opacity: half way.
+    canvas.layers[fi].opacity = 0.5;
+    let px = pixel(&canvas);
+    assert!(px.r() > 100 && px.b() > 100, "{px:?}");
+    canvas.layers[fi].opacity = 1.0;
+    // A black mask hides it.
+    let m = canvas.insert_new_layer(3, "m".into(), LayerKind::Mask { owner: f }, None);
+    let mi = canvas.layer_index_of(m).unwrap();
+    fill(&canvas, mi, Color32::BLACK);
+    assert_eq!(pixel(&canvas), Color32::RED);
+    canvas.layers[mi].visible = false;
+    // Clipped to a layer with no paint there: nothing.
+    let empty = canvas.insert_new_layer(fi, "empty".into(), LayerKind::Paint, None);
+    let _ = empty;
+    let fi = canvas.layer_index_of(f).unwrap();
+    canvas.layers[fi].clipped = true;
+    assert_eq!(pixel(&canvas), Color32::RED);
+}
+
+/// The composite of a whole canvas.
+fn picture(canvas: &Canvas) -> ColorImage {
+    let (w, h) = (canvas.width(), canvas.height());
+    let mut img = ColorImage::new([w, h], Color32::TRANSPARENT);
+    canvas.write_region_to_color_image(0, 0, w, h, &mut img, 1);
+    img
+}
+
+#[test]
+fn a_border_rings_the_paint_across_tiles_and_merging_keeps_it() {
+    use crate::canvas::layer_style::Border;
+    // Two tiles side by side; a dot of paint at the right edge of the left one.
+    let mut canvas = Canvas::new(2 * T, T, Color32::WHITE, T);
+    let mut tile = vec![Color32::TRANSPARENT; T * T];
+    tile[4 * T + (T - 1)] = Color32::BLACK;
+    canvas.set_layer_tile_data(1, 0, 0, tile);
+    canvas.layers[1].style.border = Some(Border {
+        width: 2.0,
+        colour: [255, 0, 0],
+        opacity: 1.0,
+    });
+    assert_eq!(canvas.style_reach(), 3);
+    let img = picture(&canvas);
+    let at = |x: usize, y: usize| img.pixels[y * 2 * T + x];
+    assert_eq!(at(T - 1, 4), Color32::BLACK, "the paint on top");
+    assert_eq!(at(T + 1, 4), Color32::RED, "2 px into the next tile");
+    assert_eq!(at(T - 3, 4), Color32::RED, "and the other way");
+    assert_eq!(at(T + 3, 4), Color32::WHITE, "not further");
+    assert_eq!(at(T - 1, 0), Color32::WHITE, "4 px up: past it");
+    // Merged down, the border becomes paint.
+    let before = img.pixels.clone();
+    canvas.merge_down(1).unwrap();
+    assert!(canvas.layers.iter().all(|l| l.style.is_plain()));
+    assert_eq!(picture(&canvas).pixels, before);
+}
+
+#[test]
 fn fills_and_backgrounds_keep_their_exact_colour() {
     // A mid grey used to come out much lighter (converted to sRGB twice).
     let grey = Color32::from_rgb(100, 100, 100);

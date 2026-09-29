@@ -707,6 +707,17 @@ impl Canvas {
         {
             return Some(self.shrunk_input(i, pixels, space));
         }
+        // A fill layer or a bordered one: pixels made for this tile.
+        if !layer.style.is_plain() {
+            let data = self.styled_tile(i, tx, ty)?;
+            return Some(match shrink {
+                Some(s) => {
+                    let shrunk = shrink_tile(&data, self.tile_size, s.w, s.h, s.block);
+                    self.shrunk_input(i, &shrunk, space)
+                }
+                None => self.shrunk_input(i, &data, space),
+            });
+        }
         let cell = layer_tile(layer, tx, ty);
         let guard = cell
             .as_ref()
@@ -751,6 +762,57 @@ impl Canvas {
                 }
             }),
         })
+    }
+
+    /// A styled layer's pixels for tile `(tx, ty)`, as a painted tile
+    /// holds them: its fill, or its paint over its border. `None` where it
+    /// shows nothing.
+    pub(crate) fn styled_tile(&self, i: usize, tx: i32, ty: i32) -> Option<Vec<Color32>> {
+        let layer = &self.layers[i];
+        let ts = self.tile_size;
+        if let Some(fill) = layer.style.fill {
+            return Some(fill.tile(tx, ty, ts));
+        }
+        let border = layer.style.border?;
+        // The paint's alpha around the tile, as far as the border reaches
+        // (never past the next tiles).
+        let reach = (layer.style.reach() as usize).min(ts);
+        let side = ts + 2 * reach;
+        let mut alpha = vec![0u8; side * side];
+        let mut any = false;
+        let mut own = None;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let Some(cell) = layer_tile(layer, tx + dx, ty + dy) else {
+                    continue;
+                };
+                let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(data) = guard.data.as_deref().filter(|_| !guard.is_empty) else {
+                    continue;
+                };
+                any = true;
+                if (dx, dy) == (0, 0) {
+                    own = Some(data.to_vec());
+                }
+                // Where this tile's pixels land in the square.
+                let (ox, oy) = (dx * ts as i32 + reach as i32, dy * ts as i32 + reach as i32);
+                let (x0, x1) = (
+                    (-ox).max(0) as usize,
+                    (side as i32 - ox).clamp(0, ts as i32) as usize,
+                );
+                let (y0, y1) = (
+                    (-oy).max(0) as usize,
+                    (side as i32 - oy).clamp(0, ts as i32) as usize,
+                );
+                for y in y0..y1 {
+                    let row = (oy + y as i32) as usize * side;
+                    for x in x0..x1 {
+                        alpha[row + (ox + x as i32) as usize] = data[y * ts + x].a();
+                    }
+                }
+            }
+        }
+        any.then(|| border.apply(&alpha, side, reach, own.as_deref(), ts))
     }
 
     /// Layer `i`'s input from pixels already shrunk.
