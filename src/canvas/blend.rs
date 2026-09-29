@@ -258,10 +258,12 @@ pub(crate) fn gamma_rgba_to_color32(c: Rgba) -> Color32 {
 /// channel); produces bit-identical values.
 #[inline]
 pub(crate) fn color32_to_linear(c: Color32) -> Rgba {
+    // The table once, not once a channel.
+    let lut = srgb_to_linear_lut();
     Rgba::from_rgba_premultiplied(
-        srgb_u8_to_linear(c.r()),
-        srgb_u8_to_linear(c.g()),
-        srgb_u8_to_linear(c.b()),
+        lut[c.r() as usize],
+        lut[c.g() as usize],
+        lut[c.b() as usize],
         c.a() as f32 / 255.0,
     )
 }
@@ -353,12 +355,34 @@ fn alpha_to_u8(alpha: f32) -> u8 {
 
 #[inline]
 pub(crate) fn rgba_to_color32_fast(rgba: Rgba) -> Color32 {
-    Color32::from_rgba_premultiplied(
-        linear_to_srgb_u8(rgba.r()),
-        linear_to_srgb_u8(rgba.g()),
-        linear_to_srgb_u8(rgba.b()),
-        alpha_to_u8(rgba.a()),
-    )
+    LinearEncoder::new().encode(rgba)
+}
+
+/// [`rgba_to_color32_fast`] with its table looked up once, for loops over
+/// pixels (looking it up for each channel of each pixel cost more than
+/// the conversion).
+#[derive(Clone, Copy)]
+pub(crate) struct LinearEncoder(&'static [u8; GAMMA_LUT_SIZE]);
+
+impl LinearEncoder {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self(gamma_lut())
+    }
+
+    #[inline]
+    pub(crate) fn encode(self, rgba: Rgba) -> Color32 {
+        let srgb = |linear: f32| {
+            let index = (linear.clamp(0.0, 1.0) * (GAMMA_LUT_SIZE - 1) as f32 + 0.5) as usize;
+            self.0[index.min(GAMMA_LUT_SIZE - 1)]
+        };
+        Color32::from_rgba_premultiplied(
+            srgb(rgba.r()),
+            srgb(rgba.g()),
+            srgb(rgba.b()),
+            alpha_to_u8(rgba.a()),
+        )
+    }
 }
 
 /// The brush color of a stroke, prepared for resolving stroke buffers.

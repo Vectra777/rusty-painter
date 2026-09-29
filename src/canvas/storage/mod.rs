@@ -23,9 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{Color32, Rgba};
 
-use crate::canvas::blend::{
-    alpha_over_batch, apply_opacity_scale, gamma_rgba_to_color32, rgba_to_color32_fast,
-};
+use crate::canvas::blend::{alpha_over_batch, apply_opacity_scale, gamma_rgba_to_color32};
 use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
 use crate::canvas::history::{LayerMeta, TileSnapshot, UndoAction};
 
@@ -142,6 +140,21 @@ pub struct DocumentState {
 }
 
 impl Layer {
+    /// Bytes of pixels this layer holds (for the undo history's budget).
+    pub(crate) fn held_bytes(&self) -> usize {
+        let tiles = self.tiles.lock().unwrap_or_else(|e| e.into_inner());
+        tiles
+            .values()
+            .map(|t| {
+                t.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .data
+                    .as_ref()
+                    .map_or(0, |d| d.len() * std::mem::size_of::<Color32>())
+            })
+            .sum()
+    }
+
     /// The same layer (id and settings) with no pixels.
     pub(crate) fn shell(&self) -> Layer {
         Layer {
@@ -400,11 +413,12 @@ impl Canvas {
         })
     }
 
-    /// Final 8-bit value of a composite computed by the tree compositor.
-    fn encode_tree(&self, c: Rgba) -> Color32 {
-        match self.blend_space {
-            BlendSpace::Linear => rgba_to_color32_fast(c),
-            BlendSpace::Gamma => gamma_rgba_to_color32(c),
+    /// Final 8-bit values of composites from the tree compositor (its
+    /// tables looked up once, for loops over pixels).
+    fn tree_encoder(&self) -> TreeEncoder {
+        TreeEncoder {
+            space: self.blend_space,
+            linear: crate::canvas::blend::LinearEncoder::new(),
         }
     }
 
@@ -873,6 +887,23 @@ impl Canvas {
                 active_before,
                 active_after: self.active_layer_idx,
             });
+        }
+    }
+}
+
+/// Composited pixels to what's stored, in the canvas's blend space.
+#[derive(Clone, Copy)]
+struct TreeEncoder {
+    space: BlendSpace,
+    linear: crate::canvas::blend::LinearEncoder,
+}
+
+impl TreeEncoder {
+    #[inline]
+    fn encode(self, c: Rgba) -> Color32 {
+        match self.space {
+            BlendSpace::Linear => self.linear.encode(c),
+            BlendSpace::Gamma => gamma_rgba_to_color32(c),
         }
     }
 }

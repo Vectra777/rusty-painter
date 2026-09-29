@@ -232,8 +232,44 @@ pub struct UndoAction {
 /// stroke across a 4K canvas saves about 4000 tiles, roughly 64 MiB.
 const MAX_UNDO_BYTES: usize = 512 * 1024 * 1024;
 
+/// Memory a step holds: its tile snapshots, and whatever its layer change
+/// keeps (whole layers, for a resize, rotation or merge; the lines of a
+/// vector layer). Left out, a few rotations of a large picture held
+/// gigabytes the budget never saw.
 fn snapshot_bytes(action: &UndoAction) -> usize {
-    action.tiles.iter().map(|tile| tile.data.held_bytes()).sum()
+    let tiles: usize = action.tiles.iter().map(|tile| tile.data.held_bytes()).sum();
+    let mut kept = 0;
+    let mut op = action.layer_action.as_ref();
+    while let Some(o) = op {
+        op = match o {
+            LayerHistoryOp::Document(doc) => {
+                let doc = doc.lock().unwrap_or_else(|e| e.into_inner());
+                kept += doc.layers.iter().map(|l| l.held_bytes()).sum::<usize>();
+                None
+            }
+            LayerHistoryOp::Replaced(swap) => {
+                let swap = swap.lock().unwrap_or_else(|e| e.into_inner());
+                kept += swap
+                    .layers
+                    .iter()
+                    .map(|(_, l)| l.held_bytes())
+                    .sum::<usize>();
+                None
+            }
+            LayerHistoryOp::Vector { layers, inner } => {
+                kept += layers
+                    .iter()
+                    .filter_map(|(_, v)| v.as_ref())
+                    .flat_map(|v| &v.strokes)
+                    .map(|s| std::mem::size_of_val(s.points.as_slice()))
+                    .sum::<usize>();
+                inner.as_deref()
+            }
+            LayerHistoryOp::Text { inner, .. } => inner.as_deref(),
+            _ => None,
+        };
+    }
+    tiles + kept
 }
 
 /// Compress the pixels of every action except the newest. Usually only
@@ -895,6 +931,39 @@ mod tests {
             1,
             "the newest action is kept even if it alone exceeds the budget"
         );
+    }
+
+    #[test]
+    fn steps_keeping_whole_layers_count_towards_the_budget() {
+        // Each resize keeps the picture as it was: a painted 256 px layer,
+        // 256 KiB. Three of them don't fit in 600 KiB.
+        let mut canvas = Canvas::new(256, 256, Color32::WHITE, 64);
+        for ty in 0..4 {
+            for tx in 0..4 {
+                canvas.set_layer_tile_data(1, tx, ty, vec![Color32::RED; 64 * 64]);
+            }
+        }
+        let mut stack: Vec<UndoAction> = (0..3)
+            .map(|_| {
+                let before = canvas.apply_image_op(crate::canvas::geometry::ImageOp::Reframe {
+                    x: 0,
+                    y: 0,
+                    w: 256,
+                    h: 256,
+                });
+                UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: Some(LayerHistoryOp::Document(std::sync::Arc::new(
+                        std::sync::Mutex::new(before),
+                    ))),
+                }
+            })
+            .collect();
+        assert!(snapshot_bytes(&stack[0]) >= 256 * 256 * 4);
+        assert_eq!(trim_oldest(&mut stack, 600 * 1024), 1);
+        assert_eq!(stack.len(), 2);
     }
 
     #[test]

@@ -77,6 +77,13 @@ result at 4096×4096).
   one of them to the thread pool, although all but one were already
   compressed. With hundreds of steps, each new step got slower than the
   last. Only raw snapshots are now handed over.
+- **The general compositor** (any document with a folder, mask,
+  clipping, fill layer, border or adjustment layer) looked up the
+  gamma tables three times a pixel and called the full blend-mode
+  function even for plain "over". It now looks them up once per tile,
+  blends "over" inline, and walks rows instead of working out every
+  pixel's tile position: 33% fewer instructions, and flattening such a
+  document 30–37% faster.
 - **Vector lines**: a shape added to a vector layer drew the layer's lines
   twice, once as they are and once as they were for undo. The undo picture
   is now read from the layer before the change. Each line also only visits
@@ -88,10 +95,10 @@ result at 4096×4096).
 | Feature | Time |
 |---|---:|
 | Flatten two paint layers | 89 ms |
-| … with an adjustment layer | 0.37–0.81 s |
-| … with a colour / gradient fill layer | 0.29 / 0.37 s |
-| … with a 4 / 16 / 40 px border | 0.34 / 0.37 / 0.53 s |
-| … with a 500-line vector layer | 0.15 s |
+| … with an adjustment layer | 0.24–0.64 s |
+| … with a colour / gradient fill layer | 0.20 / 0.26 s |
+| … with a 4 / 16 / 40 px border | 0.26 / 0.31 / 0.45 s |
+| … with a 500-line vector layer | 0.13 s |
 | Rasterise a 500-line vector layer | 4 ms |
 | Export PNG / 16-bit PNG | 0.25 / 0.52 s |
 | Export JPEG / TIFF / lossless WebP | 0.52 / 0.12 / 0.18 s |
@@ -111,15 +118,35 @@ bucket fill and colour select at 4096² take 0.15–0.22 s.
 
 ## Known costs left
 
-- **Adjustment layers and full-picture flattening**: with an adjustment
-  layer in the document, flattening the whole 4000 px picture (export,
-  copy merged) takes 0.4–0.8 s instead of 0.09 s. Compositing then takes a
-  general per-pixel path instead of the fast one. On screen only the
-  visible tiles are composited, so editing isn't affected.
+- **Documents with folders, masks, clipping, fill layers, borders or
+  adjustment layers** composite through the general per-pixel path, which
+  is still 2–3 times slower than the plain one. Flattening the whole
+  4000 px picture (export, copy merged) takes 0.2–0.6 s instead of 0.09 s.
+  On screen only the visible tiles are composited.
 - **Vector layers keep a full copy of their lines for every undo step.**
-  With hundreds of lines and steps this adds up, to tens of MB.
+  With hundreds of lines and steps this adds up, to tens of MB (counted
+  in the undo history's 512 MB budget).
 - **Median and oil paint** are 1.2–1.4 s at 4000 px (radius 2 and 4) and
   grow with the radius.
+
+## Damaged files (fuzzing)
+
+Every file reader has a fuzz test that feeds it thousands of damaged copies
+of a good file: flipped bits, numbers set to extremes, pieces cut out or
+repeated. It must refuse them or open them, and never crash, hang or try
+to allocate a huge amount of memory. Projects are also fuzzed with valid
+JSON holding nonsense values (sizes, indices, ids, missing parts), then
+flattened and taken back and forward through their whole undo history.
+
+```sh
+cargo test --release --lib fuzz_ -- --ignored --nocapture
+RP_FUZZ_ROUNDS=20000 cargo test --release --lib fuzz_ -- --ignored --nocapture
+# A failing input is saved under the temp dir; replay a project one with:
+RP_REPLAY=/tmp/rp-fuzz-values-123.bin cargo test --lib project::fuzz_tests::replay -- --ignored
+```
+
+Run in a debug build too: integer overflow panics there instead of
+wrapping round.
 
 ## Quality tests
 

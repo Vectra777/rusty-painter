@@ -2536,6 +2536,26 @@ mod perf {
     }
 
     #[test]
+    #[ignore = "profiling: a small tree composite to run under callgrind"]
+    fn tree_composite_profile() {
+        let canvas = Canvas::new(1024, 1024, Color32::WHITE, TILE_SIZE);
+        for ty in 0..16 {
+            for tx in 0..16 {
+                let t: Vec<Color32> = (0..TILE_SIZE * TILE_SIZE)
+                    .map(|i| Color32::from_rgb((i % 251) as u8, (tx * 16) as u8, (ty * 16) as u8))
+                    .collect();
+                canvas.set_layer_tile_data(1, tx, ty, t);
+            }
+        }
+        let mut app = tests::test_app_pub(canvas);
+        app.canvas_mut().active_layer_idx = 1;
+        app.add_folder();
+        for _ in 0..3 {
+            std::hint::black_box(app.canvas.flatten());
+        }
+    }
+
+    #[test]
     #[ignore = "timing"]
     fn every_export_format() {
         use crate::project::export::{ExportFormat, encode_color_image};

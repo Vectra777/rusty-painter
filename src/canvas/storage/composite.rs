@@ -8,11 +8,11 @@ use eframe::egui::{Color32, ColorImage, Rgba};
 
 use super::{Canvas, Layer, LayerId, LayerKind, RowTileCache, layer_tile};
 use crate::canvas::blend::{
-    alpha_over_batch, average_over, color32_to_linear, color32s_to_linear, gamma_color32_to_rgba,
-    rgba_to_color32_fast,
+    LinearEncoder, alpha_over_batch, average_over, color32_to_linear, color32s_to_linear,
+    gamma_color32_to_rgba, rgba_to_color32_fast,
 };
 use crate::canvas::blend_modes::{
-    BlendSpace, LayerBlend, composite as blend_composite, pixel_noise,
+    BlendSpace, LayerBlend, MIN_ALPHA, composite as blend_composite, pixel_noise,
 };
 
 /// A precomputed composite of the layers below `first_layer` for one tile.
@@ -196,7 +196,17 @@ fn composite_nodes(nodes: &[CompositeNode], idx: usize, mut composite: Rgba, noi
                 src = src * coverage;
             }
         }
-        composite = blend_composite(*blend, src, composite, noise);
+        // Plain "over" here, as `blend_composite` does it (the call alone
+        // cost more than the sum).
+        composite = if *blend == LayerBlend::Normal {
+            if src.a() > MIN_ALPHA {
+                src + composite * (1.0 - src.a())
+            } else {
+                composite
+            }
+        } else {
+            blend_composite(*blend, src, composite, noise)
+        };
     }
     composite
 }
@@ -517,6 +527,7 @@ impl Canvas {
         let (tx, ty) = (tx as i32, ty as i32);
         if self.needs_tree_compositing() {
             let nodes = self.tile_nodes(tx, ty, shrink);
+            let encoder = self.tree_encoder();
             for (idx, px) in out.pixels.iter_mut().enumerate() {
                 let (gx, gy) = (x + idx % dst_w * block, y + idx / dst_w * block);
                 let c = composite_nodes(
@@ -525,12 +536,13 @@ impl Canvas {
                     Rgba::TRANSPARENT,
                     pixel_noise(gx as u32, gy as u32),
                 );
-                *px = self.encode_tree(c);
+                *px = encoder.encode(c);
             }
         } else {
             let layers = self.tile_layer_inputs(tx, ty, 0..self.layers.len(), shrink);
+            let encoder = LinearEncoder::new();
             for (idx, px) in out.pixels.iter_mut().enumerate() {
-                *px = rgba_to_color32_fast(composite_pixel(&layers, idx, Rgba::TRANSPARENT));
+                *px = encoder.encode(composite_pixel(&layers, idx, Rgba::TRANSPARENT));
             }
         }
     }
@@ -1008,13 +1020,7 @@ impl Canvas {
             ),
             None => composite_pixel(&layers, idx, start(idx)),
         };
-        let encode = |c: Rgba| {
-            if nodes.is_some() {
-                self.encode_tree(c)
-            } else {
-                rgba_to_color32_fast(c)
-            }
-        };
+        let (tree, plain) = (self.tree_encoder(), LinearEncoder::new());
         // Downsampling averages in linear light, as the GPU's mips do, so a
         // zoomed-out preview shows what the full-resolution upload will. A
         // gamma-space composite is decoded (through its 8-bit value, exactly
@@ -1022,11 +1028,39 @@ impl Canvas {
         let gamma_tree = nodes.is_some() && self.blend_space == BlendSpace::Gamma;
         let linear = |c: Rgba| {
             if gamma_tree {
-                color32_to_linear(self.encode_tree(c))
+                color32_to_linear(tree.encode(c))
             } else {
                 c
             }
         };
+
+        if step == 1 {
+            // Row by row, without working out the tile position of each
+            // pixel or choosing the compositor again for it.
+            let ts = self.tile_size;
+            let (lx, ly) = (x % ts, y % ts);
+            for dst_y in 0..dst_h {
+                let src_row = (ly + dst_y) * ts + lx;
+                let gy = (y + dst_y) as u32;
+                let out_row = &mut out.pixels[dst_y * dst_w..(dst_y + 1) * dst_w];
+                match &nodes {
+                    Some(nodes) => {
+                        for (dx, px) in out_row.iter_mut().enumerate() {
+                            let noise = pixel_noise((x + dx) as u32, gy);
+                            let c = composite_nodes(nodes, src_row + dx, Rgba::TRANSPARENT, noise);
+                            *px = tree.encode(c);
+                        }
+                    }
+                    None => {
+                        for (dx, px) in out_row.iter_mut().enumerate() {
+                            let idx = src_row + dx;
+                            *px = plain.encode(composite_pixel(&layers, idx, start(idx)));
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
         for dst_y in 0..dst_h {
             let global_y_start = y + dst_y * step;
@@ -1035,13 +1069,7 @@ impl Canvas {
             for dst_x in 0..dst_w {
                 let global_x_start = x + dst_x * step;
 
-                if step == 1 {
-                    let local_y = global_y_start % self.tile_size;
-                    let local_x = global_x_start % self.tile_size;
-                    let src_idx = local_y * self.tile_size + local_x;
-                    let composite = composite_at(src_idx, global_x_start, global_y_start);
-                    out.pixels[row_start + dst_x] = encode(composite);
-                } else {
+                {
                     // Downsample: average the linear composites of the covered pixels.
                     let mut r_acc = 0.0;
                     let mut g_acc = 0.0;
@@ -1076,7 +1104,7 @@ impl Canvas {
                     if count > 0.0 {
                         let inv = 1.0 / count;
                         out.pixels[row_start + dst_x] =
-                            rgba_to_color32_fast(Rgba::from_rgba_premultiplied(
+                            plain.encode(Rgba::from_rgba_premultiplied(
                                 r_acc * inv,
                                 g_acc * inv,
                                 b_acc * inv,
@@ -1215,6 +1243,7 @@ impl Canvas {
     ) {
         let mut cache: HashMap<i32, Vec<CompositeNode>> = HashMap::new();
         let mut cached_ty = None;
+        let encoder = self.tree_encoder();
         for dst_y in 0..dst_h {
             let global_y = y + dst_y * step;
             let ty = (global_y / self.tile_size) as i32;
@@ -1233,7 +1262,7 @@ impl Canvas {
                 let idx = local_y * self.tile_size + local_x;
                 let noise = pixel_noise(global_x as u32, global_y as u32);
                 let composite = composite_nodes(nodes, idx, Rgba::TRANSPARENT, noise);
-                out.pixels[dst_y * dst_w + dst_x] = self.encode_tree(composite);
+                out.pixels[dst_y * dst_w + dst_x] = encoder.encode(composite);
             }
         }
     }

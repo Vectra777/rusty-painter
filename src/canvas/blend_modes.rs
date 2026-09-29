@@ -342,7 +342,7 @@ pub fn blend_color(mode: LayerBlend, b: [f32; 3], s: [f32; 3]) -> [f32; 3] {
     }
 }
 
-const MIN_ALPHA: f32 = 1e-6;
+pub(crate) const MIN_ALPHA: f32 = 1e-6;
 
 /// Composite premultiplied `src` onto premultiplied `dst` with `mode`.
 /// `dissolve_noise` (0..1, stable per pixel) decides Dissolve's pixels: a
