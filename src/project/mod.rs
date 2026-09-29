@@ -25,8 +25,11 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
 mod blobs;
+#[cfg(feature = "sut-import")]
+pub(crate) mod clip;
 mod convert;
 pub(crate) mod export;
+pub(crate) mod kra;
 mod preview;
 pub(crate) mod psd;
 pub(crate) mod svg;
@@ -58,6 +61,27 @@ pub(crate) fn save_project(app: &PainterApp, path: impl AsRef<Path>) -> Result<(
     fs::write(path, encode_project(app)?).map_err(|err| format!("Save failed: {err}"))
 }
 
+/// Other apps' documents this opens (lower-case extensions).
+pub(crate) const FOREIGN_EXTENSIONS: &[&str] = &[
+    "psd",
+    "kra",
+    #[cfg(feature = "sut-import")]
+    "clip",
+];
+
+type Decoder = fn(&[u8]) -> Result<psd::PsdDocument, String>;
+
+/// The reader for another app's document, by lower-case extension.
+fn foreign_decoder(extension: &str) -> Option<Decoder> {
+    Some(match extension {
+        "psd" => psd::decode_psd,
+        "kra" => kra::decode_kra,
+        #[cfg(feature = "sut-import")]
+        "clip" => clip::decode_clip,
+        _ => return None,
+    })
+}
+
 pub(crate) fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, String> {
     decode_project(&fs::read(path).map_err(|err| format!("Open failed: {err}"))?)
 }
@@ -75,12 +99,12 @@ impl PainterApp {
 
     pub(crate) fn load_project_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
-        let is_psd = path
+        let extension = path
             .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("psd"));
-        if is_psd {
+            .map(|e| e.to_string_lossy().to_ascii_lowercase());
+        if let Some(decode) = extension.as_deref().and_then(foreign_decoder) {
             let bytes = fs::read(path).map_err(|err| format!("Open failed: {err}"))?;
-            let canvas = psd::decode_psd(&bytes)?.into_canvas()?;
+            let canvas = decode(&bytes)?.into_canvas()?;
             self.replace_document(canvas, History::new());
             self.active_tool = Tool::Brush;
             return Ok(());

@@ -599,7 +599,10 @@ pub(crate) fn save_project(app: &mut PainterApp) {
 #[cfg(not(target_os = "android"))]
 fn open_project_dialog() -> Option<std::path::PathBuf> {
     crate::app::settings::file_dialog()
-        .add_filter("Rusty Painter or Photoshop", &["rpainter", "psd", "PSD"])
+        .add_filter(
+            "Rusty Painter, Photoshop, Krita or Clip Studio",
+            &["rpainter", "psd", "PSD", "kra", "KRA", "clip", "CLIP"],
+        )
         .pick_file()
         .inspect(|p| crate::app::settings::remember_dir(p))
 }

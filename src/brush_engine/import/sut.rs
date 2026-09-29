@@ -108,7 +108,7 @@ fn read(path: &std::path::Path, stem: &str) -> Result<Imported, String> {
 
 /// A table cell.
 #[derive(Clone, Debug)]
-enum Cell {
+pub(crate) enum Cell {
     Int(i64),
     Real(f64),
     Text(String),
@@ -118,7 +118,10 @@ enum Cell {
 
 /// Every row of `table`, column name → cell (the columns vary between
 /// versions, so they're found by name).
-fn rows(db: &rusqlite::Connection, table: &str) -> rusqlite::Result<Vec<HashMap<String, Cell>>> {
+pub(crate) fn rows(
+    db: &rusqlite::Connection,
+    table: &str,
+) -> rusqlite::Result<Vec<HashMap<String, Cell>>> {
     let mut stmt = db.prepare(&format!("SELECT * FROM \"{table}\""))?;
     let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut out = Vec::new();

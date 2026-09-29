@@ -11,10 +11,10 @@
 
 mod abr;
 mod gimp;
-mod krita;
+pub(crate) mod krita;
 mod mypaint;
 #[cfg(feature = "sut-import")]
-mod sut;
+pub(crate) mod sut;
 
 use crate::brush_engine::brush::{Brush, BrushPreset};
 use crate::brush_engine::brush_options::PixelBrushShape;

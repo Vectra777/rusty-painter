@@ -384,15 +384,15 @@ fn sensor_curve(xml: &str) -> Option<SoftnessCurve> {
 
 /// An XML element: its name, attributes, text (and CDATA) and children.
 #[derive(Debug, Default)]
-struct Node {
-    name: String,
+pub(crate) struct Node {
+    pub(crate) name: String,
     attrs: Vec<(String, String)>,
     text: String,
-    children: Vec<Node>,
+    pub(crate) children: Vec<Node>,
 }
 
 impl Node {
-    fn attr(&self, key: &str) -> Option<&str> {
+    pub(crate) fn attr(&self, key: &str) -> Option<&str> {
         self.attrs
             .iter()
             .find(|(k, _)| k == key)
@@ -400,7 +400,7 @@ impl Node {
     }
 
     /// The first element called `name`, this one or below.
-    fn find(&self, name: &str) -> Option<&Node> {
+    pub(crate) fn find(&self, name: &str) -> Option<&Node> {
         if self.name == name {
             return Some(self);
         }
@@ -418,7 +418,7 @@ impl Node {
 
 /// A small XML reader (elements, attributes, text): enough for Krita's
 /// presets. The result is a nameless root holding the document's elements.
-fn parse_xml(xml: &str) -> Result<Node, String> {
+pub(crate) fn parse_xml(xml: &str) -> Result<Node, String> {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut stack = vec![Node::default()];

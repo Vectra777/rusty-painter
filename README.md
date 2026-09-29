@@ -25,7 +25,7 @@ A lightweight linux desktop painting playground built with Rust and `eframe/egui
 - **History**: Edit → History (`Ctrl+H`) lists every step by what it did (the tool, filter or command); click one to go back to it, or forward again. One undo history for the whole document (pixels, selections, transforms, layer add/remove/reorder/merge, canvas resizes; all of it kept in saved files), undone in the order things were done whichever layer is selected.
 - **Canvas**: Large canvas support (default 4000x4000) backed by tiled storage and GPU texture atlases.
 - **Project Files**: Save/open your work as a `.rpainter` project (compressed, includes undo history) via the Open/Save buttons in the top bar. File managers show a preview of the drawing, and Krita, GIMP or MyPaint can open it as a flattened image.
-- **Export**: Save your work as PNG (8 or 16-bit), JPEG, TIFF, lossless WebP, a layered PSD, or a layered SVG (vector layers as editable paths, fill layers as shapes, paint layers as embedded pictures). Photoshop files (`.psd`, 8-bit RGB or grayscale) open with their layers, folders, masks, blend modes and clipping.
+- **Export**: Save your work as PNG (8 or 16-bit), JPEG, TIFF, lossless WebP, a layered PSD, or a layered SVG (vector layers as editable paths, fill layers as shapes, paint layers as embedded pictures). Photoshop files (`.psd`, 8-bit RGB or grayscale) open with their layers, folders, masks, blend modes and clipping. Krita documents (`.kra`, 8 or 16-bit RGBA) open with their paint layers, folders, transparency masks, opacity, visibility and blend modes, and Clip Studio Paint documents (`.clip`) with their raster layers, folders, masks, paper colour, clipping and blend modes; anything that can't come across (filter layers, vector data) is left out and the app's own saved picture of the document is added as a hidden layer to compare against.
 - **Performance**: Optional masked brush mode and zoom-out LOD for performance experiments.
 - **Android** (experimental): Runs on Android via a patched `winit` and native activity glue — see [Android (APK build)](#android-apk-build) below.
 
@@ -169,7 +169,7 @@ src/
 │   └── blend*.rs, fill.rs, gradient.rs, inpaint.rs, liquify.rs, palette.rs
 ├── brush_engine/        dabs, tips, strokes, stabiliser, mirror painting, the stroke worker thread
 ├── selection/           selection shapes and masks, magnetic lasso, transform state
-├── project/             .rpainter save/open, image export
+├── project/             .rpainter save/open, image export, .psd/.kra/.clip opening
 ├── tablet/              pen input (octotablet: Windows Ink, Wayland)
 ├── ui/                  egui panels, menus, tool options, theme (style.rs tokens, theme.rs)
 ├── android.rs           Android platform glue
