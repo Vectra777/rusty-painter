@@ -49,6 +49,12 @@ CI also compiles the library for `aarch64-linux-android`. Android-only code, suc
 | Brush inputs (sensor → setting) | `InputMapping` in `src/brush_engine/dynamics.rs`, applied in `StrokeState::dab_var` |
 | Text, QuickShape | `src/canvas/text.rs`, `src/app/tools/text.rs`, `src/app/tools/quickshape.rs` |
 | Autosave, time-lapse | `src/app/autosave.rs`, `src/app/timelapse.rs` |
+| Selection modify, saved selections, quick mask | `src/selection/mask.rs` (grow, shrink, feather, border), `src/ui/select_dialog.rs`, `src/app/tools/quick_mask.rs` |
+| Text layers | `Layer::text` (`src/canvas/text.rs`); `PainterApp::push_undo` turns a painted text layer into pixels, so pixel tools push their undo step through it |
+| Merging, layer flags (lock position, draft, reference) | `src/canvas/storage/merge.rs` (undo is `LayerHistoryOp::Replaced`), `SampleLayers` in `composite.rs` |
+| Stabiliser modes | `StabilizerAlgorithm` and `StabilizerModes` in `src/brush_engine/brush.rs`; post-correction repaints in `stroke_worker.rs` |
+| Brush library (tags, favourites, recent, pop-up palette) | `src/app/brush_library.rs` (`brushes/presets/library.json`), `src/ui/brush_list.rs`, `src/ui/radial_palette.rs` |
+| Grid, guides, snapping, reference image, navigator | `src/app/view/aids.rs`, `grid.rs`, `guide_lines.rs`; `src/ui/navigator.rs`, `reference_window.rs` (settings in `view.json`) |
 
 ## Adding a tool, step by step
 

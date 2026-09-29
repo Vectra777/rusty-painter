@@ -30,7 +30,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 |---|---|---|---|---|
 | Pressure → size / opacity / flow | ✅ | ✅ | ✅ | ✅ |
 | Own pressure curve per setting | ✅ | ✅ | ⚠️ | ✅ size, opacity, flow |
-| Any input → any setting, with a curve | ✅ sensors | ⚠️ fixed pairs | ❌ | ✅ 9 inputs → size, opacity, angle, squash, hue, saturation, value |
+| Any input → any setting, with a curve | ✅ sensors | ⚠️ fixed pairs | ❌ | ✅ 9 inputs → size, opacity, angle, squash, hue, saturation, value, texture strength, hardness, scatter, secondary colour mix |
 | Pen tilt / barrel rotation | ✅ | ✅ | ⚠️ barrel roll (Apple Pencil Pro) | ✅ tilt → size, opacity, tip angle (no barrel roll) |
 | Stroke speed | ✅ | ✅ | ✅ Dynamic tab | ✅ size and opacity |
 | Taper at the start / end of a stroke | ✅ fade | ✅ | ✅ Fade tab | ✅ size and/or opacity, no lag |
@@ -46,26 +46,26 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Build-up vs wash | ✅ | ✅ | ⚠️ "Constant Opacity" | ✅ |
 | Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ✅ all 27 layer modes |
 | Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ✅ Smudge with a colour rate |
-| Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height |
+| Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height; turned, moving with the stroke, offset each stroke, or on each dab |
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ✅ multiply, darken, subtract, height |
 | Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ✅ when the pen lifts |
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
 | Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ✅ hairs fan out and run dry |
 | Decoration / ribbon brushes | ✅ | ✅ | ✅ | ✅ colour tips, ribbons |
-| Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ✅ sketch, hatching, deform, sharpen/adjust, clone |
+| Other engines (sketch, hatching, deform, filter, clone…) | ✅ ~20 engines | ⚠️ | ❌ | ✅ sketch, hatching, deform, sharpen/adjust, any filter, clone |
 | Smudge and blur tools | ✅ | ✅ | ✅ | ✅ |
 
 ## Stroke help and presets
 
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
-| Stabiliser | ✅ several kinds | ✅ + post-correction | ✅ + forced fade | ✅ simple + dynamic (mass/drag) |
-| Hold to snap to a shape (QuickShape) | ❌ | ⚠️ | ⚠️ | ✅ line, ellipse, rectangle, polygon |
+| Stabiliser | ✅ several kinds | ✅ + post-correction | ✅ + forced fade | ✅ simple, dynamic (mass/drag), pulled string, post-correction, motion filter |
+| Hold to snap to a shape (QuickShape) | ❌ | ⚠️ | ⚠️ | ✅ line, ellipse (turned too), rectangle, polygon |
 | Rulers / assistants (perspective, ellipse…) | ✅ | ✅ | ✅ | ✅ ruler, vanishing point, perspective, ellipse, concentric |
 | Symmetry / radial mirror | ✅ | ✅ | ✅ | ✅ incl. kaleidoscope |
 | Wrap-around (seamless tiles) | ✅ | ⚠️ | ❌ | ✅ brushes, smudge and blur |
 | Pen eraser end switches to eraser | ✅ | ✅ | ✅ | ✅ |
-| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ✅ built-in presets + your own, kept and shared as `.rpbrush` files; imports GIMP, Photoshop, Krita, MyPaint and Clip Studio brushes |
+| Preset library / sharing | ✅ bundles | ✅ Assets store | ✅ 3000+ online | ✅ built-in presets + your own, kept and shared as `.rpbrush` files; imports GIMP, Photoshop, Krita, MyPaint and Clip Studio brushes; tags, favourites, search, recent, pop-up palette |
 
 ## Roadmap
 
@@ -160,17 +160,32 @@ below.
   stroke and it becomes a clean line, ellipse, rectangle or polygon,
   editable with the Shape tool's handles until applied.
 
+- [x] **More brush inputs:** texture strength, hardness, scatter and the
+  mix of the brush colour and the secondary colour (the one X swaps with),
+  each through its own curve. The Two-Tone Chalk preset uses them.
+- [x] **Filter brush** (Blur tool → Filter): any filter from the Filter
+  menu painted through the brush, with its settings (Settings…). Blurs,
+  sharpen and pixelate read the layer as it was before the stroke; going
+  over a spot again in the same stroke doesn't filter it twice.
+- [x] **Texture options** (Brush → Texture): the grain turned to an angle,
+  moving with the stroke instead of pinned to the canvas, shifted at random
+  each stroke, or applied afresh to each dab.
+- [x] **Stabiliser modes** (Brush → Stabilizer → Method): pulled string
+  (lazy mouse; the string is drawn while painting, and the line catches up
+  to the pen when it lifts), post-correction (the path is smoothed and
+  repainted when the pen lifts, still one undo step) and motion filtering
+  (smooths slow, shaky lines, leaves fast ones alone).
+- [x] **Brush library** (the presets window, `P`): tags (the built-in
+  presets come tagged; imports are tagged with their app), favourites (the
+  star on each tile), search by name and tag, the last 8 brushes used, and
+  a pop-up palette of favourite brushes around the pointer (hold `K`, or
+  right-click the canvas).
+
 ### Next
 
-- [ ] Brush inputs driving texture strength, hardness, scatter and the mix
-  of the main and second colour.
-- [ ] A filter brush: any filter painted through the brush.
-- [ ] Texture: grain moving with the stroke, rotated, offset each stroke,
-  applied to each dab.
-- [ ] Stabiliser: pulled string (lazy mouse), post-correction, motion
-  filtering; pressure calibration from a test stroke.
-- [ ] Brush library: tags, favourites, search, recent brushes, a pop-up
-  palette.
+- [ ] Pressure calibration from a test stroke.
+- [ ] Post-correction while drawing, not only when the pen lifts.
+- [ ] Tags and favourites carried in exported `.rpbrush` files.
 - [ ] Bigger: vector brushes, a spray/particle engine, wet paint simulation
   and impasto.
 
@@ -217,6 +232,11 @@ below.
   stat` in single-codegen-unit builds, run within ±0.04% of the instructions
   they did before for strokes (plain, airbrush, paper texture). Four input
   mappings on the same stroke cost about 3.1 ms (`input_mappings`).
+- **After the fourth round** (new input targets, texture options, filter
+  brush, stabiliser modes): the fixed workloads run within +0.2% of the
+  instructions they did before (plain, airbrush, paper texture), counted
+  the same way. A turned grain that moves with the stroke costs about 13%
+  more than the pinned grain on the same stroke.
 
 ## Sources
 
