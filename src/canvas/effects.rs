@@ -498,7 +498,7 @@ pub(crate) fn path_blur(
 
 /// Rushing towards the canvas's centre: each pixel averages the line
 /// towards the centre, `amount` of its distance long (at most
-/// [`BLUR_REACH`]).
+/// `BLUR_REACH`).
 pub fn zoom_blur(
     src: &[Color32],
     w: usize,
@@ -532,7 +532,7 @@ pub fn zoom_blur(
 }
 
 /// Turning around the canvas's centre: each pixel averages the arc of
-/// `angle` degrees through it (at most [`BLUR_REACH`] long).
+/// `angle` degrees through it (at most `BLUR_REACH` long).
 pub fn spin_blur(
     src: &[Color32],
     w: usize,

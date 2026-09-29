@@ -176,7 +176,7 @@ src/
 └── bench_api.rs         headless entry points for benches/app_bench.rs (feature `bench`)
 ```
 
-The [developer guide](docs/wiki/Developer-Guide.md) says where a typical change goes and how to test it; [architecture](docs/wiki/Architecture.md) covers the data model and pipelines.
+The [developer guide](docs/wiki/Developer-Guide.md) says where a typical change goes and how to test it; [architecture](docs/wiki/Architecture.md) covers the data model and pipelines; [performance](docs/performance.md) has timings for every filter, layer kind, export and import on a 4000 px canvas, and what the quality tests check.
 
 ## Development
 The checks CI runs:

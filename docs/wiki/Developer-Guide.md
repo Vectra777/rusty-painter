@@ -94,7 +94,10 @@ Take a "Stamp" tool that paints something where you click:
 
 - Unit tests sit next to the code (`#[cfg(test)] mod tests`). The canvas storage tests are in `src/canvas/storage/tests.rs`.
 - App-level tests use `project::tests::test_app_pub`, which gives a real `PainterApp` with a stroke worker and no window.
-- Slow timing tests are `#[ignore]`d. Run them with `cargo test --release -- --ignored --nocapture`.
+- Slow timing tests are `#[ignore]`d. Run them with `cargo test --release -- --ignored --nocapture`. `project::perf` times every filter, layer kind, export and import on a 4000 px canvas; [performance](../performance.md) has the latest numbers and what the quality tests check.
+- `test_app_pub` has a one-thread pool (so tests don't compete for cores); for timings give the app a full pool, as `project::perf` does.
+- A new filter is picked up by `canvas::filter_quality` automatically (it walks `Filter::MENU`): it must be repeatable, match when only a region is filtered (give it the right `reach`), and keep alpha if it only changes colour.
+- Test documents from other apps are in `testdata/` (see its README).
 
 ## Benchmarks
 
