@@ -98,8 +98,11 @@ below.
   charcoal, dry bristles, spray, foliage, spatter; and four generated tips
   (bristles, rough disc, spatter, leaf). For oil-like mixing, the Smudge tool
   with a Colour rate. Every preset is tested to paint and undo exactly.
-- [x] **Preset files.** Presets you save are kept in `brushes/presets/`
-  and can be exported and imported as `.rpbrush` files (one preset or a
+- [x] **Preset files.** Every preset is a file in `brushes/presets/`: the
+  ones that come with the app (`assets/default-brushes.rpbrush`) are
+  copied there on first start. A change to the brush is saved into the
+  preset it came from, as in Clip Studio; *Reset to default* and *Restore
+  default brushes* undo that. Presets can be exported and imported as `.rpbrush` files (one preset or a
   whole set, with the tips and textures they use), from the presets
   window's menu or by dropping a file on the window.
 - [x] **Airbrush.** Paint keeps building while the pen is held still, at

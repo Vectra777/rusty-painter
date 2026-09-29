@@ -54,6 +54,8 @@ CI also compiles the library for `aarch64-linux-android`. Android-only code, suc
 | Merging, layer flags (lock position, draft, reference) | `src/canvas/storage/merge.rs` (undo is `LayerHistoryOp::Replaced`), `SampleLayers` in `composite.rs` |
 | Stabiliser modes | `StabilizerAlgorithm` and `StabilizerModes` in `src/brush_engine/brush.rs`; post-correction repaints in `stroke_worker.rs` |
 | Brush library (tags, favourites, recent, pop-up palette) | `src/app/brush_library.rs` (`brushes/presets/library.json`), `src/ui/brush_list.rs`, `src/ui/radial_palette.rs` |
+| Default presets, saving changes into presets | `assets/default-brushes.rpbrush` (built into the program), `install_default_presets` and `save_active_preset` in `src/app/brush_io.rs` |
+| Settings kept between sessions | `src/app/settings.rs` (`settings.json`, and the brush and eraser in use in `brushes/current.rpbrush`) |
 | Grid, guides, snapping, reference image, navigator | `src/app/view/aids.rs`, `grid.rs`, `guide_lines.rs`; `src/ui/navigator.rs`, `reference_window.rs` (settings in `view.json`) |
 
 ## Adding a tool, step by step
