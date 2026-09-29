@@ -105,7 +105,7 @@ enum CompositeNode {
     Adjust {
         filter: crate::canvas::filters::Filter,
         /// Its per-channel table, if it has one (built once per tile).
-        lut: Option<Box<[u8; 256]>>,
+        lut: Option<Box<crate::canvas::filters::ChannelLut>>,
         opacity: f32,
         mask: Option<MaskInput>,
         space: BlendSpace,
@@ -261,7 +261,7 @@ fn composite_other(node: &CompositeNode, idx: usize, composite: Rgba, noise: f32
 #[allow(clippy::too_many_arguments)]
 fn adjust(
     filter: &crate::canvas::filters::Filter,
-    lut: Option<&[u8; 256]>,
+    lut: Option<&crate::canvas::filters::ChannelLut>,
     opacity: f32,
     mask: Option<&MaskInput>,
     space: BlendSpace,

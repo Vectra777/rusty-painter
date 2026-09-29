@@ -1404,6 +1404,25 @@ mod mode_tests {
                     white: 0.8,
                     gamma: 1.0,
                 },
+                Filter::Curves { .. } => {
+                    let invert = crate::canvas::filters::ToneCurve::from_points(&[
+                        [0.0, 1.0],
+                        [1.0, 0.0],
+                    ]);
+                    let same = crate::canvas::filters::ToneCurve::default();
+                    Filter::Curves {
+                        rgb: invert,
+                        red: same,
+                        green: same,
+                        blue: same,
+                    }
+                }
+                Filter::ColourBalance { .. } => Filter::ColourBalance {
+                    shadows: [0.8, 0.0, 0.0],
+                    midtones: [0.8, 0.0, 0.0],
+                    highlights: [0.0, 0.0, -0.8],
+                    preserve_luminosity: false,
+                },
                 f => f,
             };
             let mut a = filter_brush(checks, filter);

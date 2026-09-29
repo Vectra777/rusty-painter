@@ -1022,6 +1022,48 @@ fn an_adjustment_layer_changes_what_is_below_it() {
 }
 
 #[test]
+fn curves_colour_balance_and_gradient_map_work_as_adjustment_layers() {
+    use crate::canvas::filters::{Filter, GradientMap, ToneCurve};
+    for space in [BlendSpace::Gamma, BlendSpace::Linear] {
+        let mut canvas = one_tile_canvas();
+        canvas.blend_space = space;
+        fill(&canvas, 1, Color32::from_rgb(128, 128, 128));
+        let adj = canvas.insert_new_layer(2, "adj".into(), LayerKind::Paint, None);
+        let ai = canvas.layer_index_of(adj).unwrap();
+        // A red curve that drops red to nothing.
+        canvas.layers[ai].adjustment = Some(Filter::Curves {
+            rgb: ToneCurve::default(),
+            red: ToneCurve::from_points(&[[0.0, 0.0], [1.0, 0.0]]),
+            green: ToneCurve::default(),
+            blue: ToneCurve::default(),
+        });
+        let px = pixel(&canvas);
+        assert!(px.r() <= 1 && px.g().abs_diff(128) <= 1, "{space:?} {px:?}");
+        canvas.layers[ai].adjustment = Some(Filter::GradientMap(GradientMap::from_stops(&[
+            (0.0, [0, 0, 0]),
+            (0.5, [0, 200, 0]),
+            (1.0, [255, 255, 255]),
+        ])));
+        let px = pixel(&canvas);
+        assert!(
+            px.r() <= 2 && px.g() >= 195 && px.b() <= 2,
+            "{space:?} {px:?}"
+        );
+        canvas.layers[ai].adjustment = Some(Filter::ColourBalance {
+            shadows: [0.0; 3],
+            midtones: [0.6, 0.0, 0.0],
+            highlights: [0.0; 3],
+            preserve_luminosity: false,
+        });
+        let px = pixel(&canvas);
+        assert!(
+            px.r() > 180 && px.g().abs_diff(128) <= 1,
+            "{space:?} {px:?}"
+        );
+    }
+}
+
+#[test]
 fn fills_and_backgrounds_keep_their_exact_colour() {
     // A mid grey used to come out much lighter (converted to sRGB twice).
     let grey = Color32::from_rgb(100, 100, 100);

@@ -40,6 +40,26 @@ pub enum Filter {
     Threshold {
         level: f32,
     },
+    /// Tone curves: each channel through its own curve, after the master
+    /// (RGB) curve.
+    Curves {
+        rgb: ToneCurve,
+        red: ToneCurve,
+        green: ToneCurve,
+        blue: ToneCurve,
+    },
+    /// Shift the shadows, midtones and highlights towards red, green or blue
+    /// (or cyan, magenta, yellow): each -1..=1 per channel.
+    ColourBalance {
+        shadows: [f32; 3],
+        midtones: [f32; 3],
+        highlights: [f32; 3],
+        /// Keep each pixel's lightness.
+        preserve_luminosity: bool,
+    },
+    /// Each pixel's brightness picks a colour along the gradient (dark at
+    /// the start, light at the end); transparency stays.
+    GradientMap(GradientMap),
     /// Radius in pixels (the Gaussian's standard deviation).
     GaussianBlur {
         radius: f32,
@@ -73,6 +93,207 @@ pub enum Filter {
     },
 }
 
+/// Most points a tone curve holds.
+pub const CURVE_POINTS: usize = 16;
+
+/// A tone curve: input 0..=1 to output 0..=1 through its points (sorted by
+/// input), with smooth monotone interpolation between them. A fixed-size
+/// array of 0..=255 steps (as Photoshop keeps them), so filters stay small
+/// and `Copy`.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToneCurve {
+    len: u8,
+    points: [[u8; 2]; CURVE_POINTS],
+}
+
+impl Default for ToneCurve {
+    fn default() -> Self {
+        Self::from_points(&[[0.0, 0.0], [1.0, 1.0]])
+    }
+}
+
+impl ToneCurve {
+    /// Through `points` (the first [`CURVE_POINTS`] of them), sorted.
+    pub fn from_points(points: &[[f32; 2]]) -> Self {
+        let mut curve = Self {
+            len: 0,
+            points: [[0; 2]; CURVE_POINTS],
+        };
+        for (slot, p) in curve.points.iter_mut().zip(points) {
+            *slot = p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+            curve.len += 1;
+        }
+        curve.points[..curve.len as usize].sort_by_key(|p| p[0]);
+        curve
+    }
+
+    /// The points, 0..=1.
+    pub fn points(&self) -> Vec<[f32; 2]> {
+        self.points[..(self.len as usize).min(CURVE_POINTS)]
+            .iter()
+            .map(|p| p.map(|v| v as f32 / 255.0))
+            .collect()
+    }
+
+    /// The straight line from (0, 0) to (1, 1): changes nothing.
+    pub fn is_identity(&self) -> bool {
+        self.points().iter().all(|p| p[0] == p[1])
+    }
+
+    /// As the curve editor's type.
+    pub fn to_softness(&self) -> crate::brush_engine::hardness::SoftnessCurve {
+        use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
+        SoftnessCurve {
+            points: self
+                .points()
+                .iter()
+                .map(|p| CurvePoint::new(p[0], p[1]))
+                .collect(),
+        }
+    }
+
+    pub fn from_softness(curve: &crate::brush_engine::hardness::SoftnessCurve) -> Self {
+        let points: Vec<[f32; 2]> = curve.points.iter().map(|p| [p.x, p.y]).collect();
+        Self::from_points(&points)
+    }
+
+    /// What each 0..=255 value becomes.
+    pub fn table(&self) -> [u8; 256] {
+        let mut out = [0u8; 256];
+        if self.len == 0 {
+            for (v, o) in out.iter_mut().enumerate() {
+                *o = v as u8;
+            }
+            return out;
+        }
+        let curve = self.to_softness();
+        for (v, o) in out.iter_mut().enumerate() {
+            *o = (curve.eval(v as f32 / 255.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        out
+    }
+}
+
+/// A ready-made gradient map: its name and stops.
+pub type MapPreset = (&'static str, &'static [(f32, [u8; 3])]);
+
+/// Most stops a gradient map holds.
+pub const MAP_STOPS: usize = 8;
+
+/// A gradient map's colours, dark to light.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GradientMap {
+    pub len: u8,
+    /// Position 0..=1 and sRGB colour, sorted by position.
+    pub stops: [(f32, [u8; 3]); MAP_STOPS],
+}
+
+impl Default for GradientMap {
+    fn default() -> Self {
+        Self::from_stops(&[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])])
+    }
+}
+
+impl GradientMap {
+    /// Ready-made maps: name and stops.
+    pub const PRESETS: [MapPreset; 6] = [
+        (
+            "Black to white",
+            &[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])],
+        ),
+        (
+            "Sepia",
+            &[
+                (0.0, [30, 18, 10]),
+                (0.55, [150, 105, 65]),
+                (1.0, [250, 235, 205]),
+            ],
+        ),
+        (
+            "Sunset",
+            &[
+                (0.0, [35, 10, 60]),
+                (0.4, [190, 40, 80]),
+                (0.75, [250, 150, 60]),
+                (1.0, [255, 240, 190]),
+            ],
+        ),
+        (
+            "Cool shadows",
+            &[
+                (0.0, [15, 25, 70]),
+                (0.5, [120, 140, 170]),
+                (1.0, [255, 245, 225]),
+            ],
+        ),
+        ("Duotone", &[(0.0, [40, 20, 90]), (1.0, [255, 200, 90])]),
+        (
+            "Night",
+            &[
+                (0.0, [0, 0, 10]),
+                (0.6, [30, 70, 130]),
+                (1.0, [190, 230, 255]),
+            ],
+        ),
+    ];
+
+    pub fn from_stops(stops: &[(f32, [u8; 3])]) -> Self {
+        let mut map = Self {
+            len: 0,
+            stops: [(0.0, [0; 3]); MAP_STOPS],
+        };
+        for (slot, &(pos, c)) in map.stops.iter_mut().zip(stops) {
+            *slot = (pos.clamp(0.0, 1.0), c);
+            map.len += 1;
+        }
+        map.sort();
+        map
+    }
+
+    pub fn stops(&self) -> &[(f32, [u8; 3])] {
+        &self.stops[..(self.len as usize).min(MAP_STOPS)]
+    }
+
+    pub fn sort(&mut self) {
+        let n = (self.len as usize).min(MAP_STOPS);
+        self.stops[..n].sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+
+    /// Light becomes dark and dark light.
+    pub fn reversed(&self) -> Self {
+        let stops: Vec<_> = self.stops().iter().map(|&(p, c)| (1.0 - p, c)).collect();
+        Self::from_stops(&stops)
+    }
+
+    /// The colour at `t` (0..=1), sRGB 0..=1.
+    pub fn color_at(&self, t: f32) -> [f32; 3] {
+        let stops = self.stops();
+        let f = |c: [u8; 3]| c.map(|v| v as f32 / 255.0);
+        let Some(first) = stops.first() else {
+            return [t; 3];
+        };
+        if t <= first.0 {
+            return f(first.1);
+        }
+        for pair in stops.windows(2) {
+            let ((p0, c0), (p1, c1)) = (pair[0], pair[1]);
+            if t <= p1 {
+                let k = if p1 - p0 > 1e-6 {
+                    (t - p0) / (p1 - p0)
+                } else {
+                    1.0
+                };
+                let (a, b) = (f(c0), f(c1));
+                return [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * k);
+            }
+        }
+        f(stops[stops.len() - 1].1)
+    }
+}
+
+/// What each 0..=255 value of red, green and blue becomes.
+pub type ChannelLut = [[u8; 256]; 3];
+
 /// Largest radius or distance the sliders allow, so the area read around a
 /// selection is known before the filter runs.
 pub const MAX_REACH: i32 = 200;
@@ -99,6 +320,9 @@ impl Filter {
             Filter::Desaturate,
             Filter::Posterize { levels: 6 },
             Filter::Threshold { level: 0.5 },
+            Filter::CURVES,
+            Filter::COLOUR_BALANCE,
+            Filter::GRADIENT_MAP,
         ],
         &[
             Filter::GaussianBlur { radius: 4.0 },
@@ -140,12 +364,15 @@ impl Filter {
             Filter::Noise { .. } => "Add Noise",
             Filter::Pixelate { .. } => "Pixelate",
             Filter::LineArt { .. } => "Extract Line Art",
+            Filter::Curves { .. } => "Curves",
+            Filter::ColourBalance { .. } => "Colour Balance",
+            Filter::GradientMap(_) => "Gradient Map",
         }
     }
 
     /// Filters that can be adjustment layers: each pixel changes on its own
     /// (no neighbours, no position), and its transparency stays.
-    pub const ADJUSTMENTS: [Filter; 7] = [
+    pub const ADJUSTMENTS: [Filter; 10] = [
         Filter::BrightnessContrast {
             brightness: 0.0,
             contrast: 0.0,
@@ -164,11 +391,40 @@ impl Filter {
         Filter::Desaturate,
         Filter::Posterize { levels: 6 },
         Filter::Threshold { level: 0.5 },
+        Filter::CURVES,
+        Filter::COLOUR_BALANCE,
+        Filter::GRADIENT_MAP,
     ];
+
+    const IDENTITY_CURVE: ToneCurve = {
+        let mut points = [[0; 2]; CURVE_POINTS];
+        points[1] = [255, 255];
+        ToneCurve { len: 2, points }
+    };
+    const CURVES: Filter = Filter::Curves {
+        rgb: Self::IDENTITY_CURVE,
+        red: Self::IDENTITY_CURVE,
+        green: Self::IDENTITY_CURVE,
+        blue: Self::IDENTITY_CURVE,
+    };
+    const COLOUR_BALANCE: Filter = Filter::ColourBalance {
+        shadows: [0.0; 3],
+        midtones: [0.0; 3],
+        highlights: [0.0; 3],
+        preserve_luminosity: true,
+    };
+    const GRADIENT_MAP: Filter = Filter::GradientMap(GradientMap {
+        len: 2,
+        stops: {
+            let mut stops = [(0.0, [0u8; 3]); MAP_STOPS];
+            stops[1] = (1.0, [255; 3]);
+            stops
+        },
+    });
 
     /// This filter on one composited pixel (adjustment layers), through
     /// `lut` when it has one (see [`Filter::channel_lut`]).
-    pub fn adjust(&self, c: Color32, lut: Option<&[u8; 256]>) -> Color32 {
+    pub fn adjust(&self, c: Color32, lut: Option<&ChannelLut>) -> Color32 {
         match lut {
             Some(lut) => with_lut(c, lut),
             None => self.pixel(c),
@@ -176,9 +432,27 @@ impl Filter {
     }
 
     /// For filters that change each channel on its own (levels,
-    /// brightness/contrast, invert, posterize): what each 0..=255 value
-    /// becomes, so a pixel costs three lookups instead of the maths.
-    pub fn channel_lut(&self) -> Option<Box<[u8; 256]>> {
+    /// brightness/contrast, invert, posterize, curves): what each 0..=255
+    /// value of each channel becomes, so a pixel costs three lookups
+    /// instead of the maths.
+    pub fn channel_lut(&self) -> Option<Box<ChannelLut>> {
+        if let Filter::Curves {
+            rgb,
+            red,
+            green,
+            blue,
+        } = self
+        {
+            let master = rgb.table();
+            let mut lut = Box::new([[0u8; 256]; 3]);
+            for (table, curve) in lut.iter_mut().zip([red, green, blue]) {
+                let own = curve.table();
+                for (v, out) in table.iter_mut().enumerate() {
+                    *out = own[master[v] as usize];
+                }
+            }
+            return Some(lut);
+        }
         if !matches!(
             self,
             Filter::BrightnessContrast { .. }
@@ -188,12 +462,12 @@ impl Filter {
         ) {
             return None;
         }
-        let mut lut = Box::new([0u8; 256]);
-        for (v, out) in lut.iter_mut().enumerate() {
+        let mut table = [0u8; 256];
+        for (v, out) in table.iter_mut().enumerate() {
             let v = v as u8;
             *out = self.pixel(Color32::from_rgb(v, v, v)).r();
         }
-        Some(lut)
+        Some(Box::new([table; 3]))
     }
 
     /// Has settings (the menu opens a dialog), rather than applying at once.
@@ -341,6 +615,25 @@ impl Filter {
                 rgb.map(|v| (v * n).round() / n)
             }
             Filter::Threshold { level } => [if luma(rgb) >= level { 1.0 } else { 0.0 }; 3],
+            Filter::Curves {
+                rgb: master,
+                red,
+                green,
+                blue,
+            } => {
+                let (master, curves) = (master.to_softness(), [red, green, blue]);
+                [0, 1, 2].map(|i| {
+                    let v = master.eval(rgb[i].clamp(0.0, 1.0));
+                    curves[i].to_softness().eval(v.clamp(0.0, 1.0))
+                })
+            }
+            Filter::ColourBalance {
+                shadows,
+                midtones,
+                highlights,
+                preserve_luminosity,
+            } => colour_balance(rgb, shadows, midtones, highlights, preserve_luminosity),
+            Filter::GradientMap(map) => map.color_at(luma(rgb).clamp(0.0, 1.0)),
             _ => return None,
         })
     }
@@ -348,11 +641,10 @@ impl Filter {
     /// An adjustment on unmultiplied sRGB values (0..1), through `lut` when
     /// it has one: for compositing in gamma space, where the values are at
     /// hand without going through 8-bit colour.
-    pub fn adjust_rgb(&self, rgb: [f32; 3], lut: Option<&[u8; 256]>) -> [f32; 3] {
+    pub fn adjust_rgb(&self, rgb: [f32; 3], lut: Option<&ChannelLut>) -> [f32; 3] {
         let out = match lut {
-            Some(lut) => {
-                rgb.map(|v| lut[(v.clamp(0.0, 1.0) * 255.0).round() as usize] as f32 / 255.0)
-            }
+            Some(lut) => [0, 1, 2]
+                .map(|i| lut[i][(rgb[i].clamp(0.0, 1.0) * 255.0).round() as usize] as f32 / 255.0),
             None => self.rgb(rgb).unwrap_or(rgb),
         };
         out.map(|v| v.clamp(0.0, 1.0))
@@ -361,12 +653,47 @@ impl Filter {
 
 /// `c` with each unmultiplied channel mapped through `lut`.
 #[inline]
-fn with_lut(c: Color32, lut: &[u8; 256]) -> Color32 {
+fn with_lut(c: Color32, lut: &ChannelLut) -> Color32 {
     if c.a() == 0 {
         return c;
     }
     let [r, g, b, a] = c.to_srgba_unmultiplied();
-    Color32::from_rgba_unmultiplied(lut[r as usize], lut[g as usize], lut[b as usize], a)
+    Color32::from_rgba_unmultiplied(
+        lut[0][r as usize],
+        lut[1][g as usize],
+        lut[2][b as usize],
+        a,
+    )
+}
+
+/// GIMP's colour balance: each range's shift weighted by how far the
+/// pixel's lightness is into shadows, midtones or highlights (the three
+/// weights add up to one, so the same shift everywhere shifts everything).
+fn colour_balance(
+    rgb: [f32; 3],
+    shadows: [f32; 3],
+    midtones: [f32; 3],
+    highlights: [f32; 3],
+    preserve_luminosity: bool,
+) -> [f32; 3] {
+    const A: f32 = 0.25;
+    const B: f32 = 0.333;
+    const SCALE: f32 = 0.7;
+    let lightness = rgb_to_hsl(rgb)[2];
+    let ws = ((lightness - B) / -A + 0.5).clamp(0.0, 1.0) * SCALE;
+    let wm = ((lightness - B) / A + 0.5).clamp(0.0, 1.0)
+        * ((lightness + B - 1.0) / -A + 0.5).clamp(0.0, 1.0)
+        * SCALE;
+    let wh = ((lightness + B - 1.0) / A + 0.5).clamp(0.0, 1.0) * SCALE;
+    let out = [0, 1, 2].map(|i| {
+        (rgb[i] + shadows[i] * ws + midtones[i] * wm + highlights[i] * wh).clamp(0.0, 1.0)
+    });
+    if preserve_luminosity {
+        let [h, s, _] = rgb_to_hsl(out);
+        hsl_to_rgb([h, s, lightness])
+    } else {
+        out
+    }
 }
 
 /// Rec. 601 luma of sRGB values, as Photoshop's desaturate uses.
@@ -637,6 +964,7 @@ mod tests {
                         mono: *mono,
                     },
                     Filter::Pixelate { .. } => Filter::Pixelate { size: 1 },
+                    Filter::Curves { .. } | Filter::ColourBalance { .. } => *f,
                     _ => continue,
                 };
                 let out = neutral.apply(&px, 3, 1, (0, 0));
@@ -651,6 +979,135 @@ mod tests {
                     assert!(d <= 2, "{}: {a:?} -> {b:?}", f.name());
                 }
             }
+        }
+    }
+
+    fn rgb_of(f: Filter, c: Color32) -> [u8; 3] {
+        let out = f.apply(&[c], 1, 1, (0, 0))[0].to_srgba_unmultiplied();
+        [out[0], out[1], out[2]]
+    }
+
+    #[test]
+    fn curves_lift_what_their_curve_lifts() {
+        let lift = ToneCurve::from_points(&[[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]]);
+        let grey = Color32::from_rgb(128, 128, 128);
+        let master = Filter::Curves {
+            rgb: lift,
+            red: ToneCurve::default(),
+            green: ToneCurve::default(),
+            blue: ToneCurve::default(),
+        };
+        let [r, g, b] = rgb_of(master, grey);
+        assert!(r > 180 && r == g && g == b, "{r} {g} {b}");
+        // A red curve changes red only.
+        let red = Filter::Curves {
+            rgb: ToneCurve::default(),
+            red: lift,
+            green: ToneCurve::default(),
+            blue: ToneCurve::default(),
+        };
+        let [r, g, b] = rgb_of(red, grey);
+        assert!(r > 180 && g == 128 && b == 128, "{r} {g} {b}");
+        // Its table and the maths agree (the table rounds between curves).
+        let lut = red.channel_lut().expect("per channel");
+        for v in (0..=255u8).step_by(5) {
+            let c = Color32::from_rgb(v, 255 - v, v / 2);
+            let fast = red.adjust(c, Some(&lut)).to_array();
+            let slow = red.pixel(c).to_array();
+            for (x, y) in fast.iter().zip(slow) {
+                assert!(x.abs_diff(y) <= 1, "{fast:?} vs {slow:?}");
+            }
+        }
+        // An identity curve is known as one.
+        assert!(ToneCurve::default().is_identity() && !lift.is_identity());
+    }
+
+    #[test]
+    fn a_tone_curve_keeps_its_points_in_order_and_at_most_its_size() {
+        let points: Vec<[f32; 2]> = (0..40).rev().map(|i| [i as f32 / 40.0, 0.5]).collect();
+        let curve = ToneCurve::from_points(&points);
+        assert_eq!(curve.points().len(), CURVE_POINTS);
+        assert!(curve.points().windows(2).all(|p| p[0][0] <= p[1][0]));
+    }
+
+    #[test]
+    fn colour_balance_shifts_the_range_it_is_told_to() {
+        let grey = Color32::from_rgb(128, 128, 128);
+        let warm_mids = |preserve| Filter::ColourBalance {
+            shadows: [0.0; 3],
+            midtones: [0.5, 0.0, -0.5],
+            highlights: [0.0; 3],
+            preserve_luminosity: preserve,
+        };
+        let [r, _, b] = rgb_of(warm_mids(false), grey);
+        assert!(r > 180 && b < 80, "{r} {b}");
+        // Midtones leave black and white alone.
+        assert_eq!(rgb_of(warm_mids(false), Color32::BLACK), [0, 0, 0]);
+        assert_eq!(rgb_of(warm_mids(false), Color32::WHITE), [255, 255, 255]);
+        // Preserving luminosity keeps the grey's lightness.
+        let out = rgb_of(warm_mids(true), grey);
+        let lightness =
+            (*out.iter().max().unwrap() as f32 + *out.iter().min().unwrap() as f32) / 2.0;
+        assert!((lightness - 128.0).abs() <= 1.5, "{out:?}");
+        assert!(out[0] > out[2], "still warmer: {out:?}");
+        // Shadows move dark pixels, not light ones.
+        let blue_shadows = Filter::ColourBalance {
+            shadows: [0.0, 0.0, 0.6],
+            midtones: [0.0; 3],
+            highlights: [0.0; 3],
+            preserve_luminosity: false,
+        };
+        assert!(rgb_of(blue_shadows, Color32::from_rgb(20, 20, 20))[2] > 100);
+        assert_eq!(rgb_of(blue_shadows, Color32::WHITE), [255, 255, 255]);
+    }
+
+    #[test]
+    fn a_gradient_map_colours_by_brightness_and_keeps_transparency() {
+        let map = GradientMap::from_stops(&[(0.0, [200, 0, 0]), (1.0, [0, 0, 200])]);
+        let f = Filter::GradientMap(map);
+        assert_eq!(rgb_of(f, Color32::BLACK), [200, 0, 0]);
+        assert_eq!(rgb_of(f, Color32::WHITE), [0, 0, 200]);
+        let [r, g, b] = rgb_of(f, Color32::from_rgb(128, 128, 128));
+        assert!(
+            r.abs_diff(100) <= 2 && g == 0 && b.abs_diff(100) <= 2,
+            "{r} {g} {b}"
+        );
+        let half = Color32::from_rgba_unmultiplied(255, 255, 255, 100);
+        assert_eq!(f.apply(&[half], 1, 1, (0, 0))[0].a(), 100);
+        // Reversed, the ends swap.
+        assert_eq!(
+            rgb_of(Filter::GradientMap(map.reversed()), Color32::BLACK),
+            [0, 0, 200]
+        );
+        // The default is black to white: a grey stays grey.
+        let [r, g, b] = rgb_of(
+            Filter::GradientMap(GradientMap::default()),
+            Color32::from_rgb(90, 90, 90),
+        );
+        assert!(r.abs_diff(90) <= 1 && r == g && g == b);
+    }
+
+    #[test]
+    fn new_filters_round_trip_as_project_json() {
+        for f in [
+            Filter::Curves {
+                rgb: ToneCurve::from_points(&[[0.0, 0.1], [0.4, 0.6], [1.0, 0.9]]),
+                red: ToneCurve::default(),
+                green: ToneCurve::default(),
+                blue: ToneCurve::from_points(&[[0.0, 1.0], [1.0, 0.0]]),
+            },
+            Filter::ColourBalance {
+                shadows: [0.1, -0.2, 0.3],
+                midtones: [0.0; 3],
+                highlights: [-0.5, 0.0, 0.5],
+                preserve_luminosity: false,
+            },
+            Filter::GradientMap(GradientMap::from_stops(GradientMap::PRESETS[2].1)),
+        ] {
+            let json = serde_json::to_string(&Some(f)).unwrap();
+            let back: Option<Filter> = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, Some(f));
+            assert!(Filter::ADJUSTMENTS.iter().any(|a| a.name() == f.name()));
         }
     }
 
