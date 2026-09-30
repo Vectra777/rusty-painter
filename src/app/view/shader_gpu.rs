@@ -1205,7 +1205,9 @@ impl ShaderGpu {
         for row in data.chunks(padded as usize) {
             pixels.extend(
                 row[..width * 4]
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3])),
             );
         }
@@ -1475,7 +1477,9 @@ mod tests {
         device.poll(wgpu::Maintain::Wait);
         let data = slice.get_mapped_range();
         data[..n as usize * 16]
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .map(|c| {
                 let f = |i: usize| f32::from_ne_bytes(c[i * 4..i * 4 + 4].try_into().unwrap());
                 [f(0), f(1), f(2), f(3)]

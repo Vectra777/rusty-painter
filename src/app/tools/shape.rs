@@ -258,7 +258,9 @@ impl ShapeSession {
     /// A curve's anchors and handles, as `[anchor, in, out]`.
     fn nodes(&self) -> Vec<[Vec2; 3]> {
         self.points
-            .chunks_exact(CURVE_STRIDE)
+            .as_chunks::<CURVE_STRIDE>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2]])
             .collect()
     }
