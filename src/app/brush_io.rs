@@ -73,8 +73,13 @@ impl PainterApp {
     }
 
     fn ensure_brushes_directory_exists(&self) {
-        if !self.brush_state.brushes_path.exists() {
-            let _ = std::fs::create_dir_all(&self.brush_state.brushes_path);
+        if !self.brush_state.brushes_path.exists()
+            && let Err(err) = std::fs::create_dir_all(&self.brush_state.brushes_path)
+        {
+            log::warn!(
+                "Can't create the brushes folder {}: {err}",
+                self.brush_state.brushes_path.display()
+            );
         }
     }
 

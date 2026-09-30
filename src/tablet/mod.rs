@@ -53,6 +53,25 @@ fn lean_from_xy([ax, ay]: [f32; 2]) -> [f32; 2] {
     }
 }
 
+/// Window pixels per egui point for octotablet's positions. Windows Ink
+/// converts to pixels at the window's DPI (`GetDpiForWindow`), which under
+/// winit's per-monitor awareness are physical pixels; Wayland reports
+/// logical ones, which differ from points only by the UI zoom.
+#[cfg(not(target_os = "android"))]
+fn pose_scale(native_pixels_per_point: Option<f32>, zoom: f32) -> f32 {
+    let native = if cfg!(windows) {
+        native_pixels_per_point.filter(|p| p.is_finite() && *p > 0.0)
+    } else {
+        None
+    };
+    let scale = native.unwrap_or(1.0) * zoom;
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
 /// Per-tool contact tracking.
 #[cfg(not(target_os = "android"))]
 #[derive(Default)]
@@ -66,6 +85,9 @@ struct ToolState {
     /// Touched, but no pose has arrived since: the `Down` sample waits for
     /// one so it carries the contact's real position and pressure.
     pending_down: bool,
+    /// A pose arrived in the current frame (a backend may send it before
+    /// the frame's `Down`).
+    posed_this_frame: bool,
     in_range: bool,
 }
 
@@ -75,7 +97,7 @@ impl ToolState {
     fn apply(
         &mut self,
         event: &ToolEvent<'_>,
-        zoom: f32,
+        scale: f32,
         is_eraser: bool,
         out: &mut Vec<TabletSample>,
     ) {
@@ -94,9 +116,10 @@ impl ToolState {
             ToolEvent::In { .. } => self.in_range = true,
             ToolEvent::Down => self.pending_down = true,
             ToolEvent::Pose(pose) => {
-                self.pos = Some([pose.position[0] / zoom, pose.position[1] / zoom]);
+                self.pos = Some([pose.position[0] / scale, pose.position[1] / scale]);
                 self.pressure = pose.pressure.get().unwrap_or(1.0);
                 self.tilt = pose.tilt.map(lean_from_xy);
+                self.posed_this_frame = true;
                 if self.pending_down {
                     self.pending_down = false;
                     self.down = true;
@@ -119,6 +142,16 @@ impl ToolState {
                 if !matches!(event, ToolEvent::Up) {
                     self.in_range = false;
                 }
+            }
+            // The frame's pose came before its `Down`: that pose is where
+            // the contact starts.
+            ToolEvent::Frame(_) => {
+                if self.pending_down && self.posed_this_frame {
+                    self.pending_down = false;
+                    self.down = true;
+                    emit(self, TabletPhase::Down);
+                }
+                self.posed_this_frame = false;
             }
             _ => {}
         }
@@ -194,6 +227,11 @@ impl TabletInput {
 
     fn octotablet(cc: &eframe::CreationContext<'_>) -> Option<octotablet::Manager> {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        // To rule the tablet out when something goes wrong at start-up.
+        if std::env::var_os("RUSTY_PAINTER_DISABLE_TABLET").is_some() {
+            log::info!("Tablet input turned off by RUSTY_PAINTER_DISABLE_TABLET");
+            return None;
+        }
         // octotablet has no X11 backend.
         if cc.window_handle().is_ok_and(|h| {
             matches!(
@@ -237,9 +275,7 @@ impl TabletInput {
     /// Pump events and return this frame's contact samples. Hovering sends
     /// none: only a touching pen paints.
     pub fn poll(&mut self, ctx: &eframe::egui::Context) -> Vec<TabletSample> {
-        // octotablet reports logical window pixels; egui points differ from
-        // those only by the UI zoom factor.
-        let zoom = ctx.zoom_factor();
+        let scale = pose_scale(ctx.native_pixels_per_point(), ctx.zoom_factor());
         let mut out = Vec::new();
         #[cfg(x11_pen)]
         self.x11.poll(ctx.pixels_per_point(), &mut out);
@@ -252,7 +288,7 @@ impl TabletInput {
             };
             let is_eraser = matches!(tool.tool_type, Some(tool::Type::Eraser));
             let state = self.tools.entry(tool.id()).or_default();
-            state.apply(&event, zoom, is_eraser, &mut out);
+            state.apply(&event, scale, is_eraser, &mut out);
         }
         out
     }
@@ -393,6 +429,49 @@ mod tests {
                 (TabletPhase::Up, [7.0, 5.0], 0.5),
             ]
         );
+    }
+
+    #[test]
+    fn a_pose_before_its_down_in_the_same_frame_starts_the_contact() {
+        let samples = run(&[
+            pose(10.0, 10.0, 0.0),
+            ToolEvent::Frame(None),
+            pose(30.0, 40.0, 0.25),
+            ToolEvent::Down,
+            ToolEvent::Frame(None),
+            pose(32.0, 40.0, 0.5),
+            ToolEvent::Frame(None),
+        ]);
+        assert_eq!(
+            samples,
+            vec![
+                (TabletPhase::Down, [15.0, 20.0], 0.25),
+                (TabletPhase::Move, [16.0, 20.0], 0.5),
+            ]
+        );
+        // A hover pose from an earlier frame doesn't start it: the next
+        // pose does.
+        let samples = run(&[
+            pose(10.0, 10.0, 0.0),
+            ToolEvent::Frame(None),
+            ToolEvent::Down,
+            ToolEvent::Frame(None),
+            pose(12.0, 10.0, 0.3),
+        ]);
+        assert_eq!(samples, vec![(TabletPhase::Down, [6.0, 5.0], 0.3)]);
+    }
+
+    #[test]
+    fn positions_are_scaled_to_points() {
+        // Windows Ink sends physical pixels; elsewhere only the UI zoom
+        // separates window pixels from points.
+        let native = if cfg!(windows) { 1.5 } else { 1.0 };
+        assert_eq!(pose_scale(Some(1.5), 2.0), native * 2.0);
+        assert_eq!(pose_scale(None, 1.0), 1.0);
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(pose_scale(Some(bad), 1.0), 1.0);
+            assert_eq!(pose_scale(Some(1.0), bad), 1.0);
+        }
     }
 
     #[test]

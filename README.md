@@ -51,6 +51,9 @@ Presets, settings, swatches, gradients, the autosave and any brush tips you add 
 
 Set `RUSTY_PAINTER_DATA` to use another folder (a portable install, or a clean one to try things in). Delete the folder to start fresh.
 
+### Windows
+Build with the MSVC Rust toolchain (Visual Studio's C++ build tools and the Windows SDK); `./scripts/check-windows.ps1` runs the same checks as CI. Release builds have no console, so the app logs to `rusty-painter.log` in the data folder above (errors at start-up, the GPU it picked, panics with their backtrace). See [docs/windows-debugging.md](docs/windows-debugging.md) for what to try when it doesn't start or the pen misbehaves.
+
 ## Android (APK build)
 This is an experimental setup and may need platform fixes. Building for Android needs more than the target and `cargo-apk` — this repo vendors and patches `winit` and ships its own NDK linker wrappers, both required for the build to work:
 
@@ -102,7 +105,7 @@ FREQ=199 scripts/flamegraph.sh   # fewer samples
 Needs `perf` and `cargo install flamegraph`. The script builds with frame pointers into `target/profiling` and records with `--call-graph fp --no-inline`. Plain `cargo flamegraph` uses DWARF call graphs and inline resolution, which here wrote a large `perf.data` and spent ~7 minutes at full CPU turning a 10 s recording into a graph.
 
 ## CI and releases
-- **CI** (`.github/workflows/ci.yml`) runs on every push to `master` and on pull requests: `cargo fmt --check`, `clippy -D warnings`, tests, a bench build, a docs build, an Android compile check, and `cargo audit`.
+- **CI** (`.github/workflows/ci.yml`) runs on every push to `master` and on pull requests: `cargo fmt --check`, `clippy -D warnings`, tests, a bench build and a docs build on Linux and Windows, plus an Android compile check and `cargo audit`.
 - **Release** (`.github/workflows/release.yml`) runs the same checks first, then builds and publishes:
   - **By hand:** GitHub → *Actions* → *Release* → *Run workflow*. Enter the version and tick the platforms (Linux, Windows, Android). Untick *Publish* to only build; the files are then downloadable from the run page.
   - **By tag:** `git tag v0.2.0 && git push origin v0.2.0` builds all three and publishes release `v0.2.0`.

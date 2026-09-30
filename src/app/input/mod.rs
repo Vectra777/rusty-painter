@@ -238,8 +238,24 @@ fn handle_events(
             egui::Event::MouseWheel { unit, delta, .. } => {
                 handle_mouse_wheel(app, ctx, response, unit, delta);
             }
+            egui::Event::WindowFocused(false) => handle_focus_lost(app),
             _ => {}
         }
+    }
+}
+
+/// The window lost focus (Alt+Tab, another window clicked) mid-drag: the
+/// button's release may never arrive, and egui still thinks it's down.
+/// End whatever the press started, and stop panning and rotating.
+fn handle_focus_lost(app: &mut PainterApp) {
+    let viewport = &mut app.viewport;
+    viewport.is_panning = false;
+    viewport.is_rotating = false;
+    viewport.last_pointer_pos = None;
+    let pressed = std::mem::take(&mut viewport.is_primary_down);
+    let pen = std::mem::take(&mut viewport.touch.pen_on_canvas);
+    if pressed || pen {
+        handle_primary_release(app);
     }
 }
 
@@ -677,5 +693,42 @@ mod tests {
         frame(&mut app, &ctx, vec![press(on_dialog, true)], true);
         assert!(!app.viewport.is_primary_down);
         assert!(!app.brush_state.is_drawing);
+    }
+
+    #[test]
+    fn losing_focus_mid_drag_ends_it() {
+        use crate::app::tools::Tool;
+        use crate::selection::SelectionType;
+        for tool in [Tool::Brush, Tool::Select(SelectionType::Rectangle)] {
+            let (mut app, ctx) = (app(), egui::Context::default());
+            app.active_tool = tool;
+            let at = egui::pos2(300.0, 200.0);
+            frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at)], false);
+            frame(&mut app, &ctx, vec![press(at, true)], false);
+            frame(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(egui::pos2(340.0, 230.0))],
+                false,
+            );
+            assert!(app.viewport.is_primary_down, "{tool:?}: dragging");
+            app.viewport.is_panning = true;
+            app.viewport.is_rotating = true;
+            // Alt+Tab: the release never comes.
+            frame(
+                &mut app,
+                &ctx,
+                vec![egui::Event::WindowFocused(false)],
+                false,
+            );
+            assert!(!app.viewport.is_primary_down, "{tool:?}");
+            assert!(!app.viewport.is_panning && !app.viewport.is_rotating);
+            assert!(!app.brush_state.is_drawing, "{tool:?}: stroke ended");
+            assert!(
+                !app.selection_manager.is_dragging,
+                "{tool:?}: selection ended"
+            );
+            app.release_canvas();
+        }
     }
 }

@@ -18,7 +18,7 @@ use std::{path::PathBuf, thread};
 /// the user's data folder (`~/.local/share`, `%APPDATA%`, `~/Library/
 /// Application Support`, the app's own storage on Android), else the
 /// folder it was started in.
-fn data_dir() -> PathBuf {
+pub(crate) fn data_dir() -> PathBuf {
     let var = |name: &str| {
         std::env::var_os(name)
             .filter(|v| !v.is_empty())
@@ -58,6 +58,11 @@ impl PainterApp {
         let workspace = Self::create_workspace(color_model);
         let render_cache = RenderCache::new(canvas_w, canvas_h);
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            log::info!(
+                "GPU: {:?}; surface format {:?}",
+                render_state.adapter.get_info(),
+                render_state.target_format
+            );
             let gpu = GpuCanvas::new(&render_state.device, render_state.target_format);
             render_state.renderer.write().callback_resources.insert(gpu);
         } else {

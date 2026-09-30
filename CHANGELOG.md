@@ -7,6 +7,16 @@
 - One editor window per shader layer: syntax colouring, errors at their line as you type, play/pause, speed, templates, and Bake.
 - Export, merging and saving use the current frame; the shader, its time and speed are saved with the project.
 
+### Fixed (from the `windows` branch)
+- Windows: the pen landed away from the pointer on displays scaled above 100% (Windows Ink positions are physical pixels).
+- A pen stroke starts where the pen touched even when the tablet reports the position before the touch.
+- Losing the window's focus mid-drag (Alt+Tab) ends the stroke, selection or other drag instead of leaving it stuck.
+
+### Added (from the `windows` branch)
+- A log file on Windows (`rusty-painter.log` in the data folder): start-up, the GPU used, errors and panics with their backtrace.
+- `RUSTY_PAINTER_DISABLE_TABLET=1` starts without tablet input, to rule it out.
+- CI runs its checks on Windows too.
+
 ## 0.1.0
 
 The first version with a license. Earlier tagged versions (0.0.1 to 0.0.4) were unlicensed and kept their data in the folder the app was started from.

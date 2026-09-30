@@ -198,7 +198,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 ";
 
 /// Per-frame values every shader sees (std140: all `vec4`s). The fields
-/// match the `RpFrame` block in [`PRELUDE`].
+/// match the `RpFrame` block in the GLSL prelude (`PRELUDE`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameUniforms {

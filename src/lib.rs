@@ -13,6 +13,8 @@ pub mod canvas;
 mod fuzz;
 pub(crate) mod project;
 pub mod selection;
+#[cfg(not(target_os = "android"))]
+mod startup;
 mod tablet;
 mod ui;
 
@@ -28,7 +30,13 @@ const APP_NAME: &str = "Rusty Painter";
 /// Launch the desktop app (the binary's `main`).
 #[cfg(not(target_os = "android"))]
 pub fn run() -> eframe::Result<()> {
-    env_logger::init();
+    startup::init_logging();
+    log::info!(
+        "Starting {APP_NAME} {} on {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
@@ -37,14 +45,18 @@ pub fn run() -> eframe::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         APP_NAME,
         options,
         Box::new(|cc| {
             ui::theme::apply_global_style(&cc.egui_ctx);
             Ok(Box::new(PainterApp::new(cc)))
         }),
-    )
+    );
+    if let Err(err) = &result {
+        log::error!("The app couldn't start or its event loop failed: {err}");
+    }
+    result
 }
 
 /// Android's private storage, set at start-up (the data folder there).
