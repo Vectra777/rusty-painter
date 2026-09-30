@@ -31,6 +31,10 @@ png = "0.18"
 # The Text tool: glyph outlines (egui already uses it).
 ab_glyph = "0.2"
 quick-xml = "0.37"
+# Shader layers: GLSL (Shadertoy style) compiled with naga, handed to wgpu
+# as naga modules.
+naga = { version = "22", features = ["glsl-in"] }
+wgpu = { version = "22.1", default-features = false, features = ["naga-ir"] }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [dev-dependencies]

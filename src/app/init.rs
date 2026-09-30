@@ -107,6 +107,7 @@ impl PainterApp {
         app.load_panel_widths(&cc.egui_ctx);
         app.load_settings();
         app.workspace.autosave = crate::app::autosave::AutosaveState::new(&app.autosave_path());
+        app.workspace.shaders.gpu = cc.wgpu_render_state.clone();
         app
     }
 

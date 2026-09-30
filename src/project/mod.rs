@@ -115,6 +115,8 @@ impl PainterApp {
         self.release_canvas();
         // The mask layer isn't part of the document.
         self.quick_mask_leave();
+        // Shader layers are saved with their current frame.
+        self.bake_shader_layers();
         save_project(self, with_project_extension(path.as_ref()))?;
         self.saved_by_user();
         Ok(())
@@ -455,6 +457,9 @@ struct StoredLayer {
     /// A vector layer's lines; absent in older files (and on other layers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     vector: Option<crate::canvas::vector::VectorLayer>,
+    /// A shader layer's shader; absent in older files (and on other layers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shader: Option<crate::canvas::shader::ShaderLayer>,
     /// Layer flags; absent in older files.
     #[serde(default)]
     position_locked: bool,
@@ -487,6 +492,7 @@ impl StoredLayer {
             style: layer.style,
             text: convert::StoredText::from_layer(layer.text.as_deref()),
             vector: layer.vector.as_deref().cloned(),
+            shader: layer.shader.map(|s| *s),
             position_locked: layer.position_locked,
             draft: layer.draft,
             reference: layer.reference,
@@ -538,6 +544,7 @@ impl StoredLayer {
             style: self.style,
             text: convert::StoredText::into_layer(self.text),
             vector: self.vector.map(Box::new),
+            shader: self.shader.map(Box::new),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
@@ -1764,6 +1771,22 @@ pub(crate) mod tests {
                 app.release_canvas();
             }
         }
+    }
+
+    #[test]
+    fn project_round_trips_shader_layers() {
+        use crate::canvas::shader::ShaderLayer;
+        let mut canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
+        let mut shader =
+            ShaderLayer::new("void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }");
+        shader.time = 12.5;
+        shader.speed = 0.5;
+        canvas.layers[1].shader = Some(Box::new(shader.clone()));
+        let encoded =
+            encode_project(&test_app(canvas, vec![History::new(), History::new()])).unwrap();
+        let loaded = decode_project(&encoded).unwrap();
+        assert_eq!(loaded.canvas.layers[1].shader.as_deref(), Some(&shader));
+        assert_eq!(loaded.canvas.layers[0].shader, None);
     }
 
     #[test]

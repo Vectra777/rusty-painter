@@ -234,6 +234,7 @@ impl PainterApp {
             source.blend,
         );
         let text = source.text.clone();
+        let shader = source.shader.clone();
         let (position_locked, draft, reference) =
             (source.position_locked, source.draft, source.reference);
         let tiles: Vec<((i32, i32), Vec<Color32>)> = self
@@ -253,6 +254,7 @@ impl PainterApp {
             layer.alpha_locked = alpha_locked;
             layer.blend = blend;
             layer.text = text;
+            layer.shader = shader;
             layer.position_locked = position_locked;
             layer.draft = draft;
             layer.reference = reference;

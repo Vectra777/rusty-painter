@@ -191,6 +191,9 @@ pub struct RenderCache {
     /// Tiles whose atlas content is only exact from this mip level up (a
     /// zoomed-out stroke preview); finer levels still need a full upload.
     pub preview_tiles: FxHashMap<(usize, usize), u32>,
+    /// Shader layers showing live: the stack split into runs, each with its
+    /// own atlases (see `canvas::shader::live_layout`).
+    pub live: Option<std::sync::Arc<crate::canvas::shader::LiveLayout>>,
 }
 
 impl RenderCache {
@@ -217,6 +220,7 @@ impl RenderCache {
             below_cache: None,
             texture_generation: 0,
             preview_tiles: FxHashMap::default(),
+            live: None,
         }
     }
 
@@ -449,6 +453,8 @@ pub struct WorkspaceState {
     pub timelapse: crate::app::timelapse::TimelapseState,
     /// Text tool settings and the text being typed.
     pub text: crate::app::tools::text::TextToolState,
+    /// Shader layers: compiled shaders, clocks, editor windows.
+    pub shaders: crate::app::shader_ops::ShaderState,
     /// Hold a stroke still to turn it into a clean shape.
     pub quickshape: crate::app::tools::quickshape::QuickShapeState,
     /// Android's image picker (the photo library).
@@ -526,6 +532,7 @@ impl WorkspaceState {
             autosave: crate::app::autosave::AutosaveState::new(std::path::Path::new("")),
             timelapse: Default::default(),
             text: Default::default(),
+            shaders: Default::default(),
             quickshape: Default::default(),
             retired_textures: Vec::new(),
             frame_stats: Default::default(),

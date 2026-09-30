@@ -157,6 +157,8 @@ impl PainterApp {
         retired.extend(old.float_overlay.map(|o| o.texture));
         self.layer_state.history = history;
         self.recreate_render_cache(width, height);
+        // Shader state is per layer id, which the new document reuses.
+        self.workspace.shaders.forget_document();
         // 4. Selection and view.
         self.selection_manager.clear_selection();
         self.selection_manager.canvas_size = [width, height];
@@ -288,6 +290,8 @@ impl PainterApp {
         self.shape_commit();
         self.filter_cancel();
         self.release_canvas();
+        // Shader layers merge as their current frame.
+        self.bake_shader_layers();
         match merge(exclusive(&mut self.canvas)) {
             Ok(swap) => {
                 let (out, put) = swap.applied.clone();

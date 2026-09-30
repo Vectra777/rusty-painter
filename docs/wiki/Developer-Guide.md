@@ -54,6 +54,7 @@ CI also compiles the library for `aarch64-linux-android`. Android-only code, suc
 | Autosave, time-lapse | `src/app/autosave.rs`, `src/app/timelapse.rs` |
 | Selection modify, saved selections, quick mask | `src/selection/mask.rs` (grow, shrink, feather, border), `src/ui/select_dialog.rs`, `src/app/tools/quick_mask.rs` |
 | Text layers | `Layer::text` (`src/canvas/text.rs`); `PainterApp::push_undo` turns a painted text layer into pixels, so pixel tools push their undo step through it |
+| Shader layers | `Layer::shader` (`src/canvas/shader.rs`: GLSL wrapper, compiling, how the stack splits into runs); live composite and baking on the GPU in `src/app/view/shader_gpu.rs`; clocks, live/still decision and baking in `src/app/shader_ops.rs`; the editor window in `src/ui/shader_editor.rs`. Live, each run of layers between shader layers has its own atlases and the GPU blends them; the layer's own tiles only hold its last baked frame (export, merging, thumbnails) |
 | Merging, layer flags (lock position, draft, reference) | `src/canvas/storage/merge.rs` (undo is `LayerHistoryOp::Replaced`), `SampleLayers` in `composite.rs` |
 | Stabiliser modes | `StabilizerAlgorithm` and `StabilizerModes` in `src/brush_engine/brush.rs`; post-correction repaints in `stroke_worker.rs` |
 | Brush library (tags, favourites, recent, pop-up palette) | `src/app/brush_library.rs` (`brushes/presets/library.json`), `src/ui/brush_list.rs`, `src/ui/radial_palette.rs` |

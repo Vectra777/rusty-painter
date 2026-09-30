@@ -14,6 +14,7 @@
 //! - [`timelapse`]: recording the painting and exporting it as a video.
 //! - [`settings`]: preferences and tool options kept between sessions.
 //! - [`autosave`]: autosave and recovering unsaved work after a crash.
+//! - [`shader_ops`]: shader layers (compiling, playback, baking).
 //! - [`layout`], [`init`], [`import`], [`brush_io`]: docks, startup, files
 //!   dropped or imported, brush tips on disk.
 pub(crate) mod autosave;
@@ -29,6 +30,7 @@ pub(crate) mod input;
 pub(crate) mod layout;
 pub(crate) mod painter;
 pub(crate) mod settings;
+pub(crate) mod shader_ops;
 pub(crate) mod state;
 pub(crate) mod stroke_ops;
 pub(crate) mod timelapse;

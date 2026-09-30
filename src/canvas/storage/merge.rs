@@ -48,6 +48,7 @@ impl Layer {
         layer.adjustment = None;
         layer.style = Default::default();
         layer.vector = None;
+        layer.shader = None;
         layer
     }
 }
@@ -102,6 +103,34 @@ impl Canvas {
                     let mut layer = l.share();
                     adjust(i, &mut layer);
                     layer
+                })
+                .collect(),
+            active_layer_idx: self.active_layer_idx,
+            next_layer_id: self.next_layer_id,
+            blend_space: self.blend_space,
+        }
+    }
+
+    /// A read-only copy of this canvas sharing the tiles of the entries
+    /// `shown` marks; the others are hidden and carry no pixels.
+    pub(crate) fn view_showing(&self, shown: &[bool]) -> Canvas {
+        Canvas {
+            width: self.width,
+            height: self.height,
+            tile_size: self.tile_size,
+            clear_color: self.clear_color,
+            layers: self
+                .layers
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    if shown.get(i).copied().unwrap_or(false) {
+                        l.share()
+                    } else {
+                        let mut layer = l.shell();
+                        layer.visible = false;
+                        layer
+                    }
                 })
                 .collect(),
             active_layer_idx: self.active_layer_idx,

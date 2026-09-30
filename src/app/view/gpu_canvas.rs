@@ -234,6 +234,8 @@ pub struct GpuCanvas {
     /// This frame's display quads, and each draw's atlas and vertex range.
     quad_buffer: Option<wgpu::Buffer>,
     draws: Vec<(usize, std::ops::Range<u32>)>,
+    /// Shader layers: the live composite and baking.
+    shaders: super::shader_gpu::ShaderGpu,
 }
 
 const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -338,6 +340,8 @@ impl GpuCanvas {
                 ..Default::default()
             })
         };
+        let shaders =
+            super::shader_gpu::ShaderGpu::new(device, &layout, VERTEX_LAYOUT, target_format);
         Self {
             display,
             downsample,
@@ -357,6 +361,39 @@ impl GpuCanvas {
             generation: None,
             quad_buffer: None,
             draws: Vec::new(),
+            shaders,
+        }
+    }
+
+    /// The shader layers' GPU side (baking goes through it).
+    pub fn shaders_mut(&mut self) -> &mut super::shader_gpu::ShaderGpu {
+        &mut self.shaders
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_shader_gpu(self) -> super::shader_gpu::ShaderGpu {
+        self.shaders
+    }
+
+    /// Record the live shader-layer composite for this frame, or clear the
+    /// last one when there's none.
+    fn compose(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: Option<&super::shader_gpu::ComposePlan>,
+    ) {
+        let groups: Vec<&wgpu::BindGroup> = self.atlases.iter().map(|a| &a.display_group).collect();
+        match plan {
+            Some(plan) => self.shaders.compose(
+                device,
+                encoder,
+                plan,
+                self.quad_buffer.as_ref(),
+                &self.draws,
+                &groups,
+            ),
+            None => self.shaders.clear_result(),
         }
     }
 
@@ -638,6 +675,9 @@ pub struct CanvasPaint {
     /// Taken (not copied) by `prepare`, which runs once per frame.
     pub uploads: std::sync::Mutex<Vec<TileUpload>>,
     pub quads: Vec<AtlasQuad>,
+    /// Shader layers showing live: the quads aren't drawn directly but
+    /// composited with them offscreen.
+    pub compose: Option<super::shader_gpu::ComposePlan>,
 }
 
 impl egui_wgpu::CallbackTrait for CanvasPaint {
@@ -658,6 +698,7 @@ impl egui_wgpu::CallbackTrait for CanvasPaint {
                 .unwrap_or_default();
             gpu.upload(device, egui_encoder, &merge_uploads(uploads));
             gpu.prepare_quads(device, &self.quads);
+            gpu.compose(device, egui_encoder, self.compose.as_ref());
         }
         Vec::new()
     }
@@ -669,7 +710,11 @@ impl egui_wgpu::CallbackTrait for CanvasPaint {
         resources: &egui_wgpu::CallbackResources,
     ) {
         if let Some(gpu) = resources.get::<GpuCanvas>() {
-            gpu.paint(render_pass);
+            if gpu.shaders.has_result() {
+                gpu.shaders.paint(render_pass);
+            } else {
+                gpu.paint(render_pass);
+            }
         }
     }
 }
@@ -1017,6 +1062,203 @@ mod tests {
                     "tile {n} row {row}"
                 );
             }
+        }
+    }
+
+    /// The live shader composite (runs in their own atlases, the shader
+    /// rendered and blended on the GPU) against the CPU compositor with the
+    /// shader layer baked, for `blend` on the shader layer, `above` on the
+    /// layer over it, and `space`.
+    fn live_composite_matches_the_cpu(
+        blend: crate::canvas::blend_modes::LayerBlend,
+        above: crate::canvas::blend_modes::LayerBlend,
+        space: crate::canvas::blend_modes::BlendSpace,
+    ) {
+        use crate::app::view::shader_gpu::{ComposePlan, ComposeStep};
+        use crate::canvas::shader::{self, FrameUniforms, LiveStatus, LiveStep, ShaderLayer};
+        use crate::canvas::storage::LayerKind;
+        use eframe::egui::Color32;
+
+        let Some((device, queue)) = gpu() else {
+            eprintln!("no GPU adapter available; skipping");
+            return;
+        };
+        let (w, h) = (96usize, 80usize);
+        let mut canvas = crate::canvas::Canvas::new(w, h, Color32::WHITE, 64);
+        canvas.blend_space = space;
+        while canvas.layers.len() < 4 {
+            let i = canvas.layers.len();
+            canvas.insert_new_layer(i, format!("L{i}"), LayerKind::Paint, None);
+        }
+        canvas.layers.truncate(4);
+        // Paint: a gradient below the shader, a translucent square above it.
+        for ty in 0..2 {
+            for tx in 0..2 {
+                let below: Vec<Color32> = (0..64 * 64)
+                    .map(|i| {
+                        let (x, y) = (tx * 64 + i % 64, ty * 64 + i / 64);
+                        Color32::from_rgba_unmultiplied((x * 2) as u8, (y * 3) as u8, 90, 255)
+                    })
+                    .collect();
+                canvas.set_layer_tile_data(1, tx, ty, below);
+                let above: Vec<Color32> = (0..64 * 64)
+                    .map(|i| {
+                        let (x, y) = (tx * 64 + i % 64, ty * 64 + i / 64);
+                        if (20..60).contains(&x) && (10..50).contains(&y) {
+                            Color32::from_rgba_unmultiplied(30, 60, 220, 150)
+                        } else {
+                            Color32::TRANSPARENT
+                        }
+                    })
+                    .collect();
+                canvas.set_layer_tile_data(3, tx, ty, above);
+            }
+        }
+        let source = "void mainImage(out vec4 c, in vec2 p) {\n\
+            vec4 b = texture(iChannel0, p / iResolution.xy);\n\
+            c = vec4(1.0 - b.r, p.x / iResolution.x, 0.4, 0.3 + 0.6 * p.y / iResolution.y);\n}";
+        canvas.layers[2].shader = Some(Box::new(ShaderLayer::new(source)));
+        canvas.layers[2].blend = blend;
+        canvas.layers[2].opacity = 0.8;
+        canvas.layers[3].blend = above;
+        canvas.layers[3].opacity = 0.9;
+        let program = std::sync::Arc::new(shader::compile(source).unwrap());
+        let id = canvas.layers[2].id;
+
+        let mut gpu = GpuCanvas::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let resolution = [w as f32, h as f32, 1.0, 0.0];
+
+        // CPU reference: the shader baked into its layer, then flattened.
+        let below = shader::below_view(&canvas, 2).flatten();
+        let frame = FrameUniforms {
+            resolution,
+            ..Default::default()
+        };
+        let baked = gpu
+            .shaders
+            .bake(&device, &queue, id, &program, frame, w, h, &below.pixels)
+            .unwrap();
+        for ty in 0..2 {
+            for tx in 0..2 {
+                let data: Vec<Color32> = (0..64 * 64)
+                    .map(|i| {
+                        let (x, y) = (tx * 64 + i % 64, ty * 64 + i / 64);
+                        if x < w && y < h {
+                            baked[y * w + x]
+                        } else {
+                            Color32::TRANSPARENT
+                        }
+                    })
+                    .collect();
+                canvas.set_layer_tile_data(2, tx as i32, ty as i32, data);
+            }
+        }
+        let expected = canvas.flatten();
+
+        // Live: each run flattened into its own atlas, then composed.
+        let LiveStatus::Live(layout) = shader::live_layout(&canvas) else {
+            panic!("expected a live layout");
+        };
+        gpu.ensure_atlases(&device, 1, layout.runs.len());
+        let uploads: Vec<TileUpload> = layout
+            .runs
+            .iter()
+            .enumerate()
+            .map(|(run, shown)| TileUpload {
+                atlas: run,
+                level: 0,
+                x: ATLAS_BORDER as u32,
+                y: ATLAS_BORDER as u32,
+                width: w as u32,
+                height: h as u32,
+                pixels: shader::run_view(&canvas, shown)
+                    .flatten()
+                    .pixels
+                    .iter()
+                    .flat_map(|p| p.to_array())
+                    .collect(),
+            })
+            .collect();
+        let size = ATLAS_TEXTURE_SIZE as f32;
+        let (u0, v0) = (ATLAS_BORDER as f32 / size, ATLAS_BORDER as f32 / size);
+        let (u1, v1) = (
+            (ATLAS_BORDER + w) as f32 / size,
+            (ATLAS_BORDER + h) as f32 / size,
+        );
+        let quads: Vec<AtlasQuad> = (0..layout.runs.len())
+            .map(|run| AtlasQuad {
+                atlas: run,
+                corners: [[-1.0, 1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]],
+                uvs: [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+            })
+            .collect();
+        let steps = layout
+            .steps
+            .iter()
+            .map(|step| match step {
+                LiveStep::Run { run, blend } => ComposeStep::Run {
+                    run: *run,
+                    blend: *blend,
+                },
+                LiveStep::Shader { id, blend, opacity } => ComposeStep::Shader {
+                    id: *id,
+                    program: program.clone(),
+                    time: [0.0; 4],
+                    blend: *blend,
+                    opacity: *opacity,
+                },
+            })
+            .collect();
+        let plan = ComposePlan {
+            size: [w as u32, h as u32],
+            gamma: space == crate::canvas::blend_modes::BlendSpace::Gamma,
+            per_run: 1,
+            steps,
+            frame: FrameUniforms {
+                resolution,
+                to_canvas_x: [1.0, 0.0, 0.0, 0.0],
+                to_canvas_y: [0.0, 1.0, 0.0, 0.0],
+                to_channel_x: [1.0 / w as f32, 0.0, 0.0, 0.0],
+                to_channel_y: [0.0, 1.0 / h as f32, 0.0, 0.0],
+                ..Default::default()
+            },
+        };
+        let mut encoder = device.create_command_encoder(&Default::default());
+        gpu.upload(&device, &mut encoder, &uploads);
+        gpu.prepare_quads(&device, &quads);
+        gpu.compose(&device, &mut encoder, Some(&plan));
+        queue.submit([encoder.finish()]);
+        let texture = gpu.shaders.result_texture().expect("a composite");
+        let actual = read_texture(&device, &queue, texture, 0, w as u32, h as u32);
+        // Stored the way the atlases are (sRGB bytes) for a linear
+        // document; as the stored values themselves for a gamma one.
+        let expected: Vec<u8> = expected.pixels.iter().flat_map(|p| p.to_array()).collect();
+        for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
+            assert!(
+                (*a as i16 - *e as i16).abs() <= 3,
+                "{blend:?} under {above:?}, {space:?}: pixel {} channel {}: gpu {a} cpu {e}",
+                i / 4,
+                i % 4
+            );
+        }
+    }
+
+    #[test]
+    fn live_shader_composite_matches_the_cpu() {
+        use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
+        for (blend, above, space) in [
+            (LayerBlend::Normal, LayerBlend::Normal, BlendSpace::Linear),
+            (LayerBlend::Multiply, LayerBlend::Normal, BlendSpace::Gamma),
+            (LayerBlend::Overlay, LayerBlend::Normal, BlendSpace::Linear),
+            (LayerBlend::Normal, LayerBlend::Multiply, BlendSpace::Linear),
+            (
+                LayerBlend::Screen,
+                LayerBlend::Difference,
+                BlendSpace::Gamma,
+            ),
+            (LayerBlend::Normal, LayerBlend::Color, BlendSpace::Gamma),
+        ] {
+            live_composite_matches_the_cpu(blend, above, space);
         }
     }
 }

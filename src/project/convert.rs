@@ -419,6 +419,7 @@ pub(super) struct StoredLayerMeta {
     text: Option<StoredText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     vector: Option<crate::canvas::vector::VectorLayer>,
+    shader: Option<crate::canvas::shader::ShaderLayer>,
     position_locked: bool,
     #[serde(default)]
     draft: bool,
@@ -442,6 +443,7 @@ impl From<&LayerMeta> for StoredLayerMeta {
             style: meta.style,
             text: StoredText::from_layer(meta.text.as_deref()),
             vector: meta.vector.as_deref().cloned(),
+            shader: meta.shader.as_deref().cloned(),
             position_locked: meta.position_locked,
             draft: meta.draft,
             reference: meta.reference,
@@ -469,6 +471,7 @@ impl StoredLayerMeta {
             style: self.style,
             text: StoredText::into_layer(self.text),
             vector: self.vector.map(Box::new),
+            shader: self.shader.map(Box::new),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,

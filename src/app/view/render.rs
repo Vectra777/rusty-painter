@@ -8,6 +8,7 @@ use crate::app::state::{BelowCache, RenderCache};
 use crate::app::view::gpu_canvas::{
     ATLAS_BORDER, ATLAS_TEXTURE_SIZE, AtlasQuad, CanvasPaint, MIP_LEVELS, TileUpload,
 };
+use crate::app::view::shader_gpu::ComposePlan;
 use crate::canvas::storage::BelowComposite;
 use eframe::egui::{self, Color32};
 use eframe::egui_wgpu;
@@ -364,68 +365,54 @@ pub fn update_dirty_textures(
     let chosen: Vec<usize> = candidates.by_ref().take(max_tiles).collect();
     let filter = &app.workspace.filter;
     let more = candidates.next().is_some();
+    // Shader layers showing live: each run of layers between them is
+    // composited on its own (the others hidden), into its own atlases.
+    let shader_live = cache.live.as_deref();
+    let views: Vec<Option<crate::canvas::Canvas>> = match shader_live {
+        Some(layout) if !chosen.is_empty() => layout
+            .runs
+            .iter()
+            .map(|shown| Some(crate::canvas::shader::run_view(canvas, shown)))
+            .collect(),
+        Some(_) => Vec::new(),
+        None => vec![None],
+    };
+    let per_run = cache.atlases_x * cache.atlases_y;
+    // The below-cache holds everything under the active layer: only the
+    // first run may start from it, and only if it has all of that.
+    let below_ok = shader_live.is_none_or(|layout| {
+        matches!(
+            layout.steps.first(),
+            Some(crate::canvas::shader::LiveStep::Run { run: 0, .. })
+        ) && layout.runs.first().is_some_and(|run| {
+            run.get(active) == Some(&true)
+                && (0..active).all(|i| run[i] || !canvas.layers[i].visible)
+        })
+    });
     let uploads: Vec<(usize, Vec<TileUpload>)> = app.workspace.pool.install(|| {
         chosen
             .par_iter()
             .map(|&idx| {
                 let tile = &cache.tiles[idx];
-                let below = below_cache
-                    .and_then(|below| below.tiles.get(&(tile.tx, tile.ty)))
-                    .map(|pixels| BelowComposite {
-                        first_layer: active,
-                        pixels,
-                    });
-                // Only the part a stroke changed, when that's all that did;
-                // aligned to the mip block so downsampling stays exact.
-                let tile_size = [
-                    TILE_SIZE.min(canvas.width() - tile.tx * TILE_SIZE),
-                    TILE_SIZE.min(canvas.height() - tile.ty * TILE_SIZE),
-                ];
-                let rect = tile.damage.map_or([0, 0, tile_size[0], tile_size[1]], |d| {
-                    let block = 1usize << level;
-                    [
-                        d[0] / block * block,
-                        d[1] / block * block,
-                        d[2].div_ceil(block).saturating_mul(block).min(tile_size[0]),
-                        d[3].div_ceil(block).saturating_mul(block).min(tile_size[1]),
-                    ]
-                });
-                let mut img = egui::ColorImage::new([0, 0], Color32::TRANSPARENT);
-                if let Some(block) = live_block {
-                    let layer = filter.preview_pixels(canvas, tile.tx, tile.ty, block);
-                    canvas.write_tile_preview(tile.tx, tile.ty, block, &mut img, layer);
-                    let img = preview_at_level(&img, block, tile_size, level);
-                    let full = [0, 0, tile_size[0], tile_size[1]];
-                    return (
-                        idx,
-                        tile_uploads(cache, tile.tx, tile.ty, tile_size, full, &img, level),
-                    );
+                let mut uploads = Vec::new();
+                for (run, view) in views.iter().enumerate() {
+                    let canvas = view.as_ref().unwrap_or(canvas);
+                    let below = below_cache
+                        .filter(|_| run == 0 && below_ok)
+                        .and_then(|below| below.tiles.get(&(tile.tx, tile.ty)))
+                        .map(|pixels| BelowComposite {
+                            first_layer: active,
+                            pixels,
+                        });
+                    let start = uploads.len();
+                    uploads.extend(tile_run_uploads(
+                        canvas, cache, tile, level, live_block, below, quick_mask, filter,
+                    ));
+                    for upload in &mut uploads[start..] {
+                        upload.atlas += run * per_run;
+                    }
                 }
-                if level == 0 {
-                    canvas.write_tile_rect_to_color_image(tile.tx, tile.ty, rect, &mut img, below);
-                } else {
-                    // Zoomed-out stroke preview: composite and average in one
-                    // pass, straight at the uploaded mip level.
-                    let block = 1usize << level;
-                    canvas.write_tile_rect_downsampled(
-                        tile.tx, tile.ty, rect, block, &mut img, below,
-                    );
-                }
-                if let Some(mask) = quick_mask {
-                    crate::app::tools::quick_mask::tint_tile(
-                        canvas,
-                        mask,
-                        tile.tx,
-                        tile.ty,
-                        rect,
-                        1 << level,
-                        &mut img,
-                    );
-                }
-                (
-                    idx,
-                    tile_uploads(cache, tile.tx, tile.ty, tile_size, rect, &img, level),
-                )
+                (idx, uploads)
             })
             .collect()
     });
@@ -444,6 +431,64 @@ pub fn update_dirty_textures(
         }
     }
     (uploads.into_iter().flat_map(|(_, u)| u).collect(), more)
+}
+
+/// One tile of `canvas` (the whole stack, or one run's view of it)
+/// composited and cut into its atlas uploads.
+#[allow(clippy::too_many_arguments)]
+fn tile_run_uploads(
+    canvas: &crate::canvas::Canvas,
+    cache: &RenderCache,
+    tile: &CanvasTile,
+    level: u32,
+    live_block: Option<usize>,
+    below: Option<BelowComposite<'_>>,
+    quick_mask: Option<usize>,
+    filter: &crate::app::tools::filter::FilterState,
+) -> Vec<TileUpload> {
+    // Only the part a stroke changed, when that's all that did;
+    // aligned to the mip block so downsampling stays exact.
+    let tile_size = [
+        TILE_SIZE.min(canvas.width() - tile.tx * TILE_SIZE),
+        TILE_SIZE.min(canvas.height() - tile.ty * TILE_SIZE),
+    ];
+    let rect = tile.damage.map_or([0, 0, tile_size[0], tile_size[1]], |d| {
+        let block = 1usize << level;
+        [
+            d[0] / block * block,
+            d[1] / block * block,
+            d[2].div_ceil(block).saturating_mul(block).min(tile_size[0]),
+            d[3].div_ceil(block).saturating_mul(block).min(tile_size[1]),
+        ]
+    });
+    let mut img = egui::ColorImage::new([0, 0], Color32::TRANSPARENT);
+    if let Some(block) = live_block {
+        let layer = filter.preview_pixels(canvas, tile.tx, tile.ty, block);
+        canvas.write_tile_preview(tile.tx, tile.ty, block, &mut img, layer);
+        let img = preview_at_level(&img, block, tile_size, level);
+        let full = [0, 0, tile_size[0], tile_size[1]];
+        return tile_uploads(cache, tile.tx, tile.ty, tile_size, full, &img, level);
+    }
+    if level == 0 {
+        canvas.write_tile_rect_to_color_image(tile.tx, tile.ty, rect, &mut img, below);
+    } else {
+        // Zoomed-out stroke preview: composite and average in one
+        // pass, straight at the uploaded mip level.
+        let block = 1usize << level;
+        canvas.write_tile_rect_downsampled(tile.tx, tile.ty, rect, block, &mut img, below);
+    }
+    if let Some(mask) = quick_mask {
+        crate::app::tools::quick_mask::tint_tile(
+            canvas,
+            mask,
+            tile.tx,
+            tile.ty,
+            rect,
+            1 << level,
+            &mut img,
+        );
+    }
+    tile_uploads(cache, tile.tx, tile.ty, tile_size, rect, &img, level)
 }
 
 /// Screen position of the canvas's top-left corner and of its center (the
@@ -624,16 +669,74 @@ pub fn paint_canvas(app: &PainterApp, ui: &egui::Ui, view: &CanvasView, uploads:
         wrap: app.workspace.wrap_around,
     };
     let cache = &app.render_cache;
+    let per_run = cache.atlases_x * cache.atlases_y;
+    let runs = cache
+        .live
+        .as_ref()
+        .map_or(1, |layout| layout.runs.len().max(1));
+    let run_quads = atlas_quads(&placement, cache.atlases_x, cache.atlases_y);
+    let quads = (0..runs)
+        .flat_map(|run| {
+            run_quads.iter().map(move |quad| AtlasQuad {
+                atlas: quad.atlas + run * per_run,
+                ..*quad
+            })
+        })
+        .collect();
+    let compose = cache.live.as_ref().map(|layout| {
+        let ppp = ui.ctx().pixels_per_point();
+        ComposePlan {
+            size: [
+                (target.width() * ppp).round().max(1.0) as u32,
+                (target.height() * ppp).round().max(1.0) as u32,
+            ],
+            gamma: app.canvas.blend_space == crate::canvas::blend_modes::BlendSpace::Gamma,
+            per_run,
+            steps: app.shader_compose_steps(layout),
+            frame: shader_frame(app, view, target, ppp),
+        }
+    });
     let paint = CanvasPaint {
         generation: cache.texture_generation,
-        atlas_count: cache.atlases_x * cache.atlases_y,
+        atlas_count: per_run * runs,
         uploads: std::sync::Mutex::new(uploads),
-        quads: atlas_quads(&placement, cache.atlases_x, cache.atlases_y),
+        quads,
+        compose,
     };
     ui.painter().set(
         view.slot,
         egui_wgpu::Callback::new_paint_callback(target, paint),
     );
+}
+
+/// The live shaders' uniforms for this frame: the render target (the
+/// canvas's paint area, `ppp` pixels per point) mapped to canvas pixels and
+/// back.
+fn shader_frame(
+    app: &PainterApp,
+    view: &CanvasView,
+    target: egui::Rect,
+    ppp: f32,
+) -> crate::canvas::shader::FrameUniforms {
+    let map = screen_map(app, view);
+    let mut frame = app.shader_frame_base();
+    // Target pixel -> canvas pixel.
+    let at = |px: f32, py: f32| map.to_canvas(target.min + egui::vec2(px, py) / ppp);
+    let (c0, cx, cy) = (at(0.0, 0.0), at(1.0, 0.0), at(0.0, 1.0));
+    let (dx, dy) = (cx - c0, cy - c0);
+    frame.to_canvas_x = [dx.x, dy.x, c0.x, 0.0];
+    frame.to_canvas_y = [dx.y, dy.y, c0.y, 0.0];
+    // Canvas pixel -> texture coordinate in the target.
+    let uv = |c: egui::Vec2| {
+        let s = map.to_screen(c) - target.min;
+        egui::vec2(s.x / target.width(), s.y / target.height())
+    };
+    let s0 = uv(egui::Vec2::ZERO);
+    let (sx, sy) = (uv(egui::vec2(1.0, 0.0)) - s0, uv(egui::vec2(0.0, 1.0)) - s0);
+    frame.to_channel_x = [sx.x, sy.x, s0.x, 0.0];
+    frame.to_channel_y = [sx.y, sy.y, s0.y, 0.0];
+    frame.flags[0] = if app.workspace.wrap_around { 1.0 } else { 0.0 };
+    frame
 }
 
 #[cfg(test)]
@@ -944,6 +1047,67 @@ mod tests {
 
     use super::*;
     use crate::canvas::blend::downsample;
+
+    #[test]
+    fn with_a_live_shader_layer_each_run_fills_its_own_atlases() {
+        use crate::app::view::gpu_canvas::{ATLAS_BORDER, ATLAS_TEXTURE_SIZE};
+        use crate::canvas::shader::{self, LiveStatus};
+        let mut app = painted(160);
+        app.viewport.zoom = 1.0;
+        app.viewport.offset = eframe::egui::Vec2::ZERO;
+        let (name, source) = shader::TEMPLATES[0];
+        app.add_shader_layer(name, source).unwrap();
+        // A translucent paint layer above the shader layer.
+        let above = app
+            .add_layer_with_tiles("Above".into(), Vec::new(), |_| {})
+            .unwrap();
+        let dot: Vec<Color32> = (0..TILE_SIZE * TILE_SIZE)
+            .map(|i| {
+                if (i % TILE_SIZE) < 20 {
+                    Color32::from_rgba_unmultiplied(200, 30, 30, 120)
+                } else {
+                    Color32::TRANSPARENT
+                }
+            })
+            .collect();
+        app.canvas.set_layer_tile_data(above, 1, 1, dot);
+        let LiveStatus::Live(layout) = shader::live_layout(&app.canvas) else {
+            panic!("expected a live layout");
+        };
+        assert_eq!(layout.runs.len(), 2);
+        app.render_cache.live = Some(std::sync::Arc::new(layout.clone()));
+        app.mark_all_tiles_dirty();
+
+        let mut screen = ScreenSim::new();
+        screen.settle(&mut app);
+        let per_run = app.render_cache.atlases_x * app.render_cache.atlases_y;
+        let (w, h) = (app.canvas.width(), app.canvas.height());
+        for (run, shown) in layout.runs.iter().enumerate() {
+            let img = shader::run_view(&app.canvas, shown).flatten();
+            for y in 0..h {
+                for x in 0..w {
+                    let (atlas, lx, ly) = app.render_cache.atlas_slot(x / TILE_SIZE, y / TILE_SIZE);
+                    let texel = (ATLAS_BORDER + ly + y % TILE_SIZE) * ATLAS_TEXTURE_SIZE
+                        + ATLAS_BORDER
+                        + lx
+                        + x % TILE_SIZE;
+                    let shown = screen
+                        .atlas
+                        .get(&(atlas + run * per_run))
+                        .map_or([0; 4], |t| t[texel]);
+                    assert_eq!(
+                        shown,
+                        img.pixels[y * w + x].to_array(),
+                        "run {run} at {x},{y}"
+                    );
+                }
+            }
+        }
+        // The run above holds only the translucent layer: the shader
+        // layer's own (baked) pixels are in neither run.
+        let top = shader::run_view(&app.canvas, &layout.runs[1]).flatten();
+        assert_eq!(top.pixels[0], Color32::TRANSPARENT);
+    }
 
     #[test]
     fn atlas_quads_cover_the_canvas_in_target_ndc() {

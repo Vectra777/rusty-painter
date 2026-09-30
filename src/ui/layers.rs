@@ -192,6 +192,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     let mut to_delete = None;
     let mut duplicate: Option<usize> = None;
     let mut edit_text: Option<usize> = None;
+    let mut edit_shader: Option<LayerId> = None;
+    let mut add_shader = false;
     let mut rasterise_text: Option<usize> = None;
     let mut rasterise_vector: Option<usize> = None;
     let mut line_width: Option<usize> = None;
@@ -256,6 +258,16 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
             });
             if mask.inner.clicked() {
                 add_mask = true;
+            }
+            if ui
+                .add_sized(
+                    [m.header_button, m.header_button],
+                    egui::Button::new(RichText::new("fx").strong()).frame(false),
+                )
+                .on_hover_text("New shader layer: live animated effects written in GLSL")
+                .clicked()
+            {
+                add_shader = true;
             }
             if icon_button(ui, Icon::Folder, m.header_button, false, "New folder").clicked() {
                 add_folder = true;
@@ -338,6 +350,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 let bordered = current.style.border.is_some();
                 let is_text = current.text.is_some();
                 let is_vector = current.vector.is_some();
+                let is_shader = current.shader.is_some();
                 let (id, kind, parent, expanded, blend) = (
                     current.id,
                     current.kind,
@@ -464,6 +477,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                                 ui.label(RichText::new("T").strong().color(ACCENT))
                                     .on_hover_text("Text layer: double-click to edit the text");
                             }
+                            if is_shader {
+                                ui.label(RichText::new("fx").strong().color(ACCENT))
+                                    .on_hover_text("Shader layer: double-click to edit its shader");
+                            }
                             ui.add(egui::Label::new(text).truncate());
                             if blend != LayerBlend::Normal {
                                 ui.label(RichText::new(blend.label()).small().color(ACCENT));
@@ -527,6 +544,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         app.workspace.filter.editing = Some(id);
                     } else if fill {
                         app.workspace.filter.fill_editing = Some(id);
+                    } else if is_shader {
+                        edit_shader = Some(id);
                     } else if is_text {
                         edit_text = Some(i);
                     } else {
@@ -558,6 +577,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         && ui.button("Border…").clicked()
                     {
                         app.workspace.filter.border_editing = Some(id);
+                        ui.close_menu();
+                    }
+                    if is_shader && ui.button("Edit shader…").clicked() {
+                        edit_shader = Some(id);
                         ui.close_menu();
                     }
                     if is_text && ui.button("Edit text…").clicked() {
@@ -710,6 +733,13 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     }
     if let Some(idx) = edit_text {
         app.text_edit_layer(idx);
+    }
+    if let Some(id) = edit_shader {
+        app.open_shader_editor(id);
+    }
+    if add_shader {
+        let (name, source) = crate::canvas::shader::TEMPLATES[0];
+        app.add_shader_layer(name, source);
     }
     if let Some(idx) = rasterise_text {
         app.rasterise_text_layer(idx);

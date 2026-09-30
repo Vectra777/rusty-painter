@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Shader layers
+- A layer drawn by a GLSL shader (Shadertoy style: `mainImage`, `iTime`, `iResolution`, `iMouse`, `iChannel0` = the layers below), animated live on the GPU with the layer's blend mode and opacity.
+- One editor window per shader layer: syntax colouring, errors at their line as you type, play/pause, speed, templates, and Bake.
+- Export, merging and saving use the current frame; the shader, its time and speed are saved with the project.
+
 ## 0.1.0
 
 The first version with a license. Earlier tagged versions (0.0.1 to 0.0.4) were unlicensed and kept their data in the folder the app was started from.

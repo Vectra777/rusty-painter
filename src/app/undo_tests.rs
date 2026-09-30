@@ -377,3 +377,49 @@ fn painting_a_bordered_layer_redraws_the_tiles_around() {
     assert!(dirty(1, 1), "the next one, where the border spills");
     assert!(!dirty(3, 0), "not far away");
 }
+
+#[test]
+fn a_shader_layer_keeps_its_shader_through_undo_and_redo() {
+    let mut app = app();
+    let (name, source) = crate::canvas::shader::TEMPLATES[1];
+    let idx = app.add_shader_layer(name, source).unwrap();
+    let id = app.canvas.layers[idx].id;
+    let shader = |app: &PainterApp| {
+        app.canvas.layer_index_of(id).and_then(|i| {
+            app.canvas.layers[i]
+                .shader
+                .as_deref()
+                .map(|s| s.source.clone())
+        })
+    };
+    assert_eq!(shader(&app).as_deref(), Some(source));
+    assert!(
+        app.canvas.layers[idx].locked,
+        "no painting on a shader layer"
+    );
+    // Removed and brought back: still a shader layer.
+    app.remove_layer(idx);
+    assert_eq!(shader(&app), None);
+    app.apply_history(false);
+    assert_eq!(shader(&app).as_deref(), Some(source));
+    // Its creation undone and redone.
+    app.apply_history(false);
+    assert_eq!(shader(&app), None);
+    app.apply_history(true);
+    assert_eq!(shader(&app).as_deref(), Some(source));
+}
+
+#[test]
+fn editing_a_shader_is_unsaved_work() {
+    let mut app = app();
+    let (name, source) = crate::canvas::shader::TEMPLATES[0];
+    let idx = app.add_shader_layer(name, source).unwrap();
+    app.mark_saved();
+    assert!(!app.has_unsaved_work());
+    let id = app.canvas.layers[idx].id;
+    app.set_shader_source(
+        id,
+        "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }",
+    );
+    assert!(app.has_unsaved_work());
+}

@@ -26,6 +26,7 @@ project   brush_engine   selection   tablet
 | Module | Responsibility |
 | --- | --- |
 | `canvas::storage` | `Canvas`, made of `Layer`s, which are made of lazily allocated 64 px tiles. `composite` blends layers for display and export, `pixels` holds the pixel writers that record undo, and `transform` holds affine and perspective moves plus floating selections. |
+| `canvas::shader` | Shader layers without the GPU: `ShaderLayer`, the GLSL wrapper and compiling (naga), and `live_layout`, which splits the stack into runs around the visible shader layers. The GPU side is `app::view::shader_gpu`; playback and baking are `app::shader_ops`. |
 | `canvas::history` | Undo history, one per layer. `UndoAction` holds tile snapshots plus changes to the selection, the transform and the layer tree. |
 | `canvas::{fill, gradient, inpaint, liquify, palette, blend, blend_modes}` | Pure pixel algorithms and colour maths. They don't know about the app. |
 | `brush_engine` | Dabs, tips, spacing and pressure (`stroke`), the stabiliser, mirror painting (`symmetry`), and the stroke worker thread. The engines beside the plain dab: `bristle`, `sketch`, `hatching`, ribbons (`Brush::ribbon`); `dual` (a second tip masking the first), `wet_edge` (watercolour edges when the pen lifts). `preset_file` reads and writes `.rpbrush` files; `import` reads other apps' brushes. |
@@ -99,7 +100,8 @@ project   brush_engine   selection   tablet
 5. **Pixels.**
    - The stroke worker gets up to 5 ms to catch up.
    - `sync_stroke_worker` collects the tiles it painted and its finished undo steps.
-   - `render::update_dirty_textures` composites dirty tiles and uploads them to the GPU atlases.
+   - `shader_tick` compiles changed shader layers, advances their clocks, and works out whether they show live (`canvas::shader::live_layout`).
+   - `render::update_dirty_textures` composites dirty tiles and uploads them to the GPU atlases (one set per run when shader layers show live).
    - `render::paint_canvas` draws them.
    - `draw_overlays` draws the selection, guides, shapes, gradient handles and the transform box.
 6. **Windows.** `show_windows` shows the dialogs and floating windows.

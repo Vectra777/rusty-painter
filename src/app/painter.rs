@@ -193,6 +193,15 @@ impl eframe::App for PainterApp {
                     self.workspace.view_aids.navigator.dirty = true;
                 }
                 self.workspace.frame_stats.mark(Stage::Stroke);
+                // Shader layers: compile, advance their clocks, and split
+                // the stack for the ones showing live.
+                let pointer = self
+                    .viewport
+                    .cursor_canvas
+                    .map(|p| (p, ctx.input(|i| i.pointer.primary_down())));
+                if self.shader_tick(ctx, pointer) {
+                    needs_repaint = true;
+                }
                 // Composite and paint after input, so this frame's dabs and any
                 // pan/zoom show up in this frame.
                 let (uploads, more_tiles) =
@@ -513,6 +522,7 @@ impl PainterApp {
         ui::view_aids_menu::guides_window(self, ctx);
         ui::reference_window::reference_window(self, ctx);
         ui::navigator::navigator_window(self, ctx);
+        ui::shader_editor::shader_editors(self, ctx);
     }
 }
 

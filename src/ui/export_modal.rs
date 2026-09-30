@@ -79,8 +79,8 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     .add_enabled(!disabled, egui::Button::new("Export"))
                     .clicked()
                 {
-                    let target = settings.output_path();
-                    let format = settings.format;
+                    let target = app.export_state.settings.output_path();
+                    let format = app.export_state.settings.format;
 
                     let (w, h) = (app.canvas.width(), app.canvas.height());
                     if let Err(msg) = validate_canvas_size(w, h) {
@@ -91,6 +91,8 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     // Flatten on the UI thread, then save on a worker thread.
                     // The shared canvas is not cloned across threads; size limits keep this bounded.
                     app.stroke_worker.wait_idle();
+                    // Shader layers export as their current frame.
+                    app.bake_shader_layers();
                     enum Data {
                         Image(egui::ColorImage),
                         Layers(Box<crate::project::psd::PsdDocument>),
