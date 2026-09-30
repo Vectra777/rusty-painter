@@ -5,7 +5,7 @@
 //! at canvas point `origin`, like the rest of [`crate::canvas::filters`].
 //! Those that mix neighbouring pixels (glow, chromatic aberration,
 //! halftone, median, oil paint, zoom and spin blur) take and give sRGB
-//! values times alpha ([`crate::canvas::filters::to_mixable`]); the rest
+//! values times alpha (`filters::to_mixable`); the rest
 //! take pixels as stored.
 
 use crate::canvas::blend::Unmultiply;

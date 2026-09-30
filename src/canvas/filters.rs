@@ -5,7 +5,7 @@
 //!
 //! Colour adjustments work on unpremultiplied sRGB values, as Photoshop's
 //! do; filters that mix neighbouring pixels (blurs and most effects) work
-//! on sRGB values times alpha ([`to_mixable`]), so transparent pixels
+//! on sRGB values times alpha (`to_mixable`), so transparent pixels
 //! neither darken nor lighten the edges.
 
 use crate::canvas::blend::Unmultiply;
