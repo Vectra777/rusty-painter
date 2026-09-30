@@ -282,7 +282,21 @@ fn selected_stop(
             changed = true;
         }
         if let StopColor::Fixed(rgb) = &mut stop.color {
-            changed |= egui::color_picker::color_edit_button_srgb(ui, rgb).changed();
+            // With alpha: the picker's is the stop's opacity, so a stop can
+            // be made see-through where its colour is chosen.
+            let alpha = (stop.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let mut rgba = [rgb[0], rgb[1], rgb[2], alpha];
+            if ui
+                .color_edit_button_srgba_unmultiplied(&mut rgba)
+                .on_hover_text("Colour and opacity of this stop")
+                .changed()
+            {
+                *rgb = [rgba[0], rgba[1], rgba[2]];
+                if rgba[3] != alpha {
+                    stop.opacity = rgba[3] as f32 / 255.0;
+                }
+                changed = true;
+            }
         }
     });
     ui.horizontal(|ui| {

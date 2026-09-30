@@ -116,6 +116,8 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
                 "Radius",
                 egui::Slider::new(radius, 0.0..=reach / 3.0)
                     .logarithmic(true)
+                    .smallest_positive(0.3)
+                    .max_decimals(1)
                     .suffix(" px"),
             );
         }
@@ -130,6 +132,8 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
                 "Distance",
                 egui::Slider::new(distance, 0.0..=reach)
                     .logarithmic(true)
+                    .smallest_positive(1.0)
+                    .max_decimals(0)
                     .suffix(" px"),
             );
         }
@@ -139,6 +143,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
                 "Radius",
                 egui::Slider::new(radius, 0.3..=reach / 6.0)
                     .logarithmic(true)
+                    .max_decimals(1)
                     .suffix(" px"),
             );
             slider_row(
@@ -147,12 +152,21 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
                 percent_of_unit(egui::Slider::new(amount, 0.0..=5.0)),
             );
         }
-        Filter::Noise { amount, mono } => {
+        Filter::Noise { amount, mono, size } => {
             slider_row(
                 ui,
                 "Amount",
                 percent_of_unit(egui::Slider::new(amount, 0.0..=1.0)),
             );
+            slider_row(
+                ui,
+                "Size",
+                egui::Slider::new(size, 1.0..=64.0)
+                    .logarithmic(true)
+                    .max_decimals(1)
+                    .suffix(" px"),
+            )
+            .on_hover_text("How big each grain is");
             ui.checkbox(mono, "Monochrome");
         }
         Filter::Pixelate { size } => {
@@ -285,6 +299,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
                 "Radius",
                 egui::Slider::new(radius, 1.0..=reach / 3.0)
                     .logarithmic(true)
+                    .max_decimals(1)
                     .suffix(" px"),
             );
             slider_row(
@@ -303,7 +318,9 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Amount",
-                egui::Slider::new(amount, 0.0..=40.0).suffix(" px"),
+                egui::Slider::new(amount, 0.0..=40.0)
+                    .max_decimals(1)
+                    .suffix(" px"),
             )
             .on_hover_text("How far red and blue part at the corners; none in the middle");
         }

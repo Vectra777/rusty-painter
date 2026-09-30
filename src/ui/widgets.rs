@@ -204,12 +204,30 @@ fn row_label(ui: &mut egui::Ui, label: &str) {
 /// `label  [slider ----------] [value]` on one line, the slider filling
 /// the space left by the label and value box.
 pub(crate) fn slider_row(ui: &mut egui::Ui, label: &str, slider: impl egui::Widget) -> Response {
+    // egui sizes the number box to its text, so a long value ("1000 px")
+    // comes out wider than `value_box_width`. The row must still end at the
+    // edge: a row a few pixels too wide widens an auto-sized window, which
+    // gives the next frame's row more room to overflow again, and the window
+    // grows every time the pointer moves. So the overflow is measured and
+    // taken off the slider next frame.
+    let overflow_id = ui.next_auto_id().with(("slider_row_overflow", label));
+    let extra = ui.data(|d| d.get_temp::<f32>(overflow_id)).unwrap_or(0.0);
     ui.horizontal(|ui| {
         row_label(ui, label);
         let spacing = ui.spacing().item_spacing.x;
         let value_box = metrics(ui.ctx()).value_box_width;
-        ui.spacing_mut().slider_width = (ui.available_width() - value_box - spacing).max(40.0);
-        ui.add(slider)
+        let room = ui.available_width();
+        let right_edge = ui.cursor().left() + room;
+        let slider_width = (room - value_box - extra - spacing).max(40.0);
+        ui.spacing_mut().slider_width = slider_width;
+        let response = ui.add(slider);
+        let over = ui.min_rect().right() - right_edge;
+        let next = (extra + over).clamp(0.0, (room - value_box - spacing - 40.0).max(0.0));
+        if (next - extra).abs() > 0.25 {
+            ui.data_mut(|d| d.insert_temp(overflow_id, next));
+            ui.ctx().request_repaint();
+        }
+        response
     })
     .inner
 }
@@ -490,5 +508,82 @@ mod reset_tests {
             (value - 0.3).abs() < 1e-6,
             "reset to the new default, got {value}"
         );
+    }
+}
+
+#[cfg(test)]
+mod growth_tests {
+    use super::*;
+
+    /// Width of an auto-sized window over `frames` frames with the pointer moving.
+    fn window_widths(frames: usize, contents: impl Fn(&mut egui::Ui)) -> Vec<f32> {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_global_style(&ctx);
+        let mut widths = Vec::new();
+        for i in 0..frames {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 1000.0),
+                )),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(egui::pos2(
+                800.0 + i as f32,
+                700.0,
+            )));
+            let mut w = 0.0;
+            let _ = ctx.run(input, |ctx| {
+                let r = egui::Window::new("t")
+                    .resizable(false)
+                    .default_width(340.0)
+                    .show(ctx, |ui| contents(ui));
+                w = r.unwrap().response.rect.width();
+            });
+            widths.push(w);
+        }
+        widths
+    }
+
+    #[test]
+    fn slider_rows_do_not_grow_their_window() {
+        let widths = window_widths(30, |ui| {
+            let mut a = 1000.0_f32;
+            slider_row(
+                ui,
+                "Radius",
+                egui::Slider::new(&mut a, 0.0..=1000.0).suffix(" px"),
+            );
+            let mut b = 0.5_f32;
+            slider_row(
+                ui,
+                "A much longer label",
+                percent_of_unit(egui::Slider::new(&mut b, 0.0..=1.0)),
+            );
+        });
+        let last = widths[widths.len() - 1];
+        assert!(
+            (last - widths[widths.len() - 10]).abs() < 0.5 && last < 400.0,
+            "window kept growing: {widths:?}"
+        );
+    }
+
+    #[test]
+    fn filter_dialogs_do_not_grow() {
+        use crate::canvas::filters::Filter;
+        for group in Filter::MENU {
+            for f in group.iter() {
+                let widths = window_widths(40, |ui| {
+                    let mut f = *f;
+                    crate::ui::filter_dialog::settings(ui, &mut f);
+                });
+                let last = widths[widths.len() - 1];
+                assert!(
+                    (last - widths[widths.len() - 20]).abs() < 0.5,
+                    "{} keeps resizing: {widths:?}",
+                    f.name()
+                );
+            }
+        }
     }
 }

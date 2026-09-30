@@ -437,6 +437,7 @@ fn bench_filters(c: &mut Criterion) {
             Filter::Noise {
                 amount: 0.2,
                 mono: false,
+                size: 1.0,
             },
         ),
         ("pixelate_16", Filter::Pixelate { size: 16 }),

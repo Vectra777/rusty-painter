@@ -1,8 +1,12 @@
 //! The Filter menu's effects that read around each pixel or depend on where
 //! it is: glow, chromatic aberration, halftone, emboss, edges, clouds,
 //! median, oil paint, vignette, zoom and spin blur, dither. Pure functions
-//! over a row-major buffer of premultiplied sRGB pixels whose top-left pixel
-//! is at canvas point `origin`, like the rest of [`crate::canvas::filters`].
+//! over a row-major buffer of premultiplied pixels whose top-left pixel is
+//! at canvas point `origin`, like the rest of [`crate::canvas::filters`].
+//! Those that mix neighbouring pixels (glow, chromatic aberration,
+//! halftone, median, oil paint, zoom and spin blur) take and give sRGB
+//! values times alpha ([`crate::canvas::filters::to_mixable`]); the rest
+//! take pixels as stored.
 
 use crate::canvas::blend::Unmultiply;
 use eframe::egui::Color32;
@@ -49,6 +53,17 @@ fn f4(c: Color32) -> [f32; 4] {
 fn c4(v: [f32; 4]) -> Color32 {
     let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgba_premultiplied(q(v[0]), q(v[1]), q(v[2]), q(v[3]))
+}
+
+/// Lightness of a [`crate::canvas::filters::to_mixable`] pixel (1 where
+/// it's clear).
+#[inline]
+fn luma_mixable(c: Color32) -> f32 {
+    let a = c.a();
+    if a == 0 {
+        return 1.0;
+    }
+    (0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32) / a as f32
 }
 
 #[inline]
@@ -110,6 +125,8 @@ fn per_pixel(w: usize, h: usize, pixel: impl Fn(usize, usize) -> Color32 + Sync)
 
 /// Light bleeding out of the bright parts: those brighter than `threshold`
 /// blurred by `radius` and screened over the picture, `strength` of it.
+/// Brightness is the strongest channel, so a saturated red or blue glows
+/// in its own colour as readily as white does.
 pub fn glow(
     src: &[Color32],
     w: usize,
@@ -121,10 +138,16 @@ pub fn glow(
     let bright: Vec<Color32> = src
         .par_iter()
         .map(|&c| {
-            let l = luma(c);
-            let k = ((l - threshold) / (1.0 - threshold).max(0.05)).clamp(0.0, 1.0);
-            let v = f4(c).map(|x| x * k);
-            c4(v)
+            let a = c.a();
+            if a == 0 {
+                return c;
+            }
+            let value = c.r().max(c.g()).max(c.b()) as f32 / a as f32;
+            let t = ((value - threshold) / (1.0 - threshold).max(0.05)).clamp(0.0, 1.0);
+            // Eased in, so the glow starts gently at the threshold.
+            let k = t * t * (3.0 - 2.0 * t);
+            // Scaling colour and alpha together keeps the colour.
+            c4(f4(c).map(|x| x * k))
         })
         .collect();
     let halo = crate::canvas::filters::gaussian_blur(&bright, w, h, radius);
@@ -134,15 +157,30 @@ pub fn glow(
             if g.a() == 0 || strength <= 0.0 {
                 return s;
             }
-            let (s, g) = (f4(s), f4(g));
+            let s4 = f4(s);
+            // A strength above 1 brightens the halo but keeps its colour.
+            let g4 = f4(g);
+            let ga = (g4[3] * strength).min(1.0);
+            let k = if g4[3] > 0.0 { ga / g4[3] } else { 0.0 };
+            let g4 = [g4[0] * k, g4[1] * k, g4[2] * k, ga];
             // Screen, colour and alpha alike: the glow reaches past the paint.
-            c4([0, 1, 2, 3].map(|i| s[i] + g[i] * strength * (1.0 - s[i])))
+            let mut out = [0, 1, 2, 3].map(|i| s4[i] + g4[i] - s4[i] * g4[i]);
+            for i in 0..3 {
+                out[i] = out[i].min(out[3]);
+            }
+            c4(out)
         })
         .collect()
 }
 
 /// Red and blue pulled apart, more towards the edges of the canvas, as a
 /// cheap lens does: `amount` pixels at its corners.
+///
+/// Opaque paint simply has its red and blue moved. Over transparency, what
+/// a fringe looks like depends on what's under it, so each channel is
+/// mixed from two readings: light paint as light (a red and a blue fringe,
+/// as over black) and dark paint as ink (red and cyan, as over paper): a
+/// black line comes out with coloured fringes rather than a grey double.
 pub fn chromatic_aberration(
     src: &[Color32],
     w: usize,
@@ -158,10 +196,29 @@ pub fn chromatic_aberration(
             (cx - frame.centre[0]) / reach * amount,
             (cy - frame.centre[1]) / reach * amount,
         );
+        let own_c = src[y * w + x];
+        if dx.abs() + dy.abs() < 1e-3 {
+            return own_c;
+        }
         let red = sample(src, w, h, x as f32 - dx, y as f32 - dy);
         let blue = sample(src, w, h, x as f32 + dx, y as f32 + dy);
-        let own = f4(src[y * w + x]);
-        c4([red[0], own[1], blue[2], red[3].max(own[3]).max(blue[3])])
+        let own = f4(own_c);
+        let reads = [red, own, blue];
+        let alpha = red[3].max(own[3]).max(blue[3]);
+        if alpha <= 0.0 {
+            return Color32::TRANSPARENT;
+        }
+        // How light the paint here is: 0 reads as ink, 1 as light.
+        let paint: f32 = reads.iter().map(|r| r[0] + r[1] + r[2]).sum();
+        let cover: f32 = reads.iter().map(|r| r[3]).sum();
+        let light = (paint / (3.0 * cover).max(1e-6)).clamp(0.0, 1.0);
+        let mut out = [0.0, 0.0, 0.0, alpha];
+        for (i, r) in reads.iter().enumerate() {
+            // As ink: what this channel's reading takes out of the paper.
+            let ink = (alpha - (r[3] - r[i])).clamp(0.0, alpha);
+            out[i] = ink + (r[i] - ink) * light;
+        }
+        c4(out)
     })
 }
 
@@ -203,13 +260,13 @@ pub fn halftone(
             my - origin.1 as f32 - 0.5,
         );
         let cell_c = c4(cell);
-        let dark = 1.0 - luma(cell_c);
+        let dark = 1.0 - luma_mixable(cell_c);
         // Dot area in step with darkness; full dots touch at the diagonal.
         let radius = size * std::f32::consts::FRAC_1_SQRT_2 * dark.sqrt();
         let d = ((u - cu).powi(2) + (v - cv).powi(2)).sqrt();
         let ink = (radius - d + 0.5).clamp(0.0, 1.0);
         let [ir, ig, ib] = if colour {
-            let [r, g, b, _] = cell_c.unmultiplied();
+            let [r, g, b, _] = crate::canvas::filters::unmix(cell_c);
             // The cell's hue at full strength, its darkness in the dot size.
             let m = r.max(g).max(b).max(1) as f32;
             let lift = |v: u8| (v as f32 / m * 255.0).min(255.0);
@@ -219,7 +276,7 @@ pub fn halftone(
         };
         let paper = 255.0;
         let mix = |i: f32| (paper + (i - paper) * ink).round() as u8;
-        Color32::from_rgba_unmultiplied(mix(ir), mix(ig), mix(ib), own.a())
+        crate::canvas::filters::mixable_rgba(mix(ir), mix(ig), mix(ib), own.a())
     })
 }
 
@@ -378,8 +435,13 @@ fn summed(w: usize, h: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
 /// average of whichever of its four `radius` quadrants varies least.
 pub fn oil_paint(src: &[Color32], w: usize, h: usize, radius: u32) -> Vec<Color32> {
     let r = radius.max(1) as i32;
-    let px: Vec<[f32; 4]> = src.iter().map(|&c| f4(c)).collect();
-    let l: Vec<f64> = src.iter().map(|&c| luma(c) as f64).collect();
+    // Whole numbers, so the sums are exact and the quadrant picked doesn't
+    // depend on where the buffer starts.
+    let px: Vec<[u8; 4]> = src.iter().map(|&c| c.to_array()).collect();
+    let l: Vec<f64> = src
+        .iter()
+        .map(|&c| (luma_mixable(c) * 1024.0).round() as f64)
+        .collect();
     let sl = summed(w, h, |i| l[i]);
     let sl2 = summed(w, h, |i| l[i] * l[i]);
     let sc: Vec<Vec<f64>> = (0..4)
@@ -406,7 +468,7 @@ pub fn oil_paint(src: &[Color32], w: usize, h: usize, radius: u32) -> Vec<Color3
             let mean = rect(&sl, x0, y0, x1, y1) / n;
             let var = rect(&sl2, x0, y0, x1, y1) / n - mean * mean;
             if var < best.0 {
-                let c = [0, 1, 2, 3].map(|ch| (rect(&sc[ch], x0, y0, x1, y1) / n) as f32);
+                let c = [0, 1, 2, 3].map(|ch| (rect(&sc[ch], x0, y0, x1, y1) / n / 255.0) as f32);
                 best = (var, c);
             }
         }
@@ -657,6 +719,56 @@ mod tests {
             c.r() != c.b()
         });
         assert!(fringe);
+    }
+
+    #[test]
+    fn glow_is_the_colour_of_what_glows() {
+        // A saturated blue square on a clear layer.
+        let blue = Color32::from_rgb(40, 80, 255);
+        let src: Vec<Color32> = (0..32 * 32)
+            .map(|i| {
+                let (x, y) = (i % 32, i / 32);
+                if (12..20).contains(&x) && (12..20).contains(&y) {
+                    blue
+                } else {
+                    Color32::TRANSPARENT
+                }
+            })
+            .collect();
+        let mixed = crate::canvas::filters::to_mixable(&src);
+        let out = glow(&mixed, 32, 32, 3.0, 1.0, 0.6);
+        let halo = crate::canvas::filters::from_mixable(&out, &mixed, &src);
+        let c = halo[16 * 32 + 22];
+        assert!(c.a() > 20, "it glows past its edge: {c:?}");
+        let [r, g, b, _] = c.unmultiplied();
+        assert!(
+            r.abs_diff(40) <= 6 && g.abs_diff(80) <= 6 && b >= 248,
+            "the halo stays blue: {:?}",
+            [r, g, b]
+        );
+    }
+
+    #[test]
+    fn chromatic_aberration_colours_the_edges_of_black_line_art() {
+        // A black bar on a clear layer, right of the centre.
+        let (w, h) = (64, 8);
+        let src: Vec<Color32> = (0..w * h)
+            .map(|i| {
+                if (44..50).contains(&(i % w)) {
+                    Color32::BLACK
+                } else {
+                    Color32::TRANSPARENT
+                }
+            })
+            .collect();
+        let frame = Frame::of_canvas(w, h);
+        let out = chromatic_aberration(&src, w, h, (0, 0), 6.0, frame);
+        let row = &out[4 * w..5 * w];
+        let red = row.iter().any(|c| c.a() > 100 && c.r() > 150 && c.g() < 60);
+        let cyan = row
+            .iter()
+            .any(|c| c.a() > 100 && c.r() < 60 && c.g() > 150 && c.b() > 150);
+        assert!(red && cyan, "fringes: {row:?}");
     }
 
     #[test]

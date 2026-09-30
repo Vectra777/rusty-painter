@@ -332,8 +332,9 @@ impl PainterApp {
         }
     }
 
-    /// Cursor hints: a crosshair when picking colours, the brush ring for
-    /// the selection brush, liquify, smudge and blur.
+    /// Cursor hints: a crosshair when picking colours, the tip's outline
+    /// for the brush and eraser, a ring for the selection brush, liquify,
+    /// smudge and blur.
     fn draw_pointer_hints(&self, ctx: &egui::Context, ui: &egui::Ui, view: &render::CanvasView) {
         let picking = matches!(
             self.active_tool,
@@ -354,6 +355,17 @@ impl PainterApp {
             }
             _ => None,
         };
+        // The brush and eraser: the tip's own outline, at its size.
+        if matches!(self.active_tool, crate::app::tools::Tool::Brush)
+            && !picking
+            && let Some(pos) = view.response.hover_pos()
+        {
+            let map = render::screen_map(self, view);
+            let brush = &self.brush_state.brush;
+            if crate::app::view::brush_cursor::draw(ctx, ui.painter(), map, brush, pos) {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+            }
+        }
         if let Some(radius) = ring
             && let Some(pos) = view.response.hover_pos()
         {
@@ -645,6 +657,87 @@ impl PainterApp {
             }
 
             self.layer_state.thumbnails_dirty = true;
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_size_tests {
+    use crate::canvas::Canvas;
+    use eframe::egui::{self, Color32};
+
+    fn run(ppp: f32) -> Vec<Vec<(egui::LayerId, egui::Vec2)>> {
+        let mut app =
+            crate::project::tests::test_app_pub(Canvas::new(256, 256, Color32::WHITE, 64));
+        app.workspace.palette.open = true;
+        app.modal_state.show_history = true;
+        app.brush_state.show_presets = true;
+        app.workspace.view_aids.guides.new_guide.open = true;
+        app.workspace.view_aids.navigator.open = true;
+        app.workspace.frame_stats.enabled = true;
+        app.workspace.frame_stats.window_open = true;
+        app.filter_open(crate::canvas::filters::Filter::Exposure { stops: 0.0 });
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_global_style(&ctx);
+        let mut sizes: Vec<Vec<(egui::LayerId, egui::Vec2)>> = Vec::new();
+        let mut targets: Vec<egui::Pos2> = Vec::new();
+        for i in 0..120 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0 / ppp, 1000.0 / ppp),
+                )),
+                ..Default::default()
+            };
+            input
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(ppp);
+            // Wander over every window's rows.
+            let p = targets
+                .get(i % targets.len().max(1))
+                .copied()
+                .unwrap_or(egui::pos2(300.0, 300.0));
+            input.events.push(egui::Event::PointerMoved(p));
+            let _ = ctx.run(input, |ctx| app.show_windows(ctx));
+            let frame = ctx.memory(|m| {
+                let mut v: Vec<_> = m
+                    .areas()
+                    .visible_layer_ids()
+                    .into_iter()
+                    .filter_map(|l| m.area_rect(l.id).map(|r| (l, r)))
+                    .collect();
+                v.sort_by_key(|(l, _)| l.id.value());
+                v
+            });
+            if i == 5 {
+                for (_, r) in &frame {
+                    for k in 0..12 {
+                        let t = (k as f32 + 0.5) / 12.0;
+                        targets.push(egui::pos2(
+                            r.left() + r.width() * ((k * 7 % 12) as f32 / 12.0),
+                            r.top() + r.height() * t,
+                        ));
+                    }
+                }
+            }
+            sizes.push(frame.into_iter().map(|(l, r)| (l, r.size())).collect());
+        }
+        sizes
+    }
+
+    /// Every floating window keeps its size while the pointer moves over it
+    /// (a row a pixel too wide used to widen its window every frame).
+    #[test]
+    fn floating_windows_keep_their_size() {
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            let sizes = run(ppp);
+            let base = &sizes[20];
+            assert!(base.len() >= 6, "windows shown: {base:?}");
+            for (i, s) in sizes.iter().enumerate().skip(20) {
+                assert_eq!(base, s, "at {ppp}x, frame {i}: windows changed size");
+            }
         }
     }
 }

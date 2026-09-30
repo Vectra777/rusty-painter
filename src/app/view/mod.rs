@@ -4,6 +4,7 @@
 //! Shader layers showing live are composited on the GPU ([`shader_gpu`]).
 //! Viewing aids over it: the grid, guide lines and snapping ([`aids`]).
 pub(crate) mod aids;
+pub(crate) mod brush_cursor;
 pub(crate) mod gpu_canvas;
 pub(crate) mod grid;
 pub(crate) mod guide_lines;

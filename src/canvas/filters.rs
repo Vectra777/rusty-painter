@@ -4,13 +4,93 @@
 //! writes the result back with undo.
 //!
 //! Colour adjustments work on unpremultiplied sRGB values, as Photoshop's
-//! do; blurs average premultiplied pixels, so transparent ones don't darken
-//! the edges.
+//! do; filters that mix neighbouring pixels (blurs and most effects) work
+//! on sRGB values times alpha ([`to_mixable`]), so transparent pixels
+//! neither darken nor lighten the edges.
 
 use crate::canvas::blend::Unmultiply;
 use crate::canvas::effects::{self, Frame};
 use eframe::egui::Color32;
 use rayon::prelude::*;
+use std::sync::OnceLock;
+
+/// Pixels as stored (egui premultiplies in linear light, then encodes as
+/// sRGB) to sRGB values times alpha: the space averages have to be taken
+/// in. Averaging the stored values directly turns a white line's soft edge
+/// grey, since half of an sRGB-encoded value is far less than half the
+/// light.
+pub(crate) fn to_mixable(src: &[Color32]) -> Vec<Color32> {
+    src.par_iter().map(|&c| mixable(c)).collect()
+}
+
+#[inline]
+pub(crate) fn mixable(c: Color32) -> Color32 {
+    match c.a() {
+        0 => Color32::TRANSPARENT,
+        255 => c,
+        a => {
+            let [r, g, b, _] = c.unmultiplied();
+            mixable_rgba(r, g, b, a)
+        }
+    }
+}
+
+/// Unmultiplied sRGB to the [`to_mixable`] space.
+#[inline]
+pub(crate) fn mixable_rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
+    let m = |v: u8| ((v as u32 * a as u32 + 127) / 255) as u8;
+    Color32::from_rgba_premultiplied(m(r), m(g), m(b), a)
+}
+
+/// A [`to_mixable`] pixel's unmultiplied sRGB values.
+#[inline]
+pub(crate) fn unmix(c: Color32) -> [u8; 4] {
+    let a = c.a() as u32;
+    if a == 0 {
+        return [0; 4];
+    }
+    let u = |v: u8| ((v as u32 * 255 + a / 2) / a).min(255) as u8;
+    [u(c.r()), u(c.g()), u(c.b()), c.a()]
+}
+
+/// Back from [`to_mixable`]: pixels the filter left as they were
+/// (`out[i] == mixed[i]`) come back exactly as `src` had them.
+pub(crate) fn from_mixable(out: &[Color32], mixed: &[Color32], src: &[Color32]) -> Vec<Color32> {
+    // egui's premultiply per (alpha, value): it runs powers per channel.
+    static ENCODE: OnceLock<Vec<u8>> = OnceLock::new();
+    let lut = ENCODE.get_or_init(|| {
+        let mut t = vec![0u8; 256 * 256];
+        for a in 0..=255u8 {
+            for v in 0..=255u8 {
+                t[a as usize * 256 + v as usize] = Color32::from_rgba_unmultiplied(v, v, v, a).r();
+            }
+        }
+        t
+    });
+    out.par_iter()
+        .zip(mixed.par_iter())
+        .zip(src.par_iter())
+        .map(|((&o, &m), &s)| {
+            if o == m {
+                return s;
+            }
+            match o.a() {
+                0 => Color32::TRANSPARENT,
+                255 => o,
+                a => {
+                    let [r, g, b, _] = unmix(o);
+                    let row = &lut[a as usize * 256..][..256];
+                    Color32::from_rgba_premultiplied(
+                        row[r as usize],
+                        row[g as usize],
+                        row[b as usize],
+                        a,
+                    )
+                }
+            }
+        })
+        .collect()
+}
 
 /// sRGB value (0..=1) to linear light.
 fn srgb_to_linear(v: f32) -> f32 {
@@ -96,10 +176,13 @@ pub enum Filter {
         radius: f32,
         amount: f32,
     },
-    /// Amount 0..=1; mono: the same noise in every channel.
+    /// Amount 0..=1; mono: the same noise in every channel; `size` of the
+    /// grain in pixels (1 = every pixel its own).
     Noise {
         amount: f32,
         mono: bool,
+        #[serde(default = "one")]
+        size: f32,
     },
     /// Block size in pixels, on the canvas grid.
     Pixelate {
@@ -193,6 +276,10 @@ pub enum Filter {
     Dither {
         levels: u8,
     },
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 /// Most points a tone curve holds.
@@ -485,6 +572,7 @@ impl Filter {
             Filter::Noise {
                 amount: 0.1,
                 mono: true,
+                size: 1.0,
             },
             Filter::Pixelate { size: 8 },
             Filter::Dither { levels: 4 },
@@ -692,6 +780,11 @@ impl Filter {
             Filter::Pixelate { size } => Filter::Pixelate {
                 size: (size / block.max(1) as u32).max(1),
             },
+            Filter::Noise { amount, mono, size } => Filter::Noise {
+                amount,
+                mono,
+                size: (size / k).max(1.0),
+            },
             Filter::Glow {
                 radius,
                 strength,
@@ -771,6 +864,55 @@ impl Filter {
     pub fn apply(&self, src: &[Color32], w: usize, h: usize, origin: (i32, i32)) -> Vec<Color32> {
         debug_assert_eq!(src.len(), w * h);
         match *self {
+            Filter::GaussianBlur { .. }
+            | Filter::MotionBlur { .. }
+            | Filter::Sharpen { .. }
+            | Filter::Pixelate { .. }
+            | Filter::Glow { .. }
+            | Filter::ChromaticAberration { .. }
+            | Filter::Halftone { .. }
+            | Filter::Median { .. }
+            | Filter::OilPaint { .. }
+            | Filter::ZoomBlur { .. }
+            | Filter::SpinBlur { .. } => {
+                let mixed = to_mixable(src);
+                let out = self.apply_mixable(&mixed, w, h, origin);
+                from_mixable(&out, &mixed, src)
+            }
+            Filter::Noise { amount, mono, size } => src
+                .par_iter()
+                .enumerate()
+                .map(|(i, &c)| {
+                    let (x, y) = (origin.0 + (i % w) as i32, origin.1 + (i / w) as i32);
+                    noise(c, x, y, amount, mono, size)
+                })
+                .collect(),
+            Filter::Emboss { angle, depth } => effects::emboss(src, w, h, angle, depth),
+            Filter::FindEdges => effects::find_edges(src, w, h),
+            Filter::Clouds { scale, detail } => effects::clouds(w, h, origin, scale, detail),
+            Filter::Vignette {
+                amount,
+                size,
+                frame,
+            } => effects::vignette(src, w, h, origin, amount, size, frame),
+            Filter::Dither { levels } => effects::dither(src, w, h, origin, levels),
+            _ => match self.channel_lut() {
+                Some(lut) => src.par_iter().map(|&c| with_lut(c, &lut)).collect(),
+                None => src.par_iter().map(|&c| self.pixel(c)).collect(),
+            },
+        }
+    }
+
+    /// The filters that mix neighbouring pixels, on a [`to_mixable`]
+    /// buffer (and giving one back).
+    fn apply_mixable(
+        &self,
+        src: &[Color32],
+        w: usize,
+        h: usize,
+        origin: (i32, i32),
+    ) -> Vec<Color32> {
+        match *self {
             Filter::GaussianBlur { radius } => gaussian_blur(src, w, h, radius),
             Filter::MotionBlur { angle, distance } => motion_blur(src, w, h, angle, distance),
             Filter::Sharpen { radius, amount } => {
@@ -780,14 +922,6 @@ impl Filter {
                     .map(|(&s, &b)| unsharp(s, b, amount))
                     .collect()
             }
-            Filter::Noise { amount, mono } => src
-                .par_iter()
-                .enumerate()
-                .map(|(i, &c)| {
-                    let (x, y) = (origin.0 + (i % w) as i32, origin.1 + (i / w) as i32);
-                    noise(c, x, y, amount, mono)
-                })
-                .collect(),
             Filter::Pixelate { size } => pixelate(src, w, h, origin, size.max(1) as usize),
             Filter::Glow {
                 radius,
@@ -802,27 +936,15 @@ impl Filter {
                 angle,
                 colour,
             } => effects::halftone(src, w, h, origin, size, angle, colour),
-            Filter::Emboss { angle, depth } => effects::emboss(src, w, h, angle, depth),
-            Filter::FindEdges => effects::find_edges(src, w, h),
-            Filter::Clouds { scale, detail } => effects::clouds(w, h, origin, scale, detail),
             Filter::Median { radius } => effects::median(src, w, h, radius),
             Filter::OilPaint { radius } => effects::oil_paint(src, w, h, radius),
-            Filter::Vignette {
-                amount,
-                size,
-                frame,
-            } => effects::vignette(src, w, h, origin, amount, size, frame),
             Filter::ZoomBlur { amount, frame } => {
                 effects::zoom_blur(src, w, h, origin, amount, frame)
             }
             Filter::SpinBlur { angle, frame } => {
                 effects::spin_blur(src, w, h, origin, angle, frame)
             }
-            Filter::Dither { levels } => effects::dither(src, w, h, origin, levels),
-            _ => match self.channel_lut() {
-                Some(lut) => src.par_iter().map(|&c| with_lut(c, &lut)).collect(),
-                None => src.par_iter().map(|&c| self.pixel(c)).collect(),
-            },
+            _ => src.to_vec(),
         }
     }
 
@@ -1060,9 +1182,10 @@ fn unsharp(s: Color32, b: Color32, amount: f32) -> Color32 {
     if a == 0 {
         return s;
     }
+    // Sharpened colour can't be brighter than the pixel is opaque.
     let ch = |sv: u8, bv: u8| {
         let v = sv as f32 + amount * (sv as f32 - bv as f32);
-        v.round().clamp(0.0, 255.0) as u8
+        v.round().clamp(0.0, a as f32) as u8
     };
     Color32::from_rgba_premultiplied(ch(s.r(), b.r()), ch(s.g(), b.g()), ch(s.b(), b.b()), a)
 }
@@ -1080,14 +1203,31 @@ fn hash_noise(x: i32, y: i32, channel: u32) -> f32 {
     (h >> 8) as f32 / (1u32 << 23) as f32 - 1.0
 }
 
-fn noise(c: Color32, x: i32, y: i32, amount: f32, mono: bool) -> Color32 {
+/// [`hash_noise`] in grains `size` pixels across: smooth value noise
+/// between lattice points, scaled back up to the spread a single pixel's
+/// has (interpolating averages some of it away).
+fn grain(x: i32, y: i32, channel: u32, size: f32) -> f32 {
+    if size <= 1.0 {
+        return hash_noise(x, y, channel);
+    }
+    let (u, v) = ((x as f32 + 0.5) / size, (y as f32 + 0.5) / size);
+    let (x0, y0) = (u.floor() as i32, v.floor() as i32);
+    let s = |t: f32| t * t * (3.0 - 2.0 * t);
+    let (sx, sy) = (s(u - x0 as f32), s(v - y0 as f32));
+    let n = |dx, dy| hash_noise(x0 + dx, y0 + dy, channel);
+    let top = n(0, 0) + (n(1, 0) - n(0, 0)) * sx;
+    let bottom = n(0, 1) + (n(1, 1) - n(0, 1)) * sx;
+    ((top + (bottom - top) * sy) * 1.35).clamp(-1.0, 1.0)
+}
+
+fn noise(c: Color32, x: i32, y: i32, amount: f32, mono: bool, size: f32) -> Color32 {
     let a = c.a();
     if a == 0 {
         return c;
     }
     let spread = amount * a as f32;
     let ch = |v: u8, channel: u32| {
-        let n = hash_noise(x, y, if mono { 0 } else { channel });
+        let n = grain(x, y, if mono { 0 } else { channel }, size);
         (v as f32 + n * spread).round().clamp(0.0, 255.0) as u8
     };
     Color32::from_rgba_premultiplied(ch(c.r(), 0), ch(c.g(), 1), ch(c.b(), 2), a)
@@ -1253,9 +1393,10 @@ mod tests {
                     | Filter::HueSaturation { .. }
                     | Filter::Levels { .. } => *f,
                     Filter::GaussianBlur { .. } => Filter::GaussianBlur { radius: 0.0 },
-                    Filter::Noise { mono, .. } => Filter::Noise {
+                    Filter::Noise { mono, size, .. } => Filter::Noise {
                         amount: 0.0,
                         mono: *mono,
+                        size: *size,
                     },
                     Filter::Pixelate { .. } => Filter::Pixelate { size: 1 },
                     Filter::Curves { .. }
@@ -1607,12 +1748,91 @@ mod tests {
         assert_eq!(out[0], src[0], "flat areas are unchanged");
     }
 
+    /// A soft white line on a clear layer, blurred: its faded edge must stay
+    /// white, not turn grey (stored pixels are premultiplied in linear
+    /// light, so averaging them directly darkens).
+    #[test]
+    fn blurs_keep_the_colour_of_soft_edges() {
+        let (w, h) = (32, 8);
+        let src: Vec<Color32> = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                if (12..20).contains(&x) {
+                    Color32::WHITE
+                } else {
+                    Color32::TRANSPARENT
+                }
+            })
+            .collect();
+        for f in [
+            Filter::GaussianBlur { radius: 3.0 },
+            Filter::MotionBlur {
+                angle: 0.0,
+                distance: 10.0,
+            },
+            Filter::Pixelate { size: 5 },
+            Filter::ZoomBlur {
+                amount: 0.3,
+                frame: Frame::of_canvas(w, h),
+            },
+        ] {
+            let out = f.apply(&src, w, h, (0, 0));
+            for c in out.iter().filter(|c| c.a() > 8) {
+                let [r, g, b, _] = c.unmultiplied();
+                assert!(
+                    r.min(g).min(b) >= 245,
+                    "{}: faded edge turned {:?}",
+                    f.name(),
+                    c.unmultiplied()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mixable_round_trip_leaves_untouched_pixels_exact() {
+        let src: Vec<Color32> = (0..=255u8)
+            .map(|a| Color32::from_rgba_unmultiplied(200, 90, 30, a))
+            .collect();
+        let mixed = to_mixable(&src);
+        assert_eq!(from_mixable(&mixed, &mixed, &src), src);
+        // And a changed buffer decodes to the colour it holds.
+        let moved: Vec<Color32> = mixed.iter().rev().copied().collect();
+        let back = from_mixable(&moved, &mixed, &src);
+        for c in back.iter().filter(|c| c.a() > 40) {
+            let [r, g, b, _] = c.unmultiplied();
+            assert!(
+                r.abs_diff(200) <= 4 && g.abs_diff(90) <= 4 && b.abs_diff(30) <= 4,
+                "{c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bigger_noise_grain_changes_slowly_across_pixels() {
+        let src = solid(Color32::from_gray(128), 64 * 64);
+        let roughness = |size: f32| {
+            let f = Filter::Noise {
+                amount: 0.5,
+                mono: true,
+                size,
+            };
+            let out = f.apply(&src, 64, 64, (0, 0));
+            out.windows(2)
+                .map(|p| p[0].r().abs_diff(p[1].r()) as u32)
+                .sum::<u32>()
+        };
+        assert!(roughness(8.0) * 3 < roughness(1.0));
+        assert!(roughness(8.0) > 0);
+    }
+
     #[test]
     fn noise_is_repeatable_and_stays_in_range() {
         let src = solid(Color32::from_rgba_unmultiplied(128, 128, 128, 128), 64);
         let f = Filter::Noise {
             amount: 0.5,
             mono: false,
+            size: 1.0,
         };
         let a = f.apply(&src, 8, 8, (3, 5));
         assert_eq!(a, f.apply(&src, 8, 8, (3, 5)));
