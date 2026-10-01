@@ -1,7 +1,9 @@
-//! Sketch brush (Krita's sketch engine): besides its own line, each new
+//! Sketch brush: besides its own line, each new
 //! point of the stroke is joined by fine lines to earlier points of the
 //! stroke nearby, so going back and forth over an area builds up a web of
 //! shading, the way a quick pencil sketch does.
+
+use eframe::egui::Vec2;
 
 /// A sketch brush's lines.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -16,6 +18,10 @@ pub struct Sketch {
     pub opacity: f32,
     /// The joining lines' thickness, canvas pixels.
     pub thickness: f32,
+    /// How much of each joining line is left off at both ends, as a share
+    /// of its length: 0 joins the points, a half draws
+    /// nothing.
+    pub offset: f32,
 }
 
 impl Default for Sketch {
@@ -25,6 +31,7 @@ impl Default for Sketch {
             density: 0.15,
             opacity: 0.35,
             thickness: 1.0,
+            offset: 0.0,
         }
     }
 }
@@ -50,6 +57,12 @@ impl Sketch {
         (self.reach / 12.0).max(2.0)
     }
 
+    /// The line joining `p` to an earlier point `q`, left off at both
+    /// ends by the offset (crossing over past a half).
+    pub fn ends(&self, p: Vec2, q: Vec2) -> (Vec2, Vec2) {
+        (p + (q - p) * self.offset, q - (q - p) * self.offset)
+    }
+
     /// Distance between the dabs drawing a line.
     pub fn step(&self) -> f32 {
         (self.thickness * 0.5).max(0.4)
@@ -59,6 +72,18 @@ impl Sketch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_offset_leaves_both_ends_off() {
+        let s = Sketch {
+            offset: 0.25,
+            ..Default::default()
+        };
+        let (a, b) = s.ends(Vec2::ZERO, Vec2::new(100.0, 0.0));
+        assert_eq!((a.x, b.x), (25.0, 75.0));
+        let whole = Sketch::default().ends(Vec2::ZERO, Vec2::new(100.0, 0.0));
+        assert_eq!((whole.0.x, whole.1.x), (0.0, 100.0));
+    }
 
     #[test]
     fn lines_fade_with_length_and_stop_at_the_reach() {

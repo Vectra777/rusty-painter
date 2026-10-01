@@ -1185,7 +1185,8 @@ fn an_empty_dual_tip_masks_all_the_paint() {
     use crate::brush_engine::brush_options::PixelBrushShape;
     use crate::brush_engine::dual::{DualMode, DualTip};
     let blank = crate::brush_engine::tip::TipMask::from_mask(8, 8, vec![0; 64]);
-    for mode in DualMode::ALL {
+    // Burn leaves solid paint solid whatever the mask.
+    for mode in DualMode::ALL.into_iter().filter(|&m| m != DualMode::Burn) {
         let dual = DualTip {
             shape: PixelBrushShape::Custom(blank.clone()),
             mode,
@@ -1614,6 +1615,57 @@ fn a_sketch_brush_webs_between_passes() {
     assert!(pixels(&stroke_with_pressure(&mut sketch.clone(), &zigzag)) == pixels(&webbed));
 }
 
+#[test]
+fn sketch_lines_thin_out_and_shorten_by_their_inputs() {
+    use crate::brush_engine::dynamics::DabSetting;
+    let zigzag: Vec<(Vec2, f32)> = (0..=60)
+        .map(|i| {
+            let t = i as f32 / 60.0;
+            let y = if i % 20 < 10 {
+                40.0 + (i % 10) as f32 * 5.0
+            } else {
+                90.0 - (i % 10) as f32 * 5.0
+            };
+            (Vec2::new(40.0 + 170.0 * t, y), 0.2)
+        })
+        .collect();
+    let sketch = || {
+        let mut b = Brush::new(2.0, 90.0, Color32::BLACK, 20.0);
+        b.brush_options.pressure_size = false;
+        b.brush_type = crate::brush_engine::brush::BrushType::Sketch;
+        b.sketch.density = 1.0;
+        b.sketch.opacity = 1.0;
+        b.sketch.thickness = 4.0;
+        b
+    };
+    let covered = |c: &Canvas| pixels(c).iter().filter(|&&a| a > 20).count();
+    let ink = |c: &Canvas| pixels(c).iter().map(|&a| a as u64).sum::<u64>();
+    let full = stroke_with_pressure(&mut sketch(), &zigzag);
+    // Light pressure (a fifth) driving the line width: as thin as lines a
+    // fifth as wide.
+    let mut thin = sketch();
+    thin.inputs = vec![map_pressure(DabSetting::SketchWidth, 1.0)];
+    let thin = stroke_with_pressure(&mut thin, &zigzag);
+    let mut narrow = sketch();
+    narrow.sketch.thickness = 0.8;
+    let narrow = stroke_with_pressure(&mut narrow, &zigzag);
+    assert!(covered(&thin) < covered(&full) * 3 / 4);
+    assert_eq!(pixels(&thin), pixels(&narrow));
+    // Left off at both ends: less ink; by pressure, a fifth of that.
+    let mut short = sketch();
+    short.sketch.offset = 0.3;
+    let mut by_pressure = short.clone();
+    by_pressure.inputs = vec![map_pressure(DabSetting::SketchOffset, 1.0)];
+    let mut fifth = short.clone();
+    fifth.sketch.offset = 0.06;
+    let short = stroke_with_pressure(&mut short, &zigzag);
+    assert!(ink(&short) < ink(&full));
+    assert_eq!(
+        pixels(&stroke_with_pressure(&mut by_pressure, &zigzag)),
+        pixels(&stroke_with_pressure(&mut fifth, &zigzag))
+    );
+}
+
 /// Dabs at `centers` (each on its own), with wrap-around or not.
 fn dabs_at(centers: &[Vec2], wrap: bool) -> Canvas {
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
@@ -1725,6 +1777,45 @@ fn random_per_stroke_is_one_value_for_the_whole_stroke() {
     assert!(per_stroke.windows(2).all(|w| w[0] == w[1]), "one value");
     let per_dab = strengths(Sensor::RandomDab);
     assert!(per_dab.windows(2).any(|w| w[0] != w[1]), "each dab its own");
+}
+
+#[test]
+fn pressure_in_holds_the_highest_pressure_so_far() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let strengths = |sensor| {
+        let mut b = mapped(vec![InputMapping {
+            sensor,
+            setting: DabSetting::Opacity,
+            amount: 1.0,
+            ..Default::default()
+        }]);
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+        canvas.active_layer_idx = 1;
+        let (mut undo, mut tiles) = (empty_undo(), StrokeTiles::default());
+        let mut stroke = StrokeState::with_seed(7);
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        // A press that peaks halfway, then eases off.
+        let samples = line(64.0, 0.5);
+        let n = samples.len() as f32;
+        for (i, (p, t)) in samples.into_iter().enumerate() {
+            let pressure = 1.0 - (2.0 * i as f32 / n - 1.0).abs();
+            stroke.add_sample(&mut b, p, pressure, Some(t), &mut ctx);
+        }
+        stroke.finish(&mut b, &mut ctx);
+        stroke
+            .painted
+            .iter()
+            .map(|v| v.strength)
+            .collect::<Vec<f32>>()
+    };
+    let held = strengths(Sensor::PressureIn);
+    assert!(
+        held.windows(2).all(|w| w[1] >= w[0] - 1e-6),
+        "never eases off"
+    );
+    let plain = strengths(Sensor::Pressure);
+    assert!(plain.last() < held.last(), "pressure itself does");
 }
 
 #[test]
@@ -2292,7 +2383,7 @@ fn scrub(brush: &mut Brush, passes: usize, pressure: f32) -> Canvas {
 
 #[test]
 fn wash_never_goes_past_the_pressure_s_opacity_however_often_it_s_gone_over() {
-    // Krita's alpha darken: at light pressure, scrubbing stays light.
+    // Alpha darken: at light pressure, scrubbing stays light.
     for (passes, pressure) in [(1, 0.3), (8, 0.3), (8, 0.7)] {
         let canvas = scrub(&mut wash_brush(100.0), passes, pressure);
         let a = alpha(&canvas, 120, 64) as f32 / 255.0;
@@ -2360,7 +2451,7 @@ fn hard_edges_follow_pressure_and_keep_a_soft_band() {
         setting: DabSetting::Sharpness,
         ..Default::default()
     }];
-    // Krita: the threshold scales with pressure, so a light dab is cut
+    // The threshold scales with pressure, so a light dab is cut
     // nearer its middle.
     let (full, _) = dab_alphas(&mut b, 1.0);
     let (light, _) = dab_alphas(&mut b, 0.3);
@@ -2425,4 +2516,93 @@ fn a_lightness_map_tip_paints_the_brush_colour_at_mid_grey() {
     }
     let dark = painted(0);
     assert!(dark.r() < 10 && dark.g() < 10, "{dark:?}");
+}
+
+#[test]
+fn softness_by_pressure_shrinks_a_tips_solid_core() {
+    use crate::brush_engine::dynamics::DabSetting;
+    use crate::brush_engine::hardness::{Softening, SoftnessSelector};
+    // A hard round tip: solid to the edge until softness shrinks it.
+    let hard = || {
+        let mut b = brush(BrushDynamics::default());
+        b.brush_options.diameter = 30.0;
+        let o = &mut b.brush_options;
+        o.softening = Softening::Fade(1.0);
+        o.softness_selector = SoftnessSelector::Curve;
+        o.softness_curve = o.softening.falloff(
+            &crate::brush_engine::hardness::SoftnessCurve::default(),
+            1.0,
+        );
+        b.inputs = vec![map_pressure(DabSetting::Softness, 1.0)];
+        b
+    };
+    let full = paint_pen(&mut hard(), &line(64.0, 0.5), 1.0, None);
+    let light = paint_pen(&mut hard(), &line(64.0, 0.5), 0.3, None);
+    assert!(
+        soft_edge(&light, 128) > soft_edge(&full, 128) * 2,
+        "softer under light pressure: {} vs {}",
+        soft_edge(&light, 128),
+        soft_edge(&full, 128)
+    );
+    // The app's own soft tips soften too: their hardness scales down.
+    let mut gaussian = Brush::new(30.0, 90.0, Color32::BLACK, 5.0);
+    gaussian.brush_options.pressure_size = false;
+    let crisp = paint_pen(&mut gaussian.clone(), &line(64.0, 0.5), 0.3, None);
+    gaussian.inputs = vec![map_pressure(DabSetting::Softness, 1.0)];
+    let blurry = paint_pen(&mut gaussian, &line(64.0, 0.5), 0.3, None);
+    assert!(soft_edge(&blurry, 128) > soft_edge(&crisp, 128) * 2);
+}
+
+#[test]
+fn a_mirror_input_flips_the_dabs_that_reach_half() {
+    use crate::brush_engine::dynamics::DabSetting;
+    // As in `random_flips_mirror_some_dabs_and_not_others`: each dab paints
+    // the left of its centre, or, mirrored, the right.
+    let right_side = |pressure: f32| {
+        let mut b = brush(BrushDynamics {
+            tip: TipShape {
+                random_flip_x: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        b.brush_options.diameter = 10.0;
+        b.brush_options.spacing = 200.0;
+        b.brush_options.pixel_shape = left_half_tip();
+        b.inputs = vec![map_pressure(DabSetting::Mirror, 1.0)];
+        let canvas = paint_pen(&mut b, &line(64.0, 0.5), pressure, None);
+        (20..=220)
+            .step_by(20)
+            .filter(|&cx| alpha(&canvas, cx + 3, 64) > alpha(&canvas, cx - 3, 64))
+            .count()
+    };
+    assert_eq!(right_side(0.4), 0, "under half: none flipped");
+    assert_eq!(right_side(0.6), 11, "over half: all flipped");
+}
+
+#[test]
+fn fade_counts_the_strokes_dabs() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    // Size by fade over 20 dabs: the line thickens to full over its first
+    // twenty dabs, then stays.
+    let mut b = brush(BrushDynamics::default());
+    b.brush_options.diameter = 20.0;
+    b.brush_options.spacing = 25.0;
+    b.inputs = vec![InputMapping {
+        sensor: Sensor::Fade,
+        setting: DabSetting::Size,
+        length: 20.0,
+        ..Default::default()
+    }];
+    let (canvas, _) = paint(&mut b, &line(64.0, 0.5), 1, true);
+    let thick = |x: usize| (0..H).filter(|&y| alpha(&canvas, x, y) > 128).count();
+    // Dabs 5 px apart from x = 20: twenty of them reach x = 120.
+    assert!(
+        thick(40) < thick(70) && thick(70) < thick(150),
+        "{} {} {}",
+        thick(40),
+        thick(70),
+        thick(150)
+    );
+    assert_eq!(thick(150), thick(200));
 }

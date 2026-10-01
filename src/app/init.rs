@@ -47,7 +47,7 @@ impl PainterApp {
         let canvas_w = 4000;
         let canvas_h = 4000;
         let mut canvas = crate::canvas::Canvas::new(canvas_w, canvas_h, Color32::WHITE, TILE_SIZE);
-        // New documents blend like Krita and Photoshop; the New Canvas
+        // New documents blend stored values (gamma); the New Canvas
         // dialog starts from this.
         canvas.blend_space = crate::canvas::blend_modes::BlendSpace::Gamma;
         let layer_count = canvas.layers.len();

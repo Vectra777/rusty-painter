@@ -1,4 +1,4 @@
-//! Hatching brush (Krita's hatching engine): wherever the brush passes, it
+//! Hatching brush: wherever the brush passes, it
 //! paints parallel lines at a fixed angle and spacing instead of solid
 //! paint. The lines are pinned to the canvas, so strokes laid next to or
 //! over each other join into one even hatch; pressing harder adds more

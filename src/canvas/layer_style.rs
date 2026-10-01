@@ -1,6 +1,5 @@
 //! Layer styles: fill layers (a colour or gradient instead of paint) and a
-//! border around a layer's paint, as Clip Studio's border effect and
-//! Krita's fill layers. Nothing is stored as pixels: the compositor asks
+//! border around a layer's paint, as Clip Studio's border effect. Nothing is stored as pixels: the compositor asks
 //! [`LayerStyle`] for each tile as it would read a painted one.
 
 use crate::canvas::filters::GradientMap;

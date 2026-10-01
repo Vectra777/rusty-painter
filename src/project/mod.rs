@@ -1390,6 +1390,7 @@ pub(crate) mod tests {
         app.blend_press(Vec2::new(110.0, 96.0), 1.0);
         app.blend_drag(Vec2::new(150.0, 96.0), 1.0);
         app.blend_release();
+        app.settle_strokes();
         let px = app.canvas.get_layer_tile_data(1, 2, 1).unwrap();
         assert!(px[32 * TILE_SIZE + 5].a() > 60, "red carried past the edge");
         app.apply_history(false);
@@ -1400,6 +1401,7 @@ pub(crate) mod tests {
         app.blend_press(Vec2::new(80.0, 128.0), 1.0);
         app.blend_drag(Vec2::new(110.0, 128.0), 1.0);
         app.blend_release();
+        app.settle_strokes();
         let inside = app.canvas.get_layer_tile_data(1, 1, 1).unwrap()[62 * TILE_SIZE + 30];
         let outside = app.canvas.get_layer_tile_data(1, 1, 2).unwrap()[TILE_SIZE + 30];
         assert!(
@@ -1443,6 +1445,7 @@ pub(crate) mod tests {
             app.blend_press(Vec2::new(if smudge { 20.0 } else { 32.0 }, 10.0), 1.0);
             app.blend_drag(Vec2::new(if smudge { 50.0 } else { 32.0 }, 50.0), 1.0);
             app.blend_release();
+            app.settle_strokes();
             let px = app.canvas.get_layer_tile_data(1, 0, 0).unwrap();
             let mut soft = 0;
             for &p in &px {

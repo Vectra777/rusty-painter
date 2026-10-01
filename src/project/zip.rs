@@ -163,7 +163,7 @@ pub(crate) fn read_entry<'a>(bytes: &'a [u8], name: &str) -> Result<&'a [u8], St
 const MAX_INFLATED: usize = 256 << 20;
 
 /// Every entry of a ZIP archive, stored or deflated (other apps' archives,
-/// such as Krita's brush bundles, compress theirs): `(name, data)`.
+/// such as `.bundle` brush sets, compress theirs): `(name, data)`.
 pub(crate) fn read_all(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let broken = || "Damaged archive".to_string();
     let search_from = bytes.len().saturating_sub(22 + usize::from(u16::MAX));

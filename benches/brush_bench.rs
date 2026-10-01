@@ -124,8 +124,8 @@ fn bench_pressure_stroke_app_pool(c: &mut Criterion) {
     });
 }
 
-/// A 1500 px soft brush dragged across a 4000 px canvas: the case Krita's
-/// "Instant Preview" exists for.
+/// A 1500 px soft brush dragged across a 4000 px canvas: the case a
+/// preview at a coarser level exists for.
 fn bench_huge_brush_stroke(c: &mut Criterion) {
     let pool = ThreadPoolBuilder::new().build().unwrap();
     let canvas = Canvas::new(4000, 4000, Color32::WHITE, 64);
@@ -805,7 +805,7 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.texture = Some(t);
         b
     }));
-    // Krita's options: an image tip flipped at random, spacing by
+    // Imported brushes' options: an image tip flipped at random, spacing by
     // pressure, hard edges on a soft tip, the new texture modes, and the
     // Parallel blend mode.
     cases.push(("random_flip", {

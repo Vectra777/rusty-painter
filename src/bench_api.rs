@@ -126,7 +126,7 @@ pub fn stroke(app: &mut PainterApp, path: &[(Vec2, f32)], eraser: bool) {
     app.release_canvas();
 }
 
-/// Colour mixing on the brush (Krita's Colour Smudge), with a speckled
+/// Colour mixing on the brush, with a speckled
 /// image tip (`tip`) and the Parallel blend mode (`parallel`).
 pub fn set_mixing(app: &mut PainterApp, tip: bool, parallel: bool) {
     let b = &mut app.brush_state.brush;
@@ -150,7 +150,7 @@ pub fn set_mixing(app: &mut PainterApp, tip: bool, parallel: bool) {
     }
 }
 
-/// A smudge (or blur) stroke.
+/// A smudge (or blur) stroke through the stroke worker, waited for.
 pub fn blend_stroke(app: &mut PainterApp, path: &[(Vec2, f32)], smudge: bool) {
     app.set_blend_tool(smudge);
     let Some(&(first, pressure)) = path.first() else {
@@ -161,6 +161,7 @@ pub fn blend_stroke(app: &mut PainterApp, path: &[(Vec2, f32)], smudge: bool) {
         app.blend_drag(p, pressure);
     }
     app.blend_release();
+    app.settle_strokes();
 }
 
 /// The smudge / blur tools' modes: Smudge becomes Deform (`deform`) or

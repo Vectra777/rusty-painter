@@ -96,6 +96,7 @@ impl PainterApp {
             symmetry,
             view_scale: self.viewport.zoom,
             wrap: self.workspace.wrap_around,
+            perspective: self.perspective_grids(),
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;
@@ -139,10 +140,12 @@ impl PainterApp {
     pub(crate) fn finish_stroke(&mut self) {
         // (A vector line ends first, and says it's no longer drawing.)
         self.vector_stroke_end();
-        if self.mixing_stroke() {
+        // A smudge or blur stroke (a mixing brush's too) runs on the stroke
+        // worker like a brush stroke: ended the same way, so the worker
+        // lets go of the canvas.
+        if self.brush_state.blend_stroke.is_some() {
             self.blend_release();
-        }
-        if self.brush_state.is_drawing {
+        } else if self.brush_state.is_drawing {
             self.stroke_worker.end();
         }
         self.brush_state.is_drawing = false;
@@ -285,6 +288,7 @@ mod tests {
         }
         app.finish_stroke();
         assert!(!app.brush_state.is_drawing);
+        app.settle_strokes();
         let c = app.canvas.get_layer_tile_data(1, 0, 0).unwrap()[32 * 64 + 60];
         assert!(c.r() > 40 && c.b() > 40, "red and blue mixed: {c:?}");
         assert_eq!(app.layer_state.history.push_count(), before + 1, "one step");

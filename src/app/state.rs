@@ -52,7 +52,7 @@ pub struct BrushState {
     /// The floating presets window is open.
     pub show_presets: bool,
     /// The smudge / blur stroke in progress.
-    pub blend_stroke: Option<crate::app::tools::blend::BlendStroke>,
+    pub blend_stroke: Option<crate::app::tools::blend::ActiveBlend>,
     /// Brushes just imported from other apps: per file, how many presets
     /// and what was approximated (shown until dismissed).
     pub import_report: Option<Vec<(String, usize, Vec<String>)>>,

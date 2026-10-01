@@ -37,7 +37,7 @@ pub enum LayerBlend {
     Exclusion,
     Subtract,
     Divide,
-    /// Krita's Parallel: twice the harmonic mean of the two colours, like
+    /// Parallel: twice the harmonic mean of the two colours, like
     /// two resistors in parallel (darkens, but less than Multiply).
     Parallel,
     Hue,
@@ -167,8 +167,8 @@ pub enum BlendSpace {
     /// blended, and encoded again.
     #[default]
     Linear,
-    /// Blend the stored sRGB values directly, like Photoshop and Krita's
-    /// default 8-bit documents.
+    /// Blend the stored sRGB values directly, like Photoshop's 8-bit
+    /// documents.
     Gamma,
 }
 
@@ -229,12 +229,16 @@ fn vivid_light(b: f32, s: f32) -> f32 {
     }
 }
 
-/// Krita's `cfParallel`: `2 / (1/b + 1/s)`, a channel at 0 counting as 1
-/// in its reciprocal.
+/// Parallel: `2 / (1/b + 1/s)`, nothing where either channel is (next to)
+/// nothing, as its harmonic mean tends to. (Taking 1 for such a channel's
+/// reciprocal instead would turn a channel both colours lack full: yellow
+/// over yellow would come out white.)
 #[inline]
 fn parallel(b: f32, s: f32) -> f32 {
-    let inv = |v: f32| if v > 0.0 { 1.0 / v } else { 1.0 };
-    (2.0 / (inv(b) + inv(s))).clamp(0.0, 1.0)
+    if b <= f32::EPSILON || s <= f32::EPSILON {
+        return 0.0;
+    }
+    (2.0 / (1.0 / b + 1.0 / s)).clamp(0.0, 1.0)
 }
 
 #[inline]
@@ -423,6 +427,22 @@ mod tests {
 
     fn close(a: [f32; 3], b: [f32; 3]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
+    }
+
+    #[test]
+    fn parallel_leaves_a_channel_neither_colour_has_empty() {
+        // Yellow over yellow is yellow (it once came out white), and a
+        // channel only one colour has is nothing.
+        let yellow = [1.0, 0.6, 0.0];
+        assert!(close(
+            blend_color(LayerBlend::Parallel, yellow, yellow),
+            yellow
+        ));
+        let blue = [0.0, 0.0, 1.0];
+        assert!(close(
+            blend_color(LayerBlend::Parallel, yellow, blue),
+            [0.0; 3]
+        ));
     }
 
     #[test]

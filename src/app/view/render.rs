@@ -66,7 +66,7 @@ fn refresh_below_cache(app: &mut PainterApp, visible: &impl Fn(&CanvasTile) -> b
 }
 
 /// Mip level to upload strokes at: while painting zoomed out, only the level
-/// on screen (and coarser) is updated, like Krita's Instant Preview; full
+/// on screen (and coarser) is updated; full
 /// resolution follows when the stroke ends or the view zooms in.
 ///
 /// The GPU picks mip levels per *physical* pixel, so the display scale must

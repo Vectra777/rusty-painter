@@ -903,14 +903,20 @@ fn dynamics_sections(
                  like Wacom's Art Pen).",
             )
             .changed();
-        property_row(ui, "Flip at random", |ui| {
+        property_row(ui, "Flip", |ui| {
             changed |= ui
                 .toggle_value(&mut t.random_flip_x, "↔")
-                .on_hover_text("Mirror about half the dabs left to right.")
+                .on_hover_text(
+                    "Mirror about half the dabs left to right, at random (or by an input \
+                     mapped to Mirror).",
+                )
                 .changed();
             changed |= ui
                 .toggle_value(&mut t.random_flip_y, "↕")
-                .on_hover_text("Mirror about half the dabs top to bottom.")
+                .on_hover_text(
+                    "Mirror about half the dabs top to bottom, at random (or by an input \
+                     mapped to Mirror).",
+                )
                 .changed();
         });
     });
@@ -1106,8 +1112,9 @@ fn inputs_section(
                 }
                 if m.sensor.has_length() {
                     let (range, suffix) = match m.sensor {
-                        Sensor::Time => (0.1..=10.0, " s"),
-                        _ => (5.0..=2000.0, " px"),
+                        Sensor::Time => (0.01..=10.0, " s"),
+                        Sensor::Fade => (1.0..=5000.0, " dabs"),
+                        _ => (1.0..=5000.0, " px"),
                     };
                     changed |= slider_row(
                         ui,
@@ -1118,6 +1125,10 @@ fn inputs_section(
                     )
                     .on_hover_text("How far into the stroke the input reaches its full value.")
                     .changed();
+                    changed |= ui
+                        .checkbox(&mut m.periodic, "Repeat")
+                        .on_hover_text("Start over from nothing each time it reaches full.")
+                        .changed();
                 }
                 changed |= crate::ui::curve_editor::curve_editor_with(
                     ui,
@@ -1177,10 +1188,24 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
             ui,
             "Line width",
             crate::ui::widgets::reset(&mut s.thickness, |v| {
-                egui::Slider::new(v, 0.5..=8.0)
+                egui::Slider::new(v, 0.5..=100.0)
+                    .logarithmic(true)
                     .max_decimals(1)
                     .suffix(" px")
             }),
+        )
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Line offset",
+            crate::ui::widgets::reset(&mut s.offset, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=2.0))
+            }),
+        )
+        .on_hover_text(
+            "How much of each joining line is left off at both ends: short strokes \
+             between the points rather than lines joining them (past half, the ends \
+             cross over).",
         )
         .changed();
     });

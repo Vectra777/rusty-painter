@@ -247,11 +247,9 @@ fn separable(mode: u32, b: f32, s: f32) -> f32 {
             return min(b / s, 1.0);
         }
         case 27u: {
-            var inv_b = 1.0;
-            if (b > 0.0) { inv_b = 1.0 / b; }
-            var inv_s = 1.0;
-            if (s > 0.0) { inv_s = 1.0 / s; }
-            return clamp(2.0 / (inv_b + inv_s), 0.0, 1.0);
+            // Nothing where either channel is nothing.
+            if (b <= 1.1920929e-7 || s <= 1.1920929e-7) { return 0.0; }
+            return clamp(2.0 / (1.0 / b + 1.0 / s), 0.0, 1.0);
         }
         default: { return s; }
     }

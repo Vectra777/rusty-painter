@@ -221,6 +221,22 @@ impl PainterApp {
         }
     }
 
+    /// The enabled perspective assistants, for brushes that follow
+    /// perspective.
+    pub(crate) fn perspective_grids(&self) -> Vec<crate::brush_engine::dynamics::PerspectiveGrid> {
+        self.workspace
+            .guides
+            .assistants
+            .iter()
+            .filter(|a| a.enabled && a.kind == AssistantKind::Perspective)
+            .filter_map(|a| {
+                crate::brush_engine::dynamics::PerspectiveGrid::new(std::array::from_fn(|i| {
+                    a.point(i)
+                }))
+            })
+            .collect()
+    }
+
     /// The start of a freehand stroke at `pos`: pick what it follows (the
     /// ruler or a line parallel to it, an assistant) and put `pos` on it.
     pub(crate) fn ruler_begin_stroke(&mut self, pos: Vec2) -> Vec2 {

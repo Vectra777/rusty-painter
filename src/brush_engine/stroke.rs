@@ -21,7 +21,7 @@ use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-/// Per-tile state for indirect painting (Krita's temporary stroke device):
+/// Per-tile state for indirect painting (a temporary stroke device):
 /// dabs only accumulate `coverage`, and the tile's pixels are re-resolved from
 /// `original` (the tile as it was when the stroke first touched it) plus the
 /// coverage. Pixels are never re-quantized to 8 bits between dabs.
@@ -468,6 +468,12 @@ pub struct StrokeState {
     /// when it started (for "time").
     stroke_random: f32,
     start_time: Option<f64>,
+    /// The highest pressure the stroke has reached (for "pressure in").
+    max_pressure: f32,
+    /// Dabs the inputs have read so far (for "fade").
+    dabs: u32,
+    /// The enabled perspective assistants (for "perspective").
+    pub perspective: Vec<crate::brush_engine::dynamics::PerspectiveGrid>,
     /// The stroke's random grain shift (a share of the pattern) and the
     /// seed for each dab's.
     grain_random: ([f32; 2], u32),
@@ -519,6 +525,9 @@ impl StrokeState {
             mask_until_next: 0.0,
             stroke_random: SmallRng::seed_from_u64(seed ^ 0x5eed).random(),
             start_time: None,
+            max_pressure: 0.0,
+            dabs: 0,
+            perspective: Vec::new(),
             grain_random: {
                 let mut g = SmallRng::seed_from_u64(seed ^ 0x6ea1_0f75);
                 ([g.random(), g.random()], g.random())
@@ -667,23 +676,31 @@ impl StrokeState {
         }
     }
 
-    /// A sketch brush: join each of `points` (this sample's dabs) to some
-    /// earlier points of the stroke nearby with fine lines.
+    /// A sketch brush: join each of `points` (this sample's dabs, with
+    /// their inputs) to some earlier points of the stroke nearby with fine
+    /// lines.
     fn sketch_lines(
         &mut self,
         brush: &mut Brush,
-        points: &[Vec2],
+        points: &[(Vec2, DabVar)],
         context: &mut StrokeContext<'_>,
     ) {
         use crate::brush_engine::sketch::{HISTORY, MAX_LINES};
-        let sketch = brush.sketch;
+        let base = brush.sketch;
         let base_r = (brush.brush_options.diameter * 0.5).max(0.25);
-        let scale = (sketch.thickness * 0.5).max(0.3) / base_r;
-        let step = sketch.step();
-        let spacing = sketch.point_spacing();
+        let spacing = base.point_spacing();
         let mut centers = Vec::new();
         let mut vars = Vec::new();
-        for &p in points {
+        for &(p, var) in points {
+            // This point's density, line width and offset, by its inputs.
+            let sketch = crate::brush_engine::sketch::Sketch {
+                density: base.density * var.sketch[0],
+                thickness: base.thickness * var.sketch[1],
+                offset: base.offset * var.sketch[2],
+                ..base
+            };
+            let scale = (sketch.thickness * 0.5).max(0.3) / base_r;
+            let step = sketch.step();
             if self
                 .sketch_points
                 .last()
@@ -702,9 +719,10 @@ impl StrokeState {
                 {
                     continue;
                 }
-                let n = (d / step).ceil().max(1.0) as usize;
+                let (a, b) = sketch.ends(p, q);
+                let n = ((b - a).length() / step).ceil().max(1.0) as usize;
                 for k in 0..=n {
-                    centers.push(p + (q - p) * (k as f32 / n as f32));
+                    centers.push(a + (b - a) * (k as f32 / n as f32));
                     vars.push(DabVar {
                         scale,
                         strength,
@@ -873,8 +891,8 @@ impl StrokeState {
                         }
                     })
                     .collect();
-                let points: Vec<Vec2> = if brush.brush_type == BrushType::Sketch {
-                    plans.iter().map(|p| p.pos).collect()
+                let points: Vec<(Vec2, DabVar)> = if brush.brush_type == BrushType::Sketch {
+                    plans.iter().map(|p| (p.pos, p.var)).collect()
                 } else {
                     Vec::new()
                 };
@@ -1100,8 +1118,13 @@ impl StrokeState {
         let turn = |a: f32| a.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
         let speed = self.prev_speed + (self.speed - self.prev_speed) * dab.t;
         let tilt = self.tilt_at(dab.t);
+        let pressure = pressure.clamp(0.0, 1.0);
+        self.max_pressure = self.max_pressure.max(pressure);
+        let dabs = self.dabs as f32;
+        self.dabs = self.dabs.saturating_add(1);
         crate::brush_engine::dynamics::SensorValues {
-            pressure: pressure.clamp(0.0, 1.0),
+            pressure,
+            pressure_in: self.max_pressure,
             speed: (speed / FAST_SPEED).clamp(0.0, 1.0),
             tilt: tilt.map_or(0.0, |t| t.lean),
             tilt_direction: tilt.map_or(0.0, |t| turn(t.direction)),
@@ -1115,6 +1138,11 @@ impl StrokeState {
             random_stroke: self.stroke_random,
             rotation: self.barrel.rotation.map_or(0.0, turn),
             wheel: self.barrel.wheel.unwrap_or(0.0),
+            dabs,
+            perspective: crate::brush_engine::dynamics::PerspectiveGrid::sensor(
+                &self.perspective,
+                dab.pos,
+            ),
         }
     }
 
@@ -1163,11 +1191,28 @@ impl StrokeState {
                 angle += (self.rng.random::<f32>() * 2.0 - 1.0) * tip.random_angle.to_radians();
             }
             v.orient = tip_orientation(angle, tip.ratio * v.squash);
-            // Mirrored in the tip's own frame: across its length, its width.
-            if tip.random_flip_x && self.rng.random::<bool>() {
+            // Mirrored in the tip's own frame: across its length, its width;
+            // by its input when it has one (both ways at once), at random
+            // otherwise.
+            let by_input = brush
+                .inputs
+                .iter()
+                .any(|m| m.setting == crate::brush_engine::dynamics::DabSetting::Mirror);
+            let flip = |rng: &mut SmallRng| {
+                if by_input {
+                    v.mirror >= 0.5
+                } else {
+                    rng.random::<bool>()
+                }
+            };
+            let (flip_x, flip_y) = (
+                tip.random_flip_x && flip(&mut self.rng),
+                tip.random_flip_y && flip(&mut self.rng),
+            );
+            if flip_x {
                 v.orient = compose([-1.0, 0.0, 0.0, 1.0], v.orient);
             }
-            if tip.random_flip_y && self.rng.random::<bool>() {
+            if flip_y {
                 v.orient = compose([1.0, 0.0, 0.0, -1.0], v.orient);
             }
         }

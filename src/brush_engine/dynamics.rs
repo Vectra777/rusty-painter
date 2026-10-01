@@ -30,8 +30,10 @@ pub struct TipShape {
     /// Turn the tip with the pen's barrel rotation (pens that report it,
     /// like Wacom's Art Pen), on top of `angle`.
     pub follow_barrel: bool,
-    /// Mirror each dab at random across the tip's length (left-right) or
-    /// its width (top-bottom), half the dabs each (Krita's Mirror option).
+    /// Mirror dabs across the tip's length (left-right) or its width
+    /// (top-bottom): at random, half the dabs each
+    /// way; or, with an input mapped to [`DabSetting::Mirror`], the dabs
+    /// whose input reaches half.
     pub random_flip_x: bool,
     pub random_flip_y: bool,
 }
@@ -163,7 +165,7 @@ pub struct PenBarrel {
     /// Turn about the pen's own axis, radians on the canvas
     /// (counter-clockwise, y down).
     pub rotation: Option<f32>,
-    /// An airbrush pen's finger wheel (Krita's tangential pressure), 0..1.
+    /// An airbrush pen's finger wheel (tangential pressure), 0..1.
     pub wheel: Option<f32>,
 }
 
@@ -250,10 +252,19 @@ pub enum Sensor {
     Rotation,
     /// An airbrush pen's finger wheel.
     Wheel,
+    /// The highest pressure so far in the stroke: it never eases off.
+    PressureIn,
+    /// Dabs since the stroke started, up to the mapping's length (in
+    /// dabs).
+    Fade,
+    /// Where the dab is on an enabled perspective assistant: 0 on its
+    /// horizon, 1 at its corner farthest from it (and anywhere off the
+    /// assistants).
+    Perspective,
 }
 
 impl Sensor {
-    pub const ALL: [Sensor; 11] = [
+    pub const ALL: [Sensor; 14] = [
         Sensor::Pressure,
         Sensor::Speed,
         Sensor::Tilt,
@@ -265,6 +276,9 @@ impl Sensor {
         Sensor::RandomStroke,
         Sensor::Rotation,
         Sensor::Wheel,
+        Sensor::PressureIn,
+        Sensor::Fade,
+        Sensor::Perspective,
     ];
 
     pub fn label(self) -> &'static str {
@@ -280,12 +294,16 @@ impl Sensor {
             Sensor::RandomStroke => "Random (each stroke)",
             Sensor::Rotation => "Barrel rotation",
             Sensor::Wheel => "Airbrush wheel",
+            Sensor::PressureIn => "Pressure in (highest so far)",
+            Sensor::Fade => "Fade (dabs)",
+            Sensor::Perspective => "Perspective",
         }
     }
 
-    /// Whether the mapping's length applies (distance in px, time in s).
+    /// Whether the mapping's length applies (distance in px, time in s,
+    /// fade in dabs).
     pub fn has_length(self) -> bool {
-        matches!(self, Sensor::Distance | Sensor::Time)
+        matches!(self, Sensor::Distance | Sensor::Time | Sensor::Fade)
     }
 }
 
@@ -313,13 +331,25 @@ pub enum DabSetting {
     ColorMix,
     /// Scales the hard edges' strength (`Brush::sharpness`), like size.
     Sharpness,
-    /// Darkens the colour toward black (Krita's Darken option), like size
+    /// Darkens the colour toward black, like size
     /// scales the dab.
     Darken,
+    /// Softens a round or square tip, like size scales the dab, down to a
+    /// tenth: a smaller solid core, or a
+    /// softness curve's inner points lowered.
+    Softness,
+    /// Mirrors the tip (the ways set in the tip's mirror options) when it
+    /// reaches half.
+    Mirror,
+    /// A sketch brush's density, line width and line offset, each like
+    /// size scales the dab.
+    SketchDensity,
+    SketchWidth,
+    SketchOffset,
 }
 
 impl DabSetting {
-    pub const ALL: [DabSetting; 13] = [
+    pub const ALL: [DabSetting; 18] = [
         DabSetting::Size,
         DabSetting::Opacity,
         DabSetting::Angle,
@@ -333,6 +363,11 @@ impl DabSetting {
         DabSetting::ColorMix,
         DabSetting::Sharpness,
         DabSetting::Darken,
+        DabSetting::Softness,
+        DabSetting::Mirror,
+        DabSetting::SketchDensity,
+        DabSetting::SketchWidth,
+        DabSetting::SketchOffset,
     ];
 
     pub fn label(self) -> &'static str {
@@ -350,6 +385,11 @@ impl DabSetting {
             DabSetting::ColorMix => "Secondary colour mix",
             DabSetting::Sharpness => "Hard edges",
             DabSetting::Darken => "Darken",
+            DabSetting::Softness => "Softness",
+            DabSetting::Mirror => "Mirror",
+            DabSetting::SketchDensity => "Sketch density",
+            DabSetting::SketchWidth => "Sketch line width",
+            DabSetting::SketchOffset => "Sketch line offset",
         }
     }
 
@@ -381,7 +421,7 @@ impl DabSetting {
 }
 
 /// "This input drives that setting": any sensor to any dab setting, through
-/// its own curve, like Krita's and MyPaint's dynamics. They stack with
+/// its own curve, like MyPaint's dynamics. They stack with
 /// the brush's fixed dynamics (pressure, tapers, speed, randomness).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -394,10 +434,13 @@ pub struct InputMapping {
     pub amount: f32,
     /// Input (0..1) to how much of it counts (0..1).
     pub curve: crate::brush_engine::hardness::SoftnessCurve,
-    /// Distance (px) or time (s) that counts as the full input.
+    /// Distance (px), time (s) or dabs that count as the full input.
     pub length: f32,
+    /// Distance, time or dabs start over from 0 every `length`, rather
+    /// than staying full.
+    pub periodic: bool,
     /// The input swings the setting both ways, the middle of its range
-    /// leaving it alone (Krita's hue, saturation and value options); for
+    /// leaving it alone; for
     /// the settings that add (angle, colour, hardness, scatter).
     pub both_ways: bool,
 }
@@ -415,6 +458,7 @@ impl Default for InputMapping {
                 ],
             },
             length: 200.0,
+            periodic: false,
             both_ways: false,
         }
     }
@@ -424,6 +468,7 @@ impl Default for InputMapping {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SensorValues {
     pub pressure: f32,
+    pub pressure_in: f32,
     pub speed: f32,
     pub tilt: f32,
     pub tilt_direction: f32,
@@ -435,24 +480,37 @@ pub struct SensorValues {
     pub random_stroke: f32,
     pub rotation: f32,
     pub wheel: f32,
+    /// Dabs since the stroke started (raw, like distance).
+    pub dabs: f32,
+    pub perspective: f32,
 }
 
 impl InputMapping {
     /// The input after its curve, 0..1.
     pub fn input(&self, s: &SensorValues) -> f32 {
         let len = self.length.max(1e-3);
+        let along = |v: f32| {
+            if self.periodic {
+                v.rem_euclid(len) / len
+            } else {
+                v / len
+            }
+        };
         let raw = match self.sensor {
             Sensor::Pressure => s.pressure,
             Sensor::Speed => s.speed,
             Sensor::Tilt => s.tilt,
             Sensor::TiltDirection => s.tilt_direction,
             Sensor::Direction => s.direction,
-            Sensor::Distance => s.distance / len,
-            Sensor::Time => s.time / len,
+            Sensor::Distance => along(s.distance),
+            Sensor::Time => along(s.time),
+            Sensor::Fade => along(s.dabs),
             Sensor::RandomDab => s.random_dab,
             Sensor::RandomStroke => s.random_stroke,
             Sensor::Rotation => s.rotation,
             Sensor::Wheel => s.wheel,
+            Sensor::PressureIn => s.pressure_in,
+            Sensor::Perspective => s.perspective,
         };
         self.curve.eval(raw.clamp(0.0, 1.0)).clamp(0.0, 1.0)
     }
@@ -484,6 +542,11 @@ impl InputMapping {
             DabSetting::ColorMix => v.mix += a * x,
             DabSetting::Sharpness => v.sharpness *= factor.max(0.0),
             DabSetting::Darken => v.darken *= factor.max(0.0),
+            DabSetting::Softness => v.softness *= factor.max(0.0),
+            DabSetting::Mirror => v.mirror *= factor.max(0.0),
+            DabSetting::SketchDensity => v.sketch[0] *= factor.max(0.0),
+            DabSetting::SketchWidth => v.sketch[1] *= factor.max(0.0),
+            DabSetting::SketchOffset => v.sketch[2] *= factor.max(0.0),
         }
     }
 }
@@ -523,6 +586,12 @@ pub struct DabVar {
     pub sharpness: f32,
     /// Colour factor toward black (1 = the colour as it is).
     pub darken: f32,
+    /// Softness factor (1 = the tip as it is; see [`DabSetting::Softness`]).
+    pub softness: f32,
+    /// The Mirror input (see [`DabSetting::Mirror`]): 1 with none.
+    pub mirror: f32,
+    /// A sketch brush's density, line width and line offset factors.
+    pub sketch: [f32; 3],
 }
 
 impl Default for DabVar {
@@ -543,6 +612,9 @@ impl Default for DabVar {
             mix: 0.0,
             sharpness: 1.0,
             darken: 1.0,
+            softness: 1.0,
+            mirror: 1.0,
+            sketch: [1.0; 3],
         }
     }
 }
@@ -605,6 +677,78 @@ pub fn shift_hsv(color: eframe::egui::Color32, hsv: [f32; 3]) -> [f32; 3] {
     [r + m, g + m, b + m]
 }
 
+/// A perspective plane, for the Perspective sensor: its four corners in
+/// order round it, and its horizon.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PerspectiveGrid {
+    corners: [Vec2; 4],
+    /// A point on the horizon, its direction (unit), and the corner
+    /// farthest from it.
+    horizon: (Vec2, Vec2),
+    farthest: f32,
+}
+
+impl PerspectiveGrid {
+    /// The plane through `corners`; `None` if it has no vanishing point
+    /// (a parallelogram), which reads 1 all over.
+    pub fn new(corners: [Vec2; 4]) -> Option<Self> {
+        let [a, b, c, d] = corners;
+        // Where the sides a–b and d–c meet, and a–d and b–c.
+        let meet = |p: Vec2, q: Vec2, r: Vec2, s: Vec2| {
+            let (u, v) = (q - p, s - r);
+            let denom = u.x * v.y - u.y * v.x;
+            (denom.abs() > 1e-6 * u.length() * v.length())
+                .then(|| p + u * (((r - p).x * v.y - (r - p).y * v.x) / denom))
+        };
+        let horizon = match (meet(a, b, d, c), meet(a, d, b, c)) {
+            (Some(p), Some(q)) if (q - p).length() > 1e-6 => (p, (q - p).normalized()),
+            // One vanishing point: the horizon runs through it along the
+            // parallel sides.
+            (Some(p), None) => (p, (d - a).normalized()),
+            (None, Some(q)) => (q, (b - a).normalized()),
+            _ => return None,
+        };
+        let mut grid = Self {
+            corners,
+            horizon,
+            farthest: 0.0,
+        };
+        grid.farthest = corners
+            .iter()
+            .map(|&p| grid.off_horizon(p))
+            .fold(0.0, f32::max);
+        (grid.farthest > 0.0).then_some(grid)
+    }
+
+    fn off_horizon(&self, p: Vec2) -> f32 {
+        let (o, dir) = self.horizon;
+        let d = p - o;
+        (d.x * dir.y - d.y * dir.x).abs()
+    }
+
+    /// Whether `p` is on the plane (inside its four corners).
+    fn contains(&self, p: Vec2) -> bool {
+        let mut inside = false;
+        for i in 0..4 {
+            let (a, b) = (self.corners[i], self.corners[(i + 1) % 4]);
+            if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    /// The Perspective sensor at `p`: the first of `grids` it is on, its
+    /// distance from that one's horizon over its farthest corner's; 1 off
+    /// them all.
+    pub fn sensor(grids: &[PerspectiveGrid], p: Vec2) -> f32 {
+        grids
+            .iter()
+            .find(|g| g.contains(p))
+            .map_or(1.0, |g| g.off_horizon(p) / g.farthest)
+    }
+}
+
 /// Direction of travel from `from` to `to`, in radians on screen
 /// (counter-clockwise, y down), or `None` if they're the same point.
 pub fn direction(from: Vec2, to: Vec2) -> Option<f32> {
@@ -649,6 +793,53 @@ mod tests {
     fn nothing_is_active_by_default() {
         assert!(!BrushDynamics::default().is_active());
         assert_eq!(DabVar::default().orient, IDENTITY);
+    }
+
+    #[test]
+    fn perspective_reads_the_distance_from_the_horizon() {
+        // A floor seen in two-point perspective: its far side (a–b) is
+        // shorter than its near one (d–c), and its sides lean in.
+        let corners = [
+            Vec2::new(40.0, 40.0),
+            Vec2::new(60.0, 40.0),
+            Vec2::new(90.0, 90.0),
+            Vec2::new(0.0, 80.0),
+        ];
+        let grid = PerspectiveGrid::new(corners).unwrap();
+        let grids = [grid];
+        let far = PerspectiveGrid::sensor(&grids, Vec2::new(50.0, 42.0));
+        let near = PerspectiveGrid::sensor(&grids, Vec2::new(50.0, 82.0));
+        assert!(far < near && near <= 1.0, "{far} {near}");
+        // The farthest corner reads 1; off the plane, 1 too.
+        assert!((grid.off_horizon(corners[2]) / grid.farthest - 1.0).abs() < 1e-4);
+        assert_eq!(PerspectiveGrid::sensor(&grids, Vec2::new(200.0, 5.0)), 1.0);
+        // A rectangle has no vanishing point.
+        let flat = [
+            Vec2::ZERO,
+            Vec2::new(10.0, 0.0),
+            Vec2::new(10.0, 10.0),
+            Vec2::new(0.0, 10.0),
+        ];
+        assert!(PerspectiveGrid::new(flat).is_none());
+    }
+
+    #[test]
+    fn fade_counts_dabs_and_lengths_can_repeat() {
+        let mut m = InputMapping {
+            sensor: Sensor::Fade,
+            length: 10.0,
+            ..Default::default()
+        };
+        let at = |m: &InputMapping, dabs: f32| {
+            m.input(&SensorValues {
+                dabs,
+                ..Default::default()
+            })
+        };
+        assert_eq!(at(&m, 5.0), 0.5);
+        assert_eq!(at(&m, 25.0), 1.0);
+        m.periodic = true;
+        assert_eq!(at(&m, 25.0), 0.5);
     }
 
     #[test]

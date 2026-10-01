@@ -20,15 +20,16 @@ struct Level {
     h: usize,
     /// Coverage 0..=1, row-major.
     data: Vec<f32>,
-    /// `data` with a one-texel empty border (`(w + 2) × (h + 2)`), so
-    /// bilinear reads next to the edge need no bounds checks.
+    /// `data` in an empty border, one texel before it and two after
+    /// (`(w + 3) × (h + 3)`), so bilinear reads need no bounds checks and
+    /// anything past the edge reads as nothing.
     padded: Vec<f32>,
 }
 
 impl Level {
     fn new(w: usize, h: usize, data: Vec<f32>) -> Self {
-        let pw = w + 2;
-        let mut padded = vec![0.0; pw * (h + 2)];
+        let pw = w + 3;
+        let mut padded = vec![0.0; pw * (h + 3)];
         for y in 0..h {
             padded[(y + 1) * pw + 1..(y + 1) * pw + 1 + w]
                 .copy_from_slice(&data[y * w..(y + 1) * w]);
@@ -39,26 +40,83 @@ impl Level {
     /// Bilinear at texel position `(x, y)` (texel centres at +0.5).
     #[inline(always)]
     fn bilinear(&self, x: f32, y: f32) -> f32 {
-        let (x, y) = (x - 0.5, y - 0.5);
-        if x < -1.0 || y < -1.0 || x >= self.w as f32 || y >= self.h as f32 {
-            return 0.0;
-        }
-        // x, y ≥ -1 here, so truncating x + 1 floors it without a libm call
-        // (the baseline x86-64 target has no floor instruction). The +1 is
-        // also the border's offset.
-        let (ix, iy) = ((x + 1.0) as usize, (y + 1.0) as usize);
-        let (fx, fy) = (x + 1.0 - ix as f32, y + 1.0 - iy as f32);
-        let pw = self.w + 2;
-        let i = iy * pw + ix;
-        let (a, b, c, d) = (
-            self.padded[i],
-            self.padded[i + 1],
-            self.padded[i + pw],
-            self.padded[i + pw + 1],
-        );
-        let top = a + (b - a) * fx;
-        let bottom = c + (d - c) * fx;
+        // Clamped into the border, whose texels are empty: one before the
+        // first texel or past the last one reads nothing, as it would
+        // further out. Shifted by the border, so truncating floors.
+        let x = (x + 0.5).clamp(0.0, self.w as f32 + 1.0);
+        let y = (y + 0.5).clamp(0.0, self.h as f32 + 1.0);
+        // Through i32: one instruction, where usize needs several.
+        let (ix, iy) = (x as i32, y as i32);
+        let (fx, fy) = (x - ix as f32, y - iy as f32);
+        let pw = self.w + 3;
+        let i = iy as usize * pw + ix as usize;
+        // SAFETY: x ≤ w + 1 and y ≤ h + 1, so `i + pw + 1` is at most
+        // (h + 2) × pw + w + 2, the last of the (w + 3) × (h + 3) texels.
+        let at = |k: usize| unsafe { *self.padded.get_unchecked(k) };
+        let top = at(i) + (at(i + 1) - at(i)) * fx;
+        let bottom = at(i + pw) + (at(i + pw + 1) - at(i + pw)) * fx;
         top + (bottom - top) * fy
+    }
+
+    /// `out[i]` set to (or, with `blend`, moved that far toward) this
+    /// level at `start + i × step` (full-size texels, scaled by `scale`).
+    /// With AVX2 where the CPU has it: the loop's reads become gathers.
+    fn run(
+        &self,
+        scale: (f32, f32),
+        start: (f32, f32),
+        step: (f32, f32),
+        blend: Option<f32>,
+        out: &mut [f32],
+    ) {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU supports AVX2, checked just above.
+            unsafe { self.run_avx2(scale, start, step, blend, out) };
+            return;
+        }
+        self.run_kernel(scale, start, step, blend, out);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn run_avx2(
+        &self,
+        scale: (f32, f32),
+        start: (f32, f32),
+        step: (f32, f32),
+        blend: Option<f32>,
+        out: &mut [f32],
+    ) {
+        self.run_kernel(scale, start, step, blend, out);
+    }
+
+    #[inline(always)]
+    fn run_kernel(
+        &self,
+        scale: (f32, f32),
+        start: (f32, f32),
+        step: (f32, f32),
+        blend: Option<f32>,
+        out: &mut [f32],
+    ) {
+        let (x0, y0) = (start.0 * scale.0, start.1 * scale.1);
+        let (dx, dy) = (step.0 * scale.0, step.1 * scale.1);
+        // Each position from its index (not stepped along), so the
+        // pixels don't wait on each other and the loop vectorizes.
+        let at = |i: usize| self.bilinear(x0 + i as f32 * dx, y0 + i as f32 * dy);
+        match blend {
+            None => {
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot = at(i);
+                }
+            }
+            Some(t) => {
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot += (at(i) - *slot) * t;
+                }
+            }
+        }
     }
 }
 
@@ -277,7 +335,7 @@ impl TipMask {
 
     /// [`Self::from_image`], an opaque picture's background said rather
     /// than guessed from its edges: `Some(true)` light (dark paints, as in
-    /// Krita and Photoshop), `Some(false)` dark.
+    /// Photoshop), `Some(false)` dark.
     pub fn from_image_with(img: &image::DynamicImage, light_background: Option<bool>) -> Arc<Self> {
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
@@ -698,18 +756,14 @@ struct RowRun<'a> {
 }
 
 impl RowRun<'_> {
+    /// One level, then the other blended in: a pass each keeps the loops
+    /// tight.
     #[inline(always)]
     fn run(&self, out: &mut [f32]) {
-        let (mut tx, mut ty) = self.start;
-        for slot in out.iter_mut() {
-            let a = self.lo.bilinear(tx * self.scale_lo.0, ty * self.scale_lo.1);
-            *slot = if self.blend > 0.0 {
-                a + (self.hi.bilinear(tx * self.scale_hi.0, ty * self.scale_hi.1) - a) * self.blend
-            } else {
-                a
-            };
-            tx += self.step.0;
-            ty += self.step.1;
+        self.lo.run(self.scale_lo, self.start, self.step, None, out);
+        if self.blend > 0.0 {
+            self.hi
+                .run(self.scale_hi, self.start, self.step, Some(self.blend), out);
         }
     }
 }

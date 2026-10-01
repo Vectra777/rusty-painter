@@ -1,5 +1,5 @@
 //! Importing other apps' brushes as presets: GIMP (`.gbr`, `.gih`),
-//! Photoshop (`.abr`), Krita (`.kpp` presets and `.bundle` sets), MyPaint
+//! Photoshop (`.abr`), `.kpp` presets and `.bundle` sets, MyPaint
 //! (`.myb`) and Clip Studio Paint (`.sut`).
 //!
 //! None of these formats has an official specification (GIMP's excepted),
@@ -181,7 +181,7 @@ fn unpack_bits(r: &mut Reader<'_>, packed_len: usize, out: &mut Vec<u8>) -> Resu
     Ok(())
 }
 
-/// Standard base64 (as in Krita presets' embedded resources); whitespace
+/// Standard base64 (as in `.kpp` presets' embedded resources); whitespace
 /// ignored.
 fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
     let value = |c: u8| match c {

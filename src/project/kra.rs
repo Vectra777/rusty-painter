@@ -1,4 +1,4 @@
-//! Opening Krita documents (`.kra`): a ZIP with the layer tree in
+//! Opening `.kra` documents: a ZIP with the layer tree in
 //! `maindoc.xml` and each layer's pixels in its own file, as 64×64 tiles
 //! (LZF-compressed, one colour channel after another, B G R A).
 //!
@@ -6,7 +6,7 @@
 //! visibility, blend modes, alpha inheritance (as clipping) and
 //! transparency masks come across. Layers of other kinds (filters, fills,
 //! vectors, files, clones) and other colour spaces are left out; when any
-//! is, Krita's own flattened picture is added as a hidden top layer so the
+//! is, the file's own flattened picture is added as a hidden top layer so the
 //! look isn't lost. A document that can't be read layer by layer opens
 //! flattened.
 
@@ -37,7 +37,7 @@ pub fn decode_kra(bytes: &[u8]) -> Result<PsdDocument, String> {
     }
 }
 
-/// Krita's flattened picture (`mergedimage.png`) as one layer.
+/// The file's flattened picture (`mergedimage.png`) as one layer.
 fn flattened(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
     let (w, h, pixels) = merged_image(entries)?;
     Ok(PsdDocument {
@@ -275,7 +275,7 @@ impl Reader<'_> {
         let data = self.file(m.attr("filename")?)?;
         let tiles = read_tiles(data, 1).ok()?;
         let (w, h) = (self.size.0, self.size.1);
-        // Unpainted mask areas show (Krita's masks start white).
+        // Unpainted mask areas show (masks start white).
         let default = self
             .file(&format!("{}.defaultpixel", m.attr("filename")?))
             .and_then(|d| d.first().copied())
@@ -319,7 +319,7 @@ struct Tile {
     data: Vec<u8>,
 }
 
-/// A Krita layer file: a text header, then `x,y,LZF,size` and the data of
+/// A `.kra` layer file: a text header, then `x,y,LZF,size` and the data of
 /// each tile.
 fn read_tiles(bytes: &[u8], pixel_size: usize) -> Result<Vec<Tile>, String> {
     let bad = |what: &str| format!("damaged pixels ({what})");
@@ -385,7 +385,7 @@ fn next_line<'a>(bytes: &'a [u8], at: &mut usize) -> Option<&'a str> {
     std::str::from_utf8(&bytes[start..end]).ok()
 }
 
-/// LZF (as Krita writes it): literal runs and back references.
+/// LZF (as `.kra` files hold it): literal runs and back references.
 pub(crate) fn lzf_decompress(src: &[u8], expected: usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(expected);
     let mut i = 0;
@@ -417,7 +417,7 @@ pub(crate) fn lzf_decompress(src: &[u8], expected: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Krita's composite op names (layers' and brushes').
+/// Composite op names in `.kra` and `.kpp` files (layers' and brushes').
 pub(crate) fn blend(op: &str) -> LayerBlend {
     use LayerBlend::*;
     match op {
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(blend("something new"), LayerBlend::Normal);
     }
 
-    /// Files saved by Krita 5.2 (see `testdata/README.md`).
+    /// Sample `.kra` files (see `testdata/README.md`).
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(format!("{}/testdata/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
     }
@@ -546,7 +546,7 @@ mod tests {
         let (w, h, krita) = merged_image(&entries).unwrap();
         let ours = app.canvas.flatten_final();
         assert_eq!(ours.size, [w, h]);
-        // Krita's own picture against ours: the same to within rounding.
+        // The file's own picture against ours: the same to within rounding.
         let worst = ours
             .pixels
             .iter()

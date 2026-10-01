@@ -515,8 +515,8 @@ pub(crate) fn resolve_stroke_general(
 }
 
 /// [`resolve_stroke_normal`] for gamma-space documents: the brush colour
-/// and the pixel below are mixed as stored sRGB values, like Photoshop and
-/// Krita's 8-bit documents, instead of in linear light.
+/// and the pixel below are mixed as stored sRGB values, like Photoshop's
+/// 8-bit documents, instead of in linear light.
 pub(crate) fn resolve_stroke_normal_gamma(
     original: &[Color32],
     coverage: &[f32],

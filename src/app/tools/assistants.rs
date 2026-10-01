@@ -1,5 +1,5 @@
-//! Drawing assistants (Krita's assistants, Clip Studio's perspective and
-//! special rulers): guides a stroke snaps to, besides the straight ruler.
+//! Drawing assistants (like Clip Studio's perspective and special
+//! rulers): guides a stroke snaps to, besides the straight ruler.
 //!
 //! - **Vanishing point**: strokes run straight towards (or away from) it.
 //! - **Perspective**: a plane drawn in two-point perspective, set by the

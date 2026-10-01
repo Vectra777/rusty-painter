@@ -1,5 +1,5 @@
 //! Dual brush: a second tip, stamped along the same stroke, masks the
-//! first (Krita's masked brush, Photoshop's and Clip Studio's dual brush).
+//! first (Photoshop's and Clip Studio's dual brush).
 //! Paint shows only where both tips reach, so a round brush masked by a
 //! spatter tip paints a broken, dry-media stroke.
 //!
@@ -19,14 +19,24 @@ pub enum DualMode {
     Multiply,
     /// The weaker of the two.
     Darken,
-    /// The mask's gaps eat into the paint; heavy paint fills them in.
+    /// The mask's gaps eat into the paint; heavy paint fills them in
+    /// (a linear burn).
     Subtract,
     /// Light paint reaches only the mask's peaks, full paint everything.
     Height,
+    /// A colour burn: like subtract, but steeper, and solid paint stays
+    /// solid whatever the mask.
+    Burn,
 }
 
 impl DualMode {
-    pub const ALL: [DualMode; 4] = [Self::Multiply, Self::Darken, Self::Subtract, Self::Height];
+    pub const ALL: [DualMode; 5] = [
+        Self::Multiply,
+        Self::Darken,
+        Self::Subtract,
+        Self::Height,
+        Self::Burn,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -34,6 +44,7 @@ impl DualMode {
             Self::Darken => "Darken",
             Self::Subtract => "Subtract",
             Self::Height => "Height",
+            Self::Burn => "Burn",
         }
     }
 
@@ -50,6 +61,16 @@ impl DualMode {
                 // least that, it shows (with a short ramp).
                 let h = ((m - (1.0 - c)) * 4.0).clamp(0.0, 1.0);
                 c * h
+            }
+            // Colour burn, the mask burning the paint's coverage.
+            Self::Burn => {
+                if c >= 1.0 {
+                    1.0
+                } else if m <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - ((1.0 - c) / m).min(1.0)
+                }
             }
         }
     }
@@ -123,9 +144,21 @@ mod tests {
     fn every_mode_keeps_full_paint_under_a_full_mask_and_none_under_none() {
         for mode in DualMode::ALL {
             assert_eq!(mode.apply(1.0, 1.0), 1.0, "{mode:?}");
-            assert_eq!(mode.apply(1.0, 0.0), 0.0, "{mode:?}");
+            // Burn leaves solid paint solid.
+            if mode != DualMode::Burn {
+                assert_eq!(mode.apply(1.0, 0.0), 0.0, "{mode:?}");
+            }
             assert_eq!(mode.apply(0.0, 1.0), 0.0, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn burn_is_krita_s_colour_burn_on_the_coverage() {
+        let burn = |c, m| DualMode::Burn.apply(c, m);
+        assert_eq!(burn(0.5, 0.5), 0.0);
+        assert_eq!(burn(0.75, 0.5), 0.5);
+        assert_eq!(burn(1.0, 0.0), 1.0, "solid paint stays");
+        assert_eq!(burn(0.9, 0.0), 0.0);
     }
 
     #[test]

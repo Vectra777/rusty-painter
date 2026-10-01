@@ -110,9 +110,26 @@ pub(super) struct PlacedDab {
     pub average: f32,
     /// Hard edges' strength factor from the dab's inputs (1 = the brush's).
     pub sharp: f32,
+    /// How soft a round or square tip is, in [`SOFT_LEVELS`]ths (all of
+    /// them: the tip as it is); see `DabSetting::Softness`.
+    pub soft: u8,
+}
+
+/// Steps a dab's softness comes in (each a falloff of its own).
+pub const SOFT_LEVELS: u8 = 32;
+
+/// A Softness input's factor as a level, a tenth to full.
+pub fn soft_level(softness: f32) -> u8 {
+    (softness.clamp(0.1, 1.0) * SOFT_LEVELS as f32).round() as u8
 }
 
 impl PlacedDab {
+    /// Its softness factor (1: the tip as it is).
+    #[inline]
+    pub fn softness(&self) -> f32 {
+        self.soft as f32 / SOFT_LEVELS as f32
+    }
+
     pub fn new(center: Vec2, bounds: DabBounds, r: f32) -> Self {
         let r_ceil = r.ceil() as i32;
         let quantize =
@@ -138,6 +155,7 @@ impl PlacedDab {
             opacity: 1.0,
             average: 1.0,
             sharp: 1.0,
+            soft: SOFT_LEVELS,
         }
     }
 
@@ -222,7 +240,7 @@ pub(super) fn tile_overlap(
 /// Pixel work (dab area) that justifies one more thread. Below this per
 /// thread, extra threads mostly hand off work and spin: measured on a
 /// 16-thread pool, a 20 px brush used 3.5 cores to paint no faster than one.
-const PIXELS_PER_THREAD: usize = 16384;
+pub(super) const PIXELS_PER_THREAD: usize = 16384;
 
 /// Run `draw_tile` over every bucket: serially for a small batch, otherwise
 /// once through the thread pool (one dispatch per batch, not per dab).

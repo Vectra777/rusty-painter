@@ -162,7 +162,7 @@ struct StoredBrushTexture {
     /// Where the grain sits (moved with the stroke, turned...).
     #[serde(default)]
     placement: crate::brush_engine::texture::GrainPlacement,
-    /// Krita's texturing, for an imported brush.
+    /// An imported brush's own texturing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     krita: Option<crate::brush_engine::texture::KritaTexturing>,
 }
@@ -176,6 +176,7 @@ struct StoredBrush {
     hardness: f32,
     softness_selector: SoftnessSelector,
     softness_curve: SoftnessCurve,
+    softening: crate::brush_engine::hardness::Softening,
     shape: StoredShape,
     /// More tips the dabs alternate with, from the file's `tips`.
     extra_tips: Vec<usize>,
@@ -264,6 +265,7 @@ impl StoredBrush {
             hardness: o.hardness,
             softness_selector: o.softness_selector,
             softness_curve: o.softness_curve.clone(),
+            softening: o.softening.clone(),
             shape: StoredShape::from_shape(&o.pixel_shape, res),
             extra_tips: o.extra_tips.iter().map(|t| res.tip(t)).collect(),
             tip_order: o.tip_order,
@@ -321,6 +323,7 @@ impl StoredBrush {
         let o = &mut b.brush_options;
         o.softness_selector = self.softness_selector;
         o.softness_curve = self.softness_curve;
+        o.softening = self.softening;
         o.pixel_shape = self.shape.into_shape(res)?;
         o.extra_tips = self
             .extra_tips

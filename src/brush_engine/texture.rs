@@ -11,10 +11,9 @@
 //! - **Subtract**: low spots lose paint first; heavy strokes fill in.
 //! - **Height**: only the paper's peaks catch paint under light coverage
 //!   (low pressure, soft edges); pressing harder fills the valleys.
-//! - **Colour dodge**: the peaks strengthen the paint (Krita's colour dodge
-//!   texturing): soft edges and light strokes turn grainy and bright.
+//! - **Colour dodge**: the peaks strengthen the paint: soft edges and light strokes turn grainy and bright.
 //! - **Hard mix**: paint snaps to full or nothing by grain and coverage, a
-//!   crisp, broken dry-brush edge (Krita's "hard mix softer").
+//!   crisp, broken dry-brush edge.
 
 use std::sync::{Arc, OnceLock};
 
@@ -164,12 +163,11 @@ pub struct StrokeGrain {
     pub seed: u32,
 }
 
-/// Krita's texturing, for brushes imported from it: its mode (by Krita's
-/// number, `KisTextureOptionData::TexturingMode`) and whether it uses
-/// Krita 5's "soft texturing" or the classic strength. The grain then
-/// combines with each dab by Krita's own formulas
-/// (`KisMaskingBrushCompositeOp`), its value as Krita's mask (light keeps
-/// paint in multiply, takes it away in subtract and the height modes).
+/// An imported brush's texturing: its mode (by the preset's number) and
+/// whether it uses "soft texturing" or the classic strength. The grain
+/// then combines with each dab by the preset's own formulas, its value as
+/// a mask (light keeps paint in multiply, takes it away in subtract and
+/// the height modes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KritaTexturing {
     pub mode: u8,
@@ -177,7 +175,7 @@ pub struct KritaTexturing {
 }
 
 impl KritaTexturing {
-    /// Whether Krita's mode `mode` is one of the alpha formulas here
+    /// Whether the preset's mode `mode` is one of the alpha formulas here
     /// (lightness and gradient texturing colour the dab instead).
     pub fn supports(mode: u8) -> bool {
         matches!(mode, 0 | 1 | 4..=15)
@@ -204,7 +202,7 @@ impl KritaTexturing {
     }
 
     /// Dab alpha `a` (the tip's coverage, 0..1) textured by grain value `t`
-    /// at strength `s`, as Krita does it.
+    /// at strength `s`.
     #[inline]
     pub fn combine(self, a: f32, s: f32, t: f32) -> f32 {
         let unite = |x: f32, y: f32| x + y - x * y;
@@ -226,7 +224,7 @@ impl KritaTexturing {
                 1.0 - (1.0 - dst) / src
             }
         };
-        // Krita's overlay of `src` on `dst` is hard light the other way.
+        // Overlay of `src` on `dst` is hard light the other way.
         let overlay = |src: f32, dst: f32| {
             if src > 0.5 {
                 let k = 2.0 * src - 1.0;
@@ -309,7 +307,7 @@ pub struct BrushTexture {
     pub invert: bool,
     /// Moved with the stroke, turned, shifted, per dab.
     pub placement: GrainPlacement,
-    /// Krita's texturing (an imported brush), instead of `mode`.
+    /// An imported brush's own texturing, instead of `mode`.
     pub krita: Option<KritaTexturing>,
 }
 
@@ -360,7 +358,7 @@ impl BrushTexture {
         }
     }
 
-    /// [`Self::apply_row_scaled`] by Krita's formula: out of line, so the
+    /// [`Self::apply_row_scaled`] by an imported texturing's formula: out of line, so the
     /// usual modes' row stays small enough to inline into the painter.
     #[inline(never)]
     fn krita_row(&self, y: usize, x0: usize, alphas: &mut [f32], factor: f32, k: KritaTexturing) {
@@ -443,8 +441,8 @@ impl BrushTexture {
         }
     }
 
-    /// [`Self::apply_row_placed`] by Krita's formula, out of line (see
-    /// [`Self::krita_row`]).
+    /// [`Self::apply_row_placed`] by an imported texturing's formula, out
+    /// of line.
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     fn krita_placed_row(

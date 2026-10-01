@@ -5,7 +5,7 @@ use crate::canvas::blend_modes::BlendSpace;
 use crate::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation, PainterApp};
 use eframe::egui;
 
-/// Modal dialog to configure and create a new canvas, inspired by Krita's new file window.
+/// Modal dialog to configure and create a new canvas.
 pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
     if !app.modal_state.show_new_canvas_modal {
         return;

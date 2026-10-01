@@ -1,6 +1,6 @@
 //! Softness curve editor (brush falloff from the dab center to its edge).
 //!
-//! Interaction, like the curve tools in Photoshop/Krita:
+//! Interaction, like the curve tools in Photoshop:
 //! - press on a point to grab it (picked where the press happened, so a quick
 //!   drag can't miss it); points can pass their neighbours;
 //! - press on empty space to add a point there and keep dragging it;

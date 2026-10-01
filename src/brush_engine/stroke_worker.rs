@@ -1,5 +1,4 @@
-//! Background stroke rendering, in the spirit of Krita's stroke queue: the UI
-//! thread only queues pen samples, and a dedicated thread owns the stroke
+//! Background stroke rendering, a stroke queue: the UI thread only queues pen samples, and a dedicated thread owns the stroke
 //! session and paints them, so a heavy brush never stalls a frame.
 //!
 //! The canvas is shared through an `Arc`; tile contents are guarded by their
@@ -36,6 +35,26 @@ pub struct StrokeSetup {
     pub view_scale: f32,
     /// Wrap-around painting.
     pub wrap: bool,
+    /// The enabled perspective assistants, for the Perspective input.
+    pub perspective: Vec<crate::brush_engine::dynamics::PerspectiveGrid>,
+}
+
+/// A stroke painted by its own engine, dab after dab, each seeing the last
+/// one's result (the Smudge and Blur tools, mixing brushes): the worker
+/// runs it like a brush stroke.
+pub trait SequentialStroke: Send {
+    /// The stroke's first dab.
+    fn start(&mut self);
+    /// The pen moved to `pos`.
+    fn drag(&mut self, pos: Vec2, pressure: f32);
+    /// Canvas rectangles painted since the last call.
+    fn take_damage(&mut self) -> Vec<[i32; 4]>;
+    /// The canvas painted.
+    fn canvas(&self) -> &Canvas;
+    /// The layer painted, for filing the undo record.
+    fn layer_idx(&self) -> usize;
+    /// The pen lifted: the stroke's undo record, if it changed anything.
+    fn finish(self: Box<Self>) -> Option<UndoAction>;
 }
 
 /// A completed stroke's undo record.
@@ -52,6 +71,8 @@ const MAX_AIRBRUSH_WAIT: f32 = 0.05;
 
 enum Job {
     Begin(Box<StrokeSetup>),
+    /// A sequential stroke.
+    BeginSequential(Box<dyn SequentialStroke>),
     /// `time`: seconds since the worker started, for stroke speed.
     Sample {
         pos: Vec2,
@@ -109,6 +130,7 @@ impl StrokeWorker {
             .name("stroke-worker".into())
             .spawn(move || {
                 let mut session: Option<Session> = None;
+                let mut sequential: Option<Box<dyn SequentialStroke>> = None;
                 loop {
                     // An airbrush keeps painting between samples: wake up
                     // when its next dab is due.
@@ -149,11 +171,12 @@ impl StrokeWorker {
                         }
                     };
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_job(&mut session, job, &thread_shared)
+                        run_job(&mut session, &mut sequential, job, &thread_shared)
                     }));
                     if result.is_err() {
                         log::error!("stroke worker panicked; dropping the current stroke");
                         session = None;
+                        sequential = None;
                     }
                     let mut state = thread_shared.lock();
                     state.pending -= 1;
@@ -173,6 +196,12 @@ impl StrokeWorker {
 
     pub fn begin(&self, setup: StrokeSetup) {
         self.send(Job::Begin(Box::new(setup)));
+    }
+
+    /// Start a sequential stroke; samples and the end go to it until it
+    /// ends.
+    pub fn begin_sequential(&self, stroke: Box<dyn SequentialStroke>) {
+        self.send(Job::BeginSequential(stroke));
     }
 
     pub fn sample(&self, pos: Vec2, pressure: f32) {
@@ -301,13 +330,50 @@ enum Event {
     Airbrush(f64),
 }
 
-fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
+fn run_job(
+    session: &mut Option<Session>,
+    sequential: &mut Option<Box<dyn SequentialStroke>>,
+    job: Job,
+    shared: &Shared,
+) {
+    // A sequential stroke takes the samples and the end while it runs.
+    if let Some(stroke) = sequential.as_mut() {
+        match job {
+            Job::Sample { pos, pressure, .. } => {
+                stroke.drag(pos, pressure);
+                hand_over_damage(stroke.as_mut(), shared);
+                return;
+            }
+            Job::End => {
+                if let Some(stroke) = sequential.take() {
+                    let layer_idx = stroke.layer_idx();
+                    if let Some(undo) = stroke.finish() {
+                        shared
+                            .lock()
+                            .finished
+                            .push(FinishedStroke { layer_idx, undo });
+                    }
+                }
+                return;
+            }
+            // A new stroke: this one is left as it is (a stroke always
+            // ends first).
+            Job::Begin(_) | Job::BeginSequential(_) => *sequential = None,
+        }
+    }
     match job {
+        Job::BeginSequential(mut stroke) => {
+            *session = None;
+            stroke.start();
+            hand_over_damage(stroke.as_mut(), shared);
+            *sequential = Some(stroke);
+        }
         Job::Begin(setup) => {
             let copies = setup.symmetry.copies();
             let seed = rand::random();
             let mut stroke = StrokeState::with_seed(seed);
             stroke.view_scale = setup.view_scale;
+            stroke.perspective = setup.perspective.clone();
             let brush = &setup.brush;
             let correction = (brush.stabilizer_algorithm == StabilizerAlgorithm::PostCorrection
                 && brush.stabilizer_modes.correction > 0.0)
@@ -377,6 +443,53 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
     }
 }
 
+/// A sequential stroke's painted rectangles to the UI, as tile-local
+/// rectangles like a brush stroke's.
+fn hand_over_damage(stroke: &mut dyn SequentialStroke, shared: &Shared) {
+    let rects = stroke.take_damage();
+    if rects.is_empty() {
+        return;
+    }
+    let canvas = stroke.canvas();
+    let ts = canvas.tile_size() as i32;
+    let (w, h) = (canvas.width() as i32, canvas.height() as i32);
+    let mut shared = shared.lock();
+    for rect in rects {
+        let [x0, y0, x1, y1] = [
+            rect[0].max(0),
+            rect[1].max(0),
+            rect[2].min(w),
+            rect[3].min(h),
+        ];
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        for ty in y0 / ts..=(y1 - 1) / ts {
+            for tx in x0 / ts..=(x1 - 1) / ts {
+                let (ox, oy) = (tx * ts, ty * ts);
+                let local = [
+                    (x0.max(ox) - ox) as usize,
+                    (y0.max(oy) - oy) as usize,
+                    (x1.min(ox + ts) - ox) as usize,
+                    (y1.min(oy + ts) - oy) as usize,
+                ];
+                shared
+                    .dirty
+                    .entry((tx as usize, ty as usize))
+                    .and_modify(|d| {
+                        *d = [
+                            d[0].min(local[0]),
+                            d[1].min(local[1]),
+                            d[2].max(local[2]),
+                            d[3].max(local[3]),
+                        ]
+                    })
+                    .or_insert(local);
+            }
+        }
+    }
+}
+
 impl Session {
     /// The airbrush's timer: dabs where the pen rests.
     fn airbrush(&mut self, shared: &Shared, now: f64) {
@@ -435,6 +548,7 @@ impl Session {
         self.tiles.restart(&self.setup.canvas);
         self.stroke = StrokeState::with_seed(self.seed);
         self.stroke.view_scale = self.setup.view_scale;
+        self.stroke.perspective = self.setup.perspective.clone();
         self.setup.brush = brush;
         self.paint(shared, |stroke, brush, context| {
             let mut smoothed = smoothed.into_iter();
@@ -561,6 +675,7 @@ mod tests {
             layer_idx: 1,
             symmetry: Default::default(),
             view_scale: 1.0,
+            perspective: Vec::new(),
             wrap: false,
         });
         for (pos, pressure) in samples() {
@@ -599,6 +714,7 @@ mod tests {
             layer_idx: 1,
             symmetry: Default::default(),
             view_scale: 1.0,
+            perspective: Vec::new(),
             wrap: false,
         });
         for &(pos, pressure) in samples {
@@ -696,6 +812,7 @@ mod tests {
                 layer_idx: 1,
                 symmetry: Default::default(),
                 view_scale: 1.0,
+                perspective: Vec::new(),
                 wrap: false,
             });
             worker.sample(Vec2::new(64.0, 64.0), 1.0);

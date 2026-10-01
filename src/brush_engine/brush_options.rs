@@ -26,7 +26,7 @@ impl PartialEq for PixelBrushShape {
 }
 
 /// Which of a brush's tips each dab uses, when it has several (like
-/// Krita's animated brushes and GIMP's image hoses).
+/// GIMP's image hoses).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TipOrder {
     /// One after the other, over and over.
@@ -58,19 +58,18 @@ impl TipOrder {
     }
 }
 
-/// How a colour tip's picture paints (Krita's brush application).
+/// How a colour tip's picture paints.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TipMapping {
     /// Its own colours.
     #[default]
     Colors,
-    /// The brush colour, its lightness from the picture's (Krita's
-    /// lightness map: mid grey keeps the colour, black and white take it
+    /// The brush colour, its lightness from the picture's (a lightness
+    /// map: mid grey keeps the colour, black and white take it
     /// to black and white).
     Lightness,
     /// From the brush colour (dark) to the secondary colour (light) by the
-    /// picture's lightness (Krita's gradient map, with its default
-    /// foreground-to-background gradient).
+    /// picture's lightness (a gradient map, foreground to background).
     Gradient,
 }
 
@@ -92,7 +91,7 @@ impl TipMapping {
         match self {
             Self::Colors => c,
             Self::Lightness => {
-                // Krita's (Peter Schatz's) curve through 0, the brush's
+                // Peter Schatz's curve through 0, the brush's
                 // lightness at mid grey, and 1.
                 let l = lightness(brush);
                 let b = 4.0 * l - 1.0;
@@ -138,7 +137,7 @@ pub enum Placement {
     Ribbon,
 }
 
-/// Colour mixing, like Krita's Colour Smudge engine: each dab picks up the
+/// Colour mixing: each dab picks up the
 /// paint under it, carries it along and mixes in the brush colour, so the
 /// brush lays down its colour blended with whatever it drags.
 #[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -154,8 +153,8 @@ pub struct Mixing {
     pub pressure_length: bool,
     /// Pen pressure scales the colour rate.
     pub pressure_color: bool,
-    /// Krita's colour smudge (a brush imported from it), instead of this
-    /// app's: `smudge_length` is then Krita's smudge rate.
+    /// An imported brush's own colour smudge, instead of this app's:
+    /// `smudge_length` is then its smudge rate.
     pub krita: Option<KritaSmudge>,
 }
 
@@ -171,7 +170,7 @@ impl Default for Mixing {
     }
 }
 
-/// How Krita's colour smudge engine mixes (`KisColorSmudgeStrategyBase`):
+/// How an imported colour smudge mixes:
 /// each dab reads the layer where the previous dab was and lays it (or one
 /// colour sampled there, in dulling mode) over the layer under it, then the
 /// brush colour at the colour rate squared, through the tip.
@@ -206,7 +205,7 @@ pub enum BlendMode {
     Eraser,
 }
 
-/// How a stroke's dabs combine, as in Krita.
+/// How a stroke's dabs combine.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaintingMode {
     /// Every dab adds paint at flow × opacity, so overlaps keep building up.
@@ -222,6 +221,9 @@ pub struct BrushOptions {
     pub hardness: f32, // 0..100
     pub softness_selector: SoftnessSelector,
     pub softness_curve: SoftnessCurve,
+    /// How a curve tip softens for a dab whose Softness input is below
+    /// full.
+    pub softening: crate::brush_engine::hardness::Softening,
     pub pixel_shape: PixelBrushShape,
     /// More image tips the dabs alternate with (after `pixel_shape`, when
     /// that's an image tip too); empty for one tip.
@@ -339,6 +341,7 @@ impl BrushOptions {
             hardness,
             softness_selector: SoftnessSelector::Gaussian,
             softness_curve: SoftnessCurve::default(),
+            softening: Default::default(),
             pixel_shape: PixelBrushShape::Circle,
             extra_tips: Vec::new(),
             tip_order: TipOrder::Sequence,

@@ -1,5 +1,5 @@
 //! GIMP brushes: `.gbr` (one tip, grey or in colour) and `.gih` (an "image
-//! hose": several tips the dabs pick from, as Krita's animated brushes).
+//! hose": several tips the dabs pick from).
 //! Both formats are documented by GIMP (developer.gimp.org, "GBR" and
 //! "GIH"); this reads them from those descriptions.
 
@@ -70,7 +70,7 @@ pub(super) fn read_gbr(r: &mut Reader<'_>) -> Result<Gbr, String> {
     })
 }
 
-/// A GIMP pattern (`.pat`, as Krita's textures are): its picture.
+/// A GIMP pattern (`.pat`, as `.kpp` presets' textures are): its picture.
 pub(super) fn read_pat(bytes: &[u8]) -> Result<image::DynamicImage, String> {
     let mut r = Reader::new(bytes);
     let header_size = r.u32_be()? as usize;

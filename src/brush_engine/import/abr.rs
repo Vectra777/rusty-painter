@@ -1,5 +1,5 @@
 //! Photoshop brushes (`.abr`). Adobe doesn't document the format; this
-//! follows what GIMP and Krita read (tips) and what brush tools have worked
+//! follows what GIMP reads (tips) and what brush tools have worked
 //! out about the settings (the `desc` block, an "action descriptor").
 //!
 //! - Versions 1 and 2 (Photoshop 6 and older): a list of brushes, each a

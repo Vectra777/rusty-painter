@@ -160,9 +160,108 @@ impl SoftnessCurve {
     }
 }
 
+/// How a curve tip's falloff gets softer for a dab whose Softness input
+/// is below full (0.1..1).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Softening {
+    /// The curve's inner points scaled down.
+    #[default]
+    Curve,
+    /// A round (or square) fade, solid out to this share of the
+    /// radius: a softer dab shrinks the solid core.
+    Fade(f32),
+    /// A soft circle: its own curve, read at the squared
+    /// distance from the centre, inner points scaled down.
+    SquaredCurve(SoftnessCurve),
+}
+
+/// Points an imported falloff is sampled at.
+const FALLOFF_SAMPLES: usize = 24;
+
+impl Softening {
+    /// The falloff at softness `s` (1: as it is), given the brush's curve.
+    pub fn falloff(&self, curve: &SoftnessCurve, s: f32) -> SoftnessCurve {
+        let s = s.clamp(0.01, 1.0);
+        match self {
+            Softening::Curve => curve.softened(s),
+            // The fade shrinks with the softness: solid inside the fade, then falling with the
+            // squared distance.
+            Softening::Fade(core) => {
+                let f = (core * s).clamp(0.0, 1.0);
+                sampled(|r| {
+                    let n = r * r;
+                    if f >= 0.999 || n <= f * f {
+                        1.0
+                    } else {
+                        1.0 - (n - f * f) / (1.0 - f * f)
+                    }
+                })
+            }
+            Softening::SquaredCurve(krita) => {
+                let krita = krita.softened(s);
+                sampled(|r| krita.eval(r * r))
+            }
+        }
+    }
+}
+
+/// `f` (strength by distance from the centre, 0..1) as a curve.
+pub(crate) fn sampled(f: impl Fn(f32) -> f32) -> SoftnessCurve {
+    SoftnessCurve {
+        points: (0..=FALLOFF_SAMPLES)
+            .map(|i| {
+                let r = i as f32 / FALLOFF_SAMPLES as f32;
+                CurvePoint::new(r, f(r).clamp(0.0, 1.0))
+            })
+            .collect(),
+    }
+}
+
+impl SoftnessCurve {
+    /// Every point but the ends
+    /// scaled by `s` (a straight line gets a middle point to scale).
+    pub fn softened(&self, s: f32) -> SoftnessCurve {
+        if s >= 1.0 {
+            return self.clone();
+        }
+        let mut points = self.points.clone();
+        if let [a, b] = &points[..] {
+            let (a, b) = (a.clone(), b.clone());
+            points = vec![
+                a.clone(),
+                CurvePoint::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5),
+                b,
+            ];
+        }
+        let n = points.len();
+        for p in points.iter_mut().take(n.saturating_sub(1)).skip(1) {
+            p.y = (p.y * s).clamp(0.0, 1.0);
+        }
+        SoftnessCurve { points }
+    }
+}
+
 #[cfg(test)]
 mod lut_tests {
     use super::*;
+
+    #[test]
+    fn softening_follows_krita_masks() {
+        // A curve's inner points scale; a straight line gets a middle one.
+        let line = SoftnessCurve::default().softened(0.5);
+        assert_eq!(line.points.len(), 3);
+        assert_eq!(line.points[1], CurvePoint::new(0.5, 0.25));
+        assert_eq!((line.points[0].y, line.points[2].y), (1.0, 0.0));
+        // A fade's solid core shrinks with the softness.
+        let fade = Softening::Fade(0.6);
+        let (full, half) = (
+            fade.falloff(&SoftnessCurve::default(), 1.0),
+            fade.falloff(&SoftnessCurve::default(), 0.5),
+        );
+        assert_eq!(full.eval(0.5), 1.0);
+        assert!(half.eval(0.5) < 0.9, "{}", half.eval(0.5));
+        assert_eq!(half.eval(0.25), 1.0);
+    }
 
     #[test]
     fn the_table_follows_the_curve() {

@@ -1,4 +1,4 @@
-//! Bristle brush (Krita's bristle engine, simplified): the brush is a row
+//! Bristle brush: the brush is a row
 //! of hairs laid across the stroke. Each hair paints its own thin line,
 //! so a stroke shows streaks; pressing harder fans the hairs out, and each
 //! hair runs out of paint at its own pace, so the stroke breaks up towards

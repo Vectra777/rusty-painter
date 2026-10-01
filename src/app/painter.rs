@@ -177,7 +177,7 @@ impl eframe::App for PainterApp {
                 // Give the stroke worker a short budget to paint this frame's
                 // samples so they usually show this frame; a heavy brush can't
                 // stall the frame beyond it and simply shows up next frame.
-                if self.brush_state.is_drawing {
+                if self.brush_state.is_drawing || self.brush_state.blend_stroke.is_some() {
                     self.stroke_worker.wait_idle_for(self.stroke_frame_budget());
                 }
                 if self.sync_stroke_worker() {
