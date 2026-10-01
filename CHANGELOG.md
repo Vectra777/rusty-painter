@@ -12,6 +12,7 @@
 - The Parallel blend mode (Krita's), for layers and brushes.
 - The Smudge tool (and mixing brushes) about a third faster, and pixels the brush doesn't reach are left exactly as they were.
 - Krita's soft round tips keep their falloff curve (its airbrush was imported as a hard, solid tip).
+- Krita import fixes: wash painting mode, random (and other non-pressure) size, opacity, flow and squash, auto spacing, full-strength scatter, texture strength by pressure, texture brightness, contrast and random offset, picture tips always painting with their dark parts, image-stamp tips in their colours; options that don't come across are named in the import report.
 - Krita presets bring their rotation (stroke direction, random, tilt, barrel, wheel), mirror, pressure spacing, sharpness, blend mode and these texture modes.
 
 ### Shader layers

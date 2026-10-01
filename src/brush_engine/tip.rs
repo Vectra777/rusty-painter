@@ -272,6 +272,13 @@ impl TipMask {
 
     /// From a picture (see the module notes for which pixels paint).
     pub fn from_image(img: &image::DynamicImage) -> Arc<Self> {
+        Self::from_image_with(img, None)
+    }
+
+    /// [`Self::from_image`], an opaque picture's background said rather
+    /// than guessed from its edges: `Some(true)` light (dark paints, as in
+    /// Krita and Photoshop), `Some(false)` dark.
+    pub fn from_image_with(img: &image::DynamicImage, light_background: Option<bool>) -> Arc<Self> {
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
         let luma = |p: &image::Rgba<u8>| {
@@ -300,7 +307,7 @@ impl TipMask {
                     n += 1;
                 }
             }
-            let light_background = n == 0 || sum / n > 127;
+            let light_background = light_background.unwrap_or(n == 0 || sum / n > 127);
             rgba.pixels()
                 .map(|p| {
                     let l = luma(p);

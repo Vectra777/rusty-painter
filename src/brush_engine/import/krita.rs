@@ -186,18 +186,80 @@ fn read_kpp(
     if let Some(v) = number("FlowValue") {
         b.brush_options.flow = (v * 100.0).clamp(0.0, 100.0);
     }
-    let o = &mut b.brush_options;
-    o.pressure_size = yes("PressureSize");
-    o.pressure_opacity = yes("PressureOpacity");
-    o.pressure_flow = yes("PressureFlow");
-    o.pressure_curves.size = param("SizeSensor").and_then(sensor_curve);
-    o.pressure_curves.opacity = param("OpacitySensor").and_then(sensor_curve);
-    o.pressure_curves.flow = param("FlowSensor").and_then(sensor_curve);
-    // Scatter (Krita's is a share of the size, either way).
+    // Options switched on that don't come across, for the report.
+    const READ: [&str; 12] = [
+        "Size",
+        "Opacity",
+        "Flow",
+        "Rotation",
+        "Mirror",
+        "Scatter",
+        "Spacing",
+        "Ratio",
+        "Sharpness",
+        "Texture/Strength/",
+        "SmudgeRate",
+        "ColorRate",
+    ];
+    let mut skipped: Vec<&str> = params
+        .iter()
+        .filter(|(_, v)| v.trim() == "true")
+        .filter_map(|(k, _)| k.strip_prefix("Pressure"))
+        .filter(|o| !READ.contains(o) && !o.is_empty())
+        .collect();
+    skipped.sort_unstable();
+    if !skipped.is_empty() {
+        notes.push(format!(
+            "{name}: Krita's {} option{} didn't come across",
+            skipped.join(", "),
+            if skipped.len() > 1 { "s" } else { "" }
+        ));
+    }
+    // Krita's painting mode: 1 build up, 2 wash (the stroke never past its
+    // opacity, however its dabs overlap).
+    if param("PaintOpAction") == Some("2") {
+        b.brush_options.painting_mode = crate::brush_engine::brush_options::PaintingMode::Wash;
+    }
+    // Size, opacity and flow: pressure through its curve, any other
+    // sensor (random, speed…) as an input mapping.
+    for (option, setting) in [
+        ("Size", DabSetting::Size),
+        ("Opacity", DabSetting::Opacity),
+        ("Flow", DabSetting::Opacity),
+    ] {
+        if !yes(&format!("Pressure{option}")) {
+            continue;
+        }
+        let key = format!("{option}Sensor");
+        let o = &mut b.brush_options;
+        let (on, curve) = match option {
+            "Size" => (&mut o.pressure_size, &mut o.pressure_curves.size),
+            "Opacity" => (&mut o.pressure_opacity, &mut o.pressure_curves.opacity),
+            _ => (&mut o.pressure_flow, &mut o.pressure_curves.flow),
+        };
+        for id in sensors(&key) {
+            if id == "pressure" {
+                *on = true;
+                *curve = param(&key).and_then(sensor_curve);
+            } else if !map_sensor(&mut b.inputs, &id, setting, false) {
+                notes.push(unmapped(&name, option, &id));
+            }
+        }
+    }
+    // Squash (Krita's ratio: low values flatten the tip).
+    if yes("PressureRatio") {
+        for id in sensors("RatioSensor") {
+            if !map_sensor(&mut b.inputs, &id, DabSetting::Squash, true) {
+                notes.push(unmapped(&name, "ratio", &id));
+            }
+        }
+    }
+    // Scatter: Krita's is up to its value in brush widths, either way,
+    // like the jitter here (a percentage).
     if yes("PressureScatter")
         && let Some(v) = number("ScatterValue")
     {
-        b.jitter = (v * 50.0).clamp(0.0, 500.0);
+        b.jitter = (v * 100.0).clamp(0.0, 500.0);
     }
     // Pressure spacing.
     if yes("PressureSpacing") && by_pressure("SpacingSensor") {
@@ -209,23 +271,16 @@ fn read_kpp(
     if yes("PressureRotation") {
         for id in sensors("RotationSensor") {
             let tip = &mut b.dynamics.tip;
-            let turn_by = |sensor| InputMapping {
-                sensor,
-                setting: DabSetting::Angle,
-                amount: 1.0,
-                ..Default::default()
-            };
             match id.as_str() {
                 "drawingangle" => tip.follow_stroke = true,
                 "fuzzy" | "fuzzystroke" => tip.random_angle = 180.0,
                 "ascension" => tip.follow_tilt = true,
                 "rotation" => tip.follow_barrel = true,
-                "tangentialpressure" => b.inputs.push(turn_by(Sensor::Wheel)),
-                "pressure" => b.inputs.push(turn_by(Sensor::Pressure)),
-                other => notes.push(format!(
-                    "{name}: its rotation follows Krita's {other} sensor, which has no \
-                     counterpart here"
-                )),
+                other => {
+                    if !map_sensor(&mut b.inputs, other, DabSetting::Angle, false) {
+                        notes.push(unmapped(&name, "rotation", other));
+                    }
+                }
             }
         }
     }
@@ -258,7 +313,22 @@ fn read_kpp(
                     image::load_from_memory(d).ok()
                 }
             })
-            .map(|img| crate::brush_engine::texture::Pattern::from_image(base, &img));
+            .map(|img| crate::brush_engine::texture::Pattern::from_image(base, &img))
+            .map(|pattern| {
+                // Krita's brightness and contrast, baked into the grain.
+                let brightness = number("Texture/Pattern/Brightness").unwrap_or(0.0);
+                let contrast = number("Texture/Pattern/Contrast").unwrap_or(1.0);
+                if brightness == 0.0 && contrast == 1.0 {
+                    return pattern;
+                }
+                Arc::new(crate::brush_engine::texture::Pattern {
+                    name: format!("{base} ({brightness:+}, ×{contrast})"),
+                    size: pattern.size,
+                    data: (pattern.data.iter())
+                        .map(|&t| ((t - 0.5) * contrast + 0.5 + brightness).clamp(0.0, 1.0))
+                        .collect(),
+                })
+            });
         match pattern {
             Some(pattern) => {
                 use crate::brush_engine::texture::{BrushTexture, TextureMode};
@@ -285,8 +355,25 @@ fn read_kpp(
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0),
                     invert: yes("Texture/Pattern/Invert"),
-                    placement: Default::default(),
+                    placement: crate::brush_engine::texture::GrainPlacement {
+                        random_offset: yes("Texture/Pattern/isRandomOffsetX")
+                            || yes("Texture/Pattern/isRandomOffsetY"),
+                        ..Default::default()
+                    },
                 });
+                // Its strength by pressure.
+                if yes("PressureTexture/Strength/")
+                    && sensors("Texture/Strength/Sensor")
+                        .iter()
+                        .any(|id| id == "pressure")
+                {
+                    map_sensor(
+                        &mut b.inputs,
+                        "pressure",
+                        DabSetting::TextureStrength,
+                        false,
+                    );
+                }
             }
             None => notes.push(format!("{name}: its texture {base} is missing")),
         }
@@ -390,6 +477,7 @@ fn tip_from_definition(
                 tip.shape = PixelBrushShape::Square;
             }
         }
+        auto_spacing(&mut tip, brush);
         return Ok(Ok(tip));
     }
     let file = brush.attr("filename").unwrap_or_default();
@@ -398,11 +486,31 @@ fn tip_from_definition(
     };
     tip.diameter =
         (mask.width.max(mask.height) as f32 * attr("scale").unwrap_or(1.0)).clamp(1.0, 3000.0);
-    // Krita paints a colour picture's colours unless it's used as a mask.
-    tip.colors = mask.has_colors() && brush.attr("ColorAsMask") != Some("1");
+    // Krita paints a colour picture's colours unless it's used as a mask
+    // (Krita 5 says how in `brushApplication`: 1 stamps the picture).
+    tip.colors = mask.has_colors()
+        && match brush.attr("brushApplication") {
+            Some(application) => application == "1",
+            None => brush.attr("ColorAsMask") != Some("1"),
+        };
     tip.shape = PixelBrushShape::Custom(mask);
     tip.extra = extra;
+    auto_spacing(&mut tip, brush);
     Ok(Ok(tip))
+}
+
+/// Krita's auto spacing: `coeff × √size` pixels apart (for its size), as
+/// this app's share of the size.
+fn auto_spacing(tip: &mut TipDef, brush: &Node) {
+    if brush.attr("useAutoSpacing") != Some("1") {
+        return;
+    }
+    let coeff = brush
+        .attr("autoSpacingCoeff")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.0);
+    let d = tip.diameter.max(1.0);
+    tip.spacing = (100.0 * coeff * d.sqrt() / d).clamp(1.0, 1000.0);
 }
 
 /// A tip picture by file name, from the preset or the bundle: the tip,
@@ -432,11 +540,61 @@ fn picture_tip(
         return Some((tip.clone(), o.extra_tips.clone()));
     }
     let img = image::load_from_memory(data).ok()?;
-    Some((TipMask::from_image(&img), Vec::new()))
+    // Krita: dark paints, whatever is round the edges.
+    Some((TipMask::from_image_with(&img, Some(true)), Vec::new()))
 }
 
 /// A sensor's curve (`<curve>0,0;0.5,0.2;1,1;</curve>` inside its XML),
 /// if it isn't the straight line.
+/// This app's counterpart of one of Krita's sensors (by its id).
+fn krita_sensor(id: &str) -> Option<Sensor> {
+    Some(match id {
+        "pressure" => Sensor::Pressure,
+        "speed" => Sensor::Speed,
+        "declination" => Sensor::Tilt,
+        "ascension" => Sensor::TiltDirection,
+        "drawingangle" => Sensor::Direction,
+        "distance" => Sensor::Distance,
+        "time" => Sensor::Time,
+        "fuzzy" => Sensor::RandomDab,
+        "fuzzystroke" => Sensor::RandomStroke,
+        "rotation" => Sensor::Rotation,
+        "tangentialpressure" => Sensor::Wheel,
+        _ => return None,
+    })
+}
+
+/// Krita's `id` sensor driving `setting`, as an input mapping (full
+/// amount; `inverted`: a high input reduces it). Whether it has one here.
+fn map_sensor(
+    inputs: &mut Vec<InputMapping>,
+    id: &str,
+    setting: DabSetting,
+    inverted: bool,
+) -> bool {
+    let Some(sensor) = krita_sensor(id) else {
+        return false;
+    };
+    let mut mapping = InputMapping {
+        sensor,
+        setting,
+        amount: 1.0,
+        ..Default::default()
+    };
+    if inverted {
+        mapping.curve = SoftnessCurve {
+            points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)],
+        };
+    }
+    inputs.push(mapping);
+    true
+}
+
+/// The note for a sensor with no counterpart.
+fn unmapped(name: &str, option: &str, id: &str) -> String {
+    format!("{name}: its {option} follows Krita's {id} sensor, which has no counterpart here")
+}
+
 /// The ids of a curve option's sensors: one, or a `sensorslist`'s.
 fn sensor_ids(xml: &str) -> Vec<String> {
     let Ok(root) = parse_xml(xml) else {
@@ -631,6 +789,69 @@ mod tests {
     }
 
     const PRESSURE: &str = r#"<!DOCTYPE params><params id="pressure"/>"#;
+
+    #[test]
+    fn wash_random_sensors_auto_spacing_scatter_and_texture_options_come_across() {
+        const FUZZY: &str = r#"<!DOCTYPE params><params id="fuzzy"/>"#;
+        let xml = AUTO
+            .replace(r#"spacing="0.08""#, r#"spacing="0.08" useAutoSpacing="1" autoSpacingCoeff="0.5""#)
+            .replace(
+                r#"<param type="string" name="SizeSensor"><![CDATA[<!DOCTYPE params><params id="pressure"><curve>0,0;0.5,0.2;1,1;</curve></params>]]></param>"#,
+                &format!(r#"<param type="string" name="SizeSensor"><![CDATA[{FUZZY}]]></param>"#),
+            );
+        let brush = with_params_xml(
+            &xml,
+            &[
+                ("PaintOpAction", "2"),
+                ("PressureScatter", "true"),
+                ("ScatterValue", "0.5"),
+                ("PressureRatio", "true"),
+                ("RatioSensor", FUZZY),
+                ("Pressureh", "true"),
+            ],
+        );
+        let imported = import_kpp(&brush, "file").unwrap();
+        let b = &imported.presets[0].brush;
+        let o = &b.brush_options;
+        assert_eq!(
+            o.painting_mode,
+            crate::brush_engine::brush_options::PaintingMode::Wash
+        );
+        // Random size, not pressure.
+        assert!(!o.pressure_size);
+        let mapped: Vec<_> = b.inputs.iter().map(|m| (m.sensor, m.setting)).collect();
+        assert!(
+            mapped.contains(&(Sensor::RandomDab, DabSetting::Size)),
+            "{mapped:?}"
+        );
+        assert!(
+            mapped.contains(&(Sensor::RandomDab, DabSetting::Squash)),
+            "{mapped:?}"
+        );
+        // Auto spacing: 0.5 × √36 = 3 px of 36.
+        assert!(
+            (o.spacing - 100.0 * 3.0 / 36.0).abs() < 1e-3,
+            "{}",
+            o.spacing
+        );
+        // Half a brush width either way.
+        assert_eq!(b.jitter, 50.0);
+        // The hue option has no counterpart: the report says so.
+        assert!(
+            imported.notes.iter().any(|n| n.contains("h option")),
+            "{:?}",
+            imported.notes
+        );
+    }
+
+    /// A preset's XML with `params` added.
+    fn with_params_xml(xml: &str, params: &[(&str, &str)]) -> Vec<u8> {
+        let extra: String = params
+            .iter()
+            .map(|(k, v)| format!(r#"<param type="string" name="{k}"><![CDATA[{v}]]></param>"#))
+            .collect();
+        kpp(&xml.replace("</Preset>", &format!("{extra}</Preset>")))
+    }
 
     #[test]
     fn a_soft_circle_keeps_its_falloff_curve() {
