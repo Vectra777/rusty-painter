@@ -469,9 +469,21 @@ fn tip_from_definition(
             let fade = m("hfade").unwrap_or(0.0).max(m("vfade").unwrap_or(0.0));
             tip.hardness = ((1.0 - fade) * 100.0).clamp(0.0, 100.0);
             // A soft circle's falloff is its curve, whatever the fade (an
-            // airbrush: faint all over, gone at the edge).
+            // airbrush: faint all over, gone at the edge). Krita reads it
+            // at the squared distance from the centre, this app at the
+            // distance: resampled to match.
             if mask.attr("id") == Some("soft") {
-                tip.softness = mask.attr("softness_curve").and_then(parse_curve);
+                tip.softness = mask
+                    .attr("softness_curve")
+                    .and_then(parse_curve)
+                    .map(|krita| SoftnessCurve {
+                        points: (0..=24)
+                            .map(|i| {
+                                let r = i as f32 / 24.0;
+                                CurvePoint::new(r, krita.eval(r * r).clamp(0.0, 1.0))
+                            })
+                            .collect(),
+                    });
             }
             if mask.attr("type") == Some("rect") {
                 tip.shape = PixelBrushShape::Square;
@@ -872,6 +884,10 @@ mod tests {
             "faint centre"
         );
         assert!(o.softness_curve.eval(1.0).abs() < 1e-3, "gone at the edge");
+        // Krita reads its curve at the squared distance: √0.43 of the way
+        // out is its point at 0.43 (0.12).
+        let at = o.softness_curve.eval(0.43f32.sqrt());
+        assert!((at - 0.12).abs() < 0.01, "{at}");
         // A plain circle keeps the Gaussian falloff from its fade.
         let plain = import_kpp(&kpp(AUTO), "file").unwrap();
         assert_eq!(
