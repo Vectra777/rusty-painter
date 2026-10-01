@@ -11,6 +11,7 @@
 - Colour dodge and hard mix texture modes.
 - The Parallel blend mode (Krita's), for layers and brushes.
 - The Smudge tool (and mixing brushes) about a third faster, and pixels the brush doesn't reach are left exactly as they were.
+- Krita's soft round tips keep their falloff curve (its airbrush was imported as a hard, solid tip).
 - Krita presets bring their rotation (stroke direction, random, tilt, barrel, wheel), mirror, pressure spacing, sharpness, blend mode and these texture modes.
 
 ### Shader layers

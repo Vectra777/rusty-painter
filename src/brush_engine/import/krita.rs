@@ -128,6 +128,10 @@ fn read_kpp(
                 o.diameter = tip.diameter;
                 o.spacing = tip.spacing;
                 o.hardness = tip.hardness;
+                if let Some(curve) = tip.softness {
+                    o.softness_selector = crate::brush_engine::hardness::SoftnessSelector::Curve;
+                    o.softness_curve = curve;
+                }
                 o.tip_colors = tip.colors;
                 o.pixel_shape = tip.shape;
                 o.extra_tips = tip.extra;
@@ -339,6 +343,9 @@ struct TipDef {
     ratio: f32,
     /// A colour picture meant to paint its colours.
     colors: bool,
+    /// Krita's soft circle: its falloff as a curve (strength by distance
+    /// from the centre), rather than a fade.
+    softness: Option<SoftnessCurve>,
 }
 
 /// The tip a `brush_definition` describes: Krita's round or square one,
@@ -363,6 +370,7 @@ fn tip_from_definition(
         angle: attr("angle").unwrap_or(0.0).to_degrees(),
         ratio: 1.0,
         colors: false,
+        softness: None,
     };
     if brush.attr("type") == Some("auto_brush") {
         if let Some(mask) = brush.find("MaskGenerator") {
@@ -373,6 +381,11 @@ fn tip_from_definition(
             // Fade 0..1 from the edge in: hardness is what's left.
             let fade = m("hfade").unwrap_or(0.0).max(m("vfade").unwrap_or(0.0));
             tip.hardness = ((1.0 - fade) * 100.0).clamp(0.0, 100.0);
+            // A soft circle's falloff is its curve, whatever the fade (an
+            // airbrush: faint all over, gone at the edge).
+            if mask.attr("id") == Some("soft") {
+                tip.softness = mask.attr("softness_curve").and_then(parse_curve);
+            }
             if mask.attr("type") == Some("rect") {
                 tip.shape = PixelBrushShape::Square;
             }
@@ -449,21 +462,27 @@ fn sensor_curve(xml: &str) -> Option<SoftnessCurve> {
         .chain(root.descendants("params"))
         .chain(root.descendants("ChildSensor"))
         .find(|n| n.attr("id") == Some("pressure"))?;
-    let text = pressure.descendants("curve").next()?.text.clone();
-    let points: Vec<CurvePoint> = text
+    let curve = parse_curve(&pressure.descendants("curve").next()?.text)?;
+    let straight = curve.points.len() == 2
+        && curve.points[0] == CurvePoint::new(0.0, 0.0)
+        && curve.points[1] == CurvePoint::new(1.0, 1.0);
+    (!straight).then_some(curve)
+}
+
+/// Krita's curve text, `x,y;x,y;…` (0..1 each), as a curve; `None` with
+/// fewer than two points.
+fn parse_curve(text: &str) -> Option<SoftnessCurve> {
+    let mut points: Vec<CurvePoint> = text
         .split(';')
         .filter_map(|p| {
             let (x, y) = p.split_once(',')?;
-            Some(CurvePoint::new(
-                x.trim().parse().ok()?,
-                y.trim().parse().ok()?,
-            ))
+            let (x, y) = (x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?);
+            (x.is_finite() && y.is_finite())
+                .then(|| CurvePoint::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)))
         })
         .collect();
-    let straight = points.len() == 2
-        && points[0] == CurvePoint::new(0.0, 0.0)
-        && points[1] == CurvePoint::new(1.0, 1.0);
-    (points.len() >= 2 && !straight).then_some(SoftnessCurve { points })
+    points.sort_by(|a, b| a.x.total_cmp(&b.x));
+    (points.len() >= 2).then_some(SoftnessCurve { points })
 }
 
 /// An XML element: its name, attributes, text (and CDATA) and children.
@@ -612,6 +631,33 @@ mod tests {
     }
 
     const PRESSURE: &str = r#"<!DOCTYPE params><params id="pressure"/>"#;
+
+    #[test]
+    fn a_soft_circle_keeps_its_falloff_curve() {
+        // Krita's airbrush: faint in the middle, nothing at the edge, and
+        // no fade (which alone would read as a hard tip).
+        let xml = AUTO.replace(
+            r#"hfade="0.25" vfade="0.25" type="circle""#,
+            r#"hfade="0" vfade="0" id="soft" softness_curve="0,0.4;0.43,0.12;1,0;" type="circle""#,
+        );
+        let imported = import_kpp(&kpp(&xml), "file").unwrap();
+        let o = &imported.presets[0].brush.brush_options;
+        assert_eq!(
+            o.softness_selector,
+            crate::brush_engine::hardness::SoftnessSelector::Curve
+        );
+        assert!(
+            (o.softness_curve.eval(0.0) - 0.4).abs() < 1e-3,
+            "faint centre"
+        );
+        assert!(o.softness_curve.eval(1.0).abs() < 1e-3, "gone at the edge");
+        // A plain circle keeps the Gaussian falloff from its fade.
+        let plain = import_kpp(&kpp(AUTO), "file").unwrap();
+        assert_eq!(
+            plain.presets[0].brush.brush_options.softness_selector,
+            crate::brush_engine::hardness::SoftnessSelector::Gaussian
+        );
+    }
 
     #[test]
     fn colour_smudge_mirror_rotation_spacing_and_sharpness_come_across() {
