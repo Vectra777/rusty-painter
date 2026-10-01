@@ -1,10 +1,7 @@
 //! Tip alpha for round and square tips (Gaussian or curve falloff); image
 //! tips sample their [`crate::brush_engine::tip::TipMask`].
 
-use super::{
-    brush_options::PixelBrushShape,
-    hardness::{SoftnessCurve, SoftnessSelector},
-};
+use super::{brush_options::PixelBrushShape, hardness::SoftnessSelector};
 
 /// Smoothstep falloff used by the Gaussian softness curve: 1.0 inside the
 /// hardness radius, smoothly falling to 0.0 at the brush edge.
@@ -27,7 +24,7 @@ pub(super) fn calc_soft_brush_alpha(
     shape: &PixelBrushShape,
     hardness_val: f32,
     softness_selector: SoftnessSelector,
-    softness_curve: &SoftnessCurve,
+    softness_curve: Option<&crate::brush_engine::hardness::CurveLut>,
 ) -> (f32, f32) {
     match shape {
         PixelBrushShape::Circle => {
@@ -40,7 +37,7 @@ pub(super) fn calc_soft_brush_alpha(
                 let t = dist / radius;
                 let alpha = match softness_selector {
                     SoftnessSelector::Gaussian => gaussian_falloff(t, hardness_val),
-                    SoftnessSelector::Curve => softness_curve.eval(t),
+                    SoftnessSelector::Curve => softness_curve.map_or(1.0, |c| c.at(t)),
                 };
                 (alpha, dist_sq)
             }
@@ -56,7 +53,7 @@ pub(super) fn calc_soft_brush_alpha(
             } else {
                 let alpha = match softness_selector {
                     SoftnessSelector::Gaussian => gaussian_falloff(t, hardness_val),
-                    SoftnessSelector::Curve => softness_curve.eval(t),
+                    SoftnessSelector::Curve => softness_curve.map_or(1.0, |c| c.at(t)),
                 };
                 (alpha, dist_sq)
             }

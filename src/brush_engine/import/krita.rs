@@ -297,8 +297,10 @@ fn read_kpp(
         }
     }
     // Sharpness: Krita's threshold (out of 100) as hard edges.
+    // Sharpness: a dab's pixels above `1 - value` go solid (Krita's
+    // `KisSharpnessOption::applyThreshold`), the rest clear.
     if yes("PressureSharpness") {
-        b.sharpness = (number("Sharpness/threshold").unwrap_or(40.0) / 100.0).clamp(0.01, 1.0);
+        b.sharpness = (1.0 - number("SharpnessValue").unwrap_or(1.0)).clamp(0.01, 1.0);
     }
     // The paper texture, from the bundle.
     if yes("Texture/Pattern/Enabled") {
@@ -313,20 +315,19 @@ fn read_kpp(
                     image::load_from_memory(d).ok()
                 }
             })
-            .map(|img| crate::brush_engine::texture::Pattern::from_image(base, &img))
-            .map(|pattern| {
-                // Krita's brightness and contrast, baked into the grain.
+            .map(|img| {
+                // Krita's grain as it is (not stretched to the full range),
+                // its brightness taken off and contrast about the middle
+                // (`KisTextureMaskInfo::recalculateMask`).
                 let brightness = number("Texture/Pattern/Brightness").unwrap_or(0.0);
                 let contrast = number("Texture/Pattern/Contrast").unwrap_or(1.0);
-                if brightness == 0.0 && contrast == 1.0 {
-                    return pattern;
-                }
-                Arc::new(crate::brush_engine::texture::Pattern {
-                    name: format!("{base} ({brightness:+}, ×{contrast})"),
-                    size: pattern.size,
-                    data: (pattern.data.iter())
-                        .map(|&t| ((t - 0.5) * contrast + 0.5 + brightness).clamp(0.0, 1.0))
-                        .collect(),
+                let name = if brightness == 0.0 && contrast == 1.0 {
+                    base.to_string()
+                } else {
+                    format!("{base} ({:+}, ×{contrast})", -brightness)
+                };
+                crate::brush_engine::texture::Pattern::from_image_with(&name, &img, |v| {
+                    (((v - brightness) - 0.5) * contrast + 0.5).clamp(0.0, 1.0)
                 })
             });
         match pattern {
@@ -354,7 +355,9 @@ fn read_kpp(
                     strength: number("Texture/Strength/Value")
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0),
-                    invert: yes("Texture/Pattern/Invert"),
+                    // Krita's subtract takes paint away where the grain
+                    // is light, this app's where it's dark.
+                    invert: yes("Texture/Pattern/Invert") != (mode == TextureMode::Subtract),
                     placement: crate::brush_engine::texture::GrainPlacement {
                         random_offset: yes("Texture/Pattern/isRandomOffsetX")
                             || yes("Texture/Pattern/isRandomOffsetY"),
@@ -465,9 +468,19 @@ fn tip_from_definition(
             let diameter = m("diameter").or(m("radius").map(|r| r * 2.0));
             tip.diameter = diameter.unwrap_or(40.0).clamp(1.0, 3000.0);
             tip.ratio = m("ratio").unwrap_or(1.0).clamp(0.02, 1.0);
-            // Fade 0..1 from the edge in: hardness is what's left.
-            let fade = m("hfade").unwrap_or(0.0).max(m("vfade").unwrap_or(0.0));
-            tip.hardness = ((1.0 - fade) * 100.0).clamp(0.0, 100.0);
+            // Krita's falloff, sampled as a curve (strength by distance
+            // from the centre, 0..1): see `circle_falloff`.
+            let (fh, fv) = (m("hfade").unwrap_or(1.0), m("vfade").unwrap_or(1.0));
+            let id = mask.attr("id").unwrap_or("default");
+            tip.hardness = 100.0;
+            tip.softness = circle_falloff(id, fh, fv).map(|f| SoftnessCurve {
+                points: (0..=FALLOFF_SAMPLES)
+                    .map(|i| {
+                        let r = i as f32 / FALLOFF_SAMPLES as f32;
+                        CurvePoint::new(r, f(r).clamp(0.0, 1.0))
+                    })
+                    .collect(),
+            });
             // A soft circle's falloff is its curve, whatever the fade (an
             // airbrush: faint all over, gone at the edge). Krita reads it
             // at the squared distance from the centre, this app at the
@@ -509,6 +522,58 @@ fn tip_from_definition(
     tip.extra = extra;
     auto_spacing(&mut tip, brush);
     Ok(Ok(tip))
+}
+
+/// Points a Krita round tip's falloff is sampled at.
+const FALLOFF_SAMPLES: usize = 24;
+
+/// A Krita round tip's strength at distance `r` (0 centre, 1 edge), from
+/// its mask generator (`id`) and fades; `None` for a hard circle (all 1).
+/// Krita works on the squared distance `n = r²`:
+/// - `default`: solid out to the fade `f`, then `1 - (n - f²) / (1 - f²)`
+///   (a fade of 0 is the softest, `1 - n`; 1 is hard);
+/// - `gauss`: `(erf(d + c) - erf(d - c)) / (2 erf c)`, its width set by
+///   the fade (`KisGaussCircleMaskGenerator`).
+/// The `soft` curve tip is read separately (its own curve).
+fn circle_falloff(id: &str, fh: f32, fv: f32) -> Option<Box<dyn Fn(f32) -> f32>> {
+    match id {
+        "gauss" => {
+            let fade = (1.0 - (fh + fv) as f64 / 2.0).clamp(1e-6, 1.0 - 1e-6);
+            let center =
+                2.5 * (6761.0 * fade - 10000.0) / (std::f64::consts::SQRT_2 * 6761.0 * fade);
+            let scale = std::f64::consts::SQRT_2 * 12500.0 / (6761.0 * fade);
+            let norm = 2.0 * erf(center);
+            Some(Box::new(move |r: f32| {
+                let d = r as f64 * scale;
+                ((erf(d + center) - erf(d - center)) / norm) as f32
+            }))
+        }
+        "soft" => None,
+        _ => {
+            let f = fh.min(fv).clamp(0.0, 1.0);
+            if f >= 0.999 {
+                return None;
+            }
+            Some(Box::new(move |r: f32| {
+                let n = r * r;
+                if n <= f * f {
+                    1.0
+                } else {
+                    1.0 - (n - f * f) / (1.0 - f * f)
+                }
+            }))
+        }
+    }
+}
+
+/// The error function (Abramowitz & Stegun 7.1.26, within 1.5e-7).
+fn erf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let y = 1.0 - poly * (-x * x).exp();
+    if x < 0.0 { -y } else { y }
 }
 
 /// Krita's auto spacing: `coeff × √size` pixels apart (for its size), as
@@ -780,7 +845,16 @@ mod tests {
         let o = &p.brush.brush_options;
         assert_eq!(o.diameter, 36.0);
         assert!((o.spacing - 8.0).abs() < 1e-3);
-        assert!((o.hardness - 75.0).abs() < 1e-3);
+        // Fade 0.25: solid to a quarter of the way out, then Krita's
+        // falloff on the squared distance, `1 - (n - f²) / (1 - f²)`.
+        assert_eq!(
+            o.softness_selector,
+            crate::brush_engine::hardness::SoftnessSelector::Curve
+        );
+        let c = &o.softness_curve;
+        assert!((c.eval(0.2) - 1.0).abs() < 1e-3);
+        assert!((c.eval(0.5) - 0.8).abs() < 0.01, "{}", c.eval(0.5));
+        assert!(c.eval(1.0).abs() < 1e-3);
         assert!((o.opacity - 0.7).abs() < 1e-6);
         assert!(o.pressure_size);
         assert_eq!(o.pressure_curves.size.as_ref().unwrap().points.len(), 3);
@@ -888,12 +962,49 @@ mod tests {
         // out is its point at 0.43 (0.12).
         let at = o.softness_curve.eval(0.43f32.sqrt());
         assert!((at - 0.12).abs() < 0.01, "{at}");
-        // A plain circle keeps the Gaussian falloff from its fade.
-        let plain = import_kpp(&kpp(AUTO), "file").unwrap();
+        // A circle with a full fade is Krita's hard tip: hard here too.
+        let hard = AUTO.replace(r#"hfade="0.25" vfade="0.25""#, r#"hfade="1" vfade="1""#);
+        let hard = import_kpp(&kpp(&hard), "file").unwrap();
+        let o = &hard.presets[0].brush.brush_options;
         assert_eq!(
-            plain.presets[0].brush.brush_options.softness_selector,
+            o.softness_selector,
             crate::brush_engine::hardness::SoftnessSelector::Gaussian
         );
+        assert_eq!(o.hardness, 100.0);
+    }
+
+    #[test]
+    fn a_gaussian_circle_falls_off_like_krita_s() {
+        let xml = AUTO.replace(
+            r#"hfade="0.25" vfade="0.25" type="circle""#,
+            r#"hfade="0.5" vfade="0.5" id="gauss" type="circle""#,
+        );
+        let imported = import_kpp(&kpp(&xml), "file").unwrap();
+        let c = &imported.presets[0].brush.brush_options.softness_curve;
+        // Krita: alphafactor·(erf(d + c) − erf(d − c)), fade 0.5.
+        let (fade, sqrt2) = (0.5f64, std::f64::consts::SQRT_2);
+        let center = 2.5 * (6761.0 * fade - 10000.0) / (sqrt2 * 6761.0 * fade);
+        let krita = |r: f64| {
+            let d = r * sqrt2 * 12500.0 / (6761.0 * fade);
+            (erf(d + center) - erf(d - center)) / (2.0 * erf(center))
+        };
+        for r in [0.0, 0.3, 0.6, 0.9] {
+            let got = c.eval(r as f32) as f64;
+            assert!((got - krita(r)).abs() < 0.02, "{r}: {got} vs {}", krita(r));
+        }
+        assert!(c.eval(0.0) > c.eval(0.5) && c.eval(0.5) > c.eval(0.9));
+    }
+
+    #[test]
+    fn erf_matches_known_values() {
+        for (x, want) in [
+            (0.0, 0.0),
+            (0.5, 0.5204999),
+            (1.0, 0.8427008),
+            (-2.0, -0.9953223),
+        ] {
+            assert!((erf(x) - want).abs() < 1e-6, "{x}");
+        }
     }
 
     #[test]
@@ -935,7 +1046,7 @@ mod tests {
                 ("PressureSpacing", "true"),
                 ("SpacingSensor", PRESSURE),
                 ("PressureSharpness", "true"),
-                ("Sharpness/threshold", "40"),
+                ("SharpnessValue", "0.6"),
             ],
         );
         let imported = import_kpp(&brush, "file").unwrap();

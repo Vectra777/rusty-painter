@@ -33,6 +33,34 @@ impl Default for SoftnessCurve {
     }
 }
 
+/// A softness curve tabulated for painting: [`SoftnessCurve::eval`]'s
+/// spline per pixel costs as much as the rest of a soft dab together.
+pub(crate) struct CurveLut {
+    table: Vec<f32>,
+}
+
+impl CurveLut {
+    /// Steps across 0..1; linear between them (well under a level of 8-bit
+    /// alpha from the spline).
+    const STEPS: usize = 1024;
+
+    pub(crate) fn new(curve: &SoftnessCurve) -> Self {
+        Self {
+            table: (0..=Self::STEPS)
+                .map(|i| curve.eval(i as f32 / Self::STEPS as f32))
+                .collect(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn at(&self, t: f32) -> f32 {
+        let x = t.clamp(0.0, 1.0) * Self::STEPS as f32;
+        let i = (x as usize).min(Self::STEPS - 1);
+        let f = x - i as f32;
+        self.table[i] + (self.table[i + 1] - self.table[i]) * f
+    }
+}
+
 impl SoftnessCurve {
     pub fn eval(&self, t: f32) -> f32 {
         if self.points.is_empty() {
@@ -129,5 +157,26 @@ impl SoftnessCurve {
         let h11 = t3 - t2;
 
         p0.y * h00 + m0 * dx * h10 + p1.y * h01 + m1 * dx * h11
+    }
+}
+
+#[cfg(test)]
+mod lut_tests {
+    use super::*;
+
+    #[test]
+    fn the_table_follows_the_curve() {
+        let curve = SoftnessCurve {
+            points: vec![
+                CurvePoint::new(0.0, 0.4),
+                CurvePoint::new(0.43, 0.12),
+                CurvePoint::new(1.0, 0.0),
+            ],
+        };
+        let lut = CurveLut::new(&curve);
+        for i in 0..=1000 {
+            let t = i as f32 / 1000.0;
+            assert!((lut.at(t) - curve.eval(t)).abs() < 1e-3, "{t}");
+        }
     }
 }

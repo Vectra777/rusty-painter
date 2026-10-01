@@ -1699,7 +1699,9 @@ impl Brush {
         let o = &self.brush_options;
         let hardness_val = (o.hardness / 100.0).clamp(0.0, 1.0);
         let softness_selector = o.softness_selector;
-        let softness_curve = &o.softness_curve;
+        let curve_lut = (softness_selector == SoftnessSelector::Curve)
+            .then(|| crate::brush_engine::hardness::CurveLut::new(&o.softness_curve));
+        let softness_curve = curve_lut.as_ref();
         let pixel_shape = &o.pixel_shape;
         let tips = o.tip_shapes();
         let anti_aliasing = self.anti_aliasing;
@@ -2499,7 +2501,7 @@ mod tests {
                 &PixelBrushShape::Circle,
                 hardness,
                 SoftnessSelector::Gaussian,
-                &brush.brush_options.softness_curve,
+                None,
             );
             let dist = dist_sq.sqrt();
             let expected = if dist >= r {

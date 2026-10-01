@@ -48,6 +48,39 @@ impl Pattern {
         })
     }
 
+    /// A picture's grey (transparent counting as white) through `adjust`,
+    /// as it is rather than stretched to the full range (another app's
+    /// grain, kept as that app shows it); resampled like
+    /// [`Self::from_image`].
+    pub fn from_image_with(
+        name: &str,
+        img: &image::DynamicImage,
+        adjust: impl Fn(f32) -> f32,
+    ) -> Arc<Self> {
+        let rgba = img.to_rgba8();
+        let side = rgba.width().max(rgba.height()).clamp(16, 1024);
+        let size = side.next_power_of_two() as usize;
+        let resized = image::imageops::resize(
+            &rgba,
+            size as u32,
+            size as u32,
+            image::imageops::FilterType::Triangle,
+        );
+        let data = resized
+            .pixels()
+            .map(|p| {
+                let grey = (p[0] as f32 * 11.0 + p[1] as f32 * 16.0 + p[2] as f32 * 5.0) / 32.0;
+                let a = p[3] as f32 / 255.0;
+                adjust(grey / 255.0 * a + (1.0 - a))
+            })
+            .collect();
+        Arc::new(Self {
+            name: name.to_string(),
+            size,
+            data,
+        })
+    }
+
     /// Height at canvas point `(x, y)` with the pattern scaled by `scale`
     /// (bilinear, wrapping).
     #[inline]
