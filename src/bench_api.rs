@@ -126,6 +126,30 @@ pub fn stroke(app: &mut PainterApp, path: &[(Vec2, f32)], eraser: bool) {
     app.release_canvas();
 }
 
+/// Colour mixing on the brush (Krita's Colour Smudge), with a speckled
+/// image tip (`tip`) and the Parallel blend mode (`parallel`).
+pub fn set_mixing(app: &mut PainterApp, tip: bool, parallel: bool) {
+    let b = &mut app.brush_state.brush;
+    b.mixing = Some(crate::brush_engine::brush_options::Mixing {
+        color_rate: 0.4,
+        pressure_length: true,
+        ..Default::default()
+    });
+    if tip {
+        let spatter = crate::brush_engine::tip::builtin()
+            .iter()
+            .find(|(n, _)| *n == "Spatter")
+            .map(|(_, t)| t.clone());
+        if let Some(t) = spatter {
+            b.brush_options.pixel_shape =
+                crate::brush_engine::brush_options::PixelBrushShape::Custom(t);
+        }
+    }
+    if parallel {
+        b.paint_blend = crate::canvas::blend_modes::LayerBlend::Parallel;
+    }
+}
+
 /// A smudge (or blur) stroke.
 pub fn blend_stroke(app: &mut PainterApp, path: &[(Vec2, f32)], smudge: bool) {
     app.set_blend_tool(smudge);

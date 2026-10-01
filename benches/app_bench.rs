@@ -101,6 +101,21 @@ fn painting(c: &mut Criterion) {
         |a| b::set_brush(a, 80.0),
         |a| b::blend_stroke(a, &short, true),
     );
+    for (name, tip, parallel) in [
+        ("mixing_brush_60_samples_80px", false, false),
+        ("mixing_brush_image_tip_60_samples_80px", true, false),
+        ("mixing_brush_parallel_60_samples_80px", false, true),
+    ] {
+        bench(
+            &mut g,
+            name,
+            |a| {
+                b::set_brush(a, 80.0);
+                b::set_mixing(a, tip, parallel);
+            },
+            |a| b::stroke(a, &short, false),
+        );
+    }
     bench(
         &mut g,
         "blur_60_samples_80px",

@@ -277,6 +277,10 @@ pub struct PenSample {
     /// Tilt along x and y in radians from upright (positive: leaning right
     /// and towards the user), when the pen reports it.
     pub tilt: Option<[f32; 2]>,
+    /// The "Abs Wheel" axis (0..=1), when the pen has one: the Wacom
+    /// driver reports both an Art Pen's barrel rotation and an airbrush's
+    /// finger wheel on it.
+    pub wheel: Option<f32>,
     /// The device is an eraser (its name says so).
     pub is_eraser: bool,
     pub phase: PenPhase,

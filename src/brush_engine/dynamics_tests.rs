@@ -2053,3 +2053,216 @@ fn placed_grain_and_new_inputs_undo_exactly() {
     history.undo(&mut canvas, &mut selection, &mut tool);
     assert!(pixels(&canvas) == blank);
 }
+
+/// A tip solid on its left half and faint on its right (a faint half
+/// rather than none, which the tip would be cropped to).
+fn left_half_tip() -> crate::brush_engine::brush_options::PixelBrushShape {
+    let pixels = (0..16 * 16)
+        .map(|i| if i % 16 < 8 { 255 } else { 40 })
+        .collect();
+    crate::brush_engine::brush_options::PixelBrushShape::Custom(
+        crate::brush_engine::tip::TipMask::from_mask(16, 16, pixels),
+    )
+}
+
+#[test]
+fn random_flips_mirror_some_dabs_and_not_others() {
+    // Dabs 20 px apart along y = 64: each paints the left of its centre,
+    // or, mirrored, the right.
+    let sides = |flip: bool| {
+        let mut b = brush(BrushDynamics {
+            tip: TipShape {
+                random_flip_x: flip,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        b.brush_options.diameter = 10.0;
+        b.brush_options.spacing = 200.0;
+        b.brush_options.pixel_shape = left_half_tip();
+        let (canvas, _) = paint(&mut b, &line(64.0, 0.5), 7, true);
+        let (mut left, mut right) = (0, 0);
+        for cx in (20..=220).step_by(20) {
+            let (l, r) = (alpha(&canvas, cx - 3, 64), alpha(&canvas, cx + 3, 64));
+            assert!(l.abs_diff(r) > 100, "one side of the dab at {cx}: {l} {r}");
+            if l > r {
+                left += 1;
+            } else {
+                right += 1;
+            }
+        }
+        (left, right)
+    };
+    assert_eq!(sides(false), (11, 0), "unflipped: all on the left");
+    let (left, right) = sides(true);
+    assert!(
+        left >= 2 && right >= 2,
+        "some each way: {left} left, {right} right"
+    );
+}
+
+#[test]
+fn pressure_spacing_closes_the_gaps_under_light_pressure() {
+    let gaps = |on: bool| {
+        let mut b = brush(BrushDynamics::default());
+        b.brush_options.diameter = 8.0;
+        b.brush_options.spacing = 200.0;
+        b.brush_options.pressure_spacing = on;
+        let canvas = paint_pen(&mut b, &line(64.0, 0.5), 0.2, None);
+        (40..200).filter(|&x| alpha(&canvas, x, 64) < 64).count()
+    };
+    let (spaced, closed) = (gaps(false), gaps(true));
+    assert!(spaced > 60, "200% spacing leaves gaps: {spaced}");
+    assert_eq!(closed, 0, "at a fifth of the spacing the dabs meet");
+}
+
+#[test]
+fn sharpness_makes_a_soft_dab_hard_edged() {
+    let alphas = |sharpness: f32| {
+        let mut b = brush(BrushDynamics::default());
+        b.brush_options.diameter = 40.0;
+        b.brush_options.hardness = 0.0;
+        b.sharpness = sharpness;
+        let (canvas, _) = paint(&mut b, &[(Vec2::new(128.0, 64.0), 0.0)], 1, true);
+        pixels(&canvas)
+    };
+    let soft = alphas(0.0);
+    assert!(soft.iter().any(|&a| a > 10 && a < 245), "soft edges");
+    let hard = alphas(0.5);
+    assert!(hard.iter().all(|&a| a == 0 || a == 255), "all or nothing");
+    let (s, h) = (
+        soft.iter().filter(|&&a| a > 0).count(),
+        hard.iter().filter(|&&a| a > 0).count(),
+    );
+    assert!(h > 50 && h < s, "the faint rim is cut: {h} of {s}");
+}
+
+#[test]
+fn a_nib_that_follows_the_barrel_turns_with_it() {
+    use crate::brush_engine::dynamics::PenBarrel;
+    let mut b = brush(BrushDynamics {
+        tip: TipShape {
+            ratio: 0.2,
+            follow_barrel: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    b.brush_options.diameter = 40.0;
+    let extent = |rotation: Option<f32>| {
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+        canvas.active_layer_idx = 1;
+        let mut undo = empty_undo();
+        let mut tiles = StrokeTiles::default();
+        let mut stroke = StrokeState::with_seed(1);
+        {
+            let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+            stroke.barrel = PenBarrel {
+                rotation,
+                wheel: None,
+            };
+            let mut b = b.clone();
+            stroke.add_sample(&mut b, Vec2::new(128.0, 64.0), 1.0, Some(0.0), &mut ctx);
+            stroke.finish(&mut b, &mut ctx);
+        }
+        let painted: Vec<(usize, usize)> = (0..H)
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .filter(|&(x, y)| alpha(&canvas, x, y) > 127)
+            .collect();
+        let span = |f: fn(&(usize, usize)) -> usize| {
+            painted.iter().map(f).max().unwrap() - painted.iter().map(f).min().unwrap()
+        };
+        (span(|p| p.0), span(|p| p.1))
+    };
+    let (w, h) = extent(Some(0.0));
+    assert!(w > h * 3, "not turned: long across, {w}×{h}");
+    let (w, h) = extent(Some(std::f32::consts::FRAC_PI_2));
+    assert!(h > w * 3, "turned a quarter: long up and down, {w}×{h}");
+    assert_eq!(
+        extent(None),
+        extent(Some(0.0)),
+        "no rotation reported: upright"
+    );
+}
+
+#[test]
+fn the_new_stroke_features_paint_and_undo_exactly() {
+    use crate::brush_engine::texture::{BrushTexture, TextureMode, builtin};
+    let below = Color32::from_rgb(235, 230, 220);
+    type Setup = Box<dyn Fn(&mut Brush)>;
+    let features: Vec<(&str, Setup)> = vec![
+        (
+            "flips",
+            Box::new(|b: &mut Brush| {
+                b.brush_options.pixel_shape = left_half_tip();
+                b.dynamics.tip.random_flip_x = true;
+                b.dynamics.tip.random_flip_y = true;
+            }),
+        ),
+        (
+            "hard edges",
+            Box::new(|b: &mut Brush| {
+                b.brush_options.hardness = 0.0;
+                b.sharpness = 0.5;
+            }),
+        ),
+        (
+            "pressure spacing",
+            Box::new(|b: &mut Brush| {
+                b.brush_options.pressure_spacing = true;
+            }),
+        ),
+        (
+            "colour dodge",
+            Box::new(|b: &mut Brush| {
+                let mut t = BrushTexture::new(builtin()[0].clone());
+                t.mode = TextureMode::ColorDodge;
+                b.texture = Some(t);
+            }),
+        ),
+        (
+            "hard mix",
+            Box::new(|b: &mut Brush| {
+                let mut t = BrushTexture::new(builtin()[0].clone());
+                t.mode = TextureMode::HardMix;
+                b.texture = Some(t);
+            }),
+        ),
+        (
+            "parallel",
+            Box::new(|b: &mut Brush| {
+                b.paint_blend = crate::canvas::blend_modes::LayerBlend::Parallel;
+            }),
+        ),
+    ];
+    for (name, set) in features {
+        let mut brush = Brush::new(24.0, 60.0, Color32::from_rgb(40, 90, 160), 10.0);
+        set(&mut brush);
+        let before = pixels_rgba(&painted(below));
+        let (mut canvas, undo) = paint_preset(&mut brush, below);
+        let changed = before
+            .iter()
+            .zip(&pixels_rgba(&canvas))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 500, "{name}: only {changed} pixels changed");
+        let mut history = History::new();
+        history.push_action(undo);
+        let mut selection = crate::selection::SelectionManager::new();
+        let mut tool = crate::app::tools::Tool::Brush;
+        history.undo(&mut canvas, &mut selection, &mut tool);
+        assert!(pixels_rgba(&canvas) == before, "{name}: undo isn't exact");
+    }
+}
+
+#[test]
+fn the_new_features_are_repeatable_with_a_seed() {
+    let mut b = Brush::new(24.0, 60.0, Color32::BLACK, 10.0);
+    b.brush_options.pixel_shape = left_half_tip();
+    b.dynamics.tip.random_flip_x = true;
+    b.sharpness = 0.3;
+    let a = pixels(&paint(&mut b.clone(), &line(64.0, 0.5), 5, true).0);
+    let again = pixels(&paint(&mut b.clone(), &line(64.0, 0.5), 5, true).0);
+    assert!(a == again, "the same seed paints the same stroke");
+}

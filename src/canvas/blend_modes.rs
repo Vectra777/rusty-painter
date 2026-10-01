@@ -37,6 +37,9 @@ pub enum LayerBlend {
     Exclusion,
     Subtract,
     Divide,
+    /// Krita's Parallel: twice the harmonic mean of the two colours, like
+    /// two resistors in parallel (darkens, but less than Multiply).
+    Parallel,
     Hue,
     Saturation,
     Color,
@@ -76,6 +79,7 @@ impl LayerBlend {
             Self::Exclusion,
             Self::Subtract,
             Self::Divide,
+            Self::Parallel,
         ],
         &[Self::Hue, Self::Saturation, Self::Color, Self::Luminosity],
     ];
@@ -105,6 +109,7 @@ impl LayerBlend {
             Self::Exclusion => "Exclusion",
             Self::Subtract => "Subtract",
             Self::Divide => "Divide",
+            Self::Parallel => "Parallel",
             Self::Hue => "Hue",
             Self::Saturation => "Saturation",
             Self::Color => "Color",
@@ -138,6 +143,7 @@ impl LayerBlend {
             Self::Exclusion => "exclusion",
             Self::Subtract => "subtract",
             Self::Divide => "divide",
+            Self::Parallel => "parallel",
             Self::Hue => "hue",
             Self::Saturation => "saturation",
             Self::Color => "color",
@@ -223,6 +229,14 @@ fn vivid_light(b: f32, s: f32) -> f32 {
     }
 }
 
+/// Krita's `cfParallel`: `2 / (1/b + 1/s)`, a channel at 0 counting as 1
+/// in its reciprocal.
+#[inline]
+fn parallel(b: f32, s: f32) -> f32 {
+    let inv = |v: f32| if v > 0.0 { 1.0 / v } else { 1.0 };
+    (2.0 / (inv(b) + inv(s))).clamp(0.0, 1.0)
+}
+
 #[inline]
 fn separable(mode: LayerBlend, b: f32, s: f32) -> f32 {
     match mode {
@@ -263,6 +277,7 @@ fn separable(mode: LayerBlend, b: f32, s: f32) -> f32 {
                 (b / s).min(1.0)
             }
         }
+        LayerBlend::Parallel => parallel(b, s),
         _ => s,
     }
 }
@@ -417,7 +432,7 @@ mod tests {
             .flat_map(|g| g.iter())
             .copied()
             .collect();
-        assert_eq!(all.len(), 27);
+        assert_eq!(all.len(), 28);
         for m in &all {
             assert_eq!(all.iter().filter(|x| *x == m).count(), 1);
             assert_eq!(LayerBlend::from_key(m.key()), Some(*m));
@@ -460,7 +475,7 @@ mod tests {
         // W3C / Photoshop formulas worked by hand for the same inputs.
         let b = [0.2, 0.5, 0.8];
         let s = [0.6, 0.5, 0.1];
-        let cases: [(LayerBlend, [f32; 3]); 9] = [
+        let cases: [(LayerBlend, [f32; 3]); 10] = [
             (LayerBlend::ColorDodge, [0.5, 1.0, 0.8 / 0.9]),
             (LayerBlend::ColorBurn, [0.0, 0.0, 0.0]),
             (LayerBlend::HardLight, [0.36, 0.5, 0.16]),
@@ -469,6 +484,8 @@ mod tests {
             (LayerBlend::VividLight, [0.25, 0.5, 0.0]),
             (LayerBlend::LinearLight, [0.4, 0.5, 0.0]),
             (LayerBlend::Divide, [0.2 / 0.6, 1.0, 1.0]),
+            // 2 / (1/b + 1/s).
+            (LayerBlend::Parallel, [0.3, 0.5, 2.0 / 11.25]),
             // Whole colours: lum(b) = 0.443 < lum(s) = 0.486.
             (LayerBlend::DarkerColor, b),
             (LayerBlend::LighterColor, s),

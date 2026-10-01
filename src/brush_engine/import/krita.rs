@@ -6,13 +6,15 @@
 //! embedded in the preset or kept in the bundle). A bundle is a ZIP of
 //! presets with their tips and textures.
 //!
-//! Only the pixel brush engine (and the bristle one, as this app's bristle
-//! brush) maps onto this app's brushes; presets of other engines come with
+//! The pixel brush engine maps onto this app's brushes, the bristle,
+//! sketch and hatching ones onto its own, and the colour smudge engine
+//! onto a brush with colour mixing; presets of other engines come with
 //! their tip only, and the notes say so.
 
 use super::{Imported, Reader, base64_decode, gimp};
 use crate::brush_engine::brush::{Brush, BrushPreset, BrushType};
 use crate::brush_engine::brush_options::PixelBrushShape;
+use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
 use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
 use crate::brush_engine::tip::TipMask;
 use eframe::egui::Color32;
@@ -112,6 +114,9 @@ fn read_kpp(
     let param = |k: &str| params.get(k).map(|v| v.trim());
     let yes = |k: &str| param(k) == Some("true");
     let number = |k: &str| param(k).and_then(|v| v.parse::<f32>().ok());
+    // An option's sensors (Krita's ids) and whether pen pressure is one.
+    let sensors = |k: &str| param(k).map(sensor_ids).unwrap_or_default();
+    let by_pressure = |k: &str| sensors(k).iter().any(|id| id == "pressure");
 
     let mut b = Brush::new(40.0, 100.0, Color32::BLACK, 10.0);
     b.brush_options.pressure_size = false;
@@ -134,10 +139,21 @@ fn read_kpp(
     }
     match engine.as_str() {
         "paintbrush" | "roundmarker" => {}
-        "colorsmudge" => notes.push(format!(
-            "{name}: Krita's colour smudge came across as a plain brush (for mixing, use the \
-             Smudge tool's colour setting)"
-        )),
+        "colorsmudge" => {
+            // Its smudge rate is always on, its colour rate an option; a
+            // smudge length of 1 would never pick paint up again.
+            let rate = |k: &str| number(k).unwrap_or(0.5).clamp(0.0, 1.0);
+            b.mixing = Some(crate::brush_engine::brush_options::Mixing {
+                smudge_length: rate("SmudgeRateValue").min(0.9),
+                color_rate: if yes("PressureColorRate") {
+                    rate("ColorRateValue")
+                } else {
+                    0.0
+                },
+                pressure_length: yes("PressureSmudgeRate") && by_pressure("SmudgeRateSensor"),
+                pressure_color: yes("PressureColorRate") && by_pressure("ColorRateSensor"),
+            });
+        }
         "hairybrush" => b.brush_type = BrushType::Bristle,
         "sketchbrush" => b.brush_type = BrushType::Sketch,
         "hatchingbrush" => {
@@ -154,9 +170,11 @@ fn read_kpp(
             "{name}: Krita's {other} engine has no counterpart here; only its tip came across"
         )),
     }
-    // An eraser preset.
+    // An eraser preset, or paint in a blend mode.
     if param("CompositeOp") == Some("erase") || yes("EraserMode") {
         b.brush_options.blend_mode = crate::brush_engine::brush_options::BlendMode::Eraser;
+    } else if let Some(op) = param("CompositeOp") {
+        b.paint_blend = crate::project::kra::blend(op);
     }
     if let Some(v) = number("OpacityValue") {
         b.brush_options.opacity = v.clamp(0.0, 1.0);
@@ -176,6 +194,52 @@ fn read_kpp(
         && let Some(v) = number("ScatterValue")
     {
         b.jitter = (v * 50.0).clamp(0.0, 500.0);
+    }
+    // Pressure spacing.
+    if yes("PressureSpacing") && by_pressure("SpacingSensor") {
+        let o = &mut b.brush_options;
+        o.pressure_spacing = true;
+        o.pressure_curves.spacing = param("SpacingSensor").and_then(sensor_curve);
+    }
+    // Rotation: each of Krita's sensors as this app's counterpart.
+    if yes("PressureRotation") {
+        for id in sensors("RotationSensor") {
+            let tip = &mut b.dynamics.tip;
+            let turn_by = |sensor| InputMapping {
+                sensor,
+                setting: DabSetting::Angle,
+                amount: 1.0,
+                ..Default::default()
+            };
+            match id.as_str() {
+                "drawingangle" => tip.follow_stroke = true,
+                "fuzzy" | "fuzzystroke" => tip.random_angle = 180.0,
+                "ascension" => tip.follow_tilt = true,
+                "rotation" => tip.follow_barrel = true,
+                "tangentialpressure" => b.inputs.push(turn_by(Sensor::Wheel)),
+                "pressure" => b.inputs.push(turn_by(Sensor::Pressure)),
+                other => notes.push(format!(
+                    "{name}: its rotation follows Krita's {other} sensor, which has no \
+                     counterpart here"
+                )),
+            }
+        }
+    }
+    // Mirror: here at random, whatever Krita's sensor.
+    if yes("PressureMirror") {
+        b.dynamics.tip.random_flip_x = yes("HorizontalMirrorEnabled");
+        b.dynamics.tip.random_flip_y = yes("VerticalMirrorEnabled");
+        let ids = sensors("MirrorSensor");
+        if ids.iter().any(|id| !id.starts_with("fuzzy")) {
+            notes.push(format!(
+                "{name}: its tip flips at random here, rather than by {}",
+                ids.join(" and ")
+            ));
+        }
+    }
+    // Sharpness: Krita's threshold (out of 100) as hard edges.
+    if yes("PressureSharpness") {
+        b.sharpness = (number("Sharpness/threshold").unwrap_or(40.0) / 100.0).clamp(0.01, 1.0);
     }
     // The paper texture, from the bundle.
     if yes("Texture/Pattern/Enabled") {
@@ -197,6 +261,8 @@ fn read_kpp(
                 let mode = match number("Texture/Pattern/TexturingMode").unwrap_or(0.0) as i32 {
                     0 => TextureMode::Multiply,
                     1 => TextureMode::Subtract,
+                    6 => TextureMode::ColorDodge,
+                    10 | 11 => TextureMode::HardMix,
                     12..=15 => TextureMode::Height,
                     _ => {
                         notes.push(format!(
@@ -358,6 +424,24 @@ fn picture_tip(
 
 /// A sensor's curve (`<curve>0,0;0.5,0.2;1,1;</curve>` inside its XML),
 /// if it isn't the straight line.
+/// The ids of a curve option's sensors: one, or a `sensorslist`'s.
+fn sensor_ids(xml: &str) -> Vec<String> {
+    let Ok(root) = parse_xml(xml) else {
+        return Vec::new();
+    };
+    let Some(params) = root.find("params") else {
+        return Vec::new();
+    };
+    match params.attr("id") {
+        Some("sensorslist") => params
+            .descendants("ChildSensor")
+            .filter_map(|c| c.attr("id").map(str::to_string))
+            .collect(),
+        Some(id) => vec![id.to_string()],
+        None => Vec::new(),
+    }
+}
+
 fn sensor_curve(xml: &str) -> Option<SoftnessCurve> {
     let root = parse_xml(xml).ok()?;
     // The pressure sensor's (alone, or among several).
@@ -473,6 +557,7 @@ pub(crate) fn parse_xml(xml: &str) -> Result<Node, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::blend_modes::LayerBlend;
 
     /// A preset PNG with `xml` in its `preset` chunk.
     pub fn kpp(xml: &str) -> Vec<u8> {
@@ -513,6 +598,77 @@ mod tests {
         assert_eq!(p.brush.dynamics.tip.ratio, 0.5);
         assert!((p.brush.dynamics.tip.angle - 0.5f32.to_degrees()).abs() < 1e-3);
         assert!(imported.notes.is_empty());
+    }
+
+    /// `AUTO` with `params` added (name, value pairs) and its engine `engine`.
+    fn with_params(engine: &str, params: &[(&str, &str)]) -> Vec<u8> {
+        let extra: String = params
+            .iter()
+            .map(|(k, v)| format!(r#"<param type="string" name="{k}"><![CDATA[{v}]]></param>"#))
+            .collect();
+        kpp(&AUTO
+            .replace("paintbrush", engine)
+            .replace("</Preset>", &format!("{extra}</Preset>")))
+    }
+
+    const PRESSURE: &str = r#"<!DOCTYPE params><params id="pressure"/>"#;
+
+    #[test]
+    fn colour_smudge_mirror_rotation_spacing_and_sharpness_come_across() {
+        let smudge = with_params(
+            "colorsmudge",
+            &[
+                ("SmudgeRateValue", "0.6"),
+                ("PressureSmudgeRate", "true"),
+                ("SmudgeRateSensor", PRESSURE),
+                ("PressureColorRate", "true"),
+                ("ColorRateValue", "0.5"),
+                (
+                    "ColorRateSensor",
+                    r#"<!DOCTYPE params><params id="fuzzy"/>"#,
+                ),
+                ("CompositeOp", "parallel"),
+            ],
+        );
+        let imported = import_kpp(&smudge, "file").unwrap();
+        let b = &imported.presets[0].brush;
+        let m = b.mixing.expect("colour mixing");
+        assert_eq!((m.smudge_length, m.color_rate), (0.6, 0.5));
+        assert!(m.pressure_length && !m.pressure_color);
+        assert_eq!(b.paint_blend, LayerBlend::Parallel);
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+
+        let brush = with_params(
+            "paintbrush",
+            &[
+                ("PressureMirror", "true"),
+                ("HorizontalMirrorEnabled", "true"),
+                ("MirrorSensor", r#"<!DOCTYPE params><params id="fuzzy"/>"#),
+                ("PressureRotation", "true"),
+                (
+                    "RotationSensor",
+                    r#"<!DOCTYPE params><params id="sensorslist"><ChildSensor id="drawingangle"/><ChildSensor id="tangentialpressure"/></params>"#,
+                ),
+                ("PressureSpacing", "true"),
+                ("SpacingSensor", PRESSURE),
+                ("PressureSharpness", "true"),
+                ("Sharpness/threshold", "40"),
+            ],
+        );
+        let imported = import_kpp(&brush, "file").unwrap();
+        let b = &imported.presets[0].brush;
+        let tip = &b.dynamics.tip;
+        assert!(tip.random_flip_x && !tip.random_flip_y);
+        assert!(tip.follow_stroke);
+        assert_eq!(b.inputs.len(), 1);
+        assert_eq!(
+            (b.inputs[0].sensor, b.inputs[0].setting),
+            (Sensor::Wheel, DabSetting::Angle)
+        );
+        assert!(b.brush_options.pressure_spacing);
+        assert!((b.sharpness - 0.4).abs() < 1e-6);
+        assert!(b.mixing.is_none());
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
     }
 
     #[test]

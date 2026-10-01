@@ -11,6 +11,10 @@
 //! - **Subtract**: low spots lose paint first; heavy strokes fill in.
 //! - **Height**: only the paper's peaks catch paint under light coverage
 //!   (low pressure, soft edges); pressing harder fills the valleys.
+//! - **Colour dodge**: the peaks strengthen the paint (Krita's colour dodge
+//!   texturing): soft edges and light strokes turn grainy and bright.
+//! - **Hard mix**: paint snaps to full or nothing by grain and coverage, a
+//!   crisp, broken dry-brush edge (Krita's "hard mix softer").
 
 use std::sync::{Arc, OnceLock};
 
@@ -69,16 +73,26 @@ pub enum TextureMode {
     Multiply,
     Subtract,
     Height,
+    ColorDodge,
+    HardMix,
 }
 
 impl TextureMode {
-    pub const ALL: [TextureMode; 3] = [Self::Multiply, Self::Subtract, Self::Height];
+    pub const ALL: [TextureMode; 5] = [
+        Self::Multiply,
+        Self::Subtract,
+        Self::Height,
+        Self::ColorDodge,
+        Self::HardMix,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Multiply => "Multiply",
             Self::Subtract => "Subtract",
             Self::Height => "Height",
+            Self::ColorDodge => "Colour dodge",
+            Self::HardMix => "Hard mix",
         }
     }
 }
@@ -155,6 +169,22 @@ impl BrushTexture {
     /// input mappings).
     #[inline]
     pub fn apply_row_scaled(&self, y: usize, x0: usize, alphas: &mut [f32], factor: f32) {
+        // The mode chosen once per row, not per pixel.
+        match self.mode {
+            TextureMode::Multiply => self.scaled_row(y, x0, alphas, factor, TextureMode::Multiply),
+            TextureMode::Subtract => self.scaled_row(y, x0, alphas, factor, TextureMode::Subtract),
+            TextureMode::Height => self.scaled_row(y, x0, alphas, factor, TextureMode::Height),
+            TextureMode::ColorDodge => {
+                self.scaled_row(y, x0, alphas, factor, TextureMode::ColorDodge)
+            }
+            TextureMode::HardMix => self.scaled_row(y, x0, alphas, factor, TextureMode::HardMix),
+        }
+    }
+
+    /// [`Self::apply_row_scaled`] in `mode` (a constant at each call, so
+    /// each copy is specialised to it).
+    #[inline(always)]
+    fn scaled_row(&self, y: usize, x0: usize, alphas: &mut [f32], factor: f32, mode: TextureMode) {
         let p = &*self.pattern;
         let inv = 1.0 / self.scale.max(0.05);
         let s = (self.strength * factor).clamp(0.0, 1.0);
@@ -181,17 +211,7 @@ impl BrushTexture {
             if self.invert {
                 t = 1.0 - t;
             }
-            *a = match self.mode {
-                TextureMode::Multiply => *a * (1.0 - s + s * t),
-                TextureMode::Subtract => (*a - s * (1.0 - t)).max(0.0),
-                TextureMode::Height => {
-                    // Paint reaches down to 1 - a: a light dab only the
-                    // peaks, a full one everything.
-                    let floor = 1.0 - *a;
-                    let h = ((t - floor) * 4.0 + 0.5).clamp(0.0, 1.0);
-                    *a * (1.0 - s + s * h)
-                }
-            };
+            *a = combine(mode, *a, s, t);
         }
     }
 }
@@ -207,6 +227,30 @@ impl BrushTexture {
         factor: f32,
         grain: &StrokeGrain,
         center: [f32; 2],
+    ) {
+        // The mode chosen once per row, not per pixel.
+        let mut row = |mode| self.placed_row(y, x0, alphas, factor, grain, center, mode);
+        match self.mode {
+            TextureMode::Multiply => row(TextureMode::Multiply),
+            TextureMode::Subtract => row(TextureMode::Subtract),
+            TextureMode::Height => row(TextureMode::Height),
+            TextureMode::ColorDodge => row(TextureMode::ColorDodge),
+            TextureMode::HardMix => row(TextureMode::HardMix),
+        }
+    }
+
+    /// [`Self::apply_row_placed`] in `mode` (see [`Self::scaled_row`]).
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn placed_row(
+        &self,
+        y: usize,
+        x0: usize,
+        alphas: &mut [f32],
+        factor: f32,
+        grain: &StrokeGrain,
+        center: [f32; 2],
+        mode: TextureMode,
     ) {
         let p = &*self.pattern;
         let place = &self.placement;
@@ -257,7 +301,7 @@ impl BrushTexture {
             if self.invert {
                 t = 1.0 - t;
             }
-            *a = combine(self.mode, *a, s, t);
+            *a = combine(mode, *a, s, t);
         }
     }
 }
@@ -269,9 +313,18 @@ fn combine(mode: TextureMode, a: f32, s: f32, t: f32) -> f32 {
         TextureMode::Multiply => a * (1.0 - s + s * t),
         TextureMode::Subtract => (a - s * (1.0 - t)).max(0.0),
         TextureMode::Height => {
+            // Paint reaches down to 1 - a: a light dab only the peaks, a
+            // full one everything.
             let floor = 1.0 - a;
             let h = ((t - floor) * 4.0 + 0.5).clamp(0.0, 1.0);
             a * (1.0 - s + s * h)
+        }
+        // The grain as the dodging layer: a / (1 - t), at strength s.
+        TextureMode::ColorDodge => (a / (1.0 - s * t).max(1e-3)).min(1.0),
+        // Photoshop's hard mix, softened (3a - 2(1 - t)), blended in by s.
+        TextureMode::HardMix => {
+            let h = (3.0 * a - 2.0 * (1.0 - t)).clamp(0.0, 1.0);
+            a + (h - a) * s
         }
     }
 }
@@ -464,6 +517,55 @@ mod tests {
                 .iter()
                 .fold((1.0f32, 0.0f32), |(lo, hi), &a| (lo.min(a), hi.max(a)));
             assert!(hi - lo > 0.2, "{mode:?} varies: {lo}..{hi}");
+        }
+    }
+
+    #[test]
+    fn every_mode_stays_in_range_and_never_paints_outside_the_dab() {
+        let steps = || (0..=20).map(|i| i as f32 / 20.0);
+        for mode in TextureMode::ALL {
+            for a in steps() {
+                for s in steps() {
+                    for t in steps() {
+                        let v = combine(mode, a, s, t);
+                        assert!((0.0..=1.0).contains(&v), "{mode:?} {a} {s} {t}: {v}");
+                        if a == 0.0 && mode != TextureMode::HardMix {
+                            assert_eq!(v, 0.0, "{mode:?}: paint from nothing");
+                        }
+                    }
+                    // No strength, no change.
+                    assert!((combine(mode, a, 0.0, 0.3) - a).abs() < 1e-6, "{mode:?}");
+                }
+            }
+        }
+        // Colour dodge strengthens on the peaks, hard mix snaps.
+        assert!(combine(TextureMode::ColorDodge, 0.5, 1.0, 0.9) > 0.9);
+        assert_eq!(combine(TextureMode::HardMix, 0.9, 1.0, 0.9), 1.0);
+        assert_eq!(combine(TextureMode::HardMix, 0.2, 1.0, 0.2), 0.0);
+    }
+
+    #[test]
+    fn rows_in_each_mode_match_the_formula() {
+        // The row loops are specialised per mode: each must give `combine`.
+        let mut tex = BrushTexture::new(builtin()[0].clone());
+        tex.strength = 0.7;
+        for mode in TextureMode::ALL {
+            tex.mode = mode;
+            let alphas: Vec<f32> = (0..64).map(|i| i as f32 / 63.0).collect();
+            let mut row = alphas.clone();
+            tex.apply_row(9, 5, &mut row);
+            let mut placed = alphas.clone();
+            tex.apply_row_placed(9, 5, &mut placed, 1.0, &StrokeGrain::default(), [0.0, 0.0]);
+            for (i, &a) in alphas.iter().enumerate() {
+                let t = tex.pattern.at(5.0 + i as f32 + 0.5, 9.5, 1.0);
+                let want = if a <= 0.0 {
+                    a
+                } else {
+                    combine(mode, a, 0.7, t)
+                };
+                assert!((row[i] - want).abs() < 1e-4, "{mode:?} pinned {i}");
+                assert!((placed[i] - want).abs() < 1e-3, "{mode:?} placed {i}");
+            }
         }
     }
 

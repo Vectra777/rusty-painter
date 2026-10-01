@@ -37,6 +37,11 @@ pub struct TabletSample {
     /// way the pen leans, its length how far (0 upright, 1 flat). `None`
     /// when the tablet doesn't report tilt.
     pub tilt: Option<[f32; 2]>,
+    /// The pen's turn about its own axis (radians, a screen angle), when
+    /// the tablet reports it (Wacom's Art Pen).
+    pub roll: Option<f32>,
+    /// An airbrush pen's finger wheel, 0..=1, when it has one.
+    pub wheel: Option<f32>,
     pub is_eraser: bool,
     pub phase: TabletPhase,
 }
@@ -80,6 +85,8 @@ struct ToolState {
     pos: Option<[f32; 2]>,
     pressure: f32,
     tilt: Option<[f32; 2]>,
+    roll: Option<f32>,
+    wheel: Option<f32>,
     /// Touching, and its `Down` sample has been sent.
     down: bool,
     /// Touched, but no pose has arrived since: the `Down` sample waits for
@@ -107,6 +114,8 @@ impl ToolState {
                     pos,
                     pressure: state.pressure,
                     tilt: state.tilt,
+                    roll: state.roll,
+                    wheel: state.wheel,
                     is_eraser,
                     phase,
                 });
@@ -119,6 +128,9 @@ impl ToolState {
                 self.pos = Some([pose.position[0] / scale, pose.position[1] / scale]);
                 self.pressure = pose.pressure.get().unwrap_or(1.0);
                 self.tilt = pose.tilt.map(lean_from_xy);
+                self.roll = pose.roll.get();
+                // An airbrush's wheel is its slider (-1..=1) on Wayland.
+                self.wheel = pose.slider.get().map(|s| ((s + 1.0) * 0.5).clamp(0.0, 1.0));
                 self.posed_this_frame = true;
                 if self.pending_down {
                     self.pending_down = false;
@@ -203,6 +215,10 @@ fn x11_sample(s: winit::platform::x11::PenSample, scale: f32, phase: TabletPhase
         pos: [s.x / scale, s.y / scale],
         pressure: s.pressure,
         tilt: s.tilt.map(lean_from_xy),
+        // One axis, either kind of pen: a brush reads it as whichever it
+        // follows.
+        roll: s.wheel.map(|w| w * std::f32::consts::TAU),
+        wheel: s.wheel,
         is_eraser: s.is_eraser,
         phase,
     }
@@ -343,6 +359,8 @@ impl TabletInput {
                     let lean = s.tilt.clamp(0.0, std::f32::consts::FRAC_PI_2).sin();
                     [s.orientation.sin() * lean, -s.orientation.cos() * lean]
                 }),
+                roll: None,
+                wheel: None,
                 is_eraser: s.is_eraser,
                 phase: match s.phase {
                     PenPhase::Down => TabletPhase::Down,
@@ -506,6 +524,7 @@ mod x11_tests {
             y: 100.0,
             pressure: 0.5,
             tilt: Some([std::f32::consts::FRAC_PI_6, 0.0]),
+            wheel: Some(0.25),
             is_eraser: true,
             phase: PenPhase::Move,
         };
@@ -515,5 +534,7 @@ mod x11_tests {
         assert!(t.is_eraser);
         let [x, y] = t.tilt.unwrap();
         assert!((x - 0.5).abs() < 1e-5 && y.abs() < 1e-6);
+        assert_eq!(t.wheel, Some(0.25));
+        assert!((t.roll.unwrap() - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
     }
 }

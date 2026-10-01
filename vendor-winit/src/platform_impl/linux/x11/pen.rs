@@ -60,10 +60,12 @@ pub(crate) struct Pen {
     pressure: Axis,
     tilt_x: Option<Axis>,
     tilt_y: Option<Axis>,
+    wheel: Option<Axis>,
     is_eraser: bool,
     /// Last readings, for events that don't carry every axis.
     last_pressure: f64,
     last_tilt: [f64; 2],
+    last_wheel: f64,
     down: bool,
 }
 
@@ -76,7 +78,7 @@ impl Pen {
                 info.num_classes as usize,
             )
         };
-        let (mut pressure, mut tilt_x, mut tilt_y) = (None, None, None);
+        let (mut pressure, mut tilt_x, mut tilt_y, mut wheel) = (None, None, None, None);
         for &class_ptr in classes {
             if unsafe { (*class_ptr)._type } != ffi::XIValuatorClass {
                 continue;
@@ -99,6 +101,7 @@ impl Pen {
                 "Abs Pressure" => pressure = Some(axis),
                 "Abs Tilt X" => tilt_x = Some(axis),
                 "Abs Tilt Y" => tilt_y = Some(axis),
+                "Abs Wheel" => wheel = Some(axis),
                 _ => {},
             }
         }
@@ -107,9 +110,11 @@ impl Pen {
             pressure: pressure?,
             tilt_x,
             tilt_y,
+            wheel,
             is_eraser: device_name.contains("eraser"),
             last_pressure: 0.0,
             last_tilt: [0.0; 2],
+            last_wheel: 0.0,
             down: false,
         })
     }
@@ -132,6 +137,8 @@ impl Pen {
                 self.last_tilt[0] = self.tilt_x.unwrap().tilt_radians(v);
             } else if self.tilt_y.is_some_and(|a| a.number == i) {
                 self.last_tilt[1] = self.tilt_y.unwrap().tilt_radians(v);
+            } else if let Some(wheel) = self.wheel.filter(|a| a.number == i) {
+                self.last_wheel = wheel.normalized(v);
             }
         }
     }
@@ -143,6 +150,7 @@ impl Pen {
             pressure: self.last_pressure as f32,
             tilt: (self.tilt_x.is_some() || self.tilt_y.is_some())
                 .then(|| [self.last_tilt[0] as f32, self.last_tilt[1] as f32]),
+            wheel: self.wheel.map(|_| self.last_wheel as f32),
             is_eraser: self.is_eraser,
             phase,
         }

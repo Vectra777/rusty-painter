@@ -200,6 +200,13 @@ pub struct Brush {
     pub sketch: crate::brush_engine::sketch::Sketch,
     /// The lines of a [`BrushType::Hatching`] brush.
     pub hatching: crate::brush_engine::hatching::Hatching,
+    /// Hard edges (Krita's Sharpness): tip coverage below this share
+    /// (0..1) is dropped and the rest painted at full strength (0 = off).
+    pub sharpness: f32,
+    /// Colour mixing: the brush smudges the paint under it, mixing in its
+    /// colour (it then paints through the Smudge tool's engine); `None` for
+    /// a plain brush.
+    pub mixing: Option<crate::brush_engine::brush_options::Mixing>,
     /// The secondary colour, for input mappings that mix it in (set when
     /// a stroke starts; not part of the brush's settings).
     pub second_color: Color32,
@@ -244,6 +251,11 @@ struct BatchCtx<'a> {
     tip_colors: bool,
     /// A hatching brush: its lines, over every dab.
     hatch: Option<&'a crate::brush_engine::hatching::Hatching>,
+    /// Hard edges: the brush's [`Brush::sharpness`] (0 = off).
+    sharpness: f32,
+    /// The batch's stroke strength (before each dab's own), which a dab's
+    /// stamped alphas are scaled by.
+    strength: f32,
 }
 
 /// Where a batch of dabs accumulates.
@@ -396,6 +408,11 @@ fn paint_batch(
         // that were most of the resolve cost.
         let mut spans = vec![(usize::MAX, 0usize); tile_size];
         let mut touched = false;
+        // What changes each row's alphas after stamping (hard edges,
+        // hatching, texture), read once per tile rather than per row.
+        let sharpness = ctx.sharpness;
+        let sharp = sharpness > 0.0;
+        let post_row = sharp || ctx.hatch.is_some() || ctx.texture.is_some();
 
         for &i in dab_ids {
             let dab = &ctx.dabs[i];
@@ -423,26 +440,38 @@ fn paint_batch(
                         &mut color_row[..span.len()],
                     );
                 }
-                if let Some(hatch) = ctx.hatch {
-                    hatch.apply_row(
-                        gy,
-                        overlap.min_x + first,
-                        dab.hatch,
-                        &mut alphas[span.clone()],
-                    );
-                }
-                if let Some(texture) = ctx.texture {
-                    let (x, row) = (overlap.min_x + first, &mut alphas[span.clone()]);
-                    match &ctx.grain {
-                        Some(grain) => texture.apply_row_placed(
+                // One test per row for a plain brush, whatever it skips.
+                if post_row {
+                    if sharp {
+                        // The tip's coverage (the alpha over the dab's
+                        // strength) cut at the threshold, the rest full.
+                        let full = (ctx.strength * dab.strength).min(1.0);
+                        let cut = sharpness * full;
+                        for a in &mut alphas[span.clone()] {
+                            *a = if *a > 0.0 && *a >= cut { full } else { 0.0 };
+                        }
+                    }
+                    if let Some(hatch) = ctx.hatch {
+                        hatch.apply_row(
                             gy,
-                            x,
-                            row,
-                            dab.texture,
-                            grain,
-                            [dab.center.x, dab.center.y],
-                        ),
-                        None => texture.apply_row_scaled(gy, x, row, dab.texture),
+                            overlap.min_x + first,
+                            dab.hatch,
+                            &mut alphas[span.clone()],
+                        );
+                    }
+                    if let Some(texture) = ctx.texture {
+                        let (x, row) = (overlap.min_x + first, &mut alphas[span.clone()]);
+                        match &ctx.grain {
+                            Some(grain) => texture.apply_row_placed(
+                                gy,
+                                x,
+                                row,
+                                dab.texture,
+                                grain,
+                                [dab.center.x, dab.center.y],
+                            ),
+                            None => texture.apply_row_scaled(gy, x, row, dab.texture),
+                        }
                     }
                 }
                 if let Some(sel) = selection_coverage {
@@ -825,6 +854,8 @@ impl Brush {
             bristles: Default::default(),
             sketch: Default::default(),
             hatching: Default::default(),
+            sharpness: 0.0,
+            mixing: None,
             second_color: Color32::WHITE,
         }
     }
@@ -854,6 +885,8 @@ impl Brush {
             bristles: Default::default(),
             sketch: Default::default(),
             hatching: Default::default(),
+            sharpness: 0.0,
+            mixing: None,
             second_color: Color32::WHITE,
         }
     }
@@ -1349,6 +1382,8 @@ impl Brush {
             dual: self.dual.as_ref().map(|d| d.mode),
             tip_colors,
             hatch: (self.brush_type == BrushType::Hatching).then_some(&self.hatching),
+            sharpness: self.sharpness,
+            strength: 1.0,
         }
     }
 
@@ -1419,7 +1454,7 @@ impl Brush {
                 .extend(regions.iter().map(|r| (r.tx, r.ty))),
             Target::Stroke => {}
         }
-        let ctx = self.batch_ctx(
+        let mut ctx = self.batch_ctx(
             canvas,
             selection,
             &dabs,
@@ -1428,6 +1463,7 @@ impl Brush {
             stroke_tiles.tail_newer,
             stroke_tiles.grain,
         );
+        ctx.strength = strength;
         let work_pixels: usize = dabs
             .iter()
             .map(|d| {

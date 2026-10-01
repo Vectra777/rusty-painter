@@ -4,7 +4,9 @@
 
 use crate::brush_engine::brush::{Brush, BrushType, RibbonSeg, Target};
 use crate::brush_engine::brush_options::{PixelBrushShape, TipOrder};
-use crate::brush_engine::dynamics::{DabVar, FAST_SPEED, PenTilt, direction, tip_orientation};
+use crate::brush_engine::dynamics::{
+    DabVar, FAST_SPEED, PenBarrel, PenTilt, compose, direction, tip_orientation,
+};
 use crate::brush_engine::stabilizer::Stabilizer;
 use crate::brush_engine::symmetry::{Copy2, Symmetry};
 use crate::canvas::Canvas;
@@ -419,6 +421,8 @@ pub struct StrokeState {
     dir: Option<f32>,
     /// How the pen leans at the current sample (set before each one).
     pub tilt: Option<PenTilt>,
+    /// The pen's barrel rotation and wheel at the current sample.
+    pub barrel: PenBarrel,
     /// When the lean was last smoothed.
     last_lean_time: Option<f64>,
     /// The lean, smoothed over time (tablet readings are noisy), as a
@@ -491,6 +495,7 @@ impl StrokeState {
             view_scale: 1.0,
             dir: None,
             tilt: None,
+            barrel: PenBarrel::default(),
             last_lean_time: None,
             lean: None,
             prev_lean: None,
@@ -580,7 +585,8 @@ impl StrokeState {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Spacing and jitter follow this sample's pressure.
             apply_pressure(brush, original, p);
-            self.add_point_at_pressure(brush, raw_pos);
+            let spacing = brush.brush_options.spacing_factor(p);
+            self.add_point_at_pressure(brush, raw_pos, spacing);
             if brush.dual.is_some() {
                 self.paint_mask(brush, original.0, context);
             }
@@ -1103,6 +1109,8 @@ impl StrokeState {
             },
             random_dab: self.rng.random(),
             random_stroke: self.stroke_random,
+            rotation: self.barrel.rotation.map_or(0.0, turn),
+            wheel: self.barrel.wheel.unwrap_or(0.0),
         }
     }
 
@@ -1142,10 +1150,22 @@ impl StrokeState {
             {
                 angle += tilt.direction;
             }
+            if tip.follow_barrel
+                && let Some(rotation) = self.barrel.rotation
+            {
+                angle += rotation;
+            }
             if tip.random_angle > 0.0 {
                 angle += (self.rng.random::<f32>() * 2.0 - 1.0) * tip.random_angle.to_radians();
             }
             v.orient = tip_orientation(angle, tip.ratio * v.squash);
+            // Mirrored in the tip's own frame: across its length, its width.
+            if tip.random_flip_x && self.rng.random::<bool>() {
+                v.orient = compose([-1.0, 0.0, 0.0, 1.0], v.orient);
+            }
+            if tip.random_flip_y && self.rng.random::<bool>() {
+                v.orient = compose([1.0, 0.0, 0.0, -1.0], v.orient);
+            }
         }
         v
     }
@@ -1213,8 +1233,9 @@ impl StrokeState {
         }
     }
 
-    /// Queue the dabs for one sample into `self.pending`.
-    fn add_point_at_pressure(&mut self, brush: &Brush, raw_pos: Vec2) {
+    /// Queue the dabs for one sample into `self.pending`, `spacing` times
+    /// the brush's spacing apart.
+    fn add_point_at_pressure(&mut self, brush: &Brush, raw_pos: Vec2, spacing: f32) {
         if brush.pixel_perfect {
             self.add_point_pixel_perfect(raw_pos);
             return;
@@ -1237,7 +1258,7 @@ impl StrokeState {
             // Short segments, so the ribbon bends smoothly.
             (brush.brush_options.diameter * 0.15).clamp(1.0, 6.0)
         } else {
-            (brush.brush_options.spacing / 100.0) * brush.brush_options.diameter
+            (brush.brush_options.spacing / 100.0) * brush.brush_options.diameter * spacing
         };
         let spacing_dist = spacing_dist.max(0.5); // Avoid infinite loops
         let count = brush.dynamics.random.dabs_per_step();

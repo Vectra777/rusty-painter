@@ -27,6 +27,13 @@ pub struct TipShape {
     /// Turn the tip the way the pen leans (tablets that report tilt), on
     /// top of `angle`.
     pub follow_tilt: bool,
+    /// Turn the tip with the pen's barrel rotation (pens that report it,
+    /// like Wacom's Art Pen), on top of `angle`.
+    pub follow_barrel: bool,
+    /// Mirror each dab at random across the tip's length (left-right) or
+    /// its width (top-bottom), half the dabs each (Krita's Mirror option).
+    pub random_flip_x: bool,
+    pub random_flip_y: bool,
 }
 
 impl Default for TipShape {
@@ -37,6 +44,9 @@ impl Default for TipShape {
             random_angle: 0.0,
             ratio: 1.0,
             follow_tilt: false,
+            follow_barrel: false,
+            random_flip_x: false,
+            random_flip_y: false,
         }
     }
 }
@@ -46,8 +56,11 @@ impl TipShape {
         self.angle != 0.0
             || self.follow_stroke
             || self.follow_tilt
+            || self.follow_barrel
             || self.random_angle > 0.0
             || self.ratio < 1.0
+            || self.random_flip_x
+            || self.random_flip_y
     }
 }
 
@@ -143,6 +156,17 @@ pub struct PenTilt {
     pub direction: f32,
 }
 
+/// The pen's barrel rotation and finger wheel, where the tablet reports
+/// them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PenBarrel {
+    /// Turn about the pen's own axis, radians on the canvas
+    /// (counter-clockwise, y down).
+    pub rotation: Option<f32>,
+    /// An airbrush pen's finger wheel (Krita's tangential pressure), 0..1.
+    pub wheel: Option<f32>,
+}
+
 /// Screen speed (points per second) counted as "fast": the full effect.
 pub const FAST_SPEED: f32 = 2500.0;
 
@@ -222,10 +246,14 @@ pub enum Sensor {
     RandomDab,
     /// One random value for the whole stroke.
     RandomStroke,
+    /// The pen's barrel rotation, once round the circle.
+    Rotation,
+    /// An airbrush pen's finger wheel.
+    Wheel,
 }
 
 impl Sensor {
-    pub const ALL: [Sensor; 9] = [
+    pub const ALL: [Sensor; 11] = [
         Sensor::Pressure,
         Sensor::Speed,
         Sensor::Tilt,
@@ -235,6 +263,8 @@ impl Sensor {
         Sensor::Time,
         Sensor::RandomDab,
         Sensor::RandomStroke,
+        Sensor::Rotation,
+        Sensor::Wheel,
     ];
 
     pub fn label(self) -> &'static str {
@@ -248,6 +278,8 @@ impl Sensor {
             Sensor::Time => "Time",
             Sensor::RandomDab => "Random (each dab)",
             Sensor::RandomStroke => "Random (each stroke)",
+            Sensor::Rotation => "Barrel rotation",
+            Sensor::Wheel => "Airbrush wheel",
         }
     }
 
@@ -369,6 +401,8 @@ pub struct SensorValues {
     pub time: f32,
     pub random_dab: f32,
     pub random_stroke: f32,
+    pub rotation: f32,
+    pub wheel: f32,
 }
 
 impl InputMapping {
@@ -385,6 +419,8 @@ impl InputMapping {
             Sensor::Time => s.time / len,
             Sensor::RandomDab => s.random_dab,
             Sensor::RandomStroke => s.random_stroke,
+            Sensor::Rotation => s.rotation,
+            Sensor::Wheel => s.wheel,
         };
         self.curve.eval(raw.clamp(0.0, 1.0)).clamp(0.0, 1.0)
     }

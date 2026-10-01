@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Brushes: Krita's missing options
+- Colour mixing for any brush (Brush → Colour mixing), like Krita's Colour Smudge: smudge length and colour rate, each optionally by pressure. Krita's colour smudge presets import as mixing brushes.
+- Tips flipped at random (left-right, top-bottom), like Krita's Mirror option.
+- Pressure can set the spacing, with its own curve.
+- Hard edges: a sharpness threshold that makes any tip crisp.
+- Barrel rotation and an airbrush's finger wheel (Wayland, X11): the tip can follow the barrel, and both are inputs for any setting.
+- Colour dodge and hard mix texture modes.
+- The Parallel blend mode (Krita's), for layers and brushes.
+- The Smudge tool (and mixing brushes) about a third faster, and pixels the brush doesn't reach are left exactly as they were.
+- Krita presets bring their rotation (stroke direction, random, tilt, barrel, wheel), mirror, pressure spacing, sharpness, blend mode and these texture modes.
+
 ### Shader layers
 - A layer drawn by a GLSL shader (Shadertoy style: `mainImage`, `iTime`, `iResolution`, `iMouse`, `iChannel0` = the layers below), animated live on the GPU with the layer's blend mode and opacity.
 - One editor window per shader layer: syntax colouring, errors at their line as you type, play/pause, speed, templates, and Bake.

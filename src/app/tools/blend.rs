@@ -176,6 +176,22 @@ enum BlendKind {
     },
 }
 
+/// How a smudge stroke mixes: the Smudge tool's settings, or a mixing
+/// brush's own (see [`crate::brush_engine::brush_options::Mixing`]).
+#[derive(Clone)]
+struct SmudgeMix {
+    length: f32,
+    color_rate: f32,
+    pressure_length: bool,
+    pressure_color: bool,
+    /// A mixing brush's image tip (the Smudge tool's dabs are round).
+    tip: Option<std::sync::Arc<crate::brush_engine::tip::TipMask>>,
+    /// How a mixing brush's paint goes onto the layer.
+    blend: crate::canvas::blend_modes::LayerBlend,
+    /// The stroke is the Brush tool's (ended with the brush's strokes).
+    from_brush: bool,
+}
+
 /// A patch of carried paint (linear premultiplied, 0..1 per channel).
 struct Carry {
     side: usize,
@@ -205,6 +221,8 @@ pub struct BlendStroke {
     /// stroke has laid down so far (0..1 per pixel).
     filtered: HashMap<(i32, i32), Vec<Color32>>,
     coverage: HashMap<(i32, i32), Vec<f32>>,
+    /// Smudge: how it mixes.
+    mix: SmudgeMix,
 }
 
 /// Pixels are mixed as linear-light premultiplied colour, the same space
@@ -366,6 +384,53 @@ impl PainterApp {
     }
 
     pub(crate) fn blend_press(&mut self, pos: Vec2, pressure: f32) {
+        let b = &self.workspace.blend;
+        let mix = SmudgeMix {
+            length: b.smudge_length,
+            color_rate: b.color_rate,
+            pressure_length: false,
+            pressure_color: false,
+            tip: None,
+            blend: crate::canvas::blend_modes::LayerBlend::Normal,
+            from_brush: false,
+        };
+        self.blend_begin(pos, pressure, None, mix);
+    }
+
+    /// A stroke of a brush with colour mixing: a smudge with the brush's own
+    /// rates, tip and blend mode.
+    pub(crate) fn mixing_press(&mut self, pos: Vec2, pressure: f32) {
+        let brush = &self.brush_state.brush;
+        let Some(m) = brush.mixing else {
+            return;
+        };
+        let tip = match &brush.brush_options.pixel_shape {
+            crate::brush_engine::brush_options::PixelBrushShape::Custom(tip) => Some(tip.clone()),
+            _ => None,
+        };
+        let mix = SmudgeMix {
+            length: m.smudge_length,
+            color_rate: m.color_rate,
+            pressure_length: m.pressure_length,
+            pressure_color: m.pressure_color,
+            tip,
+            blend: brush.paint_blend,
+            from_brush: true,
+        };
+        self.blend_begin(pos, pressure, Some(BlendKind::Smudge), mix);
+    }
+
+    /// A smudge stroke of the Brush tool's (a brush with colour mixing) is
+    /// in progress.
+    pub(crate) fn mixing_stroke(&self) -> bool {
+        self.brush_state
+            .blend_stroke
+            .as_ref()
+            .is_some_and(|s| s.mix.from_brush)
+    }
+
+    /// Start a blend stroke: `kind`, or the active tool's.
+    fn blend_begin(&mut self, pos: Vec2, pressure: f32, kind: Option<BlendKind>, mix: SmudgeMix) {
         let pos = self.ruler_begin_stroke(pos);
         let idx = self.canvas.active_layer_idx;
         let Some(layer) = self.canvas.layers.get(idx) else {
@@ -376,36 +441,39 @@ impl PainterApp {
         }
         let layer_id = layer.id;
         let b = &mut self.workspace.blend;
-        let kind = match (self.active_tool, b.smudge_mode, b.filter_mode) {
-            (Tool::Smudge, SmudgeMode::Smudge, _) => BlendKind::Smudge,
-            (Tool::Smudge, SmudgeMode::Deform, _) => {
-                BlendKind::Deform(b.deform_mode, b.deform_amount.clamp(0.0, 1.0))
-            }
-            (Tool::Smudge, SmudgeMode::Clone, _) => {
-                let Some(source) = b.clone_source else {
-                    // Nothing to copy from yet: Ctrl+click sets it.
-                    return;
-                };
-                let offset = match (b.clone_aligned, b.clone_offset) {
-                    (true, Some(offset)) => offset,
-                    _ => (source - pos).round(),
-                };
-                if b.clone_aligned {
-                    b.clone_offset = Some(offset);
+        let kind = match kind {
+            Some(kind) => kind,
+            None => match (self.active_tool, b.smudge_mode, b.filter_mode) {
+                (Tool::Smudge, SmudgeMode::Smudge, _) => BlendKind::Smudge,
+                (Tool::Smudge, SmudgeMode::Deform, _) => {
+                    BlendKind::Deform(b.deform_mode, b.deform_amount.clamp(0.0, 1.0))
                 }
-                BlendKind::Clone {
-                    offset: (offset.x as i32, offset.y as i32),
-                    merged: b.clone_merged,
+                (Tool::Smudge, SmudgeMode::Clone, _) => {
+                    let Some(source) = b.clone_source else {
+                        // Nothing to copy from yet: Ctrl+click sets it.
+                        return;
+                    };
+                    let offset = match (b.clone_aligned, b.clone_offset) {
+                        (true, Some(offset)) => offset,
+                        _ => (source - pos).round(),
+                    };
+                    if b.clone_aligned {
+                        b.clone_offset = Some(offset);
+                    }
+                    BlendKind::Clone {
+                        offset: (offset.x as i32, offset.y as i32),
+                        merged: b.clone_merged,
+                    }
                 }
-            }
-            (_, _, FilterMode::Blur) => BlendKind::Blur,
-            (_, _, FilterMode::Sharpen) => BlendKind::Sharpen(b.sharpen_amount.clamp(0.0, 2.0)),
-            (_, _, FilterMode::Adjust) => BlendKind::Adjust([
-                b.adjust_hue.clamp(-180.0, 180.0),
-                b.adjust_saturation.clamp(-1.0, 1.0),
-                b.adjust_value.clamp(-1.0, 1.0),
-            ]),
-            (_, _, FilterMode::Filter) => BlendKind::Filter(b.brush_filter),
+                (_, _, FilterMode::Blur) => BlendKind::Blur,
+                (_, _, FilterMode::Sharpen) => BlendKind::Sharpen(b.sharpen_amount.clamp(0.0, 2.0)),
+                (_, _, FilterMode::Adjust) => BlendKind::Adjust([
+                    b.adjust_hue.clamp(-180.0, 180.0),
+                    b.adjust_saturation.clamp(-1.0, 1.0),
+                    b.adjust_value.clamp(-1.0, 1.0),
+                ]),
+                (_, _, FilterMode::Filter) => BlendKind::Filter(b.brush_filter),
+            },
         };
         self.release_canvas();
         // Like a brush stroke: a second press ends the running one first.
@@ -424,6 +492,7 @@ impl PainterApp {
             copies: self.workspace.symmetry.copies(),
             filtered: HashMap::new(),
             coverage: HashMap::new(),
+            mix,
         });
         self.blend_mirrored(pos, pressure);
     }
@@ -431,7 +500,8 @@ impl PainterApp {
     pub(crate) fn blend_drag(&mut self, pos: Vec2, pressure: f32) {
         let pos = self.ruler_snap(pos);
         let diameter = self.blend_diameter(pressure);
-        let spacing = (diameter * self.brush_state.brush.brush_options.spacing / 100.0).max(1.0);
+        let o = &self.brush_state.brush.brush_options;
+        let spacing = (diameter * o.spacing / 100.0 * o.spacing_factor(pressure)).max(1.0);
         let Some(stroke) = self.brush_state.blend_stroke.as_mut() else {
             return;
         };
@@ -539,20 +609,23 @@ impl PainterApp {
             strength *= o.pressure_curves.flow(pressure);
         }
         let hardness = (o.hardness / 100.0).clamp(0.0, 1.0);
-        let (length, blur_size) = (
-            self.workspace.blend.smudge_length.clamp(0.0, 1.0),
-            self.workspace.blend.blur_size,
-        );
-        // Brush colour added per brush width travelled, whatever the
-        // spacing: per dab, the share that compounds to it over one width.
-        let steps_per_width = (100.0 / o.spacing.max(1.0)).max(1.0);
-        let color_rate = 1.0
-            - (1.0 - self.workspace.blend.color_rate.clamp(0.0, 1.0)).powf(1.0 / steps_per_width);
+        let blur_size = self.workspace.blend.blur_size;
         // The brush colour as carried paint (linear, premultiplied, opaque).
         let brush_paint = to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b()));
+        let spacing = o.spacing;
         let Some(stroke) = self.brush_state.blend_stroke.as_mut() else {
             return;
         };
+        let mix = &stroke.mix;
+        let by_pressure = |on: bool| if on { pressure.clamp(0.0, 1.0) } else { 1.0 };
+        let length = (mix.length * by_pressure(mix.pressure_length)).clamp(0.0, 1.0);
+        // Brush colour added per brush width travelled, whatever the
+        // spacing: per dab, the share that compounds to it over one width.
+        let steps_per_width = (100.0 / spacing.max(1.0)).max(1.0);
+        let rate = (mix.color_rate * by_pressure(mix.pressure_color)).clamp(0.0, 1.0);
+        let color_rate = 1.0 - (1.0 - rate).powf(1.0 / steps_per_width);
+        let tip = mix.tip.clone();
+        let paint_blend = mix.blend;
         let Some(idx) = self.canvas.layer_index_of(stroke.layer_id) else {
             return;
         };
@@ -565,6 +638,8 @@ impl PainterApp {
         // the stroke strength and the selection.
         let mut mask = vec![0.0f32; side * side];
         let mut row_sel = vec![1.0f32; side];
+        let tip_sampler = tip.as_ref().map(|t| t.sampler(r.max(0.5)));
+        let mut tip_row = vec![0.0f32; side];
         for ly in 0..side {
             let y = y0 + ly as i32;
             if self.selection_manager.has_selection() {
@@ -582,6 +657,15 @@ impl PainterApp {
                     );
                 }
             }
+            if let (Some(tip), Some(sampler)) = (&tip, &tip_sampler) {
+                // A mixing brush's image tip, upright.
+                let start = (x0 as f32 + 0.5 - center.x, y as f32 + 0.5 - center.y);
+                tip.row(sampler, start, (1.0, 0.0), &mut tip_row);
+                for lx in 0..side {
+                    mask[ly * side + lx] = tip_row[lx] * strength * row_sel[lx];
+                }
+                continue;
+            }
             for lx in 0..side {
                 let p = Vec2::new((x0 + lx as i32) as f32 + 0.5, y as f32 + 0.5);
                 let t = (p - center).length() / r.max(0.5);
@@ -595,10 +679,10 @@ impl PainterApp {
         }
 
         let wrap = self.workspace.wrap_around;
-        let under: Vec<[f32; 4]> = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap)
-            .into_iter()
-            .map(to_f)
-            .collect();
+        // The pixels as stored (kept exactly where the dab doesn't reach),
+        // and as linear paint.
+        let stored = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
+        let under: Vec<[f32; 4]> = stored.iter().map(|&c| to_f(c)).collect();
         // Deform moves the pixels themselves: each takes its colour from
         // where the displacement says, at full weight (the mask sets how
         // far it moves).
@@ -763,20 +847,29 @@ impl PainterApp {
         let mut result = Vec::with_capacity(side * side);
         let mut changed = false;
         for i in 0..side * side {
+            // Outside the dab: the stored pixel as it is (no round trip
+            // through linear light, and nothing to work out).
+            if mask[i] <= 0.0 {
+                result.push(stored[i]);
+                continue;
+            }
             let (u, t) = (under[i], target[i]);
-            let m = if weights_are_mask {
-                mask[i]
-            } else if mask[i] > 0.0 {
-                1.0
+            let m = if weights_are_mask { mask[i] } else { 1.0 };
+            // A mixing brush's blend mode: its paint over what's there.
+            let t = if paint_blend == crate::canvas::blend_modes::LayerBlend::Normal {
+                t
             } else {
-                0.0
+                let rgba = |v: [f32; 4]| {
+                    eframe::egui::Rgba::from_rgba_premultiplied(v[0], v[1], v[2], v[3])
+                };
+                crate::canvas::blend_modes::composite(paint_blend, rgba(t), rgba(u), 0.0).to_array()
             };
             let mut v = [0.0; 4];
             for c in 0..4 {
                 v[c] = u[c] + (t[c] - u[c]) * m;
             }
             let mut out = to_c(v);
-            let before = to_c(u);
+            let before = stored[i];
             if alpha_lock {
                 out = crate::canvas::blend::with_alpha_of(out, before.a());
             }
@@ -1081,6 +1174,118 @@ mod mix_tests {
             .map_or(Color32::TRANSPARENT, |t| {
                 t[((y % 64) * 64 + x % 64) as usize]
             })
+    }
+
+    /// Every pixel of layer 1.
+    fn layer(app: &crate::PainterApp) -> Vec<Color32> {
+        (0..64)
+            .flat_map(|y| (0..128).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                app.canvas
+                    .get_layer_tile_data(1, x / 64, 0)
+                    .map_or(Color32::TRANSPARENT, |t| t[(y * 64 + x % 64) as usize])
+            })
+            .collect()
+    }
+
+    /// A layer of every colour and many alphas (premultiplied, as stored).
+    fn varied(app: &mut crate::PainterApp) {
+        for tx in 0..2 {
+            let tile = (0..64 * 64)
+                .map(|i| {
+                    let (x, y) = (tx * 64 + i % 64, i / 64);
+                    Color32::from_rgba_unmultiplied(
+                        (x * 2) as u8,
+                        (y * 4) as u8,
+                        ((x * 7 + y * 3) % 256) as u8,
+                        (40 + (x + y * 3) % 216) as u8,
+                    )
+                })
+                .collect();
+            app.canvas_mut().set_layer_tile_data(1, tx, 0, tile);
+        }
+    }
+
+    #[test]
+    fn smudging_leaves_every_pixel_outside_the_brush_exactly_as_it_was() {
+        for color_rate in [0.0, 0.5] {
+            let mut app = app(None);
+            varied(&mut app);
+            app.workspace.blend.color_rate = color_rate;
+            let before = layer(&app);
+            drag(&mut app);
+            let after = layer(&app);
+            // The stroke: y = 32, x 10..110, a 20 px brush.
+            let mut inside = 0;
+            for (i, (b, a)) in before.iter().zip(&after).enumerate() {
+                let (x, y) = ((i % 128) as f32 + 0.5, (i / 128) as f32 + 0.5);
+                let dx = (x - x.clamp(10.0, 110.0)).abs();
+                let d = (dx * dx + (y - 32.0) * (y - 32.0)).sqrt();
+                if d > 11.0 {
+                    assert_eq!(a, b, "({x}, {y}) is outside the brush ({color_rate})");
+                } else if a != b {
+                    inside += 1;
+                }
+            }
+            assert!(inside > 500, "smudged: {inside} ({color_rate})");
+        }
+    }
+
+    #[test]
+    fn a_mixing_brush_paints_what_the_smudge_tool_does() {
+        use crate::brush_engine::brush_options::Mixing;
+        let red = Color32::from_rgb(230, 30, 20);
+        let mut tool = app(Some(red));
+        tool.workspace.blend.smudge_length = 0.6;
+        tool.workspace.blend.color_rate = 0.3;
+        drag(&mut tool);
+        let mut brush = app(Some(red));
+        brush.active_tool = crate::app::tools::Tool::Brush;
+        brush.brush_state.brush.mixing = Some(Mixing {
+            smudge_length: 0.6,
+            color_rate: 0.3,
+            ..Default::default()
+        });
+        brush.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
+        for i in 1..=20 {
+            brush.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), 1.0);
+        }
+        brush.finish_stroke();
+        assert!(
+            layer(&tool) == layer(&brush),
+            "the same engine, the same pixels"
+        );
+    }
+
+    #[test]
+    fn a_parallel_mixing_brush_follows_the_formula() {
+        use crate::brush_engine::brush_options::Mixing;
+        use crate::canvas::blend_modes::{LayerBlend, composite};
+        let grey = Color32::from_rgb(160, 120, 200);
+        let mut app = app(Some(grey));
+        app.active_tool = crate::app::tools::Tool::Brush;
+        // All brush colour, nothing carried: each dab is the colour,
+        // blended by Parallel over what's there.
+        app.brush_state.brush.mixing = Some(Mixing {
+            smudge_length: 0.0,
+            color_rate: 1.0,
+            ..Default::default()
+        });
+        app.brush_state.brush.paint_blend = LayerBlend::Parallel;
+        let paint = app.brush_state.brush.brush_options.color;
+        app.start_stroke_with_pressure(Vec2::new(60.0, 32.0), 1.0);
+        app.finish_stroke();
+        let got = pixel(&app, 60);
+        let want = crate::canvas::blend::rgba_to_color32_fast(composite(
+            LayerBlend::Parallel,
+            crate::canvas::blend::color32_to_linear(paint),
+            crate::canvas::blend::color32_to_linear(grey),
+            0.0,
+        ));
+        for (g, w) in got.to_array().iter().zip(want.to_array()) {
+            assert!(g.abs_diff(w) <= 2, "{got:?} vs {want:?}");
+        }
+        assert!(got != grey && got != paint, "a mix of both: {got:?}");
     }
 
     #[test]

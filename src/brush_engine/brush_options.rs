@@ -69,6 +69,35 @@ pub enum Placement {
     Ribbon,
 }
 
+/// Colour mixing, like Krita's Colour Smudge engine: each dab picks up the
+/// paint under it, carries it along and mixes in the brush colour, so the
+/// brush lays down its colour blended with whatever it drags.
+#[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Mixing {
+    /// How much of the carried paint stays with the brush each dab
+    /// (0 = barely drags, 1 = smears a colour a long way).
+    pub smudge_length: f32,
+    /// How much brush colour is mixed into the carried paint per brush
+    /// width travelled (0 = a blender: no colour of its own).
+    pub color_rate: f32,
+    /// Pen pressure scales the smudge length.
+    pub pressure_length: bool,
+    /// Pen pressure scales the colour rate.
+    pub pressure_color: bool,
+}
+
+impl Default for Mixing {
+    fn default() -> Self {
+        Self {
+            smudge_length: 0.8,
+            color_rate: 0.5,
+            pressure_length: false,
+            pressure_color: false,
+        }
+    }
+}
+
 /// Blending strategy for how source color affects the destination.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
@@ -117,8 +146,10 @@ pub struct BrushOptions {
     pub pressure_opacity: bool,
     /// Pen pressure scales the flow.
     pub pressure_flow: bool,
-    /// How pressure maps to each of size, opacity and flow (`None`:
-    /// straight through).
+    /// Pen pressure scales the spacing: lighter pressure, closer dabs.
+    pub pressure_spacing: bool,
+    /// How pressure maps to each of size, opacity, flow and spacing
+    /// (`None`: straight through).
     pub pressure_curves: PressureCurves,
 }
 
@@ -129,6 +160,7 @@ pub struct PressureCurves {
     pub size: Option<SoftnessCurve>,
     pub opacity: Option<SoftnessCurve>,
     pub flow: Option<SoftnessCurve>,
+    pub spacing: Option<SoftnessCurve>,
 }
 
 impl PressureCurves {
@@ -147,6 +179,22 @@ impl PressureCurves {
 
     pub fn flow(&self, p: f32) -> f32 {
         Self::map(&self.flow, p)
+    }
+
+    pub fn spacing(&self, p: f32) -> f32 {
+        Self::map(&self.spacing, p)
+    }
+}
+
+impl BrushOptions {
+    /// The spacing's share at pressure `p` (1 without pressure spacing);
+    /// never so small the dabs pile up.
+    pub fn spacing_factor(&self, p: f32) -> f32 {
+        if self.pressure_spacing {
+            self.pressure_curves.spacing(p).max(0.05)
+        } else {
+            1.0
+        }
     }
 }
 
@@ -203,6 +251,7 @@ impl BrushOptions {
             pressure_min_size: 0.0,
             pressure_opacity: false,
             pressure_flow: false,
+            pressure_spacing: false,
             pressure_curves: PressureCurves::default(),
         }
     }

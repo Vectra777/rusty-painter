@@ -21,6 +21,8 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Tip squash (ratio) and fixed angle | ✅ | ✅ | ✅ | ✅ |
 | Tip turns with the stroke direction | ✅ | ✅ | ✅ start/end angle | ✅ |
 | Random tip rotation | ✅ | ✅ | ✅ | ✅ |
+| Random tip flip (mirror) | ✅ | ✅ | ⚠️ | ✅ left-right, top-bottom |
+| Hard edges from a soft tip (sharpness threshold) | ✅ | ⚠️ | ❌ | ✅ |
 | Aliased pixel brush | ✅ | ✅ | ✅ | ✅ |
 | Pixel-perfect lines | ❌ | ❌ | ❌ | ✅ |
 
@@ -29,9 +31,9 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Pressure → size / opacity / flow | ✅ | ✅ | ✅ | ✅ |
-| Own pressure curve per setting | ✅ | ✅ | ⚠️ | ✅ size, opacity, flow |
+| Own pressure curve per setting | ✅ | ✅ | ⚠️ | ✅ size, opacity, flow, spacing |
 | Any input → any setting, with a curve | ✅ sensors | ⚠️ fixed pairs | ❌ | ✅ 9 inputs → size, opacity, angle, squash, hue, saturation, value, texture strength, hardness, scatter, secondary colour mix |
-| Pen tilt / barrel rotation | ✅ | ✅ | ⚠️ barrel roll (Apple Pencil Pro) | ✅ tilt → size, opacity, tip angle (no barrel roll) |
+| Pen tilt / barrel rotation | ✅ | ✅ | ⚠️ barrel roll (Apple Pencil Pro) | ✅ tilt → size, opacity, tip angle; barrel rotation and an airbrush's wheel turn the tip or drive any setting (where the tablet reports them: Wayland, X11) |
 | Stroke speed | ✅ | ✅ | ✅ Dynamic tab | ✅ size and opacity |
 | Taper at the start / end of a stroke | ✅ fade | ✅ | ✅ Fade tab | ✅ size and/or opacity, no lag |
 | Random size / opacity | ✅ | ✅ | ✅ Jitter tab | ✅ |
@@ -44,9 +46,9 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Build-up vs wash | ✅ | ✅ | ⚠️ "Constant Opacity" | ✅ |
-| Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ✅ all 27 layer modes |
-| Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ✅ Smudge with a colour rate |
-| Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height; turned, moving with the stroke, offset each stroke, or on each dab |
+| Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ✅ all 28 layer modes (with Krita's Parallel) |
+| Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ✅ any brush (Colour mixing: smudge length, colour rate, by pressure), or the Smudge tool with a colour rate |
+| Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height, colour dodge, hard mix; turned, moving with the stroke, offset each stroke, or on each dab |
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ✅ multiply, darken, subtract, height |
 | Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ✅ when the pen lifts |
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
@@ -147,7 +149,8 @@ below.
   Clip Studio (`.sut`). Tips always come across; the settings that have a
   counterpart here do (size, spacing, hardness, shape, angle, opacity,
   flow, pressure and its curves, scatter; Krita's textures and masking
-  brush), and a report lists what didn't. Tested on Krita's own presets
+  brush, colour smudge, rotation, mirror, pressure spacing, sharpness and
+  blend mode), and a report lists what didn't. Tested on Krita's own presets
   and bundles. ibisPaint brushes can't be imported: they're only shared as
   QR codes through the app, in an undocumented format.
 
@@ -183,6 +186,17 @@ below.
   star on each tile), search by name and tag, the last 8 brushes used, and
   a pop-up palette of favourite brushes around the pointer (hold `K`, or
   right-click the canvas).
+
+- [x] **Krita's missing brush options:** colour mixing in any brush
+  (Brush → Colour mixing: smudge length and colour rate, each by pressure
+  if you like; a mixing brush paints through the Smudge tool's engine, with
+  its own tip and blend mode), tips flipped at random, pressure → spacing,
+  hard edges (a sharpness threshold), the tip following the pen's barrel
+  rotation and Barrel rotation / Airbrush wheel inputs, colour dodge and
+  hard mix textures, and the Parallel blend mode for layers and brushes.
+  Not yet: a mixing brush's tip doesn't turn, flip or take a texture; of
+  the brush's settings it uses size, hardness, spacing, opacity, flow and
+  pressure.
 
 ### Next
 
@@ -243,6 +257,21 @@ below.
   instructions they did before (plain, airbrush, paper texture), counted
   the same way. A turned grain that moves with the stroke costs about 13%
   more than the pinned grain on the same stroke.
+
+- **After the Krita options round** (colour mixing, flips, pressure
+  spacing, hard edges, barrel rotation, new texture modes, Parallel): the
+  fixed workloads, counted the same way, run at or under the instructions
+  they did before: plain stroke −0.02%, airbrush −0.02%, paper texture
+  −0.55%, placed grain −0.25% (the per-row extras now sit behind one test,
+  and the texture mode is chosen once per row rather than per pixel). The
+  new features on the 60-sample stroke (`feature_stroke_60_samples`):
+  random flip on an image tip 13 ms (an image tip alone is about 14 ms),
+  pressure spacing 4.7 ms, hard edges 3.1 ms, colour dodge and hard mix
+  textures 6.0 and 6.3 ms (pinned paper 5.5 ms), Parallel blend 9.3 ms.
+  The smudge engine now leaves pixels the tip doesn't reach alone (no
+  round trip through linear light): a 60-sample, 80 px smudge stroke went
+  from 48.8 to 32.4 ms (`app_bench`), a mixing brush to 32.7 ms, with an
+  image tip 36.3 ms, with Parallel 52.7 ms.
 
 ## Sources
 

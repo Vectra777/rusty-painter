@@ -95,6 +95,16 @@ fn handle_pen(
             let direction = crate::brush_engine::dynamics::direction(raw, to).unwrap_or(0.0);
             crate::brush_engine::dynamics::PenTilt { lean, direction }
         });
+        // The barrel's turn, through the view like the lean (a screen
+        // angle, y down, mapped to the canvas).
+        app.viewport.touch.pen_barrel = crate::brush_engine::dynamics::PenBarrel {
+            rotation: sample.roll.map(|r| {
+                let tip = pos + egui::vec2(r.cos(), -r.sin()) * 20.0;
+                let to = app.screen_to_canvas_raw(tip, placement.origin, placement.center);
+                crate::brush_engine::dynamics::direction(raw, to).unwrap_or(0.0)
+            }),
+            wheel: sample.wheel,
+        };
         app.viewport.cursor_canvas = inside.then_some(clamped);
         let touch = &mut app.viewport.touch;
         match sample.phase {
@@ -563,6 +573,7 @@ fn handle_tool_move(
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2) {
     // Mouse and finger input paint at full pressure (the pen has its own path).
     app.viewport.touch.pen_tilt = None;
+    app.viewport.touch.pen_barrel = Default::default();
     if app.brush_state.is_drawing {
         app.add_stroke_point(pos, 1.0);
     } else if app.viewport.is_primary_down && !app.viewport.is_panning && response.hovered() {

@@ -246,6 +246,13 @@ fn separable(mode: u32, b: f32, s: f32) -> f32 {
             }
             return min(b / s, 1.0);
         }
+        case 27u: {
+            var inv_b = 1.0;
+            if (b > 0.0) { inv_b = 1.0 / b; }
+            var inv_s = 1.0;
+            if (s > 0.0) { inv_s = 1.0 / s; }
+            return clamp(2.0 / (inv_b + inv_s), 0.0, 1.0);
+        }
         default: { return s; }
     }
 }
@@ -382,6 +389,7 @@ pub fn blend_code(mode: LayerBlend) -> u32 {
         LayerBlend::Saturation => 24,
         LayerBlend::Color => 25,
         LayerBlend::Luminosity => 26,
+        LayerBlend::Parallel => 27,
     }
 }
 
@@ -1250,7 +1258,7 @@ mod tests {
             .map(|&m| blend_code(m))
             .collect();
         codes.sort_unstable();
-        assert_eq!(codes, (0..27).collect::<Vec<_>>());
+        assert_eq!(codes, (0..28).collect::<Vec<_>>());
     }
 
     #[test]

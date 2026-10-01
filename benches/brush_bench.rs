@@ -805,6 +805,51 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.texture = Some(t);
         b
     }));
+    // Krita's options: an image tip flipped at random, spacing by
+    // pressure, hard edges on a soft tip, the new texture modes, and the
+    // Parallel blend mode.
+    cases.push(("random_flip", {
+        use rusty_painter::brush_engine::brush_options::PixelBrushShape;
+        let mut b = base();
+        b.brush_options.pixel_shape = PixelBrushShape::Custom(tip("Spatter"));
+        b.dynamics.tip.random_flip_x = true;
+        b.dynamics.tip.random_flip_y = true;
+        b
+    }));
+    cases.push(("pressure_spacing", {
+        let mut b = base();
+        b.brush_options.pressure_spacing = true;
+        b
+    }));
+    cases.push(("hard_edges", {
+        let mut b = base();
+        b.brush_options.hardness = 0.0;
+        b.sharpness = 0.4;
+        b
+    }));
+    for (name, mode) in [
+        (
+            "texture_colour_dodge",
+            rusty_painter::brush_engine::texture::TextureMode::ColorDodge,
+        ),
+        (
+            "texture_hard_mix",
+            rusty_painter::brush_engine::texture::TextureMode::HardMix,
+        ),
+    ] {
+        cases.push((name, {
+            let mut b = base();
+            let mut t = paper();
+            t.mode = mode;
+            b.texture = Some(t);
+            b
+        }));
+    }
+    cases.push(("parallel_blend", {
+        let mut b = base();
+        b.paint_blend = rusty_painter::canvas::blend_modes::LayerBlend::Parallel;
+        b
+    }));
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
         group.bench_function(name, |b| {

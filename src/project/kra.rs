@@ -417,8 +417,8 @@ pub(crate) fn lzf_decompress(src: &[u8], expected: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Krita's composite op names.
-fn blend(op: &str) -> LayerBlend {
+/// Krita's composite op names (layers' and brushes').
+pub(crate) fn blend(op: &str) -> LayerBlend {
     use LayerBlend::*;
     match op {
         "dissolve" => Dissolve,
@@ -443,6 +443,7 @@ fn blend(op: &str) -> LayerBlend {
         "exclusion" => Exclusion,
         "subtract" => Subtract,
         "divide" => Divide,
+        "parallel" => Parallel,
         "hue" => Hue,
         "saturation" => Saturation,
         "color" => Color,

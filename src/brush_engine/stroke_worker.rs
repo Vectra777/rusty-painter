@@ -8,7 +8,7 @@
 //! stroke and [`StrokeWorker::wait_idle`], which releases the worker's `Arc`.
 
 use crate::brush_engine::brush::{Brush, StabilizerAlgorithm};
-use crate::brush_engine::dynamics::PenTilt;
+use crate::brush_engine::dynamics::{PenBarrel, PenTilt};
 use crate::brush_engine::stroke::{StrokeContext, StrokeState, StrokeTiles};
 use crate::brush_engine::symmetry::{Copy2, Symmetry};
 use crate::canvas::Canvas;
@@ -58,6 +58,7 @@ enum Job {
         pressure: f32,
         time: f64,
         tilt: Option<crate::brush_engine::dynamics::PenTilt>,
+        barrel: PenBarrel,
     },
     End,
 }
@@ -175,15 +176,16 @@ impl StrokeWorker {
     }
 
     pub fn sample(&self, pos: Vec2, pressure: f32) {
-        self.sample_tilted(pos, pressure, None);
+        self.sample_tilted(pos, pressure, None, PenBarrel::default());
     }
 
-    /// [`Self::sample`] with how the pen leans.
+    /// [`Self::sample`] with how the pen leans and turns.
     pub fn sample_tilted(
         &self,
         pos: Vec2,
         pressure: f32,
         tilt: Option<crate::brush_engine::dynamics::PenTilt>,
+        barrel: PenBarrel,
     ) {
         let time = self.epoch.elapsed().as_secs_f64();
         self.send(Job::Sample {
@@ -191,6 +193,7 @@ impl StrokeWorker {
             pressure,
             time,
             tilt,
+            barrel,
         });
     }
 
@@ -287,6 +290,7 @@ struct Sample {
     pressure: f32,
     time: f64,
     tilt: Option<PenTilt>,
+    barrel: PenBarrel,
 }
 
 /// What a stroke was given, in order, for post-correction.
@@ -329,6 +333,7 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
             pressure,
             time,
             tilt,
+            barrel,
         } => {
             let Some(session) = session else {
                 return;
@@ -338,6 +343,7 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
                 pressure,
                 time,
                 tilt,
+                barrel,
             };
             session.last_sample = Some(sample);
             if let Some((_, events)) = session.correction.as_mut() {
@@ -345,6 +351,7 @@ fn run_job(session: &mut Option<Session>, job: Job, shared: &Shared) {
             }
             session.paint(shared, |stroke, brush, context| {
                 stroke.tilt = tilt;
+                stroke.barrel = barrel;
                 stroke.add_sample(brush, pos, pressure, Some(time), context);
             });
         }
@@ -397,6 +404,7 @@ impl Session {
         self.paint(shared, |stroke, brush, context| {
             brush.stabilizer_algorithm = StabilizerAlgorithm::None;
             stroke.tilt = last.tilt;
+            stroke.barrel = last.barrel;
             stroke.add_sample(brush, last.pos, last.pressure, Some(last.time), context);
             brush.stabilizer_algorithm = StabilizerAlgorithm::String;
         });
@@ -435,6 +443,7 @@ impl Session {
                     Event::Sample(s) => {
                         let pos = smoothed.next().unwrap_or(s.pos);
                         stroke.tilt = s.tilt;
+                        stroke.barrel = s.barrel;
                         stroke.add_sample(brush, pos, s.pressure, Some(s.time), context);
                     }
                     Event::Airbrush(now) => stroke.airbrush(brush, now, context),

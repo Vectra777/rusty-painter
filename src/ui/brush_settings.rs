@@ -480,6 +480,18 @@ fn brush_settings_contents(
              still (0: off).",
         )
         .changed();
+        changed |= slider_row(
+            ui,
+            "Hard edges",
+            crate::ui::widgets::reset(&mut brush.sharpness, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
+        )
+        .on_hover_text(
+            "Cut each dab's faint edge at this share of its strength and paint the rest \
+             solid: crisp, aliased edges from any tip (0: off).",
+        )
+        .changed();
         property_row(ui, "Blend", |ui| {
             use crate::canvas::blend_modes::LayerBlend;
             egui::ComboBox::from_id_salt("brush_paint_blend")
@@ -508,6 +520,48 @@ fn brush_settings_contents(
     changed |= inputs_section(ui, &mut brush.inputs);
     changed |= texture_section(ui, &mut brush.texture, textures);
     changed |= dual_section(ui, &mut brush.dual, loaded_tips);
+    section(ui, "Colour mixing", false, |ui| {
+        let mut on = brush.mixing.is_some();
+        if ui
+            .checkbox(&mut on, "Mix with the paint under the brush")
+            .on_hover_text(
+                "Like Krita's Colour Smudge: the brush picks up the paint it passes over, \
+                 carries it along and mixes in its own colour (the eraser doesn't mix).",
+            )
+            .changed()
+        {
+            brush.mixing = on.then(Default::default);
+            changed = true;
+        }
+        let Some(m) = brush.mixing.as_mut() else {
+            return;
+        };
+        changed |= slider_row(
+            ui,
+            "Smudge length",
+            crate::ui::widgets::reset(&mut m.smudge_length, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
+        )
+        .on_hover_text("How far the brush drags the paint it picks up.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Colour rate",
+            crate::ui::widgets::reset(&mut m.color_rate, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
+        )
+        .on_hover_text(
+            "How much brush colour goes in per brush width travelled (0: a blender with no \
+             colour of its own).",
+        )
+        .changed();
+        property_row(ui, "Pressure", |ui| {
+            changed |= ui.toggle_value(&mut m.pressure_length, "Length").changed();
+            changed |= ui.toggle_value(&mut m.pressure_color, "Colour").changed();
+        });
+    });
     section(ui, "Watercolour", false, |ui| {
         changed |= slider_row(
             ui,
@@ -543,6 +597,10 @@ fn brush_settings_contents(
                 .toggle_value(&mut o.pressure_opacity, "Opacity")
                 .changed();
             changed |= ui.toggle_value(&mut o.pressure_flow, "Flow").changed();
+            changed |= ui
+                .toggle_value(&mut o.pressure_spacing, "Spacing")
+                .on_hover_text("Lighter pressure places the dabs closer together.")
+                .changed();
         });
         if o.pressure_size {
             mask_changed |= slider_row(
@@ -580,6 +638,7 @@ fn brush_settings_contents(
             (o.pressure_size, "Size", &mut curves.size),
             (o.pressure_opacity, "Opacity", &mut curves.opacity),
             (o.pressure_flow, "Flow", &mut curves.flow),
+            (o.pressure_spacing, "Spacing", &mut curves.spacing),
         ] {
             if on {
                 changed |= pressure_curve_row(ui, name, curve);
@@ -774,6 +833,23 @@ fn dynamics_sections(
             .checkbox(&mut t.follow_tilt, "Follow pen tilt")
             .on_hover_text("Turn the tip the way the pen leans (tablets that report tilt).")
             .changed();
+        changed |= ui
+            .checkbox(&mut t.follow_barrel, "Follow barrel rotation")
+            .on_hover_text(
+                "Turn the tip as the pen turns about its own axis (pens that report it, \
+                 like Wacom's Art Pen).",
+            )
+            .changed();
+        property_row(ui, "Flip at random", |ui| {
+            changed |= ui
+                .toggle_value(&mut t.random_flip_x, "↔")
+                .on_hover_text("Mirror about half the dabs left to right.")
+                .changed();
+            changed |= ui
+                .toggle_value(&mut t.random_flip_y, "↕")
+                .on_hover_text("Mirror about half the dabs top to bottom.")
+                .changed();
+        });
     });
     section(ui, "Taper & speed", false, |ui| {
         let t = &mut d.taper;
@@ -1307,9 +1383,13 @@ fn texture_section(
             return;
         };
         property_row(ui, "Mode", |ui| {
-            let modes: Vec<(TextureMode, &str)> =
-                TextureMode::ALL.iter().map(|&m| (m, m.label())).collect();
-            changed |= segmented(ui, &mut t.mode, &modes, false);
+            egui::ComboBox::from_id_salt("brush_texture_mode")
+                .selected_text(t.mode.label())
+                .show_ui(ui, |ui| {
+                    for m in TextureMode::ALL {
+                        changed |= ui.selectable_value(&mut t.mode, m, m.label()).changed();
+                    }
+                });
         });
         changed |= slider_row(
             ui,
@@ -1369,6 +1449,10 @@ fn texture_section(
                 TextureMode::Subtract => "Low spots lose paint first; heavy strokes fill in.",
                 TextureMode::Height => {
                     "Light pressure only catches the peaks; press harder to fill the valleys."
+                }
+                TextureMode::ColorDodge => "The peaks strengthen the paint: grainy, bright edges.",
+                TextureMode::HardMix => {
+                    "Paint snaps to full or nothing along the grain: a crisp, broken edge."
                 }
             })
             .small()

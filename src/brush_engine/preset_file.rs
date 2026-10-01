@@ -190,6 +190,7 @@ struct StoredBrush {
     pressure_min_size: f32,
     pressure_opacity: bool,
     pressure_flow: bool,
+    pressure_spacing: bool,
     pressure_curves: PressureCurves,
     pixel_perfect: bool,
     anti_aliasing: bool,
@@ -212,6 +213,8 @@ struct StoredBrush {
     bristles: crate::brush_engine::bristle::Bristles,
     sketch: crate::brush_engine::sketch::Sketch,
     hatching: crate::brush_engine::hatching::Hatching,
+    sharpness: f32,
+    mixing: Option<crate::brush_engine::brush_options::Mixing>,
 }
 
 impl Default for StoredBrush {
@@ -271,6 +274,7 @@ impl StoredBrush {
             pressure_min_size: o.pressure_min_size,
             pressure_opacity: o.pressure_opacity,
             pressure_flow: o.pressure_flow,
+            pressure_spacing: o.pressure_spacing,
             pressure_curves: o.pressure_curves.clone(),
             pixel_perfect: b.pixel_perfect,
             anti_aliasing: b.anti_aliasing,
@@ -298,6 +302,8 @@ impl StoredBrush {
             bristles: b.bristles,
             sketch: b.sketch,
             hatching: b.hatching,
+            sharpness: b.sharpness,
+            mixing: b.mixing,
         }
     }
 
@@ -331,6 +337,7 @@ impl StoredBrush {
         o.pressure_min_size = self.pressure_min_size;
         o.pressure_opacity = self.pressure_opacity;
         o.pressure_flow = self.pressure_flow;
+        o.pressure_spacing = self.pressure_spacing;
         o.pressure_curves = self.pressure_curves;
         b.pixel_perfect = self.pixel_perfect;
         b.anti_aliasing = self.anti_aliasing;
@@ -365,6 +372,8 @@ impl StoredBrush {
         b.bristles = self.bristles;
         b.sketch = self.sketch;
         b.hatching = self.hatching;
+        b.sharpness = self.sharpness.clamp(0.0, 1.0);
+        b.mixing = self.mixing;
         Ok(b)
     }
 }
@@ -684,6 +693,37 @@ mod tests {
                 assert!(Arc::ptr_eq(&x.pattern, &y.pattern), "{}", a.name);
             }
         }
+    }
+
+    #[test]
+    fn mixing_sharpness_flips_and_pressure_spacing_survive() {
+        use crate::brush_engine::brush_options::Mixing;
+        let mut brush = Brush::new(30.0, 50.0, Color32::BLACK, 12.0);
+        let mixing = Mixing {
+            smudge_length: 0.4,
+            color_rate: 0.7,
+            pressure_length: true,
+            pressure_color: false,
+        };
+        brush.mixing = Some(mixing);
+        brush.sharpness = 0.4;
+        brush.brush_options.pressure_spacing = true;
+        brush.dynamics.tip.random_flip_x = true;
+        brush.dynamics.tip.follow_barrel = true;
+        brush.paint_blend = LayerBlend::Parallel;
+        let preset = BrushPreset {
+            name: "Krita-like".into(),
+            brush,
+            file: None,
+        };
+        let back = decode(&encode(&[preset]).unwrap()).unwrap();
+        let b = &back[0].brush;
+        assert_eq!(b.mixing, Some(mixing));
+        assert_eq!(b.sharpness, 0.4);
+        assert!(b.brush_options.pressure_spacing);
+        assert!(b.dynamics.tip.random_flip_x && !b.dynamics.tip.random_flip_y);
+        assert!(b.dynamics.tip.follow_barrel);
+        assert_eq!(b.paint_blend, LayerBlend::Parallel);
     }
 
     #[test]

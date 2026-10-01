@@ -41,9 +41,19 @@ impl PainterApp {
         self.rasterise_text_for_stroke();
         self.rasterise_vector_for_stroke();
         self.mark_action();
-        if self.brush_state.brush.brush_options.blend_mode != BlendMode::Eraser {
+        let erasing = self.brush_state.brush.brush_options.blend_mode == BlendMode::Eraser;
+        if !erasing {
             let color = self.brush_state.brush.brush_options.color;
             self.brush_state.remember_color(color);
+        }
+        // Colour mixing paints through the Smudge tool's engine (it erases
+        // like any brush).
+        if self.brush_state.brush.mixing.is_some() && !erasing {
+            self.mixing_press(pos, pressure);
+            // A stroke is on, as far as the rest of the app goes (moves
+            // extend it, nothing autosaves meanwhile).
+            self.brush_state.is_drawing = self.mixing_stroke();
+            return;
         }
         let selection = self
             .selection_manager
@@ -89,13 +99,21 @@ impl PainterApp {
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;
-        self.stroke_worker
-            .sample_tilted(pos, pressure, self.viewport.touch.pen_tilt);
+        self.stroke_worker.sample_tilted(
+            pos,
+            pressure,
+            self.viewport.touch.pen_tilt,
+            self.viewport.touch.pen_barrel,
+        );
         self.viewport.touch.stroke_started = Some(std::time::Instant::now());
     }
 
     pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
         if self.vector_stroke_add(pos, pressure) {
+            return;
+        }
+        if self.mixing_stroke() {
+            self.blend_drag(pos, pressure);
             return;
         }
         if !self.brush_state.is_drawing {
@@ -107,8 +125,12 @@ impl PainterApp {
                 s.pen = pos;
                 s.tip = crate::brush_engine::stabilizer::pull_string(s.tip, pos, s.length);
             }
-            self.stroke_worker
-                .sample_tilted(pos, pressure, self.viewport.touch.pen_tilt);
+            self.stroke_worker.sample_tilted(
+                pos,
+                pressure,
+                self.viewport.touch.pen_tilt,
+                self.viewport.touch.pen_barrel,
+            );
         }
     }
 
@@ -117,6 +139,9 @@ impl PainterApp {
     pub(crate) fn finish_stroke(&mut self) {
         // (A vector line ends first, and says it's no longer drawing.)
         self.vector_stroke_end();
+        if self.mixing_stroke() {
+            self.blend_release();
+        }
         if self.brush_state.is_drawing {
             self.stroke_worker.end();
         }
@@ -230,6 +255,42 @@ mod tests {
         app.release_canvas();
         let c = app.canvas.get_layer_tile_data(1, 0, 0).unwrap()[32 * 64 + 50];
         assert!(c.r() > 200 && c.g() < 40, "the secondary colour: {c:?}");
+    }
+
+    #[test]
+    fn a_mixing_brush_smudges_its_colour_into_the_paint_and_undoes() {
+        use crate::brush_engine::brush_options::Mixing;
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        let red = Color32::from_rgb(230, 30, 20);
+        for tx in 0..2 {
+            app.canvas_mut()
+                .set_layer_tile_data(1, tx, 0, vec![red; 64 * 64]);
+        }
+        let brush = &mut app.brush_state.brush;
+        brush.brush_options.color = Color32::from_rgb(20, 40, 230);
+        brush.brush_options.diameter = 20.0;
+        brush.brush_options.hardness = 100.0;
+        brush.brush_options.pressure_size = false;
+        brush.mixing = Some(Mixing {
+            color_rate: 0.3,
+            ..Default::default()
+        });
+        app.release_canvas();
+        let before = app.layer_state.history.push_count();
+        app.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
+        assert!(app.brush_state.is_drawing, "a stroke is on");
+        for i in 1..=20 {
+            app.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), 1.0);
+        }
+        app.finish_stroke();
+        assert!(!app.brush_state.is_drawing);
+        let c = app.canvas.get_layer_tile_data(1, 0, 0).unwrap()[32 * 64 + 60];
+        assert!(c.r() > 40 && c.b() > 40, "red and blue mixed: {c:?}");
+        assert_eq!(app.layer_state.history.push_count(), before + 1, "one step");
+        app.apply_history(false);
+        let c = app.canvas.get_layer_tile_data(1, 0, 0).unwrap()[32 * 64 + 60];
+        assert_eq!(c, red, "undo restores");
     }
 
     /// Layer 1's pixels (a tile never painted counts as transparent).

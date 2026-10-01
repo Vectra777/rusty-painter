@@ -91,6 +91,8 @@ fn blend_key(blend: LayerBlend) -> &'static [u8; 4] {
         Saturation => b"sat ",
         Color => b"colr",
         Luminosity => b"lum ",
+        // Photoshop has no Parallel.
+        Parallel => b"norm",
     }
 }
 

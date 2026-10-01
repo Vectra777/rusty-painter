@@ -55,6 +55,8 @@ pub struct TouchState {
     /// How the pen leans at the latest sample (canvas terms); `None` for
     /// the mouse, fingers and tablets without tilt.
     pub(crate) pen_tilt: Option<crate::brush_engine::dynamics::PenTilt>,
+    /// Its barrel rotation and wheel, in canvas terms.
+    pub(crate) pen_barrel: crate::brush_engine::dynamics::PenBarrel,
     /// The current pen contact started on the canvas.
     pub(crate) pen_on_canvas: bool,
     /// Where the active layer's history stood when the current stroke began
