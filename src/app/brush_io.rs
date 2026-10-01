@@ -16,7 +16,11 @@ const MAX_TIPS_PER_SET: usize = 64;
 impl PainterApp {
     pub fn load_brush_tips(&mut self, ctx: egui::Context) {
         self.ensure_brushes_directory_exists();
-        self.brush_state.loaded_brush_tips.clear();
+        // Their textures may be on screen this frame (see `retired_textures`).
+        let old = std::mem::take(&mut self.brush_state.loaded_brush_tips);
+        self.workspace
+            .retired_textures
+            .extend(old.into_iter().filter_map(|t| t.texture));
         self.scan_and_load_brush_images(ctx.clone());
         self.sort_loaded_brushes();
         // The built-in tips and sets first, then the folder's.
@@ -383,6 +387,16 @@ impl PainterApp {
         names.iter().any(|n| n == name)
     }
 
+    /// Drop a preset's preview, to be drawn again. Kept until next frame:
+    /// the presets window may have drawn it this one, and egui-wgpu fails
+    /// the frame's submit on a texture freed meanwhile (see
+    /// `retired_textures`).
+    fn forget_preset_preview(&mut self, name: &str) {
+        if let Some(texture) = self.brush_state.preset_previews.remove(name) {
+            self.workspace.retired_textures.push(texture);
+        }
+    }
+
     /// Give preset `index` back the settings it came with.
     pub(crate) fn reset_preset(&mut self, index: usize) {
         let Some(name) = self.brush_state.presets.get(index).map(|p| p.name.clone()) else {
@@ -393,7 +407,7 @@ impl PainterApp {
             return;
         };
         self.brush_state.presets[index].brush = default.brush;
-        self.brush_state.preset_previews.remove(&name);
+        self.forget_preset_preview(&name);
         self.save_preset(index);
         if self.brush_state.active_preset.as_deref() == Some(name.as_str()) {
             self.apply_preset(index);
@@ -455,9 +469,9 @@ impl PainterApp {
         if preset_file::same_settings(&brush, stored) {
             return;
         }
-        let bs = &mut self.brush_state;
-        bs.preset_previews.remove(&bs.presets[index].name);
-        bs.presets[index].brush = brush;
+        let name = self.brush_state.presets[index].name.clone();
+        self.forget_preset_preview(&name);
+        self.brush_state.presets[index].brush = brush;
         self.save_preset(index);
     }
 
@@ -477,7 +491,7 @@ impl PainterApp {
             return;
         }
         let preset = self.brush_state.presets.remove(index);
-        self.brush_state.preset_previews.remove(&preset.name);
+        self.forget_preset_preview(&preset.name);
         self.edit_library(|lib| lib.forget(&preset.name));
         for active in [
             &mut self.brush_state.active_preset,
@@ -690,6 +704,33 @@ mod tests {
         );
         assert_eq!(parse_hex("FF8000"), None);
         assert_eq!(parse_hex("#GG0000"), None);
+    }
+
+    #[test]
+    fn an_edited_preset_keeps_its_old_preview_until_the_next_frame() {
+        use crate::canvas::Canvas;
+        let dir = std::env::temp_dir().join(format!("rp-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.brush_state.brushes_path = dir.join("brushes");
+        app.brush_state.presets = PainterApp::default_brush_presets();
+        let preset = app.brush_state.presets[0].clone();
+        app.brush_state.active_preset = Some(preset.name.clone());
+        app.brush_state.brush = preset.brush.clone();
+        // Its preview, drawn by the presets window this frame.
+        let ctx = egui::Context::default();
+        let image = egui::ColorImage::new([4, 4], Color32::RED);
+        let texture = ctx.load_texture("preset_preview", image, TextureOptions::LINEAR);
+        app.brush_state
+            .preset_previews
+            .insert(preset.name.clone(), texture);
+        // The brush is changed: the preset takes the change.
+        app.brush_state.brush.brush_options.diameter += 7.0;
+        app.save_active_preset(false);
+        assert!(!app.brush_state.preset_previews.contains_key(&preset.name));
+        // Freed this frame, egui-wgpu would fail the frame's submit.
+        assert_eq!(app.workspace.retired_textures.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
