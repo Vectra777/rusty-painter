@@ -2473,7 +2473,6 @@ mod tests {
 
     #[test]
     fn gaussian_tip_matches_soft_brush_formula() {
-        let brush = Brush::new(24.0, 20.0, Color32::BLACK, 25.0);
         let r = 12.0;
         let hardness = 0.2;
         let fade_start = 10.5;

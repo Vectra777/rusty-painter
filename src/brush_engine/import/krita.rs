@@ -534,6 +534,7 @@ const FALLOFF_SAMPLES: usize = 24;
 ///   (a fade of 0 is the softest, `1 - n`; 1 is hard);
 /// - `gauss`: `(erf(d + c) - erf(d - c)) / (2 erf c)`, its width set by
 ///   the fade (`KisGaussCircleMaskGenerator`).
+///
 /// The `soft` curve tip is read separately (its own curve).
 fn circle_falloff(id: &str, fh: f32, fv: f32) -> Option<Box<dyn Fn(f32) -> f32>> {
     match id {
