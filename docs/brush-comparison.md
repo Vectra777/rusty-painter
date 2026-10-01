@@ -198,6 +198,21 @@ below.
   the brush's settings it uses size, hardness, spacing, opacity, flow and
   pressure.
 
+- [x] **Painting as Krita does, from its source.** Wash mode is Krita's
+  alpha darken: each dab moves the stroke toward its own opacity and never
+  past it, flow setting how fast, the stroke's average opacity easing
+  pressure changes. Imported textures use Krita's own formula for every
+  alpha mode, classic or soft texturing (`KisMaskingBrushCompositeOp`).
+  Brushes imported from Krita's colour smudge use its engine (smearing or
+  dulling, smear alpha, smudge radius, colour rate squared, the brush's
+  blend mode on the paint colour); a mixing brush's tip turns and takes the
+  texture. Hard edges follow any input and keep a soft band. Inputs can
+  swing a setting both ways, and drive hard edges and darken. Tips can
+  paint by lightness or as a gradient map. The Krita importer reads each
+  option's sensors as Krita uses them (its curve on or off, the common
+  curve), and its hue, saturation, value, darken, gradient colour source,
+  sharpness sensors and lightness or gradient map tips.
+
 ### Next
 
 - [ ] Pressure calibration from a test stroke.
@@ -272,6 +287,13 @@ below.
   round trip through linear light): a 60-sample, 80 px smudge stroke went
   from 48.8 to 32.4 ms (`app_bench`), a mixing brush to 32.7 ms, with an
   image tip 36.3 ms, with Parallel 52.7 ms.
+
+- **After the Krita engine round** (alpha-darken wash, Krita texturing,
+  Krita colour smudge, input targets): the fixed workloads, against the
+  commit before it: paper texture +0.03%, placed grain +0.10%, plain and
+  airbrush strokes +0.27% (a branch per dab row between wash and build-up
+  coverage; splitting the painter in two to remove it cost more, the
+  stamping closure no longer inlining).
 
 ## Sources
 

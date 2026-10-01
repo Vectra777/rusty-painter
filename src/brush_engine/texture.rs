@@ -338,7 +338,7 @@ impl BrushTexture {
     #[inline]
     pub fn apply_row_scaled(&self, y: usize, x0: usize, alphas: &mut [f32], factor: f32) {
         if let Some(k) = self.krita {
-            return self.scaled_row(y, x0, alphas, factor, |a, s, t| k.combine(a, s, t));
+            return self.krita_row(y, x0, alphas, factor, k);
         }
         // The mode chosen once per row, not per pixel.
         match self.mode {
@@ -358,6 +358,13 @@ impl BrushTexture {
                 combine(TextureMode::HardMix, a, s, t)
             }),
         }
+    }
+
+    /// [`Self::apply_row_scaled`] by Krita's formula: out of line, so the
+    /// usual modes' row stays small enough to inline into the painter.
+    #[inline(never)]
+    fn krita_row(&self, y: usize, x0: usize, alphas: &mut [f32], factor: f32, k: KritaTexturing) {
+        self.scaled_row(y, x0, alphas, factor, |a, s, t| k.combine(a, s, t));
     }
 
     /// [`Self::apply_row_scaled`] combining by `combine(alpha, strength,
@@ -417,9 +424,7 @@ impl BrushTexture {
     ) {
         // The mode chosen once per row, not per pixel.
         if let Some(k) = self.krita {
-            return self.placed_row(y, x0, alphas, factor, grain, center, |a, s, t| {
-                k.combine(a, s, t)
-            });
+            return self.krita_placed_row(y, x0, alphas, factor, grain, center, k);
         }
         // The mode chosen once per row, each arm its own copy of the loop.
         macro_rules! row {
@@ -436,6 +441,25 @@ impl BrushTexture {
             TextureMode::ColorDodge => row!(TextureMode::ColorDodge),
             TextureMode::HardMix => row!(TextureMode::HardMix),
         }
+    }
+
+    /// [`Self::apply_row_placed`] by Krita's formula, out of line (see
+    /// [`Self::krita_row`]).
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn krita_placed_row(
+        &self,
+        y: usize,
+        x0: usize,
+        alphas: &mut [f32],
+        factor: f32,
+        grain: &StrokeGrain,
+        center: [f32; 2],
+        k: KritaTexturing,
+    ) {
+        self.placed_row(y, x0, alphas, factor, grain, center, |a, s, t| {
+            k.combine(a, s, t)
+        });
     }
 
     /// [`Self::apply_row_placed`] combining by `combine` (see

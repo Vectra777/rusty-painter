@@ -14,6 +14,11 @@
 - Krita's soft round tips keep their falloff curve (its airbrush was imported as a hard, solid tip).
 - Krita import fixes: wash painting mode, random (and other non-pressure) size, opacity, flow and squash, auto spacing, full-strength scatter, texture strength by pressure, texture brightness, contrast and random offset, picture tips always painting with their dark parts, image-stamp tips in their colours; options that don't come across are named in the import report.
 - Krita round tips keep Krita's exact falloff (default, Gaussian and soft circles; the default circle's fade was read backwards), sharpness reads Krita's threshold, textures keep Krita's grain levels and brightness, and Krita's subtract texturing takes paint from the light grain as Krita does. Softness curves are tabulated, so curve tips paint about 30% faster.
+- Wash mode paints as Krita's alpha darken: going over a light stroke at light pressure stays light.
+- Brushes from Krita paint with Krita's exact texture formulas and its colour smudge engine (smearing, dulling, smear alpha, smudge radius).
+- Hard edges can follow pressure (or any input) and keep a soft band; inputs can swing a setting both ways and drive darken.
+- Tips can paint by lightness (Krita's lightness map) or as a gradient map.
+- Krita import reads options as Krita does (curve on or off, the common curve) and brings hue, saturation, value, darken, gradient colour source and lightness or gradient map tips; the report names options plainly.
 - Krita presets bring their rotation (stroke direction, random, tilt, barrel, wheel), mirror, pressure spacing, sharpness, blend mode and these texture modes.
 
 ### Shader layers

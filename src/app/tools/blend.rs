@@ -190,6 +190,8 @@ struct SmudgeMix {
     blend: crate::canvas::blend_modes::LayerBlend,
     /// The stroke is the Brush tool's (ended with the brush's strokes).
     from_brush: bool,
+    /// Krita's colour smudge (an imported brush), instead of this app's.
+    krita: Option<crate::brush_engine::brush_options::KritaSmudge>,
 }
 
 /// A patch of carried paint (linear premultiplied, 0..1 per channel).
@@ -223,6 +225,10 @@ pub struct BlendStroke {
     coverage: HashMap<(i32, i32), Vec<f32>>,
     /// Smudge: how it mixes.
     mix: SmudgeMix,
+    /// Krita's smudge: where each mirror copy's last dab was (it reads the
+    /// layer there), and the stroke's random state (a turning tip).
+    krita_last: Vec<Option<Vec2>>,
+    random: u32,
 }
 
 /// Pixels are mixed as linear-light premultiplied colour, the same space
@@ -393,6 +399,7 @@ impl PainterApp {
             tip: None,
             blend: crate::canvas::blend_modes::LayerBlend::Normal,
             from_brush: false,
+            krita: None,
         };
         self.blend_begin(pos, pressure, None, mix);
     }
@@ -416,6 +423,7 @@ impl PainterApp {
             tip,
             blend: brush.paint_blend,
             from_brush: true,
+            krita: m.krita,
         };
         self.blend_begin(pos, pressure, Some(BlendKind::Smudge), mix);
     }
@@ -493,6 +501,8 @@ impl PainterApp {
             filtered: HashMap::new(),
             coverage: HashMap::new(),
             mix,
+            krita_last: Vec::new(),
+            random: 0x9e37_79b9,
         });
         self.blend_mirrored(pos, pressure);
     }
@@ -598,6 +608,15 @@ impl PainterApp {
 
     /// One dab at `center`, for mirror copy `copy`.
     fn blend_dab(&mut self, center: Vec2, pressure: f32, copy: usize) {
+        if self
+            .brush_state
+            .blend_stroke
+            .as_ref()
+            .is_some_and(|s| s.mix.krita.is_some())
+        {
+            self.krita_smudge_dab(center, pressure, copy);
+            return;
+        }
         let diameter = self.blend_diameter(pressure);
         let o = &self.brush_state.brush.brush_options;
         let r = diameter * 0.5;
@@ -902,6 +921,281 @@ impl PainterApp {
             return;
         }
         // Wrap-around: each piece of the patch where it lands on the canvas.
+        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let mut damage = Vec::new();
+        for (sx, dx, w) in wrap_pieces(x0, side, cw) {
+            for (sy, dy, h) in wrap_pieces(y0, side, ch) {
+                let piece: Vec<Color32> = (0..h)
+                    .flat_map(|row| {
+                        let start = (dy + row) * side + dx;
+                        result[start..start + w].iter().copied()
+                    })
+                    .collect();
+                self.canvas.write_layer_region(
+                    idx,
+                    (sx, sy, w, h),
+                    &piece,
+                    Some(&mut stroke.before),
+                );
+                damage.push([sx, sy, sx + w as i32, sy + h as i32]);
+            }
+        }
+        for rect in damage {
+            self.mark_rect_damage(rect);
+        }
+    }
+}
+
+impl PainterApp {
+    /// One dab of Krita's colour smudge (`KisColorSmudgeStrategyBase::
+    /// blendBrush`): the layer under the dab, with the layer where the last
+    /// dab was laid over it (smearing; in dulling mode one colour sampled
+    /// there), at the smudge rate × opacity; then the brush colour at the
+    /// colour rate² × opacity (by the brush's blend mode); the result put
+    /// down through the tip. The stroke's first dab only says where it is.
+    fn krita_smudge_dab(&mut self, center: Vec2, pressure: f32, copy: usize) {
+        use crate::brush_engine::brush_options::PixelBrushShape;
+        let diameter = self.blend_diameter(pressure);
+        let brush = &self.brush_state.brush;
+        let o = &brush.brush_options;
+        let r = diameter * 0.5;
+        let p = pressure.clamp(0.0, 1.0);
+        let mut opacity = o.flow / 100.0 * o.opacity;
+        if o.pressure_opacity {
+            opacity *= o.pressure_curves.opacity(p);
+        }
+        let Some(m) = brush.mixing else {
+            return;
+        };
+        let Some(k) = m.krita else {
+            return;
+        };
+        let rate = m.smudge_length * if m.pressure_length { p } else { 1.0 };
+        let color_rate = m.color_rate * if m.pressure_color { p } else { 1.0 };
+        let smear = if k.dulling { 0.8 } else { 1.0 } * rate * opacity;
+        let colour = color_rate * color_rate * opacity;
+        let paint = to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b()));
+        let hardness = (o.hardness / 100.0).clamp(0.0, 1.0);
+        let curve = (o.softness_selector == crate::brush_engine::hardness::SoftnessSelector::Curve)
+            .then(|| crate::brush_engine::hardness::CurveLut::new(&o.softness_curve));
+        let shape = o.pixel_shape.clone();
+        let texture = brush.texture.clone();
+        let tip_shape = brush.dynamics.tip;
+        let paint_blend = brush.paint_blend;
+        let wrap = self.workspace.wrap_around;
+        let has_selection = self.selection_manager.has_selection();
+        let Some(stroke) = self.brush_state.blend_stroke.as_mut() else {
+            return;
+        };
+        let Some(idx) = self.canvas.layer_index_of(stroke.layer_id) else {
+            return;
+        };
+        if stroke.krita_last.len() <= copy {
+            stroke.krita_last.resize(copy + 1, None);
+        }
+        let Some(last) = stroke.krita_last[copy].replace(center) else {
+            return;
+        };
+        // The tip's turn: its angle, the stroke's direction, at random.
+        let mut angle = tip_shape.angle.to_radians();
+        if tip_shape.follow_stroke {
+            let dir = if copy == 0 {
+                stroke.dir
+            } else {
+                let s = &stroke.symmetry;
+                s.map(&stroke.copies[copy - 1], s.center + stroke.dir) - s.center
+            };
+            angle += crate::brush_engine::dynamics::direction(Vec2::ZERO, dir).unwrap_or(0.0);
+        }
+        if tip_shape.random_angle > 0.0 {
+            stroke.random ^= stroke.random << 13;
+            stroke.random ^= stroke.random >> 17;
+            stroke.random ^= stroke.random << 5;
+            let u = stroke.random as f32 / u32::MAX as f32;
+            angle += (u * 2.0 - 1.0) * tip_shape.random_angle.to_radians();
+        }
+        let orient = crate::brush_engine::dynamics::tip_orientation(angle, tip_shape.ratio);
+        let [oa, ob, oc, od] = orient;
+        let alpha_lock = self.canvas.layers[idx].alpha_locked;
+        let reach = r * match &shape {
+            PixelBrushShape::Custom(tip) => tip.corner_reach(),
+            PixelBrushShape::Square => std::f32::consts::SQRT_2,
+            PixelBrushShape::Circle => 1.0,
+        };
+        let rc = reach.ceil() as i32;
+        let side = (2 * rc + 1) as usize;
+        let (x0, y0) = (center.x.floor() as i32 - rc, center.y.floor() as i32 - rc);
+
+        // The tip (turned, textured, selected): how much of the result
+        // each pixel takes.
+        let mut mask = vec![0.0f32; side * side];
+        let sampler = match &shape {
+            PixelBrushShape::Custom(tip) => Some(tip.sampler(r.max(0.5))),
+            _ => None,
+        };
+        let mut row_sel = vec![1.0f32; side];
+        for ly in 0..side {
+            let y = y0 + ly as i32;
+            let row = &mut mask[ly * side..(ly + 1) * side];
+            let pdy = y as f32 + 0.5 - center.y;
+            let pdx0 = x0 as f32 + 0.5 - center.x;
+            match (&shape, &sampler) {
+                (PixelBrushShape::Custom(tip), Some(sampler)) => {
+                    tip.row(
+                        sampler,
+                        (oa * pdx0 + ob * pdy, oc * pdx0 + od * pdy),
+                        (oa, oc),
+                        row,
+                    );
+                }
+                _ => {
+                    for (lx, v) in row.iter_mut().enumerate() {
+                        let pdx = pdx0 + lx as f32;
+                        let (tx, ty) = (oa * pdx + ob * pdy, oc * pdx + od * pdy);
+                        let t = if matches!(shape, PixelBrushShape::Square) {
+                            tx.abs().max(ty.abs())
+                        } else {
+                            (tx * tx + ty * ty).sqrt()
+                        } / r.max(0.5);
+                        *v = if t >= 1.0 {
+                            0.0
+                        } else {
+                            match &curve {
+                                Some(c) => c.at(t),
+                                None => crate::brush_engine::masks::gaussian_falloff(t, hardness),
+                            }
+                        };
+                    }
+                }
+            }
+            if let Some(t) = &texture
+                && y >= 0
+            {
+                let skip = (-x0).max(0) as usize;
+                if skip < side {
+                    t.apply_row(y as usize, (x0 + skip as i32) as usize, &mut row[skip..]);
+                }
+            }
+            if has_selection {
+                row_sel.fill(0.0);
+                if y >= 0 {
+                    let start = x0.max(0);
+                    let skip = (start - x0) as usize;
+                    if skip < side {
+                        self.selection_manager.row_coverage(
+                            y as usize,
+                            start as usize,
+                            &mut row_sel[skip..],
+                        );
+                    }
+                }
+                for (v, s) in row.iter_mut().zip(&row_sel) {
+                    *v *= s;
+                }
+            }
+        }
+
+        let stored = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
+        let under: Vec<[f32; 4]> = stored.iter().map(|&c| to_f(c)).collect();
+        // Where the last dab was, in whole pixels (Krita reads aligned).
+        let shift = (last - center).round();
+        let (sx, sy) = (x0 + shift.x as i32, y0 + shift.y as i32);
+        let source: Vec<[f32; 4]> = read_patch(&self.canvas, Some(idx), (sx, sy), side, side, wrap)
+            .into_iter()
+            .map(to_f)
+            .collect();
+        // Dulling: one colour, the weighted average (by the tip and the
+        // paint's coverage, premultiplied) of the middle of the source, out
+        // to the smudge radius; all of it if that held no paint.
+        let dulled = k.dulling.then(|| {
+            let mid = side as f32 * 0.5;
+            let average = |radius: f32| {
+                let reach = (r * radius).max(0.5);
+                let (mut sum, mut weight) = ([0.0f32; 4], 0.0f32);
+                for (i, px) in source.iter().enumerate() {
+                    let (dx, dy) = ((i % side) as f32 + 0.5 - mid, (i / side) as f32 + 0.5 - mid);
+                    if dx.abs() > reach || dy.abs() > reach {
+                        continue;
+                    }
+                    let w = mask[i];
+                    for c in 0..4 {
+                        sum[c] += px[c] * w;
+                    }
+                    weight += w;
+                }
+                (weight > 0.5).then(|| sum.map(|v| v / weight))
+            };
+            average(k.radius)
+                .or_else(|| average(1.0))
+                .unwrap_or([0.0; 4])
+        });
+
+        let mut result = Vec::with_capacity(side * side);
+        let mut changed = false;
+        for i in 0..side * side {
+            if mask[i] <= 0.0 {
+                result.push(stored[i]);
+                continue;
+            }
+            let u = under[i];
+            let s = dulled.unwrap_or(source[i]);
+            // The picked-up paint over the layer (copied, alpha too, with
+            // smear alpha).
+            let mut v: [f32; 4] = if k.smear_alpha {
+                std::array::from_fn(|c| u[c] + (s[c] - u[c]) * smear)
+            } else {
+                std::array::from_fn(|c| s[c] * smear + u[c] * (1.0 - s[3] * smear))
+            };
+            // Then the brush colour.
+            if colour > 0.0 {
+                v = if paint_blend == crate::canvas::blend_modes::LayerBlend::Normal {
+                    std::array::from_fn(|c| paint[c] * colour + v[c] * (1.0 - colour))
+                } else {
+                    let rgba = |x: [f32; 4]| {
+                        eframe::egui::Rgba::from_rgba_premultiplied(x[0], x[1], x[2], x[3])
+                    };
+                    let src = paint.map(|c| c * colour);
+                    crate::canvas::blend_modes::composite(paint_blend, rgba(src), rgba(v), 0.0)
+                        .to_array()
+                };
+            }
+            let m = mask[i].min(1.0);
+            let mut out = to_c(std::array::from_fn(|c| u[c] + (v[c] - u[c]) * m));
+            if alpha_lock {
+                out = crate::canvas::blend::with_alpha_of(out, stored[i].a());
+            }
+            changed |= out != stored[i];
+            result.push(out);
+        }
+        if changed {
+            self.write_blend_patch(idx, (x0, y0), side, &result, wrap);
+        }
+    }
+
+    /// Put a blend stroke's `side`² `result` on layer `idx` at `origin`
+    /// (round the edges with wrap-around), keeping the tiles' pixels from
+    /// before the stroke for its undo.
+    fn write_blend_patch(
+        &mut self,
+        idx: usize,
+        (x0, y0): (i32, i32),
+        side: usize,
+        result: &[Color32],
+        wrap: bool,
+    ) {
+        let Some(stroke) = self.brush_state.blend_stroke.as_mut() else {
+            return;
+        };
+        if !wrap {
+            self.canvas.write_layer_region(
+                idx,
+                (x0, y0, side, side),
+                result,
+                Some(&mut stroke.before),
+            );
+            self.mark_rect_damage([x0, y0, x0 + side as i32, y0 + side as i32]);
+            return;
+        }
         let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
         let mut damage = Vec::new();
         for (sx, dx, w) in wrap_pieces(x0, side, cw) {
@@ -1286,6 +1580,116 @@ mod mix_tests {
             assert!(g.abs_diff(w) <= 2, "{got:?} vs {want:?}");
         }
         assert!(got != grey && got != paint, "a mix of both: {got:?}");
+    }
+
+    /// A brush with Krita's colour smudge.
+    fn krita_brush(app: &mut crate::PainterApp, dulling: bool, rate: f32, colour: f32) {
+        use crate::brush_engine::brush_options::{KritaSmudge, Mixing};
+        app.active_tool = crate::app::tools::Tool::Brush;
+        app.brush_state.brush.mixing = Some(Mixing {
+            smudge_length: rate,
+            color_rate: colour,
+            krita: Some(KritaSmudge {
+                dulling,
+                smear_alpha: true,
+                radius: 0.5,
+            }),
+            ..Default::default()
+        });
+    }
+
+    fn brush_drag(app: &mut crate::PainterApp, from: f32, to: f32) {
+        app.start_stroke_with_pressure(Vec2::new(from, 32.0), 1.0);
+        let steps = 20;
+        for i in 1..=steps {
+            let x = from + (to - from) * i as f32 / steps as f32;
+            app.add_stroke_point(Vec2::new(x, 32.0), 1.0);
+        }
+        app.finish_stroke();
+    }
+
+    #[test]
+    fn krita_smudge_on_one_colour_changes_nothing_and_its_first_dab_paints_nothing() {
+        let red = Color32::from_rgb(230, 30, 20);
+        for dulling in [false, true] {
+            let mut a = app(Some(red));
+            krita_brush(&mut a, dulling, 1.0, 0.0);
+            let before = layer(&a);
+            brush_drag(&mut a, 10.0, 110.0);
+            assert!(layer(&a) == before, "one colour stays ({dulling})");
+            // A tap: Krita's first dab only says where it is.
+            let mut a = app(None);
+            varied(&mut a);
+            krita_brush(&mut a, dulling, 1.0, 1.0);
+            let before = layer(&a);
+            a.start_stroke_with_pressure(Vec2::new(60.0, 32.0), 1.0);
+            a.finish_stroke();
+            assert!(layer(&a) == before, "a tap paints nothing ({dulling})");
+        }
+    }
+
+    #[test]
+    fn krita_smearing_drags_paint_along_and_undoes_exactly() {
+        // Black on the left, white on the right: a stroke out of the black
+        // carries it into the white.
+        let mut a = app(None);
+        for tx in 0..2 {
+            let tile = (0..64 * 64)
+                .map(|i| {
+                    if tx * 64 + i % 64 < 40 {
+                        Color32::BLACK
+                    } else {
+                        Color32::WHITE
+                    }
+                })
+                .collect();
+            a.canvas_mut().set_layer_tile_data(1, tx, 0, tile);
+        }
+        krita_brush(&mut a, false, 1.0, 0.0);
+        let before = layer(&a);
+        brush_drag(&mut a, 20.0, 80.0);
+        let p = pixel(&a, 60);
+        assert!(p.r() < 200, "dark paint dragged into the white: {p:?}");
+        a.apply_history(false);
+        assert!(layer(&a) == before, "undo restores");
+    }
+
+    #[test]
+    fn krita_colour_rate_lays_down_the_brush_colour() {
+        let mut a = app(Some(Color32::WHITE));
+        krita_brush(&mut a, true, 0.0, 1.0);
+        brush_drag(&mut a, 10.0, 110.0);
+        // Colour rate 1 at full opacity: rate² × opacity = all brush colour.
+        let p = pixel(&a, 60);
+        let want = a.brush_state.brush.brush_options.color;
+        for (g, w) in p.to_array().iter().zip(want.to_array()) {
+            assert!(g.abs_diff(w) <= 2, "{p:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn krita_dulling_mixes_one_colour_where_smearing_keeps_the_pattern() {
+        let spread = |dulling: bool| {
+            let mut a = app(None);
+            for tx in 0..2 {
+                let tile = (0..64 * 64)
+                    .map(|i| {
+                        if (i % 64) / 3 % 2 == 0 {
+                            Color32::BLACK
+                        } else {
+                            Color32::WHITE
+                        }
+                    })
+                    .collect();
+                a.canvas_mut().set_layer_tile_data(1, tx, 0, tile);
+            }
+            krita_brush(&mut a, dulling, 0.5, 0.0);
+            brush_drag(&mut a, 10.0, 110.0);
+            let row: Vec<i32> = (50..70).map(|x| pixel(&a, x).r() as i32).collect();
+            row.iter().max().unwrap() - row.iter().min().unwrap()
+        };
+        let (dull, smear) = (spread(true), spread(false));
+        assert!(dull < smear / 2, "dulling evens out: {dull} vs {smear}");
     }
 
     #[test]

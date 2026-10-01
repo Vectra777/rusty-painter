@@ -108,6 +108,8 @@ pub(super) struct PlacedDab {
     /// `Brush::paint_prepared`).
     pub opacity: f32,
     pub average: f32,
+    /// Hard edges' strength factor from the dab's inputs (1 = the brush's).
+    pub sharp: f32,
 }
 
 impl PlacedDab {
@@ -135,6 +137,7 @@ impl PlacedDab {
             texture: 1.0,
             opacity: 1.0,
             average: 1.0,
+            sharp: 1.0,
         }
     }
 

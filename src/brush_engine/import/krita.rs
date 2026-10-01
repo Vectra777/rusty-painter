@@ -115,8 +115,31 @@ fn read_kpp(
     let yes = |k: &str| param(k) == Some("true");
     let number = |k: &str| param(k).and_then(|v| v.parse::<f32>().ok());
     // An option's sensors (Krita's ids) and whether pen pressure is one.
-    let sensors = |k: &str| param(k).map(sensor_ids).unwrap_or_default();
+    // An option's sensors (Krita's ids, by its `…Sensor` key), as Krita's
+    // `generateSensors` uses them: none when its curve is off (`…UseCurve`,
+    // the option's value alone), and each through the option's common
+    // curve when it uses the same one for all (`…UseSameCurve`).
+    let prefix = |k: &str| k.strip_suffix("Sensor").unwrap_or(k).to_string();
+    let sensors = |k: &str| {
+        if param(&format!("{}UseCurve", prefix(k))) == Some("false") {
+            return Vec::new();
+        }
+        param(k).map(sensor_ids).unwrap_or_default()
+    };
     let by_pressure = |k: &str| sensors(k).iter().any(|id| id == "pressure");
+    let curve_of = |k: &str, id: &str| -> Option<SoftnessCurve> {
+        let p = prefix(k);
+        if param(&format!("{p}UseSameCurve")) != Some("false") {
+            // Its common curve, or (not saved: an older preset) the
+            // sensor's own, as Krita's `KisKritaSensorPack` reads it.
+            match param(&format!("{p}commonCurve")) {
+                Some(common) => parse_curve(common).filter(|c| !is_straight(c)),
+                None => param(k).and_then(|xml| sensor_curve(xml, id)),
+            }
+        } else {
+            param(k).and_then(|xml| sensor_curve(xml, id))
+        }
+    };
 
     let mut b = Brush::new(40.0, 100.0, Color32::BLACK, 10.0);
     b.brush_options.pressure_size = false;
@@ -133,6 +156,9 @@ fn read_kpp(
                     o.softness_curve = curve;
                 }
                 o.tip_colors = tip.colors;
+                if let Some(mapping) = tip.mapping {
+                    o.tip_mapping = mapping;
+                }
                 o.pixel_shape = tip.shape;
                 o.extra_tips = tip.extra;
                 b.dynamics.tip.angle = tip.angle;
@@ -144,11 +170,21 @@ fn read_kpp(
     match engine.as_str() {
         "paintbrush" | "roundmarker" => {}
         "colorsmudge" => {
-            // Its smudge rate is always on, its colour rate an option; a
-            // smudge length of 1 would never pick paint up again.
+            // Krita's own smudge: its smudge rate is always on, its colour
+            // rate and smudge radius options (`kis_colorsmudgeop.cpp`).
             let rate = |k: &str| number(k).unwrap_or(0.5).clamp(0.0, 1.0);
             b.mixing = Some(crate::brush_engine::brush_options::Mixing {
-                smudge_length: rate("SmudgeRateValue").min(0.9),
+                smudge_length: rate("SmudgeRateValue"),
+                krita: Some(crate::brush_engine::brush_options::KritaSmudge {
+                    // `KisSmudgeLengthOptionData::Mode`: 1 is dulling.
+                    dulling: param("SmudgeRateMode") == Some("1"),
+                    smear_alpha: param("SmudgeRateSmearAlpha") != Some("false"),
+                    radius: if yes("PressureSmudgeRadius") {
+                        number("SmudgeRadiusValue").unwrap_or(0.0).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                }),
                 color_rate: if yes("PressureColorRate") {
                     rate("ColorRateValue")
                 } else {
@@ -187,7 +223,7 @@ fn read_kpp(
         b.brush_options.flow = (v * 100.0).clamp(0.0, 100.0);
     }
     // Options switched on that don't come across, for the report.
-    const READ: [&str; 12] = [
+    const READ: [&str; 18] = [
         "Size",
         "Opacity",
         "Flow",
@@ -200,6 +236,12 @@ fn read_kpp(
         "Texture/Strength/",
         "SmudgeRate",
         "ColorRate",
+        "SmudgeRadius",
+        "h",
+        "s",
+        "v",
+        "Darken",
+        "Gradient",
     ];
     let mut skipped: Vec<&str> = params
         .iter()
@@ -209,6 +251,7 @@ fn read_kpp(
         .collect();
     skipped.sort_unstable();
     if !skipped.is_empty() {
+        let skipped: Vec<&str> = skipped.into_iter().map(option_name).collect();
         notes.push(format!(
             "{name}: Krita's {} option{} didn't come across",
             skipped.join(", "),
@@ -240,8 +283,8 @@ fn read_kpp(
         for id in sensors(&key) {
             if id == "pressure" {
                 *on = true;
-                *curve = param(&key).and_then(sensor_curve);
-            } else if !map_sensor(&mut b.inputs, &id, setting, false) {
+                *curve = curve_of(&key, "pressure");
+            } else if !map_sensor(&mut b.inputs, &id, setting, false, curve_of(&key, &id)) {
                 notes.push(unmapped(&name, option, &id));
             }
         }
@@ -249,7 +292,8 @@ fn read_kpp(
     // Squash (Krita's ratio: low values flatten the tip).
     if yes("PressureRatio") {
         for id in sensors("RatioSensor") {
-            if !map_sensor(&mut b.inputs, &id, DabSetting::Squash, true) {
+            let curve = curve_of("RatioSensor", &id);
+            if !map_sensor(&mut b.inputs, &id, DabSetting::Squash, true, curve) {
                 notes.push(unmapped(&name, "ratio", &id));
             }
         }
@@ -265,7 +309,7 @@ fn read_kpp(
     if yes("PressureSpacing") && by_pressure("SpacingSensor") {
         let o = &mut b.brush_options;
         o.pressure_spacing = true;
-        o.pressure_curves.spacing = param("SpacingSensor").and_then(sensor_curve);
+        o.pressure_curves.spacing = curve_of("SpacingSensor", "pressure");
     }
     // Rotation: each of Krita's sensors as this app's counterpart.
     if yes("PressureRotation") {
@@ -277,7 +321,8 @@ fn read_kpp(
                 "ascension" => tip.follow_tilt = true,
                 "rotation" => tip.follow_barrel = true,
                 other => {
-                    if !map_sensor(&mut b.inputs, other, DabSetting::Angle, false) {
+                    let curve = curve_of("RotationSensor", other);
+                    if !map_sensor(&mut b.inputs, other, DabSetting::Angle, false, curve) {
                         notes.push(unmapped(&name, "rotation", other));
                     }
                 }
@@ -301,6 +346,76 @@ fn read_kpp(
     // `KisSharpnessOption::applyThreshold`), the rest clear.
     if yes("PressureSharpness") {
         b.sharpness = (1.0 - number("SharpnessValue").unwrap_or(1.0)).clamp(0.01, 1.0);
+        // Its threshold follows its sensors (pressure, mostly).
+        for id in sensors("SharpnessSensor") {
+            let curve = curve_of("SharpnessSensor", &id);
+            if !map_sensor(&mut b.inputs, &id, DabSetting::Sharpness, false, curve) {
+                notes.push(unmapped(&name, "hard edges", &id));
+            }
+        }
+        // Its soft band, in percent (an older setting as a share).
+        b.sharpness_softness = number("Sharpness/softness")
+            .map(|v| v / 100.0)
+            .or(number("Sharpness/factor"))
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+    }
+    // Hue, saturation and value by sensor (Krita's HSV options): either
+    // way of the colour, by the option's strength.
+    for (option, setting) in [
+        ("h", DabSetting::Hue),
+        ("s", DabSetting::Saturation),
+        ("v", DabSetting::Value),
+    ] {
+        if !yes(&format!("Pressure{option}")) {
+            continue;
+        }
+        let strength = number(&format!("{option}Value")).unwrap_or(1.0);
+        let key = format!("{option}Sensor");
+        for id in sensors(&key) {
+            if map_sensor(&mut b.inputs, &id, setting, false, curve_of(&key, &id)) {
+                let m = b.inputs.last_mut().expect("just added");
+                m.amount = strength.clamp(-1.0, 1.0);
+                m.both_ways = true;
+            } else {
+                notes.push(unmapped(&name, option_name(option), &id));
+            }
+        }
+    }
+    // Darken: the colour times one less the option's value.
+    if yes("PressureDarken") {
+        let strength = number("DarkenValue").unwrap_or(1.0);
+        for id in sensors("DarkenSensor") {
+            let curve = curve_of("DarkenSensor", &id);
+            if map_sensor(&mut b.inputs, &id, DabSetting::Darken, false, curve) {
+                b.inputs.last_mut().expect("just added").amount = -strength.clamp(0.0, 1.0);
+            } else {
+                notes.push(unmapped(&name, "darken", &id));
+            }
+        }
+    }
+    // The colour source: a gradient is the brush colour to the secondary
+    // (Krita's default foreground-to-background one) by its option.
+    match param("ColorSource/Type").unwrap_or("plain") {
+        "plain" => {}
+        "gradient" => {
+            if yes("PressureGradient") {
+                for id in sensors("GradientSensor") {
+                    let curve = curve_of("GradientSensor", &id);
+                    if !map_sensor(&mut b.inputs, &id, DabSetting::ColorMix, false, curve) {
+                        notes.push(unmapped(&name, "gradient", &id));
+                    }
+                }
+            }
+        }
+        "uniform_random" => {
+            b.dynamics.random.hue = 180.0;
+            b.dynamics.random.saturation = 0.5;
+            b.dynamics.random.value = 0.5;
+        }
+        other => notes.push(format!(
+            "{name}: its colour comes from Krita's {other} source, which has no counterpart here"
+        )),
     }
     // The paper texture, from the bundle.
     if yes("Texture/Pattern/Enabled") {
@@ -377,11 +492,13 @@ fn read_kpp(
                         .iter()
                         .any(|id| id == "pressure")
                 {
+                    let curve = curve_of("Texture/Strength/Sensor", "pressure");
                     map_sensor(
                         &mut b.inputs,
                         "pressure",
                         DabSetting::TextureStrength,
                         false,
+                        curve,
                     );
                 }
             }
@@ -443,6 +560,8 @@ struct TipDef {
     /// Krita's soft circle: its falloff as a curve (strength by distance
     /// from the centre), rather than a fade.
     softness: Option<SoftnessCurve>,
+    /// A lightness or gradient map (painting by the picture's grey).
+    mapping: Option<crate::brush_engine::brush_options::TipMapping>,
 }
 
 /// The tip a `brush_definition` describes: Krita's round or square one,
@@ -468,6 +587,7 @@ fn tip_from_definition(
         ratio: 1.0,
         colors: false,
         softness: None,
+        mapping: None,
     };
     if brush.attr("type") == Some("auto_brush") {
         if let Some(mask) = brush.find("MaskGenerator") {
@@ -513,7 +633,15 @@ fn tip_from_definition(
         return Ok(Ok(tip));
     }
     let file = brush.attr("filename").unwrap_or_default();
-    let Some((mask, extra)) = picture_tip(file, embedded, bundle) else {
+    // Krita 5's brush application: 0 a mask, 1 its colours, 2 a lightness
+    // map, 3 a gradient map (the last two paint by the picture's grey).
+    let application = brush.attr("brushApplication");
+    tip.mapping = match application {
+        Some("2") => Some(crate::brush_engine::brush_options::TipMapping::Lightness),
+        Some("3") => Some(crate::brush_engine::brush_options::TipMapping::Gradient),
+        _ => None,
+    };
+    let Some((mask, extra)) = picture_tip(file, embedded, bundle, tip.mapping.is_some()) else {
         return Ok(Err(file.to_string()));
     };
     tip.diameter =
@@ -521,8 +649,8 @@ fn tip_from_definition(
     // Krita paints a colour picture's colours unless it's used as a mask
     // (Krita 5 says how in `brushApplication`: 1 stamps the picture).
     tip.colors = mask.has_colors()
-        && match brush.attr("brushApplication") {
-            Some(application) => application == "1",
+        && match application {
+            Some(application) => application != "0",
             None => brush.attr("ColorAsMask") != Some("1"),
         };
     tip.shape = PixelBrushShape::Custom(mask);
@@ -604,6 +732,7 @@ fn picture_tip(
     file: &str,
     embedded: &HashMap<String, Vec<u8>>,
     bundle: &HashMap<String, Vec<u8>>,
+    keep_colors: bool,
 ) -> Option<(Arc<TipMask>, Vec<Arc<TipMask>>)> {
     let base = file.rsplit('/').next().unwrap_or(file);
     let data = embedded
@@ -625,12 +754,15 @@ fn picture_tip(
         return Some((tip.clone(), o.extra_tips.clone()));
     }
     let img = image::load_from_memory(data).ok()?;
+    if keep_colors {
+        return Some((TipMask::from_image_keeping_colors(&img), Vec::new()));
+    }
     // Krita: dark paints, whatever is round the edges.
     Some((TipMask::from_image_with(&img, Some(true)), Vec::new()))
 }
 
-/// A sensor's curve (`<curve>0,0;0.5,0.2;1,1;</curve>` inside its XML),
-/// if it isn't the straight line.
+/// Sensor `id`'s own curve (`<curve>0,0;0.5,0.2;1,1;</curve>` inside the
+/// option's sensor XML), if it isn't the straight line.
 /// This app's counterpart of one of Krita's sensors (by its id).
 fn krita_sensor(id: &str) -> Option<Sensor> {
     Some(match id {
@@ -649,13 +781,15 @@ fn krita_sensor(id: &str) -> Option<Sensor> {
     })
 }
 
-/// Krita's `id` sensor driving `setting`, as an input mapping (full
-/// amount; `inverted`: a high input reduces it). Whether it has one here.
+/// Krita's `id` sensor driving `setting` through `curve` (straight when
+/// `None`), as an input mapping (full amount; `inverted`: a high input
+/// reduces it). Whether it has one here.
 fn map_sensor(
     inputs: &mut Vec<InputMapping>,
     id: &str,
     setting: DabSetting,
     inverted: bool,
+    curve: Option<SoftnessCurve>,
 ) -> bool {
     let Some(sensor) = krita_sensor(id) else {
         return false;
@@ -666,13 +800,32 @@ fn map_sensor(
         amount: 1.0,
         ..Default::default()
     };
+    if let Some(curve) = curve {
+        mapping.curve = curve;
+    }
     if inverted {
-        mapping.curve = SoftnessCurve {
-            points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)],
-        };
+        for p in &mut mapping.curve.points {
+            p.y = 1.0 - p.y;
+        }
     }
     inputs.push(mapping);
     true
+}
+
+/// A Krita option's name as its settings show it (its key is terse).
+fn option_name(key: &str) -> &str {
+    match key {
+        "h" => "hue",
+        "s" => "saturation",
+        "v" => "value",
+        "SmudgeRadius" => "smudge radius",
+        "SmudgeRate" => "smudge length",
+        "ColorRate" => "colour rate",
+        "LightnessStrength" => "lightness strength",
+        "PaintThickness" => "paint thickness",
+        "Texture/Strength/" => "texture strength",
+        other => other,
+    }
 }
 
 /// The note for a sensor with no counterpart.
@@ -698,18 +851,22 @@ fn sensor_ids(xml: &str) -> Vec<String> {
     }
 }
 
-fn sensor_curve(xml: &str) -> Option<SoftnessCurve> {
+fn sensor_curve(xml: &str, id: &str) -> Option<SoftnessCurve> {
     let root = parse_xml(xml).ok()?;
-    // The pressure sensor's (alone, or among several).
-    let pressure = std::iter::once(&root)
+    // That sensor's (alone, or among several).
+    let sensor = std::iter::once(&root)
         .chain(root.descendants("params"))
         .chain(root.descendants("ChildSensor"))
-        .find(|n| n.attr("id") == Some("pressure"))?;
-    let curve = parse_curve(&pressure.descendants("curve").next()?.text)?;
-    let straight = curve.points.len() == 2
+        .find(|n| n.attr("id") == Some(id))?;
+    let curve = parse_curve(&sensor.descendants("curve").next()?.text)?;
+    (!is_straight(&curve)).then_some(curve)
+}
+
+/// The straight line, `0,0` to `1,1` (as good as no curve).
+fn is_straight(curve: &SoftnessCurve) -> bool {
+    curve.points.len() == 2
         && curve.points[0] == CurvePoint::new(0.0, 0.0)
-        && curve.points[1] == CurvePoint::new(1.0, 1.0);
-    (!straight).then_some(curve)
+        && curve.points[1] == CurvePoint::new(1.0, 1.0)
 }
 
 /// Krita's curve text, `x,y;x,y;…` (0..1 each), as a curve; `None` with
@@ -902,6 +1059,9 @@ mod tests {
                 ("PressureRatio", "true"),
                 ("RatioSensor", FUZZY),
                 ("Pressureh", "true"),
+                ("hSensor", FUZZY),
+                ("hValue", "0.5"),
+                ("PressurePaintThickness", "true"),
             ],
         );
         let imported = import_kpp(&brush, "file").unwrap();
@@ -930,9 +1090,22 @@ mod tests {
         );
         // Half a brush width either way.
         assert_eq!(b.jitter, 50.0);
-        // The hue option has no counterpart: the report says so.
+        // Hue by a random input, either way, by its strength.
+        let hue = b
+            .inputs
+            .iter()
+            .find(|m| m.setting == DabSetting::Hue)
+            .expect("hue");
+        assert_eq!(
+            (hue.sensor, hue.amount, hue.both_ways),
+            (Sensor::RandomDab, 0.5, true)
+        );
+        // An option with no counterpart is named in the report.
         assert!(
-            imported.notes.iter().any(|n| n.contains("h option")),
+            imported
+                .notes
+                .iter()
+                .any(|n| n.contains("paint thickness option")),
             "{:?}",
             imported.notes
         );
@@ -945,6 +1118,66 @@ mod tests {
             .map(|(k, v)| format!(r#"<param type="string" name="{k}"><![CDATA[{v}]]></param>"#))
             .collect();
         kpp(&xml.replace("</Preset>", &format!("{extra}</Preset>")))
+    }
+
+    #[test]
+    fn sensors_follow_krita_s_use_curve_and_common_curve() {
+        const CURVED: &str =
+            r#"<!DOCTYPE params><params id="pressure"><curve>0,0;0.5,0.2;1,1;</curve></params>"#;
+        let base = AUTO.replace(
+            r#"<param type="string" name="SizeSensor"><![CDATA[<!DOCTYPE params><params id="pressure"><curve>0,0;0.5,0.2;1,1;</curve></params>]]></param>"#,
+            "",
+        );
+        let import = |params: &[(&str, &str)]| {
+            let imported = import_kpp(&with_params_xml(&base, params), "file").unwrap();
+            imported.presets[0].brush.brush_options.clone()
+        };
+        // Its curve off: the option's value alone, no pressure.
+        let o = import(&[("SizeSensor", CURVED), ("SizeUseCurve", "false")]);
+        assert!(!o.pressure_size);
+        // The same curve for all: the common one, not the sensor's.
+        let o = import(&[
+            ("SizeSensor", CURVED),
+            ("SizeUseSameCurve", "true"),
+            ("SizecommonCurve", "0,0;0.5,0.8;1,1;"),
+        ]);
+        let c = o.pressure_curves.size.expect("a curve");
+        assert!((c.eval(0.5) - 0.8).abs() < 1e-3, "{}", c.eval(0.5));
+        // Not the same: the sensor's own.
+        let o = import(&[
+            ("SizeSensor", CURVED),
+            ("SizeUseSameCurve", "false"),
+            ("SizecommonCurve", "0,0;0.5,0.8;1,1;"),
+        ]);
+        let c = o.pressure_curves.size.expect("a curve");
+        assert!((c.eval(0.5) - 0.2).abs() < 1e-3, "{}", c.eval(0.5));
+    }
+
+    #[test]
+    fn a_lightness_map_tip_comes_across() {
+        let png = {
+            let mut bytes = Vec::new();
+            let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([128, 128, 128, 255]));
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            bytes
+        };
+        let xml = r#"<Preset paintopid="paintbrush" name="Map" embedded_resources="0">
+            <param type="string" name="brush_definition"><![CDATA[<Brush type="png_brush" filename="tip.png" spacing="0.1" brushApplication="2"/>]]></param>
+            </Preset>"#;
+        let bundle: HashMap<String, Vec<u8>> = [("tip.png".to_string(), png)].into();
+        let mut notes = Vec::new();
+        let p = read_kpp(&kpp(xml), "file", &bundle, &mut notes).unwrap();
+        let o = &p.brush.brush_options;
+        assert!(o.tip_colors, "{notes:?}");
+        assert_eq!(
+            o.tip_mapping,
+            crate::brush_engine::brush_options::TipMapping::Lightness
+        );
     }
 
     #[test]

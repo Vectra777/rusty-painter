@@ -318,6 +318,17 @@ impl TipMask {
         Self::from_mask(w, h, pixels)
     }
 
+    /// A picture whose alpha is the mask and whose colours (grey ones
+    /// too) are kept, for painting by its lightness (a lightness or
+    /// gradient map); opaque pictures are opaque all over.
+    pub fn from_image_keeping_colors(img: &image::DynamicImage) -> Arc<Self> {
+        let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        let pixels = rgba.pixels().map(|p| p[3]).collect();
+        let colors = rgba.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+        Self::from_colored(w, h, pixels, colors)
+    }
+
     /// The same mask, inverted (what painted doesn't, and the other way).
     pub fn inverted(&self) -> Arc<Self> {
         Self::from_parts(

@@ -311,10 +311,15 @@ pub enum DabSetting {
     /// Mixes the brush colour with the secondary colour, all the way at
     /// full amount.
     ColorMix,
+    /// Scales the hard edges' strength (`Brush::sharpness`), like size.
+    Sharpness,
+    /// Darkens the colour toward black (Krita's Darken option), like size
+    /// scales the dab.
+    Darken,
 }
 
 impl DabSetting {
-    pub const ALL: [DabSetting; 11] = [
+    pub const ALL: [DabSetting; 13] = [
         DabSetting::Size,
         DabSetting::Opacity,
         DabSetting::Angle,
@@ -326,6 +331,8 @@ impl DabSetting {
         DabSetting::Hardness,
         DabSetting::Scatter,
         DabSetting::ColorMix,
+        DabSetting::Sharpness,
+        DabSetting::Darken,
     ];
 
     pub fn label(self) -> &'static str {
@@ -341,14 +348,34 @@ impl DabSetting {
             DabSetting::Hardness => "Hardness",
             DabSetting::Scatter => "Scatter",
             DabSetting::ColorMix => "Secondary colour mix",
+            DabSetting::Sharpness => "Hard edges",
+            DabSetting::Darken => "Darken",
         }
+    }
+
+    /// The input adds to it (rather than scaling it), so it can swing it
+    /// both ways (see [`InputMapping::both_ways`]).
+    pub fn adds(self) -> bool {
+        matches!(
+            self,
+            DabSetting::Angle
+                | DabSetting::Hue
+                | DabSetting::Saturation
+                | DabSetting::Value
+                | DabSetting::Hardness
+                | DabSetting::Scatter
+        )
     }
 
     /// It changes the dab's colour.
     pub fn is_color(self) -> bool {
         matches!(
             self,
-            DabSetting::Hue | DabSetting::Saturation | DabSetting::Value | DabSetting::ColorMix
+            DabSetting::Hue
+                | DabSetting::Saturation
+                | DabSetting::Value
+                | DabSetting::ColorMix
+                | DabSetting::Darken
         )
     }
 }
@@ -369,6 +396,10 @@ pub struct InputMapping {
     pub curve: crate::brush_engine::hardness::SoftnessCurve,
     /// Distance (px) or time (s) that counts as the full input.
     pub length: f32,
+    /// The input swings the setting both ways, the middle of its range
+    /// leaving it alone (Krita's hue, saturation and value options); for
+    /// the settings that add (angle, colour, hardness, scatter).
+    pub both_ways: bool,
 }
 
 impl Default for InputMapping {
@@ -384,6 +415,7 @@ impl Default for InputMapping {
                 ],
             },
             length: 200.0,
+            both_ways: false,
         }
     }
 }
@@ -429,6 +461,8 @@ impl InputMapping {
     pub fn apply(&self, v: &mut DabVar, s: &SensorValues) {
         let x = self.input(s);
         let a = self.amount.clamp(-1.0, 1.0);
+        // Both ways: an added setting moves by -a..a over the input.
+        let added = if self.both_ways { 2.0 * x - 1.0 } else { x };
         // Size and opacity scale: full at one end of the input, reduced
         // by the amount at the other.
         let factor = if a >= 0.0 {
@@ -439,15 +473,17 @@ impl InputMapping {
         match self.setting {
             DabSetting::Size => v.scale *= factor.max(0.0),
             DabSetting::Opacity => v.strength *= factor.max(0.0),
-            DabSetting::Angle => v.turn += a * x * std::f32::consts::PI,
+            DabSetting::Angle => v.turn += a * added * std::f32::consts::PI,
             DabSetting::Squash => v.squash *= (1.0 - a.abs() * x).max(0.05),
-            DabSetting::Hue => v.hsv[0] += a * x * 180.0,
-            DabSetting::Saturation => v.hsv[1] += a * x,
-            DabSetting::Value => v.hsv[2] += a * x,
+            DabSetting::Hue => v.hsv[0] += a * added * 180.0,
+            DabSetting::Saturation => v.hsv[1] += a * added,
+            DabSetting::Value => v.hsv[2] += a * added,
             DabSetting::TextureStrength => v.texture *= factor.max(0.0),
-            DabSetting::Hardness => v.hardness += a * x,
-            DabSetting::Scatter => v.scatter += a * x,
+            DabSetting::Hardness => v.hardness += a * added,
+            DabSetting::Scatter => v.scatter += a * added,
             DabSetting::ColorMix => v.mix += a * x,
+            DabSetting::Sharpness => v.sharpness *= factor.max(0.0),
+            DabSetting::Darken => v.darken *= factor.max(0.0),
         }
     }
 }
@@ -483,6 +519,10 @@ pub struct DabVar {
     pub scatter: f32,
     /// How much of the secondary colour is mixed in (0..1).
     pub mix: f32,
+    /// Hard edges' strength factor (1 = the brush's).
+    pub sharpness: f32,
+    /// Colour factor toward black (1 = the colour as it is).
+    pub darken: f32,
 }
 
 impl Default for DabVar {
@@ -501,6 +541,8 @@ impl Default for DabVar {
             hardness: 0.0,
             scatter: 0.0,
             mix: 0.0,
+            sharpness: 1.0,
+            darken: 1.0,
         }
     }
 }

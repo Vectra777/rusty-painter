@@ -203,6 +203,9 @@ pub struct Brush {
     /// Hard edges (Krita's Sharpness): tip coverage below this share
     /// (0..1) is dropped and the rest painted at full strength (0 = off).
     pub sharpness: f32,
+    /// Hard edges' soft band (Krita's sharpness softness, 0..1): coverage
+    /// down to this share below the cut keeps its own strength.
+    pub sharpness_softness: f32,
     /// Colour mixing: the brush smudges the paint under it, mixing in its
     /// colour (it then paints through the Smudge tool's engine); `None` for
     /// a plain brush.
@@ -254,8 +257,10 @@ struct BatchCtx<'a> {
     tip_colors: bool,
     /// A hatching brush: its lines, over every dab.
     hatch: Option<&'a crate::brush_engine::hatching::Hatching>,
-    /// Hard edges: the brush's [`Brush::sharpness`] (0 = off).
+    /// Hard edges: the brush's [`Brush::sharpness`] (0 = off) and its
+    /// soft band.
     sharpness: f32,
+    sharpness_softness: f32,
     /// The batch's stroke strength (before each dab's own), which a dab's
     /// stamped alphas are scaled by.
     strength: f32,
@@ -420,6 +425,10 @@ fn paint_batch(
         let sharpness = ctx.sharpness;
         let sharp = sharpness > 0.0;
         let post_row = sharp || ctx.hatch.is_some() || ctx.texture.is_some();
+        // A Krita texture (textures the shape before the strength) and
+        // wash (Krita's alpha darken), likewise once per tile.
+        let krita_texture = ctx.texture.is_some_and(|t| t.krita.is_some());
+        let wash = ctx.wash;
 
         for &i in dab_ids {
             let dab = &ctx.dabs[i];
@@ -451,11 +460,21 @@ fn paint_batch(
                 if post_row {
                     if sharp {
                         // The tip's coverage (the alpha over the dab's
-                        // strength) cut at the threshold, the rest full.
+                        // strength) cut at the threshold, the rest full,
+                        // as Krita's `KisSharpnessOption::applyThreshold`:
+                        // its threshold (1 - the cut) scaled by the dab's
+                        // inputs, and a soft band below the cut kept.
                         let full = (ctx.strength * dab.strength).min(1.0);
-                        let cut = sharpness * full;
+                        let cut = (1.0 - (1.0 - sharpness) * dab.sharp).clamp(0.0, 1.0) * full;
+                        let low = cut * (1.0 - ctx.sharpness_softness);
                         for a in &mut alphas[span.clone()] {
-                            *a = if *a > 0.0 && *a >= cut { full } else { 0.0 };
+                            *a = if *a > 0.0 && *a >= cut {
+                                full
+                            } else if *a <= low {
+                                0.0
+                            } else {
+                                *a
+                            };
                         }
                     }
                     if let Some(hatch) = ctx.hatch {
@@ -470,8 +489,12 @@ fn paint_batch(
                         let (x, row) = (overlap.min_x + first, &mut alphas[span.clone()]);
                         // Krita textures the tip's shape, before flow and
                         // opacity (a wash's stamps are the shape already).
-                        let full = (ctx.strength * dab.strength).min(1.0);
-                        let unscale = texture.krita.is_some() && full > 0.0 && full < 1.0;
+                        let full = if krita_texture {
+                            (ctx.strength * dab.strength).min(1.0)
+                        } else {
+                            1.0
+                        };
+                        let unscale = full > 0.0 && full < 1.0;
                         if unscale {
                             row.iter_mut().for_each(|a| *a /= full);
                         }
@@ -504,7 +527,7 @@ fn paint_batch(
                 if let Some(colors) = colors.as_deref_mut() {
                     // Each dab's colour laid over what's there, like paint.
                     let dst = &mut colors[start + first..=start + last];
-                    if ctx.wash.is_some() {
+                    if wash.is_some() {
                         for a in &mut alphas[span.clone()] {
                             *a *= dab.opacity;
                         }
@@ -529,39 +552,12 @@ fn paint_batch(
                     }
                 }
                 let covered = coverage[start + first..=start + last].iter_mut();
-                match ctx.wash {
-                    // Krita's alpha darken (its "creamy" variant): the
-                    // coverage moves toward the dab's opacity by the tip's
-                    // coverage, at the flow, and never past it; the stroke's
-                    // average opacity holds it up while pressure eases.
+                match wash {
                     Some(flow) => {
-                        let (op, avg) = (dab.opacity, dab.average);
                         // The alphas carry the opacity already when the
                         // dabs differ in colour (above).
-                        let m_of = |a: f32| {
-                            if colors.is_some() {
-                                a / op.max(1e-6)
-                            } else {
-                                a
-                            }
-                        };
-                        for (cov, &a) in covered.zip(&alphas[span]) {
-                            let m = m_of(a).min(1.0);
-                            let dst = *cov;
-                            let full = if avg > op {
-                                if avg > dst {
-                                    let src = m * op;
-                                    src + (avg - src) * (dst / avg)
-                                } else {
-                                    dst
-                                }
-                            } else if op > dst {
-                                dst + (op - dst) * m
-                            } else {
-                                dst
-                            };
-                            *cov = dst + (full - dst) * flow;
-                        }
+                        let carried = colors.is_some();
+                        alpha_darken(covered, &alphas[span], dab, flow, carried);
                     }
                     None => {
                         for (cov, &alpha) in covered.zip(&alphas[span]) {
@@ -600,6 +596,41 @@ fn paint_batch(
         resolve_spans(ctx, *region, &mut buffer, &spans);
     };
     dispatch_over_buckets(buckets, pool, work_pixels, draw_tile);
+}
+
+/// Wash: one dab's row of tip coverage `alphas` into `coverage` as Krita's
+/// alpha darken (its "creamy" variant): the coverage moves toward the
+/// dab's opacity by the tip's coverage, at `flow`, and never past it; the
+/// stroke's average opacity holds it up while pressure eases. With
+/// `carried` the alphas carry the dab's opacity already. Out of line: the
+/// usual build-up loop stays small.
+#[inline(never)]
+fn alpha_darken<'a>(
+    coverage: impl Iterator<Item = &'a mut f32>,
+    alphas: &[f32],
+    dab: &PlacedDab,
+    flow: f32,
+    carried: bool,
+) {
+    let (op, avg) = (dab.opacity, dab.average);
+    let inv_op = if carried { 1.0 / op.max(1e-6) } else { 1.0 };
+    for (cov, &a) in coverage.zip(alphas) {
+        let m = (a * inv_op).min(1.0);
+        let dst = *cov;
+        let full = if avg > op {
+            if avg > dst {
+                let src = m * op;
+                src + (avg - src) * (dst / avg)
+            } else {
+                dst
+            }
+        } else if op > dst {
+            dst + (op - dst) * m
+        } else {
+            dst
+        };
+        *cov = dst + (full - dst) * flow;
+    }
 }
 
 /// The colours of a dab painting its tip's own: `(dab, gy, x0, alphas,
@@ -914,6 +945,7 @@ impl Brush {
             sketch: Default::default(),
             hatching: Default::default(),
             sharpness: 0.0,
+            sharpness_softness: 0.0,
             mixing: None,
             second_color: Color32::WHITE,
             wash_opacity: 1.0,
@@ -946,6 +978,7 @@ impl Brush {
             sketch: Default::default(),
             hatching: Default::default(),
             sharpness: 0.0,
+            sharpness_softness: 0.0,
             mixing: None,
             second_color: Color32::WHITE,
             wash_opacity: 1.0,
@@ -1086,13 +1119,15 @@ impl Brush {
                 dab.hatch = var.hatch;
                 dab.hardness = var.hardness;
                 dab.texture = var.texture;
+                dab.sharp = var.sharpness;
                 if colored {
                     let base = if var.mix > 0.0 {
                         mix_colors(self.brush_options.color, self.second_color, var.mix)
                     } else {
                         self.brush_options.color
                     };
-                    let srgb = crate::brush_engine::dynamics::shift_hsv(base, var.hsv);
+                    let srgb = crate::brush_engine::dynamics::shift_hsv(base, var.hsv)
+                        .map(|c| c * var.darken.clamp(0.0, 1.0));
                     dab.color = if linear {
                         srgb.map(srgb_to_linear)
                     } else {
@@ -1444,6 +1479,7 @@ impl Brush {
             tip_colors,
             hatch: (self.brush_type == BrushType::Hatching).then_some(&self.hatching),
             sharpness: self.sharpness,
+            sharpness_softness: self.sharpness_softness.clamp(0.0, 1.0),
             strength: 1.0,
             wash: None,
         }
@@ -1891,6 +1927,10 @@ impl Brush {
                 nonzero_span(out)
             };
             let linear = ctx.space == BlendSpace::Linear;
+            // A lightness or gradient map paints from the brush colours.
+            let mapping = o.tip_mapping;
+            let srgb = |c: Color32| crate::brush_engine::dynamics::shift_hsv(c, [0.0; 3]);
+            let (brush_srgb, second_srgb) = (srgb(o.color), srgb(self.second_color));
             let color_stamp =
                 |dab: &PlacedDab, gy: usize, x0: usize, alphas: &[f32], out: &mut [[f32; 3]]| {
                     let PixelBrushShape::Custom(tip) = &tips[dab.tip as usize] else {
@@ -1910,6 +1950,11 @@ impl Brush {
                             strength,
                             out,
                         );
+                        if mapping != crate::brush_engine::brush_options::TipMapping::Colors {
+                            for c in out.iter_mut() {
+                                *c = mapping.map(*c, brush_srgb, second_srgb);
+                            }
+                        }
                         if linear {
                             for c in out.iter_mut() {
                                 *c = c.map(srgb_to_linear);

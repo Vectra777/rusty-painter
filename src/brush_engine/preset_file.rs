@@ -181,6 +181,7 @@ struct StoredBrush {
     extra_tips: Vec<usize>,
     tip_order: TipOrder,
     tip_colors: bool,
+    tip_mapping: crate::brush_engine::brush_options::TipMapping,
     placement: Placement,
     /// Premultiplied RGBA, as the brush holds it.
     color: [u8; 4],
@@ -217,6 +218,7 @@ struct StoredBrush {
     sketch: crate::brush_engine::sketch::Sketch,
     hatching: crate::brush_engine::hatching::Hatching,
     sharpness: f32,
+    sharpness_softness: f32,
     mixing: Option<crate::brush_engine::brush_options::Mixing>,
 }
 
@@ -266,6 +268,7 @@ impl StoredBrush {
             extra_tips: o.extra_tips.iter().map(|t| res.tip(t)).collect(),
             tip_order: o.tip_order,
             tip_colors: o.tip_colors,
+            tip_mapping: o.tip_mapping,
             placement: o.placement,
             color: o.color.to_array(),
             spacing: o.spacing,
@@ -307,6 +310,7 @@ impl StoredBrush {
             sketch: b.sketch,
             hatching: b.hatching,
             sharpness: b.sharpness,
+            sharpness_softness: b.sharpness_softness,
             mixing: b.mixing,
         }
     }
@@ -330,6 +334,7 @@ impl StoredBrush {
             .collect::<Result<_, _>>()?;
         o.tip_order = self.tip_order;
         o.tip_colors = self.tip_colors;
+        o.tip_mapping = self.tip_mapping;
         o.placement = self.placement;
         let [r, g, bl, a] = self.color;
         o.color = Color32::from_rgba_premultiplied(r, g, bl, a);
@@ -378,6 +383,7 @@ impl StoredBrush {
         b.sketch = self.sketch;
         b.hatching = self.hatching;
         b.sharpness = self.sharpness.clamp(0.0, 1.0);
+        b.sharpness_softness = self.sharpness_softness.clamp(0.0, 1.0);
         b.mixing = self.mixing;
         Ok(b)
     }
@@ -709,6 +715,11 @@ mod tests {
             color_rate: 0.7,
             pressure_length: true,
             pressure_color: false,
+            krita: Some(crate::brush_engine::brush_options::KritaSmudge {
+                dulling: true,
+                smear_alpha: false,
+                radius: 0.3,
+            }),
         };
         brush.mixing = Some(mixing);
         brush.sharpness = 0.4;

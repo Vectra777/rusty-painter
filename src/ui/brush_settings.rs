@@ -340,6 +340,14 @@ fn brush_settings_contents(
                          (flowers, stitches, printed ribbons).",
                     )
                     .changed();
+                if o.tip_colors {
+                    property_row(ui, "Colours", |ui| {
+                        use crate::brush_engine::brush_options::TipMapping;
+                        let modes: Vec<(TipMapping, &str)> =
+                            TipMapping::ALL.iter().map(|&m| (m, m.label())).collect();
+                        changed |= segmented(ui, &mut o.tip_mapping, &modes, false);
+                    });
+                }
             }
         }
         let tips = brush.brush_options.tip_count();
@@ -492,6 +500,20 @@ fn brush_settings_contents(
              solid: crisp, aliased edges from any tip (0: off).",
         )
         .changed();
+        if brush.sharpness > 0.0 {
+            changed |= slider_row(
+                ui,
+                "Edge softness",
+                crate::ui::widgets::reset(&mut brush.sharpness_softness, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                }),
+            )
+            .on_hover_text(
+                "Coverage this far below the cut keeps its own strength rather than \
+                 vanishing: a softer hard edge.",
+            )
+            .changed();
+        }
         property_row(ui, "Blend", |ui| {
             use crate::canvas::blend_modes::LayerBlend;
             egui::ComboBox::from_id_salt("brush_paint_blend")
@@ -561,6 +583,47 @@ fn brush_settings_contents(
             changed |= ui.toggle_value(&mut m.pressure_length, "Length").changed();
             changed |= ui.toggle_value(&mut m.pressure_color, "Colour").changed();
         });
+        let mut krita = m.krita.is_some();
+        if ui
+            .checkbox(&mut krita, "Krita's colour smudge")
+            .on_hover_text(
+                "Mix as Krita's Colour Smudge engine does: each dab reads the layer where the \
+                 last dab was and lays it over the paint under it (Smudge length is then \
+                 Krita's smudge rate). Brushes imported from Krita's colour smudge use it.",
+            )
+            .changed()
+        {
+            m.krita = krita.then(Default::default);
+            changed = true;
+        }
+        if let Some(k) = m.krita.as_mut() {
+            property_row(ui, "Mode", |ui| {
+                changed |= segmented(
+                    ui,
+                    &mut k.dulling,
+                    &[(false, "Smearing"), (true, "Dulling")],
+                    false,
+                );
+            });
+            changed |= ui
+                .checkbox(&mut k.smear_alpha, "Smear alpha")
+                .on_hover_text("Smudge transparency too, not just the paint over what's there.")
+                .changed();
+            if k.dulling {
+                changed |= slider_row(
+                    ui,
+                    "Sample radius",
+                    crate::ui::widgets::reset(&mut k.radius, |v| {
+                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    }),
+                )
+                .on_hover_text(
+                    "Dulling picks up one colour from under the last dab: from this much of \
+                     it (0: its centre).",
+                )
+                .changed();
+            }
+        }
     });
     section(ui, "Watercolour", false, |ui| {
         changed |= slider_row(
@@ -1032,6 +1095,15 @@ fn inputs_section(
                      the secondary colour).",
                 )
                 .changed();
+                if m.setting.adds() {
+                    changed |= ui
+                        .checkbox(&mut m.both_ways, "Both ways")
+                        .on_hover_text(
+                            "The input moves the setting either way: a low input the other \
+                             way, the middle not at all.",
+                        )
+                        .changed();
+                }
                 if m.sensor.has_length() {
                     let (range, suffix) = match m.sensor {
                         Sensor::Time => (0.1..=10.0, " s"),

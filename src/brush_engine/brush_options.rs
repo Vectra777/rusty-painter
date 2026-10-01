@@ -58,6 +58,75 @@ impl TipOrder {
     }
 }
 
+/// How a colour tip's picture paints (Krita's brush application).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TipMapping {
+    /// Its own colours.
+    #[default]
+    Colors,
+    /// The brush colour, its lightness from the picture's (Krita's
+    /// lightness map: mid grey keeps the colour, black and white take it
+    /// to black and white).
+    Lightness,
+    /// From the brush colour (dark) to the secondary colour (light) by the
+    /// picture's lightness (Krita's gradient map, with its default
+    /// foreground-to-background gradient).
+    Gradient,
+}
+
+impl TipMapping {
+    pub const ALL: [TipMapping; 3] = [Self::Colors, Self::Lightness, Self::Gradient];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Colors => "Its colours",
+            Self::Lightness => "Lightness",
+            Self::Gradient => "Gradient",
+        }
+    }
+
+    /// A tip texel's colour `c` (sRGB 0..1) as this paints it, with the
+    /// brush colour `brush` and secondary colour `second` (sRGB 0..1).
+    pub fn map(self, c: [f32; 3], brush: [f32; 3], second: [f32; 3]) -> [f32; 3] {
+        let grey = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+        match self {
+            Self::Colors => c,
+            Self::Lightness => {
+                // Krita's (Peter Schatz's) curve through 0, the brush's
+                // lightness at mid grey, and 1.
+                let l = lightness(brush);
+                let b = 4.0 * l - 1.0;
+                let target = ((1.0 - b) * grey * grey + b * grey).clamp(0.0, 1.0);
+                set_lightness(brush, target)
+            }
+            Self::Gradient => std::array::from_fn(|i| brush[i] + (second[i] - brush[i]) * grey),
+        }
+    }
+}
+
+/// HSL lightness: the middle of the brightest and darkest channel.
+fn lightness(c: [f32; 3]) -> f32 {
+    let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    (max + min) * 0.5
+}
+
+/// `c` moved to HSL lightness `l`, kept in range by pulling the channels
+/// toward the lightness (hue kept).
+fn set_lightness(c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - lightness(c);
+    let c = c.map(|v| v + d);
+    let l = lightness(c);
+    let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    let mut out = c;
+    if min < 0.0 && l - min > 0.0 {
+        out = out.map(|v| l + (v - l) * l / (l - min));
+    }
+    if max > 1.0 && max - l > 0.0 {
+        out = out.map(|v| l + (v - l) * (1.0 - l) / (max - l));
+    }
+    out.map(|v| v.clamp(0.0, 1.0))
+}
+
 /// How a brush lays its tip down.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Placement {
@@ -85,6 +154,9 @@ pub struct Mixing {
     pub pressure_length: bool,
     /// Pen pressure scales the colour rate.
     pub pressure_color: bool,
+    /// Krita's colour smudge (a brush imported from it), instead of this
+    /// app's: `smudge_length` is then Krita's smudge rate.
+    pub krita: Option<KritaSmudge>,
 }
 
 impl Default for Mixing {
@@ -94,6 +166,35 @@ impl Default for Mixing {
             color_rate: 0.5,
             pressure_length: false,
             pressure_color: false,
+            krita: None,
+        }
+    }
+}
+
+/// How Krita's colour smudge engine mixes (`KisColorSmudgeStrategyBase`):
+/// each dab reads the layer where the previous dab was and lays it (or one
+/// colour sampled there, in dulling mode) over the layer under it, then the
+/// brush colour at the colour rate squared, through the tip.
+#[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct KritaSmudge {
+    /// Dulling: one colour sampled from under the previous dab (its
+    /// weighted average), rather than the pixels themselves (smearing).
+    pub dulling: bool,
+    /// The paint's transparency is smeared too (copied), rather than the
+    /// picked-up paint only going over what's there.
+    pub smear_alpha: bool,
+    /// Dulling: how much of the dab the colour is sampled from (0 its
+    /// centre, 1 all of it).
+    pub radius: f32,
+}
+
+impl Default for KritaSmudge {
+    fn default() -> Self {
+        Self {
+            dulling: false,
+            smear_alpha: true,
+            radius: 0.0,
         }
     }
 }
@@ -130,6 +231,8 @@ pub struct BrushOptions {
     /// Paint with a colour tip's own colours rather than the brush colour
     /// (decorations: flowers, stitches, chains).
     pub tip_colors: bool,
+    /// How a colour tip's colours paint, with `tip_colors`.
+    pub tip_mapping: TipMapping,
     /// Dabs, or the tip laid along the stroke as a ribbon.
     pub placement: Placement,
     pub color: Color32,
@@ -240,6 +343,7 @@ impl BrushOptions {
             extra_tips: Vec::new(),
             tip_order: TipOrder::Sequence,
             tip_colors: false,
+            tip_mapping: TipMapping::Colors,
             placement: Placement::Dabs,
             color,
             spacing,
@@ -254,5 +358,28 @@ impl BrushOptions {
             pressure_spacing: false,
             pressure_curves: PressureCurves::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tip_mapping_tests {
+    use super::TipMapping;
+
+    #[test]
+    fn lightness_mapping_keeps_the_colour_at_mid_grey_and_reaches_black_and_white() {
+        let red = [0.8, 0.2, 0.2];
+        let at = |g: f32| TipMapping::Lightness.map([g; 3], red, [1.0; 3]);
+        let mid = at(0.5);
+        for (m, r) in mid.iter().zip(red) {
+            assert!((m - r).abs() < 1e-4, "{mid:?}");
+        }
+        assert!(at(0.0).iter().all(|&v| v < 1e-4), "{:?}", at(0.0));
+        assert!(at(1.0).iter().all(|&v| v > 1.0 - 1e-4), "{:?}", at(1.0));
+        // Gradient: the brush colour where the picture is dark, the
+        // secondary where it's light.
+        let g = TipMapping::Gradient.map([0.0; 3], red, [0.0, 0.0, 1.0]);
+        assert_eq!(g, red);
+        let g = TipMapping::Gradient.map([1.0; 3], red, [0.0, 0.0, 1.0]);
+        assert_eq!(g, [0.0, 0.0, 1.0]);
     }
 }

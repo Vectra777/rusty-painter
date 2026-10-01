@@ -2336,3 +2336,93 @@ fn easing_pressure_in_wash_fades_gradually_not_at_once() {
     assert!((at(220) - 0.2).abs() < 0.05, "light part: {}", at(220));
     assert!(at(140) > 0.3, "the change eases in: {}", at(140));
 }
+
+/// Pixels of one dab at `pressure` that are fully painted, and ones only
+/// partly.
+fn dab_alphas(brush: &mut Brush, pressure: f32) -> (usize, usize) {
+    let canvas = paint_pen(brush, &[(Vec2::new(128.0, 64.0), 0.0)], pressure, None);
+    let all = pixels(&canvas);
+    (
+        all.iter().filter(|&&a| a == 255).count(),
+        all.iter().filter(|&&a| a > 0 && a < 255).count(),
+    )
+}
+
+#[test]
+fn hard_edges_follow_pressure_and_keep_a_soft_band() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let mut b = brush(BrushDynamics::default());
+    b.brush_options.diameter = 40.0;
+    b.brush_options.hardness = 0.0;
+    b.sharpness = 0.3;
+    b.inputs = vec![InputMapping {
+        sensor: Sensor::Pressure,
+        setting: DabSetting::Sharpness,
+        ..Default::default()
+    }];
+    // Krita: the threshold scales with pressure, so a light dab is cut
+    // nearer its middle.
+    let (full, _) = dab_alphas(&mut b, 1.0);
+    let (light, _) = dab_alphas(&mut b, 0.3);
+    assert!(light < full * 3 / 4, "light {light} vs full {full}");
+    // Without a soft band it's all or nothing; with one, some of the edge
+    // keeps its own strength.
+    b.inputs.clear();
+    assert_eq!(dab_alphas(&mut b, 1.0).1, 0);
+    b.sharpness_softness = 0.6;
+    assert!(dab_alphas(&mut b, 1.0).1 > 20);
+}
+
+#[test]
+fn darken_by_pressure_takes_the_colour_toward_black() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let mut b = brush(BrushDynamics::default());
+    b.brush_options.color = Color32::from_rgb(200, 120, 40);
+    b.inputs = vec![InputMapping {
+        sensor: Sensor::Pressure,
+        setting: DabSetting::Darken,
+        amount: -1.0,
+        ..Default::default()
+    }];
+    let red_at = |b: &mut Brush, p: f32| {
+        let canvas = paint_pen(b, &line(64.0, 0.5), p, None);
+        let tile = canvas.get_layer_tile_data(1, 2, 1).unwrap();
+        tile[0].r()
+    };
+    let (light, hard) = (red_at(&mut b, 0.2), red_at(&mut b, 0.9));
+    assert!(
+        hard < light / 2,
+        "darker with pressure: {light} then {hard}"
+    );
+}
+
+#[test]
+fn a_lightness_map_tip_paints_the_brush_colour_at_mid_grey() {
+    use crate::brush_engine::brush_options::{PixelBrushShape, TipMapping};
+    let grey = |g: u8| {
+        PixelBrushShape::Custom(crate::brush_engine::tip::TipMask::from_colored(
+            16,
+            16,
+            vec![255; 256],
+            vec![[g; 3]; 256],
+        ))
+    };
+    let colour = Color32::from_rgb(200, 60, 40);
+    let painted = |g: u8| {
+        let mut b = brush(BrushDynamics::default());
+        b.brush_options.diameter = 30.0;
+        b.brush_options.color = colour;
+        b.brush_options.pixel_shape = grey(g);
+        b.brush_options.tip_colors = true;
+        b.brush_options.tip_mapping = TipMapping::Lightness;
+        let (canvas, _) = paint(&mut b, &[(Vec2::new(100.0, 64.0), 0.0)], 1, true);
+        // (100, 64): its middle.
+        canvas.get_layer_tile_data(1, 1, 1).unwrap()[36]
+    };
+    let mid = painted(128);
+    for (m, c) in mid.to_array().iter().zip(colour.to_array()) {
+        assert!(m.abs_diff(c) <= 6, "{mid:?} vs {colour:?}");
+    }
+    let dark = painted(0);
+    assert!(dark.r() < 10 && dark.g() < 10, "{dark:?}");
+}
