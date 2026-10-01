@@ -210,6 +210,9 @@ pub struct Brush {
     /// The secondary colour, for input mappings that mix it in (set when
     /// a stroke starts; not part of the brush's settings).
     pub second_color: Color32,
+    /// Wash mode: the opacity pen pressure gives the dabs being painted
+    /// (set with the pressure while painting; not a setting).
+    pub wash_opacity: f32,
 }
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
@@ -256,6 +259,10 @@ struct BatchCtx<'a> {
     /// The batch's stroke strength (before each dab's own), which a dab's
     /// stamped alphas are scaled by.
     strength: f32,
+    /// Wash mode (Krita's alpha darken): the flow each dab moves the
+    /// coverage toward its opacity with; its stamped alphas are then the
+    /// tip's coverage alone.
+    wash: Option<f32>,
 }
 
 /// Where a batch of dabs accumulates.
@@ -461,6 +468,13 @@ fn paint_batch(
                     }
                     if let Some(texture) = ctx.texture {
                         let (x, row) = (overlap.min_x + first, &mut alphas[span.clone()]);
+                        // Krita textures the tip's shape, before flow and
+                        // opacity (a wash's stamps are the shape already).
+                        let full = (ctx.strength * dab.strength).min(1.0);
+                        let unscale = texture.krita.is_some() && full > 0.0 && full < 1.0;
+                        if unscale {
+                            row.iter_mut().for_each(|a| *a /= full);
+                        }
                         match &ctx.grain {
                             Some(grain) => texture.apply_row_placed(
                                 gy,
@@ -472,6 +486,9 @@ fn paint_batch(
                             ),
                             None => texture.apply_row_scaled(gy, x, row, dab.texture),
                         }
+                        if unscale {
+                            row.iter_mut().for_each(|a| *a *= full);
+                        }
                     }
                 }
                 if let Some(sel) = selection_coverage {
@@ -482,9 +499,16 @@ fn paint_batch(
                         *alpha *= s;
                     }
                 }
+                // Wash: the colour goes on at the dab's opacity over its
+                // coverage (Krita's alpha darken), not at the coverage.
                 if let Some(colors) = colors.as_deref_mut() {
                     // Each dab's colour laid over what's there, like paint.
                     let dst = &mut colors[start + first..=start + last];
+                    if ctx.wash.is_some() {
+                        for a in &mut alphas[span.clone()] {
+                            *a *= dab.opacity;
+                        }
+                    }
                     let alphas = &alphas[span.clone()];
                     let mix = |dst: &mut [f32; 3], c: [f32; 3], alpha: f32| {
                         let keep = 1.0 - alpha;
@@ -504,11 +528,46 @@ fn paint_batch(
                         }
                     }
                 }
-                for (cov, &alpha) in coverage[start + first..=start + last]
-                    .iter_mut()
-                    .zip(&alphas[span])
-                {
-                    *cov += alpha * (1.0 - *cov);
+                let covered = coverage[start + first..=start + last].iter_mut();
+                match ctx.wash {
+                    // Krita's alpha darken (its "creamy" variant): the
+                    // coverage moves toward the dab's opacity by the tip's
+                    // coverage, at the flow, and never past it; the stroke's
+                    // average opacity holds it up while pressure eases.
+                    Some(flow) => {
+                        let (op, avg) = (dab.opacity, dab.average);
+                        // The alphas carry the opacity already when the
+                        // dabs differ in colour (above).
+                        let m_of = |a: f32| {
+                            if colors.is_some() {
+                                a / op.max(1e-6)
+                            } else {
+                                a
+                            }
+                        };
+                        for (cov, &a) in covered.zip(&alphas[span]) {
+                            let m = m_of(a).min(1.0);
+                            let dst = *cov;
+                            let full = if avg > op {
+                                if avg > dst {
+                                    let src = m * op;
+                                    src + (avg - src) * (dst / avg)
+                                } else {
+                                    dst
+                                }
+                            } else if op > dst {
+                                dst + (op - dst) * m
+                            } else {
+                                dst
+                            };
+                            *cov = dst + (full - dst) * flow;
+                        }
+                    }
+                    None => {
+                        for (cov, &alpha) in covered.zip(&alphas[span]) {
+                            *cov += alpha * (1.0 - *cov);
+                        }
+                    }
                 }
                 let local_x = overlap.min_x - tile_x0;
                 let span = &mut spans[gy - tile_y0];
@@ -857,6 +916,7 @@ impl Brush {
             sharpness: 0.0,
             mixing: None,
             second_color: Color32::WHITE,
+            wash_opacity: 1.0,
         }
     }
 
@@ -888,6 +948,7 @@ impl Brush {
             sharpness: 0.0,
             mixing: None,
             second_color: Color32::WHITE,
+            wash_opacity: 1.0,
         }
     }
 
@@ -1384,6 +1445,7 @@ impl Brush {
             hatch: (self.brush_type == BrushType::Hatching).then_some(&self.hatching),
             sharpness: self.sharpness,
             strength: 1.0,
+            wash: None,
         }
     }
 
@@ -1435,16 +1497,38 @@ impl Brush {
             return;
         }
         let o = &self.brush_options;
+        let mut dabs = dabs;
+        // Wash, as Krita's alpha darken: each dab's opacity (pressure,
+        // colour alpha, dynamics) and the stroke's running average of it,
+        // in stroke order; its stamp is then just the tip's coverage.
+        let wash = o.painting_mode == PaintingMode::Wash && target != Target::Mask;
+        if wash {
+            let alpha = o.color.a() as f32 / 255.0;
+            for dab in &mut dabs {
+                let opacity = (self.wash_opacity * alpha * dab.strength).clamp(0.0, 1.0);
+                let average = match stroke_tiles.wash_average {
+                    Some(a) if a >= opacity => 0.1 * opacity + 0.9 * a,
+                    // Rising, or the stroke's first dab (Krita's average
+                    // starts as the first opacity).
+                    _ => opacity,
+                };
+                stroke_tiles.wash_average = Some(average);
+                (dab.opacity, dab.average, dab.strength) = (opacity, average, 1.0);
+            }
+        }
 
         let buckets = bucket_by_tile(&dabs);
         let regions: Vec<TileRegion> = buckets.iter().map(|(region, _)| *region).collect();
         Self::snapshot_tiles(canvas, &regions, undo_action, stroke_tiles);
 
-        let wash = o.painting_mode == PaintingMode::Wash;
         // Build-up scales every dab by opacity; wash instead caps the whole
-        // stroke at opacity when resolving.
-        let strength =
-            o.color.a() as f32 / 255.0 * (o.flow / 100.0) * if wash { 1.0 } else { o.opacity };
+        // stroke at opacity when resolving, its dabs stamping their tip's
+        // coverage alone (flow and opacity go into the alpha darken).
+        let strength = if wash {
+            1.0
+        } else {
+            o.color.a() as f32 / 255.0 * (o.flow / 100.0) * o.opacity
+        };
         match target {
             Target::Tail(k) => {
                 stroke_tiles.tail_tiles[k].extend(regions.iter().map(|r| (r.tx, r.ty)));
@@ -1464,6 +1548,7 @@ impl Brush {
             stroke_tiles.grain,
         );
         ctx.strength = strength;
+        ctx.wash = wash.then_some((o.flow / 100.0).clamp(0.0, 1.0));
         let work_pixels: usize = dabs
             .iter()
             .map(|d| {

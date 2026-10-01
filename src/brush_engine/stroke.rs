@@ -69,6 +69,9 @@ pub struct StrokeTiles {
     /// Where the stroke's grain sits, for a texture that isn't pinned to
     /// the canvas (set by the first sample).
     pub(crate) grain: crate::brush_engine::texture::StrokeGrain,
+    /// Wash mode: the running average of the dabs' opacity so far (`None`
+    /// before the first dab, which starts it).
+    pub(crate) wash_average: Option<f32>,
 }
 
 impl StrokeTiles {
@@ -99,6 +102,7 @@ impl StrokeTiles {
         self.tail_tiles = Default::default();
         self.tail_newer = 0;
         self.mask_tiles.clear();
+        self.wash_average = None;
     }
 }
 
@@ -1479,9 +1483,9 @@ fn pressure_level(p: f32) -> u32 {
 }
 
 /// Set what pressure `p` drives on the brush, from its unpressured
-/// `(diameter, opacity, flow)`. In wash mode pressure-opacity goes to the
-/// dabs' strength instead of the stroke's opacity cap, which must stay fixed
-/// for a whole stroke.
+/// `(diameter, opacity, flow)`. In wash mode pressure-opacity is each dab's
+/// opacity (`Brush::wash_opacity`) instead of the stroke's opacity cap,
+/// which must stay fixed for a whole stroke.
 fn apply_pressure(brush: &mut Brush, (diameter, opacity, flow): (f32, f32, f32), p: f32) {
     let o = &mut brush.brush_options;
     (o.diameter, o.opacity, o.flow) = (diameter, opacity, flow);
@@ -1490,17 +1494,21 @@ fn apply_pressure(brush: &mut Brush, (diameter, opacity, flow): (f32, f32, f32),
         let factor = o.pressure_min_size + (1.0 - o.pressure_min_size) * curves.size(p);
         o.diameter = (diameter * factor).max(1.0);
     }
-    if o.pressure_opacity {
-        let p = curves.opacity(p);
-        if o.painting_mode == crate::brush_engine::brush_options::PaintingMode::Wash {
-            o.flow *= p;
-        } else {
-            o.opacity *= p;
-        }
+    let wash = o.painting_mode == crate::brush_engine::brush_options::PaintingMode::Wash;
+    let pressure_opacity = o.pressure_opacity.then(|| curves.opacity(p));
+    if !wash && let Some(p) = pressure_opacity {
+        o.opacity *= p;
     }
     if o.pressure_flow {
         o.flow *= curves.flow(p);
     }
+    // Wash: pressure sets each dab's opacity, which the stroke moves toward
+    // (its own opacity caps the whole stroke).
+    brush.wash_opacity = if wash {
+        pressure_opacity.unwrap_or(1.0)
+    } else {
+        1.0
+    };
 }
 
 impl Default for StrokeState {

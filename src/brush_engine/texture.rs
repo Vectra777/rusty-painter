@@ -164,6 +164,138 @@ pub struct StrokeGrain {
     pub seed: u32,
 }
 
+/// Krita's texturing, for brushes imported from it: its mode (by Krita's
+/// number, `KisTextureOptionData::TexturingMode`) and whether it uses
+/// Krita 5's "soft texturing" or the classic strength. The grain then
+/// combines with each dab by Krita's own formulas
+/// (`KisMaskingBrushCompositeOp`), its value as Krita's mask (light keeps
+/// paint in multiply, takes it away in subtract and the height modes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KritaTexturing {
+    pub mode: u8,
+    pub soft: bool,
+}
+
+impl KritaTexturing {
+    /// Whether Krita's mode `mode` is one of the alpha formulas here
+    /// (lightness and gradient texturing colour the dab instead).
+    pub fn supports(mode: u8) -> bool {
+        matches!(mode, 0 | 1 | 4..=15)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self.mode {
+            0 => "Multiply",
+            1 => "Subtract",
+            4 => "Darken",
+            5 => "Overlay",
+            6 => "Color dodge",
+            7 => "Color burn",
+            8 => "Linear dodge",
+            9 => "Linear burn",
+            10 => "Hard mix",
+            11 => "Hard mix softer",
+            12 => "Height",
+            13 => "Linear height",
+            14 => "Height (Photoshop)",
+            15 => "Linear height (Photoshop)",
+            _ => "Multiply",
+        }
+    }
+
+    /// Dab alpha `a` (the tip's coverage, 0..1) textured by grain value `t`
+    /// at strength `s`, as Krita does it.
+    #[inline]
+    pub fn combine(self, a: f32, s: f32, t: f32) -> f32 {
+        let unite = |x: f32, y: f32| x + y - x * y;
+        let is = 1.0 - s;
+        let soft = self.soft;
+        let dodge = |src: f32, dst: f32| {
+            if src >= 1.0 {
+                if dst <= 0.0 { 0.0 } else { 1.0 }
+            } else {
+                dst / (1.0 - src)
+            }
+        };
+        let burn = |src: f32, dst: f32| {
+            if dst >= 1.0 {
+                1.0
+            } else if src < 1.0 - dst {
+                0.0
+            } else {
+                1.0 - (1.0 - dst) / src
+            }
+        };
+        // Krita's overlay of `src` on `dst` is hard light the other way.
+        let overlay = |src: f32, dst: f32| {
+            if src > 0.5 {
+                let k = 2.0 * src - 1.0;
+                dst + k - dst * k
+            } else {
+                dst * 2.0 * src
+            }
+        };
+        let v = match self.mode {
+            0 if soft => a * unite(t, is),
+            0 => a * t * s,
+            1 if soft => a - t * s,
+            1 => a - (t + is),
+            4 if soft => unite(t, is).min(a),
+            4 => t.min(a * s),
+            5 if soft => overlay(a, unite(t, is)),
+            5 => overlay(a * s, t),
+            6 if soft => dodge(t * s, a),
+            6 => dodge(t, a * s),
+            7 if soft => burn(unite(t, is), a),
+            7 => burn(t, a * s),
+            8 if a <= 0.0 => 0.0,
+            8 if soft => t * s + a,
+            8 => t + a * s,
+            9 if soft => unite(t, is) + a - 1.0,
+            9 => t + a * s - 1.0,
+            10 => {
+                let hard = |src: f32, dst: f32| if src + dst > 1.0 { 1.0 } else { 0.0 };
+                if soft {
+                    hard(unite(t, is), a) * unite(a, s)
+                } else {
+                    hard(t, a * s)
+                }
+            }
+            11 if soft => 3.0 * a - 2.0 * (1.0 - t * s),
+            11 => 3.0 * a * s - 2.0 * (1.0 - t),
+            12 | 13 => {
+                let s = 0.99 * s;
+                let is = 1.0 - s;
+                if self.mode == 12 {
+                    if soft {
+                        a / is - t * s
+                    } else {
+                        a / is - (t + is)
+                    }
+                } else if soft {
+                    let (d, ts) = (a / is, t * s);
+                    (d * (1.0 - ts)).max(d - ts)
+                } else {
+                    let d = a / is - is;
+                    (d * (1.0 - t)).max(d - t)
+                }
+            }
+            14 if soft => a + a * 9.0 * s - t * s,
+            14 => a * 10.0 * s - t,
+            15 if soft => {
+                let (d, ts) = (a + a * 9.0 * s, t * s);
+                (d * (1.0 - ts)).max(d - ts)
+            }
+            15 => {
+                let d = a * 10.0 * s;
+                ((1.0 - t) * d).max(d - t)
+            }
+            _ => a * unite(t, is),
+        };
+        v.clamp(0.0, 1.0)
+    }
+}
+
 /// A brush's texture settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrushTexture {
@@ -177,6 +309,8 @@ pub struct BrushTexture {
     pub invert: bool,
     /// Moved with the stroke, turned, shifted, per dab.
     pub placement: GrainPlacement,
+    /// Krita's texturing (an imported brush), instead of `mode`.
+    pub krita: Option<KritaTexturing>,
 }
 
 impl BrushTexture {
@@ -188,6 +322,7 @@ impl BrushTexture {
             strength: 0.8,
             invert: false,
             placement: GrainPlacement::default(),
+            krita: None,
         }
     }
 
@@ -202,22 +337,41 @@ impl BrushTexture {
     /// input mappings).
     #[inline]
     pub fn apply_row_scaled(&self, y: usize, x0: usize, alphas: &mut [f32], factor: f32) {
+        if let Some(k) = self.krita {
+            return self.scaled_row(y, x0, alphas, factor, |a, s, t| k.combine(a, s, t));
+        }
         // The mode chosen once per row, not per pixel.
         match self.mode {
-            TextureMode::Multiply => self.scaled_row(y, x0, alphas, factor, TextureMode::Multiply),
-            TextureMode::Subtract => self.scaled_row(y, x0, alphas, factor, TextureMode::Subtract),
-            TextureMode::Height => self.scaled_row(y, x0, alphas, factor, TextureMode::Height),
-            TextureMode::ColorDodge => {
-                self.scaled_row(y, x0, alphas, factor, TextureMode::ColorDodge)
-            }
-            TextureMode::HardMix => self.scaled_row(y, x0, alphas, factor, TextureMode::HardMix),
+            TextureMode::Multiply => self.scaled_row(y, x0, alphas, factor, |a, s, t| {
+                combine(TextureMode::Multiply, a, s, t)
+            }),
+            TextureMode::Subtract => self.scaled_row(y, x0, alphas, factor, |a, s, t| {
+                combine(TextureMode::Subtract, a, s, t)
+            }),
+            TextureMode::Height => self.scaled_row(y, x0, alphas, factor, |a, s, t| {
+                combine(TextureMode::Height, a, s, t)
+            }),
+            TextureMode::ColorDodge => self.scaled_row(y, x0, alphas, factor, |a, s, t| {
+                combine(TextureMode::ColorDodge, a, s, t)
+            }),
+            TextureMode::HardMix => self.scaled_row(y, x0, alphas, factor, |a, s, t| {
+                combine(TextureMode::HardMix, a, s, t)
+            }),
         }
     }
 
-    /// [`Self::apply_row_scaled`] in `mode` (a constant at each call, so
-    /// each copy is specialised to it).
+    /// [`Self::apply_row_scaled`] combining by `combine(alpha, strength,
+    /// grain)` (a constant formula at each call, so each copy is
+    /// specialised to it).
     #[inline(always)]
-    fn scaled_row(&self, y: usize, x0: usize, alphas: &mut [f32], factor: f32, mode: TextureMode) {
+    fn scaled_row(
+        &self,
+        y: usize,
+        x0: usize,
+        alphas: &mut [f32],
+        factor: f32,
+        combine: impl Fn(f32, f32, f32) -> f32,
+    ) {
         let p = &*self.pattern;
         let inv = 1.0 / self.scale.max(0.05);
         let s = (self.strength * factor).clamp(0.0, 1.0);
@@ -244,7 +398,7 @@ impl BrushTexture {
             if self.invert {
                 t = 1.0 - t;
             }
-            *a = combine(mode, *a, s, t);
+            *a = combine(*a, s, t);
         }
     }
 }
@@ -262,17 +416,30 @@ impl BrushTexture {
         center: [f32; 2],
     ) {
         // The mode chosen once per row, not per pixel.
-        let mut row = |mode| self.placed_row(y, x0, alphas, factor, grain, center, mode);
+        if let Some(k) = self.krita {
+            return self.placed_row(y, x0, alphas, factor, grain, center, |a, s, t| {
+                k.combine(a, s, t)
+            });
+        }
+        // The mode chosen once per row, each arm its own copy of the loop.
+        macro_rules! row {
+            ($mode:expr) => {
+                self.placed_row(y, x0, alphas, factor, grain, center, |a, s, t| {
+                    combine($mode, a, s, t)
+                })
+            };
+        }
         match self.mode {
-            TextureMode::Multiply => row(TextureMode::Multiply),
-            TextureMode::Subtract => row(TextureMode::Subtract),
-            TextureMode::Height => row(TextureMode::Height),
-            TextureMode::ColorDodge => row(TextureMode::ColorDodge),
-            TextureMode::HardMix => row(TextureMode::HardMix),
+            TextureMode::Multiply => row!(TextureMode::Multiply),
+            TextureMode::Subtract => row!(TextureMode::Subtract),
+            TextureMode::Height => row!(TextureMode::Height),
+            TextureMode::ColorDodge => row!(TextureMode::ColorDodge),
+            TextureMode::HardMix => row!(TextureMode::HardMix),
         }
     }
 
-    /// [`Self::apply_row_placed`] in `mode` (see [`Self::scaled_row`]).
+    /// [`Self::apply_row_placed`] combining by `combine` (see
+    /// [`Self::scaled_row`]).
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn placed_row(
@@ -283,7 +450,7 @@ impl BrushTexture {
         factor: f32,
         grain: &StrokeGrain,
         center: [f32; 2],
-        mode: TextureMode,
+        combine: impl Fn(f32, f32, f32) -> f32,
     ) {
         let p = &*self.pattern;
         let place = &self.placement;
@@ -334,7 +501,7 @@ impl BrushTexture {
             if self.invert {
                 t = 1.0 - t;
             }
-            *a = combine(mode, *a, s, t);
+            *a = combine(*a, s, t);
         }
     }
 }
@@ -575,6 +742,65 @@ mod tests {
         assert!(combine(TextureMode::ColorDodge, 0.5, 1.0, 0.9) > 0.9);
         assert_eq!(combine(TextureMode::HardMix, 0.9, 1.0, 0.9), 1.0);
         assert_eq!(combine(TextureMode::HardMix, 0.2, 1.0, 0.2), 0.0);
+    }
+
+    #[test]
+    fn krita_texturing_follows_krita_s_formulas() {
+        let k = |mode, soft| KritaTexturing { mode, soft };
+        let (a, s, t) = (0.8f32, 0.5f32, 0.6f32);
+        let close = |x: f32, y: f32| (x - y).abs() < 1e-5;
+        // Classic multiply scales the whole dab by the strength; soft only
+        // the grain.
+        assert!(close(k(0, false).combine(a, s, t), a * t * s));
+        assert!(close(k(0, true).combine(a, s, t), a * (t + 0.5 - t * 0.5)));
+        // Subtract takes paint away where the grain is light.
+        assert!(close(k(1, true).combine(a, s, t), a - t * s));
+        assert!(close(
+            k(1, false).combine(a, s, t),
+            (a - (t + 0.5)).max(0.0)
+        ));
+        assert!(k(1, true).combine(a, 1.0, 1.0) < k(1, true).combine(a, 1.0, 0.0));
+        // Colour dodge: a / (1 - t·s) soft, (a·s) / (1 - t) classic.
+        assert!(close(k(6, true).combine(0.4, s, t), 0.4 / (1.0 - t * s)));
+        assert!(close(
+            k(6, false).combine(0.4, s, t),
+            (0.4 * s / (1.0 - t)).min(1.0)
+        ));
+        // Height: a / (1 - 0.99s) - t·0.99s, soft.
+        let s99 = 0.99 * s;
+        assert!(close(
+            k(12, true).combine(0.3, s, t),
+            (0.3 / (1.0 - s99) - t * s99).clamp(0.0, 1.0)
+        ));
+        // Every mode stays in range and leaves no paint outside the dab
+        // (linear dodge on nothing is nothing).
+        for mode in (0..=15).filter(|&m| KritaTexturing::supports(m)) {
+            for soft in [false, true] {
+                for i in 0..=10 {
+                    for j in 0..=10 {
+                        let v = k(mode, soft).combine(i as f32 / 10.0, 0.7, j as f32 / 10.0);
+                        assert!((0.0..=1.0).contains(&v), "{mode} {soft}: {v}");
+                    }
+                }
+            }
+        }
+        assert_eq!(k(8, true).combine(0.0, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_krita_texture_row_uses_krita_s_formula() {
+        let mut tex = BrushTexture::new(builtin()[0].clone());
+        tex.strength = 0.5;
+        tex.krita = Some(KritaTexturing {
+            mode: 0,
+            soft: false,
+        });
+        let mut row = vec![0.8f32; 32];
+        tex.apply_row(7, 3, &mut row);
+        for (i, &v) in row.iter().enumerate() {
+            let t = tex.pattern.at(3.0 + i as f32 + 0.5, 7.5, 1.0);
+            assert!((v - 0.8 * t * 0.5).abs() < 1e-4, "{i}");
+        }
     }
 
     #[test]

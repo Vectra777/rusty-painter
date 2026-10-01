@@ -103,6 +103,11 @@ pub(super) struct PlacedDab {
     /// texture's strength factor.
     pub hardness: f32,
     pub texture: f32,
+    /// Wash mode: the dab's opacity, which the stroke's coverage moves
+    /// toward and never past, and the stroke's running average of it (see
+    /// `Brush::paint_prepared`).
+    pub opacity: f32,
+    pub average: f32,
 }
 
 impl PlacedDab {
@@ -128,6 +133,8 @@ impl PlacedDab {
             hatch: 1,
             hardness: 0.0,
             texture: 1.0,
+            opacity: 1.0,
+            average: 1.0,
         }
     }
 

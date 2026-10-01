@@ -333,19 +333,22 @@ fn read_kpp(
         match pattern {
             Some(pattern) => {
                 use crate::brush_engine::texture::{BrushTexture, TextureMode};
-                let mode = match number("Texture/Pattern/TexturingMode").unwrap_or(0.0) as i32 {
-                    0 => TextureMode::Multiply,
+                let krita_mode = number("Texture/Pattern/TexturingMode").unwrap_or(0.0) as u8;
+                // The nearest of this app's own modes (shown, and used if
+                // Krita's formula is turned off); Krita's formula paints.
+                let mode = match krita_mode {
                     1 => TextureMode::Subtract,
-                    6 => TextureMode::ColorDodge,
+                    6 | 8 => TextureMode::ColorDodge,
                     10 | 11 => TextureMode::HardMix,
                     12..=15 => TextureMode::Height,
-                    _ => {
-                        notes.push(format!(
-                            "{name}: its texture blends a way this app doesn't; multiplied instead"
-                        ));
-                        TextureMode::Multiply
-                    }
+                    _ => TextureMode::Multiply,
                 };
+                if !crate::brush_engine::texture::KritaTexturing::supports(krita_mode) {
+                    notes.push(format!(
+                        "{name}: its texture colours the dab (Krita's lightness or gradient \
+                         texturing), which this app doesn't; multiplied instead"
+                    ));
+                }
                 b.texture = Some(BrushTexture {
                     pattern,
                     mode,
@@ -355,14 +358,18 @@ fn read_kpp(
                     strength: number("Texture/Strength/Value")
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0),
-                    // Krita's subtract takes paint away where the grain
-                    // is light, this app's where it's dark.
-                    invert: yes("Texture/Pattern/Invert") != (mode == TextureMode::Subtract),
+                    invert: yes("Texture/Pattern/Invert"),
                     placement: crate::brush_engine::texture::GrainPlacement {
                         random_offset: yes("Texture/Pattern/isRandomOffsetX")
                             || yes("Texture/Pattern/isRandomOffsetY"),
                         ..Default::default()
                     },
+                    // Krita's own formula for its mode.
+                    krita: crate::brush_engine::texture::KritaTexturing::supports(krita_mode)
+                        .then_some(crate::brush_engine::texture::KritaTexturing {
+                            mode: krita_mode,
+                            soft: yes("Texture/Pattern/UseSoftTexturing"),
+                        }),
                 });
                 // Its strength by pressure.
                 if yes("PressureTexture/Strength/")

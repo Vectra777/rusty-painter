@@ -162,6 +162,9 @@ struct StoredBrushTexture {
     /// Where the grain sits (moved with the stroke, turned...).
     #[serde(default)]
     placement: crate::brush_engine::texture::GrainPlacement,
+    /// Krita's texturing, for an imported brush.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    krita: Option<crate::brush_engine::texture::KritaTexturing>,
 }
 
 /// A brush's settings, flattened (the tip and texture by number).
@@ -293,6 +296,7 @@ impl StoredBrush {
                 strength: t.strength,
                 invert: t.invert,
                 placement: t.placement,
+                krita: t.krita,
             }),
             paint_blend: b.paint_blend.key().to_string(),
             airbrush_rate: b.airbrush_rate,
@@ -362,6 +366,7 @@ impl StoredBrush {
                 strength: t.strength,
                 invert: t.invert,
                 placement: t.placement,
+                krita: t.krita,
             }),
         };
         b.paint_blend = LayerBlend::from_key(&self.paint_blend).unwrap_or_default();
@@ -711,6 +716,12 @@ mod tests {
         brush.dynamics.tip.random_flip_x = true;
         brush.dynamics.tip.follow_barrel = true;
         brush.paint_blend = LayerBlend::Parallel;
+        let mut texture = BrushTexture::new(crate::brush_engine::texture::builtin()[0].clone());
+        texture.krita = Some(crate::brush_engine::texture::KritaTexturing {
+            mode: 12,
+            soft: false,
+        });
+        brush.texture = Some(texture);
         let preset = BrushPreset {
             name: "Krita-like".into(),
             brush,
@@ -724,6 +735,13 @@ mod tests {
         assert!(b.dynamics.tip.random_flip_x && !b.dynamics.tip.random_flip_y);
         assert!(b.dynamics.tip.follow_barrel);
         assert_eq!(b.paint_blend, LayerBlend::Parallel);
+        assert_eq!(
+            b.texture.as_ref().unwrap().krita,
+            Some(crate::brush_engine::texture::KritaTexturing {
+                mode: 12,
+                soft: false
+            })
+        );
     }
 
     #[test]

@@ -2266,3 +2266,73 @@ fn the_new_features_are_repeatable_with_a_seed() {
     let again = pixels(&paint(&mut b.clone(), &line(64.0, 0.5), 5, true).0);
     assert!(a == again, "the same seed paints the same stroke");
 }
+
+/// A wash brush, opacity by pressure, flow `flow` (0..100).
+fn wash_brush(flow: f32) -> Brush {
+    let mut b = Brush::new(20.0, 100.0, Color32::BLACK, 5.0);
+    let o = &mut b.brush_options;
+    o.pressure_size = false;
+    o.pressure_opacity = true;
+    o.flow = flow;
+    o.painting_mode = crate::brush_engine::brush_options::PaintingMode::Wash;
+    b
+}
+
+/// Back and forth over y = 64 `passes` times in one stroke, at `pressure`.
+fn scrub(brush: &mut Brush, passes: usize, pressure: f32) -> Canvas {
+    let points: Vec<(Vec2, f64)> = (0..=passes * 20)
+        .map(|i| {
+            let t = (i % 40) as f32 / 20.0;
+            let x = if t <= 1.0 { t } else { 2.0 - t };
+            (Vec2::new(40.0 + x * 160.0, 64.0), i as f64 * 0.01)
+        })
+        .collect();
+    paint_pen(brush, &points, pressure, None)
+}
+
+#[test]
+fn wash_never_goes_past_the_pressure_s_opacity_however_often_it_s_gone_over() {
+    // Krita's alpha darken: at light pressure, scrubbing stays light.
+    for (passes, pressure) in [(1, 0.3), (8, 0.3), (8, 0.7)] {
+        let canvas = scrub(&mut wash_brush(100.0), passes, pressure);
+        let a = alpha(&canvas, 120, 64) as f32 / 255.0;
+        assert!(
+            (a - pressure).abs() < 0.02,
+            "{passes} passes at {pressure}: {a}"
+        );
+    }
+}
+
+#[test]
+fn wash_flow_approaches_the_opacity_gradually() {
+    let once = alpha(&scrub(&mut wash_brush(20.0), 1, 0.6), 120, 64) as f32 / 255.0;
+    let many = alpha(&scrub(&mut wash_brush(20.0), 8, 0.6), 120, 64) as f32 / 255.0;
+    assert!(once < many, "builds with each pass: {once} then {many}");
+    assert!(many <= 0.61, "never past the opacity: {many}");
+}
+
+#[test]
+fn easing_pressure_in_wash_fades_gradually_not_at_once() {
+    // Full pressure, then light, along a line: the average opacity carries
+    // the strong part on for a while rather than dropping at once.
+    let mut b = wash_brush(100.0);
+    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(1);
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        for i in 0..=60 {
+            let p = if i < 30 { 1.0 } else { 0.2 };
+            let pos = Vec2::new(20.0 + i as f32 * 3.6, 64.0);
+            stroke.add_sample(&mut b, pos, p, Some(i as f64 * 0.01), &mut ctx);
+        }
+        stroke.finish(&mut b, &mut ctx);
+    }
+    let at = |x: usize| alpha(&canvas, x, 64) as f32 / 255.0;
+    assert!(at(60) > 0.95, "strong part: {}", at(60));
+    assert!((at(220) - 0.2).abs() < 0.05, "light part: {}", at(220));
+    assert!(at(140) > 0.3, "the change eases in: {}", at(140));
+}

@@ -1387,10 +1387,27 @@ fn texture_section(
                 .selected_text(t.mode.label())
                 .show_ui(ui, |ui| {
                     for m in TextureMode::ALL {
-                        changed |= ui.selectable_value(&mut t.mode, m, m.label()).changed();
+                        if ui.selectable_value(&mut t.mode, m, m.label()).clicked() {
+                            // Picking a mode uses this app's formula for it.
+                            t.krita = None;
+                            changed = true;
+                        }
                     }
                 });
         });
+        if let Some(k) = t.krita {
+            property_row(ui, "Krita", |ui| {
+                ui.label(format!(
+                    "{} ({})",
+                    k.label(),
+                    if k.soft { "soft texturing" } else { "classic" }
+                ))
+                .on_hover_text(
+                    "This brush came from Krita: its texture combines by Krita's own formula \
+                     for this mode. Pick a mode above to use this app's instead.",
+                );
+            });
+        }
         changed |= slider_row(
             ui,
             "Strength",
@@ -1445,6 +1462,7 @@ fn texture_section(
             .changed();
         ui.label(
             egui::RichText::new(match t.mode {
+                _ if t.krita.is_some() => "Krita's texturing, as Krita paints it.",
                 TextureMode::Multiply => "The grain darkens the stroke evenly.",
                 TextureMode::Subtract => "Low spots lose paint first; heavy strokes fill in.",
                 TextureMode::Height => {
