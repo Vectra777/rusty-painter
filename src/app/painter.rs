@@ -93,10 +93,11 @@ impl eframe::App for PainterApp {
         // 2. Chrome. Bars first so they span the full window width; the tool strip is
         // added before the docks so it sits at the far left.
         // Tablets have the menus in a sheet over the bottom bar, and adjust
-        // size/opacity with the canvas faders instead of the tool options.
+        // size/opacity with sliders on the top bar instead of the tool options.
         ui::menus::top_bar(self, ctx);
         if touch {
             ui::menus::menu_sheet(self, ctx);
+            layout::show_dropdowns(self, ctx);
         }
         ui::toolbar::toolbar(self, ctx);
         layout::right_rail(self, ctx);

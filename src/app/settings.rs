@@ -45,6 +45,7 @@ pub struct AppSettings {
     pressure_curve: SoftnessCurve,
     touch_mode: bool,
     finger_painting: bool,
+    autohide_panels: bool,
     show_left_panel: bool,
     show_color: bool,
     show_layers: bool,
@@ -138,6 +139,7 @@ impl AppSettings {
             pressure_curve: ws.pressure_curve.clone(),
             touch_mode: ws.touch_mode,
             finger_painting: ws.finger_painting,
+            autohide_panels: ws.autohide_panels,
             show_left_panel: ws.show_left_panel,
             show_color: ws.show_color,
             show_layers: ws.show_layers,
@@ -200,9 +202,13 @@ impl AppSettings {
         ws.pressure_curve = self.pressure_curve;
         ws.touch_mode = self.touch_mode;
         ws.finger_painting = self.finger_painting;
-        ws.show_left_panel = self.show_left_panel;
-        ws.show_color = self.show_color;
-        ws.show_layers = self.show_layers;
+        ws.autohide_panels = self.autohide_panels;
+        // A tablet starts with the canvas clear: the panels stay closed.
+        let restore = !ws.touch_mode;
+        ws.show_left_panel = restore && self.show_left_panel;
+        ws.show_color = restore && self.show_color;
+        ws.show_layers = restore && self.show_layers;
+        app.brush_state.show_presets &= restore;
         ws.quickshape.enabled = self.quickshape;
         ws.transform_pick_layer = self.transform_pick_layer;
         ws.select_type = self.select_type;

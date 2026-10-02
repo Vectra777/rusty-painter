@@ -110,7 +110,7 @@ fn handle_pen(
         match sample.phase {
             TabletPhase::Down => {
                 // Only a pen landing on the canvas panel acts on it (not on a
-                // window, menu or fader over it); dragging in from the UI
+                // window or menu over it); dragging in from the UI
                 // doesn't paint.
                 let over =
                     response.rect.contains(pos) && ctx.layer_id_at(pos) == Some(response.layer_id);

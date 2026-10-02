@@ -81,7 +81,7 @@ fn touch_and_pen_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
     );
     ui.checkbox(
         &mut ws.touch_mode,
-        "Touch mode (larger controls, canvas faders)",
+        "Touch mode (larger controls, size and opacity on the top bar)",
     );
     ui.checkbox(&mut ws.finger_painting, "Paint with one finger")
         .on_hover_text("When off, only a stylus paints and one finger pans the canvas.");

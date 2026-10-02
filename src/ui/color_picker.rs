@@ -40,6 +40,13 @@ fn gradient_slider(
     checker: bool,
 ) -> bool {
     ui.horizontal(|ui| {
+        let touch = metrics(ui.ctx()).touch;
+        let bar_height: f32 = if touch { 26.0 } else { 14.0 };
+        let box_height = bar_height.max(18.0);
+        if touch {
+            // The number box as tall as the bar, so they line up.
+            ui.spacing_mut().interact_size.y = box_height;
+        }
         ui.add_sized(
             egui::vec2(14.0, 18.0),
             egui::Label::new(RichText::new(label).small().color(TEXT_DIM)),
@@ -47,7 +54,6 @@ fn gradient_slider(
         // No narrower than egui draws a number box, or the row overflows.
         let value_width = ui.spacing().interact_size.x.max(36.0);
         let width = (ui.available_width() - value_width - ui.spacing().item_spacing.x).max(40.0);
-        let bar_height = if metrics(ui.ctx()).touch { 26.0 } else { 14.0 };
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, bar_height), Sense::click_and_drag());
         let painter = ui.painter();
@@ -93,7 +99,7 @@ fn gradient_slider(
 
         let mut percent = (*value * 100.0).round();
         let drag = ui.add_sized(
-            egui::vec2(value_width, 18.0),
+            egui::vec2(value_width, box_height),
             egui::DragValue::new(&mut percent)
                 .range(0.0..=100.0)
                 .speed(0.5)

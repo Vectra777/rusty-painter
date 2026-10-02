@@ -28,7 +28,7 @@ pub fn options_inline(app: &mut PainterApp, ui: &mut egui::Ui) {
 }
 
 fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
-    // Desktop only (tablets use the canvas faders); hints fill the right.
+    // Desktop only (tablets have size and opacity sliders); hints fill the right.
     let hint = match app.active_tool {
         Tool::Brush => brush_options(app, ui),
         Tool::Select(kind) => select_options(app, ui, kind),

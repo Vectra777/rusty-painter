@@ -402,6 +402,9 @@ pub struct WorkspaceState {
     /// Let a single finger paint; when off, one finger pans and only a
     /// stylus paints.
     pub finger_painting: bool,
+    /// Touch mode: the tool strip and brush panel fade out while painting
+    /// and come back when the pen or mouse comes near them.
+    pub autohide_panels: bool,
     /// How the pen's raw pressure maps to the pressure every brush sees (a
     /// soft or firm pen, a heavy or light hand). What pressure drives (size,
     /// opacity, flow) is set per brush, with its own curves on top.
@@ -501,6 +504,7 @@ impl WorkspaceState {
                 || std::env::var_os("RUSTY_PAINTER_TOUCH").is_some(),
             applied_touch_mode: None,
             finger_painting: true,
+            autohide_panels: true,
             pressure_curve: crate::brush_engine::hardness::SoftnessCurve {
                 points: vec![
                     crate::brush_engine::hardness::CurvePoint::new(0.0, 0.0),

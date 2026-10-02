@@ -43,61 +43,87 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
         MIN_TOOL_BUTTON
     });
     let mut anchors = Anchors::default();
-    egui::SidePanel::left("toolbar")
-        .exact_width(size + m.toolbar_width - m.tool_button)
-        .resizable(false)
-        .frame(
-            egui::Frame::none()
-                .fill(BG_PANEL)
-                .inner_margin(egui::Margin::symmetric(5.0, MARGIN_Y)),
-        )
-        .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, ITEM_SPACING);
-            if fitting.is_some() {
-                anchors = tool_buttons(app, ui, size, m.touch);
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    color_pair(app, ui, size);
-                    settings_button(app, ui, size);
+    let width = size + m.toolbar_width - m.tool_button;
+    let frame = egui::Frame::none()
+        .fill(BG_PANEL)
+        .inner_margin(egui::Margin::symmetric(5.0, MARGIN_Y));
+    let area = ctx.available_rect();
+    let overlay = m.touch && app.workspace.autohide_panels;
+    let shown = if overlay {
+        // The brush panel floats beside it (layout::show_panels).
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("toolbar_overlay_width"), width));
+        crate::app::layout::left_reveal(app, ctx, area.left() + width)
+    } else {
+        1.0
+    };
+    let (offset, _) = crate::app::layout::left_slide(app, ctx, width);
+    let mut strip = |ui: &mut egui::Ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(0.0, ITEM_SPACING);
+        if fitting.is_some() {
+            anchors = tool_buttons(app, ui, size, m.touch);
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                color_pair(app, ui, size);
+                settings_button(app, ui, size);
+            });
+        } else {
+            // The colors stay pinned at the bottom; the tools scroll.
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                color_pair(app, ui, size);
+                settings_button(app, ui, size);
+                separator(ui, size);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    let out = egui::ScrollArea::vertical()
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .show(ui, |ui| {
+                            anchors = tool_buttons(app, ui, size, m.touch);
+                        });
+                    // More tools below: say so (the strip scrolls by drag
+                    // or wheel, with no bar to see).
+                    let r = out.inner_rect;
+                    let hidden = out.content_size.y - out.state.offset.y - r.height();
+                    if hidden > 2.0 {
+                        let band = egui::Rect::from_min_max(
+                            egui::pos2(r.left(), r.bottom() - 12.0),
+                            r.right_bottom(),
+                        );
+                        ui.painter().rect_filled(band, 0.0, BG_PANEL);
+                        let c = egui::pos2(r.center().x, r.bottom() - 6.0);
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            vec![
+                                c + egui::vec2(-6.0, -4.0),
+                                c + egui::vec2(6.0, -4.0),
+                                c + egui::vec2(0.0, 3.0),
+                            ],
+                            ACCENT,
+                            Stroke::NONE,
+                        ));
+                    }
                 });
-            } else {
-                // The colors stay pinned at the bottom; the tools scroll.
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    color_pair(app, ui, size);
-                    settings_button(app, ui, size);
-                    separator(ui, size);
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                        let out = egui::ScrollArea::vertical()
-                            .scroll_bar_visibility(
-                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                            )
-                            .show(ui, |ui| {
-                                anchors = tool_buttons(app, ui, size, m.touch);
-                            });
-                        // More tools below: say so (the strip scrolls by drag
-                        // or wheel, with no bar to see).
-                        let r = out.inner_rect;
-                        let hidden = out.content_size.y - out.state.offset.y - r.height();
-                        if hidden > 2.0 {
-                            let band = egui::Rect::from_min_max(
-                                egui::pos2(r.left(), r.bottom() - 12.0),
-                                r.right_bottom(),
-                            );
-                            ui.painter().rect_filled(band, 0.0, BG_PANEL);
-                            let c = egui::pos2(r.center().x, r.bottom() - 6.0);
-                            ui.painter().add(egui::Shape::convex_polygon(
-                                vec![
-                                    c + egui::vec2(-6.0, -4.0),
-                                    c + egui::vec2(6.0, -4.0),
-                                    c + egui::vec2(0.0, 3.0),
-                                ],
-                                ACCENT,
-                                Stroke::NONE,
-                            ));
-                        }
-                    });
+            });
+        }
+    };
+    if overlay {
+        // Over the canvas, fading with the pen's distance: the canvas
+        // keeps its size whether the strip shows or not.
+        egui::Area::new(egui::Id::new("toolbar_overlay"))
+            .fixed_pos(area.left_top() + egui::vec2(offset, 0.0))
+            .order(egui::Order::Middle)
+            .interactable(shown > 0.3)
+            .show(ctx, |ui| {
+                ui.set_opacity(shown);
+                frame.show(ui, |ui| {
+                    ui.set_width(width - 10.0);
+                    ui.set_height(area.height() - 2.0 * MARGIN_Y);
+                    strip(ui);
                 });
-            }
-        });
+            });
+    } else {
+        egui::SidePanel::left("toolbar")
+            .exact_width(width)
+            .resizable(false)
+            .frame(frame)
+            .show(ctx, |ui| strip(ui));
+    }
     if let Some(anchor) = anchors.select {
         crate::ui::select_menu::show(app, ctx, anchor);
     }
@@ -248,8 +274,9 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         app.active_tool = Tool::Liquify;
     }
     separator(ui, size);
+    // Touch mode has the presets on the top bar.
     let presets_open = app.brush_state.show_presets;
-    if icon_button(ui, Icon::Presets, size, presets_open, "Brush presets (P)").clicked() {
+    if !touch && icon_button(ui, Icon::Presets, size, presets_open, "Brush presets (P)").clicked() {
         app.brush_state.show_presets = !presets_open;
     }
     let palette_open = app.workspace.palette.open;

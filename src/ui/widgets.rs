@@ -366,6 +366,52 @@ pub(crate) fn flyout(
     }
 }
 
+/// A small menu dropping from a top-bar button (`anchor`) while `*open`,
+/// its right edge under the button's; `size` is its content's. Closes on a
+/// tap on the canvas or a panel (not on its own popups, like a combo box).
+pub(crate) fn dropdown(
+    ctx: &egui::Context,
+    id: &str,
+    open: &mut bool,
+    anchor: Rect,
+    size: egui::Vec2,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let t = ctx.animate_bool_with_time(egui::Id::new((id, "anim")), *open, 0.12);
+    if t <= 0.0 {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let x = (anchor.right() - size.x - 16.0).max(screen.left());
+    let y = anchor.bottom() + 2.0 - (1.0 - t) * 12.0;
+    egui::Area::new(egui::Id::new(id))
+        .fixed_pos(egui::pos2(x, y))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_opacity(t);
+            egui::Frame::none()
+                .fill(BG_PANEL)
+                .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.set_width(size.x);
+                    ui.set_height(size.y);
+                    ui.set_clip_rect(ui.max_rect().expand(1.0));
+                    add_contents(ui);
+                });
+        });
+    let tapped_behind = ctx.input(|i| i.pointer.any_pressed())
+        && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| {
+            !anchor.contains(p)
+                && ctx
+                    .layer_id_at(p)
+                    .is_none_or(|l| l.order == egui::Order::Background)
+        });
+    if *open && tapped_behind {
+        *open = false;
+    }
+}
+
 /// Sliders reset to this "default" epoch's first value; bumped when a preset
 /// is chosen, so their defaults become the preset's.
 static DEFAULTS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

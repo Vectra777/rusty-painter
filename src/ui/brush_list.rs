@@ -33,70 +33,77 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
     }
     let m = metrics(ctx);
     let mut open = true;
-    let default_pos = egui::pos2(m.toolbar_width + 8.0, m.menu_height + 8.0);
-    egui::Window::new("Brush Presets")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .default_pos(default_pos)
-        .default_size([WINDOW_WIDTH, 520.0])
-        .min_size([200.0, 160.0])
-        .show(ctx, |ui| {
-            match presets_list(app, ui) {
-                Some(PresetAction::Pick(index)) => {
-                    app.apply_preset(index);
-                    // On a tablet the window is in the way once a preset is picked.
-                    if m.touch {
-                        app.brush_state.show_presets = false;
-                    }
-                }
-                Some(PresetAction::Delete(index)) => app.delete_user_preset(index),
-                Some(PresetAction::Reset(index)) => app.reset_preset(index),
-                #[cfg(not(target_os = "android"))]
-                Some(PresetAction::RestoreDefaults) => app.restore_default_presets(),
-                Some(PresetAction::ToggleFavourite(index)) => {
-                    let name = app.brush_state.presets[index].name.clone();
-                    app.edit_library(|lib| lib.toggle_favourite(&name));
-                }
-                Some(PresetAction::AddTag(index, tag)) => {
-                    let name = app.brush_state.presets[index].name.clone();
-                    app.edit_library(|lib| {
-                        lib.add_tag(&name, &tag);
-                    });
-                    app.brush_state.library.new_tag.clear();
-                }
-                Some(PresetAction::RemoveTag(index, tag)) => {
-                    let name = app.brush_state.presets[index].name.clone();
-                    app.edit_library(|lib| lib.remove_tag(&name, &tag));
-                }
-                #[cfg(not(target_os = "android"))]
-                Some(PresetAction::Export(index)) => {
-                    let name = app.brush_state.presets[index].name.clone();
-                    crate::app::brush_io::export_presets_dialog(app, &[index], &name);
-                }
-                #[cfg(not(target_os = "android"))]
-                Some(PresetAction::ExportMine) => {
-                    let mine: Vec<usize> = (app.brush_state.presets.iter().enumerate())
-                        .filter(|(_, p)| !PainterApp::is_default_preset(&p.name))
-                        .map(|(i, _)| i)
-                        .collect();
-                    crate::app::brush_io::export_presets_dialog(app, &mine, "My brushes");
-                }
-                #[cfg(not(target_os = "android"))]
-                Some(PresetAction::ExportAll) => {
-                    let all: Vec<usize> = (0..app.brush_state.presets.len()).collect();
-                    crate::app::brush_io::export_presets_dialog(app, &all, "Brushes");
-                }
-                #[cfg(not(target_os = "android"))]
-                Some(PresetAction::Import) => crate::app::brush_io::import_presets_dialog(app),
-                None => {}
-            }
-        });
+    // Touch mode docks the list in the right panel (layout::show_panels).
+    if !m.touch {
+        let default_pos = egui::pos2(m.toolbar_width + 8.0, m.menu_height + 8.0);
+        egui::Window::new("Brush Presets")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_pos(default_pos)
+            .default_size([WINDOW_WIDTH, 520.0])
+            .min_size([200.0, 160.0])
+            .show(ctx, |ui| presets_contents(app, ui));
+    }
     if !open {
         app.brush_state.show_presets = false;
     }
     save_preset_modal(app, ctx);
     import_report_window(app, ctx);
+}
+
+/// The presets list and what its actions do (in the window, or docked).
+pub(crate) fn presets_contents(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let touch = metrics(ui.ctx()).touch;
+    match presets_list(app, ui) {
+        Some(PresetAction::Pick(index)) => {
+            app.apply_preset(index);
+            // On a tablet the list is in the way once a preset is picked.
+            if touch {
+                app.brush_state.show_presets = false;
+            }
+        }
+        Some(PresetAction::Delete(index)) => app.delete_user_preset(index),
+        Some(PresetAction::Reset(index)) => app.reset_preset(index),
+        #[cfg(not(target_os = "android"))]
+        Some(PresetAction::RestoreDefaults) => app.restore_default_presets(),
+        Some(PresetAction::ToggleFavourite(index)) => {
+            let name = app.brush_state.presets[index].name.clone();
+            app.edit_library(|lib| lib.toggle_favourite(&name));
+        }
+        Some(PresetAction::AddTag(index, tag)) => {
+            let name = app.brush_state.presets[index].name.clone();
+            app.edit_library(|lib| {
+                lib.add_tag(&name, &tag);
+            });
+            app.brush_state.library.new_tag.clear();
+        }
+        Some(PresetAction::RemoveTag(index, tag)) => {
+            let name = app.brush_state.presets[index].name.clone();
+            app.edit_library(|lib| lib.remove_tag(&name, &tag));
+        }
+        #[cfg(not(target_os = "android"))]
+        Some(PresetAction::Export(index)) => {
+            let name = app.brush_state.presets[index].name.clone();
+            crate::app::brush_io::export_presets_dialog(app, &[index], &name);
+        }
+        #[cfg(not(target_os = "android"))]
+        Some(PresetAction::ExportMine) => {
+            let mine: Vec<usize> = (app.brush_state.presets.iter().enumerate())
+                .filter(|(_, p)| !PainterApp::is_default_preset(&p.name))
+                .map(|(i, _)| i)
+                .collect();
+            crate::app::brush_io::export_presets_dialog(app, &mine, "My brushes");
+        }
+        #[cfg(not(target_os = "android"))]
+        Some(PresetAction::ExportAll) => {
+            let all: Vec<usize> = (0..app.brush_state.presets.len()).collect();
+            crate::app::brush_io::export_presets_dialog(app, &all, "Brushes");
+        }
+        #[cfg(not(target_os = "android"))]
+        Some(PresetAction::Import) => crate::app::brush_io::import_presets_dialog(app),
+        None => {}
+    }
 }
 
 /// What the last import of other apps' brushes brought in, and what it

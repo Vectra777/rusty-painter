@@ -654,16 +654,19 @@ fn brush_settings_contents(
 
     section(ui, "Pen pressure & tilt", true, |ui| {
         let o = &mut brush.brush_options;
+        // Wraps: four touch-sized buttons are wider than the panel.
         property_row(ui, "Controls", |ui| {
-            changed |= ui.toggle_value(&mut o.pressure_size, "Size").changed();
-            changed |= ui
-                .toggle_value(&mut o.pressure_opacity, "Opacity")
-                .changed();
-            changed |= ui.toggle_value(&mut o.pressure_flow, "Flow").changed();
-            changed |= ui
-                .toggle_value(&mut o.pressure_spacing, "Spacing")
-                .on_hover_text("Lighter pressure places the dabs closer together.")
-                .changed();
+            ui.horizontal_wrapped(|ui| {
+                changed |= ui.toggle_value(&mut o.pressure_size, "Size").changed();
+                changed |= ui
+                    .toggle_value(&mut o.pressure_opacity, "Opacity")
+                    .changed();
+                changed |= ui.toggle_value(&mut o.pressure_flow, "Flow").changed();
+                changed |= ui
+                    .toggle_value(&mut o.pressure_spacing, "Spacing")
+                    .on_hover_text("Lighter pressure places the dabs closer together.")
+                    .changed();
+            });
         });
         if o.pressure_size {
             mask_changed |= slider_row(

@@ -123,13 +123,20 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                     egui::vec2(middle, height),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        if !m.touch {
+                        if m.touch {
+                            crate::ui::canvas_sliders::bar_sliders(app, ui);
+                        } else {
                             crate::ui::tool_options::options_inline(app, ui);
                         }
                     },
                 );
                 let right = ui
                     .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if m.touch {
+                            let size = m.menu_height - 4.0;
+                            crate::app::layout::dropdown_buttons(app, ui, size);
+                            crate::ui::widgets::vdivider(ui);
+                        }
                         crate::ui::frame_times::status_readout(app, ui);
                         crate::ui::status_bar::view_controls(app, ui);
                         ui.min_rect().width()
@@ -442,6 +449,13 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if app.workspace.touch_mode {
         ui.checkbox(&mut app.workspace.finger_painting, "Paint with one finger")
             .on_hover_text("When off, only a stylus paints and one finger pans the canvas.");
+        ui.checkbox(
+            &mut app.workspace.autohide_panels,
+            "Hide side panels while painting",
+        )
+        .on_hover_text(
+            "The tools and brush panel fade away; bring the pen near the left edge to show them.",
+        );
     }
     let stats = &mut app.workspace.frame_stats;
     if ui

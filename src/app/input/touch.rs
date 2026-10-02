@@ -208,7 +208,7 @@ pub(crate) fn handle_touch(
         }
         match phase {
             egui::TouchPhase::Start => {
-                // Fingers landing on panels, menus or the canvas faders are
+                // Fingers landing on panels or menus are
                 // the UI's; only the canvas itself starts a gesture.
                 let on_canvas = area.contains(pos) && ctx.layer_id_at(pos) == Some(canvas.layer_id);
                 if !on_canvas && touch.touches.is_empty() {

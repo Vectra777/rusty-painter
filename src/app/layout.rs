@@ -16,6 +16,10 @@ use eframe::egui::{self, Stroke};
 pub(crate) const NARROW_WIDTH: f32 = 760.0;
 const PANEL_WIDTH: f32 = 290.0;
 const PANEL_MIN_WIDTH: f32 = 230.0;
+/// Touch colour dropdown: below the wheel, the colour pair and H, S, V, A.
+const COLOUR_BELOW_WHEEL: f32 = 240.0;
+/// Touch dropdowns: the layers header and its option rows fit at this width.
+const DROPDOWN_WIDTH: f32 = 340.0;
 /// Canvas a floating panel leaves uncovered on a narrow screen.
 const MIN_CANVAS_WIDTH: f32 = 56.0;
 
@@ -38,8 +42,229 @@ impl PainterApp {
     }
 }
 
+/// Touch mode's dropdowns on the top bar's right: brushes, colour, layers.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Dropdown {
+    Brushes,
+    Colour,
+    Layers,
+}
+
+impl Dropdown {
+    pub(crate) const ALL: [(Dropdown, &'static str); 3] = [
+        (Dropdown::Brushes, "Brush presets"),
+        (Dropdown::Colour, "Colour"),
+        (Dropdown::Layers, "Layers"),
+    ];
+
+    fn anchor_id(self) -> egui::Id {
+        egui::Id::new(("dropdown_anchor", self as u8))
+    }
+
+    fn flag(self, app: &mut PainterApp) -> &mut bool {
+        match self {
+            Dropdown::Brushes => &mut app.brush_state.show_presets,
+            Dropdown::Colour => &mut app.workspace.show_color,
+            Dropdown::Layers => &mut app.workspace.show_layers,
+        }
+    }
+
+    pub(crate) fn is_open(self, app: &mut PainterApp) -> bool {
+        *self.flag(app)
+    }
+
+    /// Open this one (closing the others), or close it.
+    pub(crate) fn toggle(self, app: &mut PainterApp) {
+        let open = !self.is_open(app);
+        for (d, _) in Dropdown::ALL {
+            *d.flag(app) = false;
+        }
+        *self.flag(app) = open;
+    }
+}
+
+/// Touch mode: one dropdown at a time, however it was opened (a toolbar
+/// swatch, a shortcut): the one opened last wins.
+fn one_dropdown(app: &mut PainterApp, ctx: &egui::Context) {
+    let id = egui::Id::new("dropdowns_last_frame");
+    let before: [bool; 3] = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    let now = Dropdown::ALL.map(|(d, _)| d.is_open(app));
+    if now.iter().filter(|o| **o).count() > 1 {
+        let keep = (0..3)
+            .find(|&i| now[i] && !before[i])
+            .or((0..3).find(|&i| now[i]));
+        for (i, (d, _)) in Dropdown::ALL.into_iter().enumerate() {
+            *d.flag(app) = Some(i) == keep;
+        }
+    }
+    let now = Dropdown::ALL.map(|(d, _)| d.is_open(app));
+    ctx.data_mut(|d| d.insert_temp(id, now));
+}
+
+/// Touch mode: the dropdown buttons, right to left (layers, colour,
+/// brushes), in a right-to-left layout on the top bar.
+pub(crate) fn dropdown_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32) {
+    for (dropdown, tip) in Dropdown::ALL.into_iter().rev() {
+        let open = dropdown.is_open(app);
+        let response = match dropdown {
+            Dropdown::Brushes => icon_button(ui, Icon::Presets, size, open, tip),
+            Dropdown::Colour => colour_button(app, ui, size, open),
+            Dropdown::Layers => icon_button(ui, Icon::Layers, size, open, tip),
+        };
+        ui.data_mut(|d| d.insert_temp(dropdown.anchor_id(), response.rect));
+        if response.clicked() {
+            dropdown.toggle(app);
+        }
+    }
+}
+
+/// Touch mode: the open dropdown, under its button.
+pub(crate) fn show_dropdowns(app: &mut PainterApp, ctx: &egui::Context) {
+    one_dropdown(app, ctx);
+    let screen = ctx.screen_rect();
+    let tall = (screen.height() * 0.6).clamp(200.0, 520.0);
+    for (dropdown, _) in Dropdown::ALL {
+        let Some(anchor) = ctx.data(|d| d.get_temp::<egui::Rect>(dropdown.anchor_id())) else {
+            continue;
+        };
+        let width = DROPDOWN_WIDTH.min(screen.width() - 40.0);
+        let height = match dropdown {
+            // The wheel, the colour pair and the four sliders, unscrolled.
+            Dropdown::Colour => {
+                let wheel = width.min(metrics(ctx).wheel_max);
+                (wheel + COLOUR_BELOW_WHEEL).min(screen.height() - 80.0)
+            }
+            _ => tall,
+        };
+        let size = egui::vec2(width, height);
+        let mut open = dropdown.is_open(app);
+        let id = format!("dropdown_{}", dropdown as u8);
+        ui::widgets::dropdown(ctx, &id, &mut open, anchor, size, |ui| match dropdown {
+            Dropdown::Brushes => ui::brush_list::presets_contents(app, ui),
+            Dropdown::Colour => ui::color_picker::color_picker_panel(
+                ui,
+                &mut app.brush_state,
+                app.workspace.color_model,
+            ),
+            Dropdown::Layers => {
+                let ctx = ui.ctx().clone();
+                ui::layers::layers_panel(&ctx, ui, app);
+            }
+        });
+        *dropdown.flag(app) = open;
+    }
+}
+
+/// The brush colour as a button: the colour itself in a ring.
+fn colour_button(app: &PainterApp, ui: &mut egui::Ui, size: f32, open: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    paint_swatch(
+        ui.painter(),
+        rect.shrink(5.0),
+        app.brush_state.brush.brush_options.color,
+    );
+    let ring = if open {
+        ACCENT
+    } else if response.hovered() {
+        TEXT_STRONG
+    } else {
+        BORDER_LIGHT
+    };
+    ui.painter()
+        .rect_stroke(rect.shrink(3.0), 0.0, Stroke::new(2.0_f32, ring));
+    response.on_hover_text("Colour")
+}
+
+/// Past the left side's edge, how near the pen or mouse brings it back.
+const REVEAL_MARGIN: f32 = 32.0;
+
+/// Touch mode with auto-hide: how much the left side (tool strip, from the
+/// window's edge to `strip_right`, and the brush panel beside it) shows,
+/// 0 to 1. It fades out slowly while painting or with the pen away, and
+/// back quickly when the pen or mouse comes near.
+pub(crate) fn left_reveal(app: &PainterApp, ctx: &egui::Context, strip_right: f32) -> f32 {
+    let id = egui::Id::new("left_reveal");
+    let (shown, wanted): (f32, bool) = ctx.data(|d| d.get_temp(id)).unwrap_or((1.0, true));
+    // Near the strip's edge, or on the strip or the brush panel themselves
+    // (whatever their size).
+    let near = |p: egui::Pos2| {
+        p.x <= strip_right + REVEAL_MARGIN
+            || ctx.layer_id_at(p).is_some_and(|l| {
+                l.id == egui::Id::new("toolbar_overlay") || l.id == egui::Id::new("float_brush")
+            })
+    };
+    let (hover, down, origin, dt) = ctx.input(|i| {
+        let p = &i.pointer;
+        (p.hover_pos(), p.any_down(), p.press_origin(), i.stable_dt)
+    });
+    let ms = &app.modal_state;
+    // A menu of the strip's, or a list dropped from the brush panel, is open.
+    // The brush panel stays too, like those menus, until closed.
+    let menu = ms.select_menu_open
+        || ms.symmetry_menu_open
+        || ms.shape_menu_open
+        || app.workspace.show_left_panel;
+    let wanted = if menu || ctx.memory(|m| m.any_popup_open()) {
+        true
+    } else if down {
+        // Painting: hide, unless the press was on the side itself.
+        origin.is_some_and(near)
+    } else {
+        // A finger lifted leaves no position: keep what it was.
+        hover.map_or(wanted, near)
+    };
+    let step = if wanted { dt / 0.15 } else { -dt / 0.8 };
+    let shown = (shown + step).clamp(0.0, 1.0);
+    ctx.data_mut(|d| d.insert_temp(id, (shown, wanted)));
+    if shown > 0.0 && shown < 1.0 {
+        ctx.request_repaint();
+    }
+    shown
+}
+
+/// A brush panel floating over the canvas: its width.
+fn float_width(ctx: &egui::Context) -> f32 {
+    PANEL_WIDTH
+        .min(ctx.available_rect().width() - MIN_CANVAS_WIDTH)
+        .max(160.0)
+}
+
+/// Touch auto-hide: the left side (the `strip` and the brush panel beside
+/// it) slides in from the window's edge as it shows. Returns its offset
+/// (0 when fully in, negative while sliding out) and how far into the
+/// canvas it reaches, for the canvas overlays to make way.
+pub(crate) fn left_slide(app: &PainterApp, ctx: &egui::Context, strip: f32) -> (f32, f32) {
+    let panel = if app.workspace.show_left_panel {
+        float_width(ctx)
+    } else {
+        0.0
+    };
+    let shown = left_shown(app, ctx);
+    let total = strip + panel;
+    (-(1.0 - shown) * total, shown * total)
+}
+
+/// How far the left side reaches into the canvas (see [`left_slide`]).
+pub(crate) fn left_cover(ctx: &egui::Context) -> f32 {
+    ctx.data(|d| d.get_temp(egui::Id::new("left_cover")))
+        .unwrap_or(0.0)
+}
+
+/// How much the left side shows (1 unless touch mode hides it).
+fn left_shown(app: &PainterApp, ctx: &egui::Context) -> f32 {
+    if !(app.workspace.touch_mode && app.workspace.autohide_panels) {
+        return 1.0;
+    }
+    let state: Option<(f32, bool)> = ctx.data(|d| d.get_temp(egui::Id::new("left_reveal")));
+    state.map_or(1.0, |(shown, _)| shown)
+}
+
 /// The right rail: the brush colour (opens the colour panel) and layers.
+/// Touch mode has them on the top bar instead.
 pub(crate) fn right_rail(app: &mut PainterApp, ctx: &egui::Context) {
+    if app.workspace.touch_mode {
+        return;
+    }
     let m = metrics(ctx);
     let size = m.tool_button.min(40.0);
     egui::SidePanel::right("rail_right")
@@ -52,25 +277,8 @@ pub(crate) fn right_rail(app: &mut PainterApp, ctx: &egui::Context) {
         )
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
-            // The colour button is the colour itself.
-            let (rect, response) =
-                ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
             let open = app.workspace.show_color;
-            paint_swatch(
-                ui.painter(),
-                rect.shrink(5.0),
-                app.brush_state.brush.brush_options.color,
-            );
-            let ring = if open {
-                ACCENT
-            } else if response.hovered() {
-                TEXT_STRONG
-            } else {
-                BORDER_LIGHT
-            };
-            ui.painter()
-                .rect_stroke(rect.shrink(3.0), 0.0, Stroke::new(2.0_f32, ring));
-            if response.on_hover_text("Colour").clicked() {
+            if colour_button(app, ui, size, open).clicked() {
                 app.workspace.show_color = !open;
             }
             let open = app.workspace.show_layers;
@@ -85,8 +293,11 @@ pub(crate) fn show_panels(app: &mut PainterApp, ctx: &egui::Context) {
     let frame = egui::Frame::none()
         .fill(BG_PANEL)
         .inner_margin(egui::Margin::symmetric(6.0, 4.0));
-    let right_open = app.workspace.show_color || app.workspace.show_layers;
-    if !narrow(ctx) {
+    let touch = app.workspace.touch_mode;
+    // Touch mode has colour and layers in dropdowns (show_dropdowns).
+    let right_open = !touch && (app.workspace.show_color || app.workspace.show_layers);
+    // Touch mode: over the canvas, so opening one never resizes it.
+    if !touch && !narrow(ctx) {
         // A fixed width (dragged at the edge to change): egui's resizable
         // panels grow to fit their content, and content a pixel too wide
         // would then widen the panel every frame.
@@ -140,15 +351,31 @@ pub(crate) fn show_panels(app: &mut PainterApp, ctx: &egui::Context) {
             (ws.show_color, ws.show_layers) = (false, false);
         }
     }
-    let right_open = ws.show_color || ws.show_layers;
+    let right_open = !touch && (ws.show_color || ws.show_layers);
     ctx.data_mut(|d| d.insert_temp(id, (ws.show_left_panel, right_open)));
     let area = ctx.available_rect();
-    let width = PANEL_WIDTH.min(area.width() - MIN_CANVAS_WIDTH).max(160.0);
-    let floating = |id: &str, left: f32, contents: &mut dyn FnMut(&mut egui::Ui)| {
+    let width = float_width(ctx);
+    // Beside the tool strip, which floats too when it auto-hides.
+    let shown = left_shown(app, ctx);
+    let strip: f32 = if touch && app.workspace.autohide_panels {
+        ctx.data(|d| d.get_temp(egui::Id::new("toolbar_overlay_width")))
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let cover = if strip > 0.0 {
+        left_slide(app, ctx, strip).1
+    } else {
+        0.0
+    };
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("left_cover"), cover));
+    let floating = |id: &str, left: f32, opacity: f32, contents: &mut dyn FnMut(&mut egui::Ui)| {
         egui::Area::new(egui::Id::new(id))
             .fixed_pos(egui::pos2(left, area.top()))
             .order(egui::Order::Middle)
+            .interactable(opacity > 0.3)
             .show(ctx, |ui| {
+                ui.set_opacity(opacity);
                 ui.set_max_width(width);
                 frame.stroke(Stroke::new(1.0_f32, BORDER)).show(ui, |ui| {
                     ui.set_width(width - 14.0);
@@ -159,10 +386,11 @@ pub(crate) fn show_panels(app: &mut PainterApp, ctx: &egui::Context) {
             });
     };
     if app.workspace.show_left_panel {
-        floating("float_brush", area.left(), &mut |ui| brush_panel(app, ui));
+        let left = area.left() + strip + left_slide(app, ctx, strip).0;
+        floating("float_brush", left, shown, &mut |ui| brush_panel(app, ui));
     }
     if right_open {
-        floating("float_right", area.right() - width, &mut |ui| {
+        floating("float_right", area.right() - width, 1.0, &mut |ui| {
             right_panel(app, ui)
         });
     }
@@ -268,7 +496,9 @@ pub(crate) fn close_floating_panels(
     ctx: &egui::Context,
     canvas: &egui::Response,
 ) -> bool {
-    if !narrow(ctx) || !app.any_panel_open() {
+    // Touch mode keeps panels over the canvas.
+    let floats = narrow(ctx) || app.workspace.touch_mode;
+    if !floats || !app.any_panel_open() {
         return false;
     }
     let pressed = ctx.input(|i| i.pointer.any_pressed()) && canvas.hovered();
@@ -416,6 +646,77 @@ pub(crate) fn notices(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
 mod tests {
     use crate::canvas::Canvas;
     use eframe::egui::{self, Color32};
+
+    /// Touch mode's brushes/colour/layers dropdowns: one open at a time.
+    #[test]
+    fn one_dropdown_open() {
+        use super::Dropdown;
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.workspace.touch_mode = true;
+        Dropdown::Colour.toggle(&mut app);
+        Dropdown::Layers.toggle(&mut app);
+        assert!(!app.workspace.show_color && app.workspace.show_layers);
+        Dropdown::Layers.toggle(&mut app);
+        assert!(!app.workspace.show_layers);
+        // Opened another way (the toolbar swatch): the newest one wins.
+        let ctx = egui::Context::default();
+        app.workspace.show_layers = true;
+        super::one_dropdown(&mut app, &ctx);
+        app.brush_state.show_presets = true;
+        super::one_dropdown(&mut app, &ctx);
+        assert!(app.brush_state.show_presets && !app.workspace.show_layers);
+    }
+
+    /// Touch mode: the floating brush panel is as wide as it's meant to be
+    /// (a row too wide for it used to stretch it, leaving an empty band).
+    #[test]
+    fn floating_brush_panel_keeps_its_width() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.workspace.touch_mode = true;
+        app.workspace.show_left_panel = true;
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_style(&ctx, true);
+        crate::ui::style::set_touch_metrics(&ctx, true);
+        for _ in 0..10 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                crate::ui::toolbar::toolbar(&mut app, ctx);
+                super::show_panels(&mut app, ctx);
+            });
+        }
+        let rect = ctx.memory(|m| m.area_rect(egui::Id::new("float_brush")));
+        let width = rect.expect("the brush panel floats").width();
+        assert!(width <= super::PANEL_WIDTH + 1.0, "{width}");
+    }
+
+    /// Auto-hide: the side fades out with the pen away, back when it's near.
+    #[test]
+    fn side_fades_with_the_pen() {
+        let app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        let ctx = egui::Context::default();
+        let mut shown = 1.0;
+        let mut frames = |x: f32, n: usize| {
+            for _ in 0..n {
+                let input = egui::RawInput {
+                    predicted_dt: 0.05,
+                    events: vec![egui::Event::PointerMoved(egui::pos2(x, 100.0))],
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| shown = super::left_reveal(&app, ctx, 50.0));
+            }
+            shown
+        };
+        let away = frames(600.0, 3);
+        assert!(away > 0.0 && away < 1.0, "fades slowly: {away}");
+        assert_eq!(frames(600.0, 30), 0.0);
+        assert_eq!(frames(40.0, 5), 1.0);
+    }
 
     /// The canvas width left after 40 frames of the panels, one per frame.
     fn canvas_widths(touch: bool) -> Vec<f32> {
