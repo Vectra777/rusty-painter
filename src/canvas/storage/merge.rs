@@ -376,7 +376,7 @@ impl Canvas {
             .filter(|&i| self.layers[i].kind == LayerKind::Paint && shows(i))
             .collect();
         // A clipped layer shows only through its base.
-        merged.retain(|&i| !self.layers[i].clipped || self.clip_base(i).is_none_or(&shows));
+        merged.retain(|&i| !self.layers[i].clipped || self.clip_base(i).is_none_or(shows));
         let chosen: HashSet<usize> = merged.iter().copied().collect();
         if chosen.len() < 2 {
             return Err("Nothing to merge: fewer than two layers show");
