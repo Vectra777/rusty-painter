@@ -198,6 +198,207 @@ impl Default for KritaSmudge {
     }
 }
 
+/// Krita's auto-tip extras for round and square tips.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AutoTip {
+    /// The tip's shape repeated this many times round its centre: with the
+    /// tip squashed, a star of that many points (2 = the plain shape).
+    pub spikes: u32,
+    /// Horizontal and vertical fade: solid out to this share of the tip's
+    /// width and height, then fading to its edge (1 = no fade).
+    pub fade: [f32; 2],
+    /// Share of the tip's pixels painted, the rest left out at random
+    /// (1 = all of them).
+    pub density: f32,
+    /// How much each pixel's strength varies at random: a grainy, rough
+    /// tip (0 = none).
+    pub randomness: f32,
+}
+
+impl Default for AutoTip {
+    fn default() -> Self {
+        Self {
+            spikes: 2,
+            fade: [1.0; 2],
+            density: 1.0,
+            randomness: 0.0,
+        }
+    }
+}
+
+impl AutoTip {
+    pub fn is_active(&self) -> bool {
+        self.spikes > 2 || self.has_fade() || self.density < 1.0 || self.randomness > 0.0
+    }
+
+    pub fn has_fade(&self) -> bool {
+        self.fade[0] < 1.0 || self.fade[1] < 1.0
+    }
+
+    /// The spikes' folding, worked out once for a batch of dabs.
+    pub fn spikes(&self) -> Option<Spikes> {
+        (self.spikes > 2).then(|| Spikes::new(self.spikes))
+    }
+
+    /// The fade's coefficients at `softness` for [`Self::fade_with`]: one
+    /// over each fade squared.
+    #[inline]
+    pub fn fade_coeffs(&self, softness: f32) -> [f32; 2] {
+        self.fade.map(|f| (f * softness).max(1e-4).powi(-2))
+    }
+
+    /// The fade at `(u, v)`, the offset over the tip's half width and half
+    /// height (1 at the edge), with the fades scaled by `softness`
+    /// (Krita's default mask: solid inside the fade ellipse, then falling
+    /// to nothing at the edge).
+    #[inline]
+    pub fn fade_at(&self, u: f32, v: f32, softness: f32) -> f32 {
+        Self::fade_with(u, v, self.fade_coeffs(softness))
+    }
+
+    /// [`Self::fade_at`] with the coefficients worked out.
+    #[inline]
+    pub fn fade_with(u: f32, v: f32, [kh, kv]: [f32; 2]) -> f32 {
+        let (u2, v2) = (u * u, v * v);
+        let n = u2 + v2;
+        let nf = u2 * kh + v2 * kv;
+        if nf <= 1.0 {
+            return 1.0;
+        }
+        if n >= 1.0 {
+            return 0.0;
+        }
+        (1.0 - n * (nf - 1.0) / (nf - n)).clamp(0.0, 1.0)
+    }
+
+    /// A pixel's strength factor from the density and randomness, `seed`
+    /// telling dabs apart (the same pixel of the same dab always gets the
+    /// same).
+    #[inline]
+    pub fn grain(&self, seed: u32, gx: usize, gy: usize) -> f32 {
+        let h = hash3(seed, gx as u32, gy as u32);
+        if self.density < 1.0 && unit(h) >= self.density {
+            return 0.0;
+        }
+        if self.randomness > 0.0 {
+            1.0 - self.randomness * unit(h.rotate_left(16).wrapping_mul(0x9E37_79B9))
+        } else {
+            1.0
+        }
+    }
+}
+
+/// Folding a tip into its first spike's wedge.
+pub struct Spikes {
+    inv_wedge: f32,
+    /// cos and sin of each whole number of wedges, to turn back by.
+    turns: Vec<(f32, f32)>,
+}
+
+impl Spikes {
+    fn new(spikes: u32) -> Self {
+        let wedge = std::f32::consts::TAU / spikes as f32;
+        Self {
+            inv_wedge: 1.0 / wedge,
+            turns: (0..=spikes / 2 + 1)
+                .map(|k| {
+                    let (s, c) = (k as f32 * wedge).sin_cos();
+                    (c, s)
+                })
+                .collect(),
+        }
+    }
+
+    /// `(x, y)`, in tip pixels from the centre (squashed to `ratio`), folded
+    /// into the first spike's wedge, as Krita folds it before squashing.
+    #[inline]
+    pub fn fold(&self, (x, y): (f32, f32), ratio: f32) -> (f32, f32) {
+        let y = y.abs() * ratio;
+        // The wedge the point is in, its angle 0..π (y folded up).
+        let k = (fast_atan2(y, x) * self.inv_wedge + 0.5) as usize;
+        let (c, s) = self.turns[k.min(self.turns.len() - 1)];
+        // Turned back by k wedges.
+        (c * x + s * y, (c * y - s * x) / ratio)
+    }
+}
+
+/// `atan2(y, x)` to within 1e-5 radians, for `y >= 0` (0..π): a
+/// polynomial rather than libm's, per pixel.
+#[inline]
+fn fast_atan2(y: f32, x: f32) -> f32 {
+    let (ax, ay) = (x.abs(), y);
+    let (lo, hi) = (ax.min(ay), ax.max(ay));
+    if hi == 0.0 {
+        return 0.0;
+    }
+    let z = lo / hi;
+    let z2 = z * z;
+    let mut a = z
+        * (0.999_977_26
+            + z2 * (-0.332_623_47
+                + z2 * (0.193_543_46
+                    + z2 * (-0.116_432_87 + z2 * (0.052_653_32 + z2 * -0.011_721_2)))));
+    if ay > ax {
+        a = std::f32::consts::FRAC_PI_2 - a;
+    }
+    if x < 0.0 { std::f32::consts::PI - a } else { a }
+}
+
+/// A well-mixed hash of three numbers.
+#[inline]
+pub fn hash3(a: u32, b: u32, c: u32) -> u32 {
+    let mut h = a
+        .wrapping_mul(0x9E37_79B1)
+        .wrapping_add(b.wrapping_mul(0x85EB_CA77))
+        .wrapping_add(c.wrapping_mul(0xC2B2_AE3D));
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297A_2D39);
+    h ^ (h >> 15)
+}
+
+/// `h` as 0..1.
+#[inline]
+pub fn unit(h: u32) -> f32 {
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// Where a brush's colour comes from.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ColorSource {
+    /// The brush colour.
+    #[default]
+    Plain,
+    /// A random colour for each dab.
+    UniformRandom,
+    /// A random colour for each pixel.
+    TotalRandom,
+    /// A picture pinned to the canvas, from the brush colour where it's
+    /// dark to the secondary colour where it's light, at `scale`.
+    Pattern {
+        pattern: std::sync::Arc<crate::brush_engine::texture::Pattern>,
+        scale: f32,
+    },
+}
+
+impl ColorSource {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Plain => "Brush colour",
+            Self::UniformRandom => "Random each dab",
+            Self::TotalRandom => "Random each pixel",
+            Self::Pattern { .. } => "Pattern",
+        }
+    }
+
+    /// Each pixel gets its own colour.
+    pub fn per_pixel(&self) -> bool {
+        matches!(self, Self::TotalRandom | Self::Pattern { .. })
+    }
+}
+
 /// Blending strategy for how source color affects the destination.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
@@ -239,6 +440,14 @@ pub struct BrushOptions {
     pub placement: Placement,
     pub color: Color32,
     pub spacing: f32, // Percentage of diameter (0..100+)
+    /// Auto spacing: dabs this many times the square root of the
+    /// diameter apart, rather than `spacing` (big tips closer together for
+    /// their size, as Krita's auto spacing); `None` for off.
+    pub auto_spacing: Option<f32>,
+    /// Spikes, fades, density and randomness of a round or square tip.
+    pub auto_tip: AutoTip,
+    /// Where the colour comes from.
+    pub color_source: ColorSource,
     pub flow: f32,    // 0..100
     pub opacity: f32, // 0..1
     pub blend_mode: BlendMode,
@@ -292,6 +501,18 @@ impl PressureCurves {
 }
 
 impl BrushOptions {
+    /// Dab spacing in canvas pixels for a tip `diameter` across, times
+    /// `factor` (pressure, inputs).
+    pub fn spacing_px(&self, diameter: f32, factor: f32) -> f32 {
+        match self.auto_spacing {
+            Some(coeff) => {
+                let d = diameter.max(0.01);
+                coeff * if d < 1.0 { d } else { d.sqrt() } * factor
+            }
+            None => self.spacing / 100.0 * diameter * factor,
+        }
+    }
+
     /// The spacing's share at pressure `p` (1 without pressure spacing);
     /// never so small the dabs pile up.
     pub fn spacing_factor(&self, p: f32) -> f32 {
@@ -350,6 +571,9 @@ impl BrushOptions {
             placement: Placement::Dabs,
             color,
             spacing,
+            auto_spacing: None,
+            auto_tip: AutoTip::default(),
+            color_source: ColorSource::Plain,
             flow: 100.0,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
@@ -361,6 +585,61 @@ impl BrushOptions {
             pressure_spacing: false,
             pressure_curves: PressureCurves::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod auto_tip_tests {
+    use super::{AutoTip, BrushOptions};
+
+    #[test]
+    fn auto_spacing_goes_by_the_square_root_of_the_size() {
+        let mut o = BrushOptions::new(36.0, 100.0, eframe::egui::Color32::BLACK, 10.0);
+        assert!((o.spacing_px(36.0, 1.0) - 3.6).abs() < 1e-4);
+        o.auto_spacing = Some(0.5);
+        assert!((o.spacing_px(36.0, 1.0) - 3.0).abs() < 1e-4);
+        assert!((o.spacing_px(36.0, 2.0) - 6.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_fade_is_solid_inside_and_gone_at_the_edge() {
+        let t = AutoTip {
+            fade: [0.5, 1.0],
+            ..Default::default()
+        };
+        assert_eq!(t.fade_at(0.4, 0.0, 1.0), 1.0);
+        assert_eq!(t.fade_at(0.0, 0.9, 1.0), 1.0);
+        let mid = t.fade_at(0.75, 0.0, 1.0);
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        assert!(t.fade_at(0.999, 0.0, 1.0) < 0.01);
+        // Softer: the fade starts nearer the centre.
+        assert!(t.fade_at(0.4, 0.0, 0.5) < 1.0);
+    }
+
+    #[test]
+    fn spikes_fold_into_the_first_wedge_as_the_exact_turn_does() {
+        let spikes = AutoTip {
+            spikes: 5,
+            ..Default::default()
+        }
+        .spikes()
+        .unwrap();
+        let wedge = std::f32::consts::TAU / 5.0;
+        for i in 0..400 {
+            let a = i as f32 / 400.0 * std::f32::consts::TAU;
+            let (x, y) = (7.0 * a.cos(), 7.0 * a.sin());
+            // Exactly: the angle (y folded up) turned back into ±half a wedge.
+            let t = y.abs().atan2(x);
+            let t = (t + wedge * 0.5).rem_euclid(wedge) - wedge * 0.5;
+            let (fx, fy) = spikes.fold((x, y), 1.0);
+            // Either side of a wedge's edge is the same point folded.
+            if (t.abs() - wedge * 0.5).abs() < 1e-3 {
+                continue;
+            }
+            assert!((fx - 7.0 * t.cos()).abs() < 1e-3, "{a}: {fx} {fy}");
+            assert!((fy - 7.0 * t.sin()).abs() < 1e-3, "{a}: {fx} {fy}");
+        }
+        assert!((super::fast_atan2(1.0, -1.0) - 3.0 * std::f32::consts::FRAC_PI_4).abs() < 1e-5);
     }
 }
 

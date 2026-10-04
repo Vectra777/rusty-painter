@@ -588,7 +588,7 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
     fn drag(&mut self, pos: Vec2, pressure: f32) {
         let diameter = self.blend_diameter(pressure);
         let o = &self.brush.brush_options;
-        let spacing = (diameter * o.spacing / 100.0 * o.spacing_factor(pressure)).max(1.0);
+        let spacing = o.spacing_px(diameter, o.spacing_factor(pressure)).max(1.0);
         let stroke = &mut self.stroke;
         let Some(last) = stroke.last else {
             return;
@@ -784,7 +784,7 @@ impl BlendSession {
                 let s = &stroke.symmetry;
                 s.map(&stroke.copies[copy - 1], s.center + stroke.dir) - s.center
             };
-            let step = (diameter * self.brush.brush_options.spacing / 100.0).max(1.0);
+            let step = self.brush.brush_options.spacing_px(diameter, 1.0).max(1.0);
             let margin = (r * amount * 0.6).max(step).ceil() as i32 + 2;
             let big_side = side + 2 * margin as usize;
             let big: Vec<[f32; 4]> = read_patch(

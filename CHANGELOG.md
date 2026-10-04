@@ -18,6 +18,9 @@
 - Brushes from Krita paint with Krita's exact texture formulas and its colour smudge engine (smearing, dulling, smear alpha, smudge radius).
 - Hard edges can follow pressure (or any input) and keep a soft band; inputs can swing a setting both ways and drive darken.
 - Tips can paint by lightness (Krita's lightness map) or as a gradient map.
+- Round and square tips: spikes (a star when squashed), separate fades across and down, density and per-pixel randomness, like Krita's auto tips.
+- Auto spacing (dabs by the square root of the size), and spacing, flow and lightness strength as inputs any sensor can drive; X and Y tilt sensors.
+- Colour source (Brush → Colour source): a random colour each dab, each pixel, or a pattern pinned to the canvas from the brush colour to the secondary. Krita presets bring their spikes, fades, density, randomness, auto spacing, random colour sources and these sensors.
 - Krita import reads options as Krita does (curve on or off, the common curve) and brings hue, saturation, value, darken, gradient colour source and lightness or gradient map tips; the report names options plainly.
 - Krita presets bring their rotation (stroke direction, random, tilt, barrel, wheel), mirror, pressure spacing, sharpness, blend mode and these texture modes.
 

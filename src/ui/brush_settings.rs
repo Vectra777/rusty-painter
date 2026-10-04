@@ -430,6 +430,9 @@ fn brush_settings_contents(
                     mask_changed |= curve_editor(ui, &mut brush.brush_options.softness_curve);
                 }
             }
+            if !matches!(brush.brush_options.pixel_shape, PixelBrushShape::Custom(_)) {
+                mask_changed |= auto_tip_rows(ui, &mut brush.brush_options.auto_tip);
+            }
         }
     });
 
@@ -452,17 +455,48 @@ fn brush_settings_contents(
             }),
         )
         .changed();
-        changed |= slider_row(
-            ui,
-            "Spacing",
-            crate::ui::widgets::reset(&mut brush.brush_options.spacing, |v| {
-                egui::Slider::new(v, 1.0..=200.0)
-                    .max_decimals(0)
-                    .suffix("%")
-            }),
-        )
-        .on_hover_text("Distance between dabs, as a percentage of the brush size.")
-        .changed();
+        let o = &mut brush.brush_options;
+        match &mut o.auto_spacing {
+            Some(coeff) => {
+                changed |= slider_row(
+                    ui,
+                    "Spacing",
+                    crate::ui::widgets::reset(coeff, |v| {
+                        egui::Slider::new(v, 0.1..=10.0)
+                            .logarithmic(true)
+                            .max_decimals(2)
+                            .suffix("× √size")
+                    }),
+                )
+                .on_hover_text(
+                    "Auto spacing: dabs this many times the square root of the brush size \
+                     apart, so big brushes keep their dabs closer for their size.",
+                )
+                .changed();
+            }
+            None => {
+                changed |= slider_row(
+                    ui,
+                    "Spacing",
+                    crate::ui::widgets::reset(&mut o.spacing, |v| {
+                        egui::Slider::new(v, 1.0..=200.0)
+                            .max_decimals(0)
+                            .suffix("%")
+                    }),
+                )
+                .on_hover_text("Distance between dabs, as a percentage of the brush size.")
+                .changed();
+            }
+        }
+        let mut auto = o.auto_spacing.is_some();
+        if ui
+            .checkbox(&mut auto, "Auto spacing")
+            .on_hover_text("Space the dabs by the square root of the brush size, as Krita does.")
+            .changed()
+        {
+            o.auto_spacing = auto.then_some(1.0);
+            changed = true;
+        }
         changed |= slider_row(
             ui,
             "Jitter",
@@ -538,6 +572,7 @@ fn brush_settings_contents(
         });
     });
 
+    changed |= color_source_section(ui, &mut brush.brush_options.color_source, textures);
     changed |= dynamics_sections(ui, &mut brush.dynamics);
     changed |= inputs_section(ui, &mut brush.inputs);
     changed |= texture_section(ui, &mut brush.texture, textures);
@@ -1439,6 +1474,123 @@ fn dual_section(
         changed |= ui
             .checkbox(&mut d.random_angle, "Turn each dab at random")
             .changed();
+    });
+    changed
+}
+
+/// Spikes, fades, density and randomness of a round or square tip.
+fn auto_tip_rows(ui: &mut egui::Ui, t: &mut crate::brush_engine::brush_options::AutoTip) -> bool {
+    let mut changed = slider_row(
+        ui,
+        "Spikes",
+        crate::ui::widgets::reset(&mut t.spikes, |v| egui::Slider::new(v, 2..=50)),
+    )
+    .on_hover_text(
+        "The tip's shape repeated round its centre: squash the tip (Ratio) for a star with \
+         this many points (2: the plain shape).",
+    )
+    .changed();
+    for (i, label) in ["Fade across", "Fade down"].into_iter().enumerate() {
+        changed |= slider_row(
+            ui,
+            label,
+            crate::ui::widgets::reset(&mut t.fade[i], |v| {
+                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            }),
+        )
+        .on_hover_text(
+            "Solid out to this share of the tip's width (across) or height (down), then \
+             fading to its edge (100%: no fade).",
+        )
+        .changed();
+    }
+    changed |= slider_row(
+        ui,
+        "Density",
+        crate::ui::widgets::reset(&mut t.density, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        }),
+    )
+    .on_hover_text("Share of the tip's pixels painted, the rest left out at random.")
+    .changed();
+    changed |= slider_row(
+        ui,
+        "Randomness",
+        crate::ui::widgets::reset(&mut t.randomness, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        }),
+    )
+    .on_hover_text("How much each pixel's strength varies at random: a grainy, rough tip.")
+    .changed();
+    changed
+}
+
+/// Where the brush's colour comes from.
+fn color_source_section(
+    ui: &mut egui::Ui,
+    source: &mut crate::brush_engine::brush_options::ColorSource,
+    loaded: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
+) -> bool {
+    use crate::brush_engine::brush_options::ColorSource;
+    use crate::brush_engine::texture::builtin;
+    let mut changed = false;
+    section(ui, "Colour source", false, |ui| {
+        property_row(ui, "Colour", |ui| {
+            egui::ComboBox::from_id_salt("brush_color_source")
+                .selected_text(source.label())
+                .show_ui(ui, |ui| {
+                    let first = builtin().first().or(loaded.first()).cloned();
+                    let options = [
+                        Some(ColorSource::Plain),
+                        Some(ColorSource::UniformRandom),
+                        Some(ColorSource::TotalRandom),
+                        first.map(|pattern| ColorSource::Pattern {
+                            pattern,
+                            scale: 1.0,
+                        }),
+                    ];
+                    for option in options.into_iter().flatten() {
+                        let selected =
+                            std::mem::discriminant(&option) == std::mem::discriminant(source);
+                        if ui.selectable_label(selected, option.label()).clicked() && !selected {
+                            *source = option;
+                            changed = true;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "The brush colour; a random colour for each dab or each pixel; or a \
+                     pattern pinned to the canvas, from the brush colour where it's dark to \
+                     the secondary colour where it's light.",
+                );
+        });
+        if let ColorSource::Pattern { pattern, scale } = source {
+            property_row(ui, "Pattern", |ui| {
+                egui::ComboBox::from_id_salt("brush_color_pattern")
+                    .selected_text(pattern.name.as_str())
+                    .show_ui(ui, |ui| {
+                        for p in builtin().iter().chain(loaded) {
+                            let selected = std::sync::Arc::ptr_eq(p, pattern);
+                            if ui.selectable_label(selected, &p.name).clicked() && !selected {
+                                *pattern = p.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            changed |= slider_row(
+                ui,
+                "Scale",
+                crate::ui::widgets::reset(scale, |v| {
+                    egui::Slider::new(v, 0.25..=4.0)
+                        .logarithmic(true)
+                        .max_decimals(2)
+                        .suffix("×")
+                }),
+            )
+            .changed();
+        }
     });
     changed
 }

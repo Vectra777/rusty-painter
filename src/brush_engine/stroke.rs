@@ -598,7 +598,8 @@ impl StrokeState {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Spacing and jitter follow this sample's pressure.
             apply_pressure(brush, original, p);
-            let spacing = brush.brush_options.spacing_factor(p);
+            let spacing =
+                brush.brush_options.spacing_factor(p) * self.spacing_input(brush, raw_pos, p);
             self.add_point_at_pressure(brush, raw_pos, spacing);
             if brush.dual.is_some() {
                 self.paint_mask(brush, original.0, context);
@@ -1100,6 +1101,11 @@ impl StrokeState {
             let mut spread = |amount: f32| (self.rng.random::<f32>() * 2.0 - 1.0) * amount;
             v.hsv = [spread(r.hue), spread(r.saturation), spread(r.value)];
         }
+        if brush.brush_options.color_source
+            == crate::brush_engine::brush_options::ColorSource::UniformRandom
+        {
+            v.base = Some(std::array::from_fn(|_| self.rng.random::<f32>()));
+        }
         if !brush.inputs.is_empty() {
             let sensors = self.sensors(dab, pressure);
             for mapping in &brush.inputs {
@@ -1107,6 +1113,39 @@ impl StrokeState {
             }
         }
         self.orient(brush, v, dab.dir, dab.t)
+    }
+
+    /// The spacing factor the brush's Spacing inputs give at a sample (1
+    /// with none), read there rather than per dab (the spacing places the
+    /// dabs).
+    fn spacing_input(&mut self, brush: &Brush, pos: Vec2, pressure: f32) -> f32 {
+        use crate::brush_engine::dynamics::{DabSetting, DabVar};
+        if !brush
+            .inputs
+            .iter()
+            .any(|m| m.setting == DabSetting::Spacing)
+        {
+            return 1.0;
+        }
+        let at = Pending {
+            pos,
+            t: 1.0,
+            along: self.travel,
+            dir: self.dir,
+        };
+        // A reading, not a dab: the dab count stays.
+        let dabs = self.dabs;
+        let sensors = self.sensors(&at, pressure);
+        self.dabs = dabs;
+        let mut v = DabVar::default();
+        for m in brush
+            .inputs
+            .iter()
+            .filter(|m| m.setting == DabSetting::Spacing)
+        {
+            m.apply(&mut v, &sensors);
+        }
+        v.spacing
     }
 
     /// Every input a mapping can read, for one dab.
@@ -1143,6 +1182,9 @@ impl StrokeState {
                 &self.perspective,
                 dab.pos,
             ),
+            // The lean's canvas x (right) and y (down, toward you).
+            x_tilt: tilt.map_or(0.5, |t| 0.5 + 0.5 * t.lean * t.direction.cos()),
+            y_tilt: tilt.map_or(0.5, |t| 0.5 - 0.5 * t.lean * t.direction.sin()),
         }
     }
 
@@ -1307,7 +1349,9 @@ impl StrokeState {
             // Short segments, so the ribbon bends smoothly.
             (brush.brush_options.diameter * 0.15).clamp(1.0, 6.0)
         } else {
-            (brush.brush_options.spacing / 100.0) * brush.brush_options.diameter * spacing
+            brush
+                .brush_options
+                .spacing_px(brush.brush_options.diameter, spacing)
         };
         let spacing_dist = spacing_dist.max(0.5); // Avoid infinite loops
         let count = brush.dynamics.random.dabs_per_step();

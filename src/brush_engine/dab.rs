@@ -113,6 +113,10 @@ pub(super) struct PlacedDab {
     /// How soft a round or square tip is, in [`SOFT_LEVELS`]ths (all of
     /// them: the tip as it is); see `DabSetting::Softness`.
     pub soft: u8,
+    /// Flow factor from the dab's inputs (1 = the brush's).
+    pub flow: f32,
+    /// A lightness-mapped tip's strength from the dab's inputs (1 = full).
+    pub lightness: f32,
 }
 
 /// Steps a dab's softness comes in (each a falloff of its own).
@@ -156,6 +160,8 @@ impl PlacedDab {
             average: 1.0,
             sharp: 1.0,
             soft: SOFT_LEVELS,
+            flow: 1.0,
+            lightness: 1.0,
         }
     }
 
@@ -163,6 +169,24 @@ impl PlacedDab {
     #[inline]
     pub fn upright(&self) -> bool {
         self.orient == [1.0, 0.0, 0.0, 1.0]
+    }
+
+    /// The tip's squash (height over width), from `orient`.
+    #[inline]
+    pub fn ratio(&self) -> f32 {
+        let [a, b, c, d] = self.orient;
+        ((a * a + b * b) / (c * c + d * d).max(1e-12))
+            .sqrt()
+            .min(1.0)
+    }
+
+    /// A number telling this dab apart from others (for per-pixel
+    /// randomness that stays put when the stroke is redrawn).
+    #[inline]
+    pub fn seed(&self) -> u32 {
+        self.center.x.to_bits()
+            ^ self.center.y.to_bits().rotate_left(13)
+            ^ ((self.tip as u32) << 24)
     }
 
     /// `(dx, dy)` (canvas offset from the centre) in the tip's frame.

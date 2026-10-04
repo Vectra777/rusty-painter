@@ -1,7 +1,7 @@
 //! The brush: its tip (Gaussian, custom image, pixel) and rendering a
 //! batch of dabs into canvas tiles in parallel.
 
-use super::brush_options::BrushOptions;
+use super::brush_options::{BrushOptions, ColorSource};
 use crate::{
     brush_engine::{
         brush_options::{BlendMode, PaintingMode, PixelBrushShape},
@@ -591,7 +591,7 @@ fn paint_batch(
                             // The alphas carry the opacity already when the
                             // dabs differ in colour (above).
                             let carried = colors.is_some();
-                            alpha_darken(covered, &alphas[span], dab, flow, carried);
+                            alpha_darken(covered, &alphas[span], dab, flow * dab.flow, carried);
                         }
                         None => {
                             for (cov, &alpha) in covered.zip(&alphas[span]) {
@@ -930,6 +930,7 @@ impl Brush {
     pub fn varies_color(&self) -> bool {
         self.dynamics.random.has_color()
             || self.paints_tip_colors()
+            || self.brush_options.color_source != ColorSource::Plain
             || self.inputs.iter().any(|m| m.setting.is_color())
     }
 
@@ -943,6 +944,7 @@ impl Brush {
                 BrushType::Bristle | BrushType::Sketch | BrushType::Hatching
             )
             || self.paints_tip_colors()
+            || self.brush_options.color_source != ColorSource::Plain
     }
 
     /// How far from its centre a dab can paint, generously (for copying it
@@ -1192,11 +1194,17 @@ impl Brush {
                 dab.texture = var.texture;
                 dab.sharp = var.sharpness;
                 dab.soft = crate::brush_engine::dab::soft_level(var.softness);
+                dab.flow = var.flow;
+                dab.lightness = var.lightness;
                 if colored {
+                    let own = var.base.map_or(self.brush_options.color, |c| {
+                        let [r, g, b] = c.map(|v| (v * 255.0).round() as u8);
+                        Color32::from_rgb(r, g, b)
+                    });
                     let base = if var.mix > 0.0 {
-                        mix_colors(self.brush_options.color, self.second_color, var.mix)
+                        mix_colors(own, self.second_color, var.mix)
                     } else {
-                        self.brush_options.color
+                        own
                     };
                     let srgb = crate::brush_engine::dynamics::shift_hsv(base, var.hsv)
                         .map(|c| c * var.darken.clamp(0.0, 1.0));
@@ -1623,6 +1631,11 @@ impl Brush {
                 stroke_tiles.wash_average = Some(average);
                 (dab.opacity, dab.average, dab.strength) = (opacity, average, 1.0);
             }
+        } else {
+            // Build-up: flow scales the dab like opacity.
+            for dab in &mut dabs {
+                dab.strength *= dab.flow;
+            }
         }
 
         let buckets = bucket_by_tile(&dabs);
@@ -1877,7 +1890,14 @@ impl Brush {
             }
             nonzero_span(out)
         };
-        paint_batch(pool, ctx, buckets, work_pixels, &stamp, None);
+        paint_batch(
+            pool,
+            ctx,
+            buckets,
+            work_pixels,
+            &stamp,
+            self.source_stamp(ctx).as_deref(),
+        );
     }
 
     /// Soft, anti-aliased dabs.
@@ -1930,13 +1950,27 @@ impl Brush {
         let tips = o.tip_shapes();
         let anti_aliasing = self.anti_aliasing;
         let custom = matches!(pixel_shape, PixelBrushShape::Custom(_));
+        // Spikes, fades, density and randomness (round and square tips).
+        let auto = o.auto_tip;
+        let auto_on = auto.is_active() && !custom;
+        let grainy = auto_on && (auto.density < 1.0 || auto.randomness > 0.0);
+        let spikes = auto_on.then(|| auto.spikes()).flatten();
+        let source_stamp = self.source_stamp(ctx);
 
         // Any tip, any dab: per pixel, in the tip's (turned, squashed) frame.
         let general = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
             let pixel_shape = &tips[dab.tip as usize];
             let r = dab.r;
             let strength = (strength * dab.strength).min(1.0);
-            let hardness_val = (hardness_val + dab.hardness).clamp(0.0, 1.0) * dab.softness();
+            // A fade takes the Softness input (as Krita's does); otherwise
+            // the hardness does.
+            let fade = auto_on && auto.has_fade();
+            let hardness_val = (hardness_val + dab.hardness).clamp(0.0, 1.0)
+                * if fade { 1.0 } else { dab.softness() };
+            let ratio = if spikes.is_some() { dab.ratio() } else { 1.0 };
+            let fade_k = auto.fade_coeffs(dab.softness());
+            let inv_r = 1.0 / r;
+            let seed = dab.seed();
             let softness_curve = lut_for(dab);
             let turned = custom || !dab.upright();
             let falloff = |t: f32| match softness_selector {
@@ -1956,14 +1990,29 @@ impl Brush {
                     // clipped).
                     PixelBrushShape::Custom(tip) if anti_aliasing => tip.sample(pdx, pdy, r),
                     PixelBrushShape::Custom(tip) => tip.sample_nearest(pdx, pdy, r),
-                    shape => super::masks::auto_tip_alpha(
-                        (pdx, pdy),
-                        r,
-                        matches!(shape, PixelBrushShape::Square),
-                        softness_selector,
-                        falloff,
-                        anti_aliasing,
-                    ),
+                    shape => {
+                        let (pdx, pdy) = match &spikes {
+                            Some(spikes) => spikes.fold((pdx, pdy), ratio),
+                            None => (pdx, pdy),
+                        };
+                        let a = super::masks::auto_tip_alpha(
+                            (pdx, pdy),
+                            r,
+                            matches!(shape, PixelBrushShape::Square),
+                            softness_selector,
+                            falloff,
+                            anti_aliasing,
+                        );
+                        if fade && a > 0.0 {
+                            a * super::brush_options::AutoTip::fade_with(
+                                pdx * inv_r,
+                                pdy * inv_r,
+                                fade_k,
+                            )
+                        } else {
+                            a
+                        }
+                    }
                 }
             };
             // Small anti-aliased round and square tips: several samples a
@@ -1987,6 +2036,11 @@ impl Brush {
                         }
                     }
                     sum / (samples * samples) as f32
+                };
+                let alpha_factor = if grainy && alpha_factor > 0.0 {
+                    alpha_factor * auto.grain(seed, x0 + i, gy)
+                } else {
+                    alpha_factor
                 };
                 *slot = if alpha_factor <= 0.0 {
                     0.0
@@ -2045,7 +2099,15 @@ impl Brush {
                             out,
                         );
                         if mapping != crate::brush_engine::brush_options::TipMapping::Colors {
+                            // Lightness strength: the picture's grey pulled
+                            // toward mid grey (the plain colour) at less.
+                            let k = dab.lightness.clamp(0.0, 1.0);
+                            let lightness = mapping
+                                == crate::brush_engine::brush_options::TipMapping::Lightness;
                             for c in out.iter_mut() {
+                                if lightness && k < 1.0 {
+                                    *c = c.map(|v| 0.5 + (v - 0.5) * k);
+                                }
                                 *c = mapping.map(*c, brush_srgb, second_srgb);
                             }
                         }
@@ -2062,7 +2124,7 @@ impl Brush {
             let color_stamp: Option<&ColorStamp<'_>> = if ctx.tip_colors {
                 Some(&color_stamp)
             } else {
-                None
+                source_stamp.as_deref()
             };
             paint_batch(pool, ctx, buckets, work_pixels, &stamp, color_stamp);
             return;
@@ -2071,6 +2133,8 @@ impl Brush {
         if anti_aliasing
             && softness_selector == SoftnessSelector::Gaussian
             && matches!(pixel_shape, PixelBrushShape::Circle)
+            && !auto_on
+            && source_stamp.is_none()
         {
             let tip_for = GaussianTip::new;
             let batch_tip = tip_for(ctx.r, hardness_val);
@@ -2112,7 +2176,72 @@ impl Brush {
             paint_batch(pool, ctx, buckets, work_pixels, &stamp, None);
             return;
         }
-        paint_batch(pool, ctx, buckets, work_pixels, &general, None);
+        paint_batch(
+            pool,
+            ctx,
+            buckets,
+            work_pixels,
+            &general,
+            source_stamp.as_deref(),
+        );
+    }
+
+    /// Per-pixel colours from the colour source (random each pixel, a
+    /// pattern), in the document's blend space; `None` for a source that
+    /// colours whole dabs.
+    fn source_stamp<'a>(&'a self, ctx: &BatchCtx<'_>) -> Option<Box<ColorStamp<'a>>> {
+        if !self.brush_options.color_source.per_pixel() || !ctx.colored {
+            return None;
+        }
+        let linear = ctx.space == BlendSpace::Linear;
+        let to_space = |v: f32| if linear { srgb_to_linear(v) } else { v };
+        Some(match &self.brush_options.color_source {
+            ColorSource::Pattern { pattern, scale } => {
+                // The brush colour to the secondary (in sRGB) by the
+                // pattern, in RAMP steps, in the blend space.
+                const RAMP: usize = 1024;
+                let srgb = |c: Color32| crate::brush_engine::dynamics::shift_hsv(c, [0.0; 3]);
+                let (brush, second) = (srgb(self.brush_options.color), srgb(self.second_color));
+                let ramp: Vec<[f32; 3]> = (0..RAMP)
+                    .map(|i| {
+                        let v = i as f32 / (RAMP - 1) as f32;
+                        std::array::from_fn(|k| to_space(brush[k] + (second[k] - brush[k]) * v))
+                    })
+                    .collect();
+                let inv_scale = 1.0 / scale.max(0.01);
+                Box::new(
+                    move |_: &PlacedDab, gy: usize, x0: usize, _: &[f32], out: &mut [[f32; 3]]| {
+                        let y = gy as f32 + 0.5;
+                        for (i, c) in out.iter_mut().enumerate() {
+                            let v = pattern.at((x0 + i) as f32 + 0.5, y, inv_scale);
+                            *c = ramp[((v * (RAMP - 1) as f32 + 0.5) as usize).min(RAMP - 1)];
+                        }
+                    },
+                )
+            }
+            _ => {
+                // A random byte per channel, through its value in the
+                // blend space.
+                let levels: [f32; 256] = std::array::from_fn(|i| to_space(i as f32 / 255.0));
+                Box::new(
+                    move |dab: &PlacedDab,
+                          gy: usize,
+                          x0: usize,
+                          _: &[f32],
+                          out: &mut [[f32; 3]]| {
+                        let seed = dab.seed();
+                        for (i, c) in out.iter_mut().enumerate() {
+                            let h = super::brush_options::hash3(seed, (x0 + i) as u32, gy as u32);
+                            *c = [
+                                levels[(h & 0xFF) as usize],
+                                levels[((h >> 8) & 0xFF) as usize],
+                                levels[((h >> 16) & 0xFF) as usize],
+                            ];
+                        }
+                    },
+                )
+            }
+        })
     }
 }
 

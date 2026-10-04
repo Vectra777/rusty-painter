@@ -17,7 +17,7 @@
 
 use crate::brush_engine::brush::{Brush, BrushPreset, BrushType, StabilizerAlgorithm};
 use crate::brush_engine::brush_options::{
-    BlendMode, PaintingMode, PixelBrushShape, Placement, PressureCurves, TipOrder,
+    BlendMode, ColorSource, PaintingMode, PixelBrushShape, Placement, PressureCurves, TipOrder,
 };
 use crate::brush_engine::dual::{DualMode, DualTip};
 use crate::brush_engine::dynamics::BrushDynamics;
@@ -167,6 +167,20 @@ struct StoredBrushTexture {
     krita: Option<crate::brush_engine::texture::KritaTexturing>,
 }
 
+/// Where the colour comes from, a pattern by number.
+#[derive(Serialize, Deserialize, Default)]
+enum StoredColorSource {
+    #[default]
+    Plain,
+    UniformRandom,
+    TotalRandom,
+    /// A texture from the file's `textures`.
+    Pattern {
+        pattern: usize,
+        scale: f32,
+    },
+}
+
 /// A brush's settings, flattened (the tip and texture by number).
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -221,6 +235,9 @@ struct StoredBrush {
     sharpness: f32,
     sharpness_softness: f32,
     mixing: Option<crate::brush_engine::brush_options::Mixing>,
+    auto_spacing: Option<f32>,
+    auto_tip: crate::brush_engine::brush_options::AutoTip,
+    color_source: StoredColorSource,
 }
 
 impl Default for StoredBrush {
@@ -314,6 +331,17 @@ impl StoredBrush {
             sharpness: b.sharpness,
             sharpness_softness: b.sharpness_softness,
             mixing: b.mixing,
+            auto_spacing: o.auto_spacing,
+            auto_tip: o.auto_tip,
+            color_source: match &o.color_source {
+                ColorSource::Plain => StoredColorSource::Plain,
+                ColorSource::UniformRandom => StoredColorSource::UniformRandom,
+                ColorSource::TotalRandom => StoredColorSource::TotalRandom,
+                ColorSource::Pattern { pattern, scale } => StoredColorSource::Pattern {
+                    pattern: res.texture(pattern),
+                    scale: *scale,
+                },
+            },
         }
     }
 
@@ -351,6 +379,21 @@ impl StoredBrush {
         o.pressure_flow = self.pressure_flow;
         o.pressure_spacing = self.pressure_spacing;
         o.pressure_curves = self.pressure_curves;
+        o.auto_spacing = self.auto_spacing.map(|c| c.clamp(0.01, 10.0));
+        o.auto_tip = self.auto_tip;
+        o.color_source = match self.color_source {
+            StoredColorSource::Plain => ColorSource::Plain,
+            StoredColorSource::UniformRandom => ColorSource::UniformRandom,
+            StoredColorSource::TotalRandom => ColorSource::TotalRandom,
+            StoredColorSource::Pattern { pattern, scale } => ColorSource::Pattern {
+                pattern: res
+                    .textures
+                    .get(pattern)
+                    .cloned()
+                    .ok_or_else(|| format!("Missing texture {pattern}"))?,
+                scale,
+            },
+        };
         b.pixel_perfect = self.pixel_perfect;
         b.anti_aliasing = self.anti_aliasing;
         b.jitter = self.jitter;
@@ -755,6 +798,41 @@ mod tests {
                 mode: 12,
                 soft: false
             })
+        );
+    }
+
+    #[test]
+    fn the_auto_tip_auto_spacing_and_colour_source_survive() {
+        use crate::brush_engine::brush_options::{AutoTip, ColorSource};
+        let pattern = crate::brush_engine::texture::builtin()[0].clone();
+        let mut brush = Brush::new(30.0, 50.0, Color32::BLACK, 12.0);
+        let o = &mut brush.brush_options;
+        o.auto_spacing = Some(0.7);
+        o.auto_tip = AutoTip {
+            spikes: 5,
+            fade: [0.3, 0.8],
+            density: 0.6,
+            randomness: 0.2,
+        };
+        o.color_source = ColorSource::Pattern {
+            pattern: pattern.clone(),
+            scale: 2.0,
+        };
+        let preset = BrushPreset {
+            name: "Star".into(),
+            brush: brush.clone(),
+            file: None,
+        };
+        let back = decode(&encode(&[preset]).unwrap()).unwrap();
+        let b = &back[0].brush.brush_options;
+        assert_eq!(b.auto_spacing, Some(0.7));
+        assert_eq!(b.auto_tip, brush.brush_options.auto_tip);
+        assert_eq!(
+            b.color_source,
+            ColorSource::Pattern {
+                pattern,
+                scale: 2.0
+            }
         );
     }
 

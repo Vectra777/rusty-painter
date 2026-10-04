@@ -185,6 +185,8 @@ fn read_kpp(
                 let o = &mut b.brush_options;
                 o.diameter = tip.diameter;
                 o.spacing = tip.spacing;
+                o.auto_spacing = tip.auto_spacing;
+                o.auto_tip = tip.auto_tip;
                 o.hardness = tip.hardness;
                 if let Some(curve) = tip.softness {
                     o.softness_selector = crate::brush_engine::hardness::SoftnessSelector::Curve;
@@ -301,7 +303,7 @@ fn read_kpp(
         b.brush_options.flow = (v * 100.0).clamp(0.0, 100.0);
     }
     // Options switched on that don't come across, for the report.
-    const READ: [&str; 22] = [
+    const READ: [&str; 23] = [
         "Size",
         "Density",
         "Line width",
@@ -324,6 +326,7 @@ fn read_kpp(
         "v",
         "Darken",
         "Gradient",
+        "LightnessStrength",
     ];
     let mut skipped: Vec<&str> = params
         .iter()
@@ -382,7 +385,7 @@ fn read_kpp(
     for (option, setting) in [
         ("Size", DabSetting::Size),
         ("Opacity", DabSetting::Opacity),
-        ("Flow", DabSetting::Opacity),
+        ("Flow", DabSetting::Flow),
     ] {
         if !yes(&format!("Pressure{option}")) {
             continue;
@@ -454,11 +457,34 @@ fn read_kpp(
         }
     }
     // Pressure spacing, its strength spacing the dabs to begin with.
-    if yes("PressureSpacing") && by_pressure("SpacingSensor") {
+    if yes("PressureSpacing") {
         let o = &mut b.brush_options;
         o.spacing = (o.spacing * strength("Spacing")).clamp(1.0, 1000.0);
-        o.pressure_spacing = true;
-        o.pressure_curves.spacing = curve_of("SpacingSensor", "pressure");
+        if let Some(coeff) = &mut o.auto_spacing {
+            *coeff = (*coeff * strength("Spacing")).clamp(0.01, 10.0);
+        }
+        // Pressure through its curve, any other sensor as an input.
+        for id in sensors("SpacingSensor") {
+            if id == "pressure" {
+                let o = &mut b.brush_options;
+                o.pressure_spacing = true;
+                o.pressure_curves.spacing = curve_of("SpacingSensor", "pressure");
+            } else {
+                let read = read("SpacingSensor", &id);
+                if !map_sensor(&mut b.inputs, &id, DabSetting::Spacing, false, read) {
+                    notes.push(unmapped(&name, "spacing", &id));
+                }
+            }
+        }
+    }
+    // Lightness strength (a lightness-mapped tip), by its sensors.
+    if yes("PressureLightnessStrength") {
+        for id in sensors("LightnessStrengthSensor") {
+            let read = read("LightnessStrengthSensor", &id);
+            if !map_sensor(&mut b.inputs, &id, DabSetting::Lightness, false, read) {
+                notes.push(unmapped(&name, "lightness strength", &id));
+            }
+        }
     }
     // Rotation: each sensor as this app's counterpart. Its other sensors
     // swing the tip both ways, up to its strength × 180°, as does its
@@ -534,6 +560,17 @@ fn read_kpp(
             Softening::Curve => Softening::Curve,
         };
         o.softness_curve = o.softening.falloff(&o.softness_curve, 1.0);
+        for id in sensors("SoftnessSensor") {
+            let read = read("SoftnessSensor", &id);
+            if !map_sensor(&mut b.inputs, &id, DabSetting::Softness, false, read) {
+                notes.push(unmapped(&name, "softness", &id));
+            }
+        }
+    } else if yes("PressureSoftness") && b.brush_options.auto_tip.has_fade() {
+        // Different fades across and down: the fades soften.
+        let k = strength("Softness").clamp(0.1, 1.0);
+        let fade = &mut b.brush_options.auto_tip.fade;
+        *fade = fade.map(|f| f * k);
         for id in sensors("SoftnessSensor") {
             let read = read("SoftnessSensor", &id);
             if !map_sensor(&mut b.inputs, &id, DabSetting::Softness, false, read) {
@@ -651,9 +688,12 @@ fn read_kpp(
             }
         }
         "uniform_random" => {
-            b.dynamics.random.hue = 180.0;
-            b.dynamics.random.saturation = 0.5;
-            b.dynamics.random.value = 0.5;
+            b.brush_options.color_source =
+                crate::brush_engine::brush_options::ColorSource::UniformRandom;
+        }
+        "total_random" => {
+            b.brush_options.color_source =
+                crate::brush_engine::brush_options::ColorSource::TotalRandom;
         }
         other => notes.push(format!(
             "{name}: its colour comes from Krita's {other} source, which has no counterpart here"
@@ -817,6 +857,10 @@ struct TipDef {
     softening: Option<Softening>,
     /// A generated tip's Anti-aliasing box (picture tips are always smooth).
     antialias: bool,
+    /// Auto spacing's coefficient, when on.
+    auto_spacing: Option<f32>,
+    /// A generated tip's spikes, fades, density and randomness.
+    auto_tip: crate::brush_engine::brush_options::AutoTip,
 }
 
 /// The tip a `brush_definition` describes: a generated round or square one,
@@ -845,6 +889,8 @@ fn tip_from_definition(
         mapping: None,
         softening: None,
         antialias: true,
+        auto_spacing: None,
+        auto_tip: Default::default(),
     };
     if brush.attr("type") == Some("auto_brush") {
         if let Some(mask) = brush.find("MaskGenerator") {
@@ -859,6 +905,9 @@ fn tip_from_definition(
             // it.
             let (fh, fv) = (m("hfade").unwrap_or(1.0), m("vfade").unwrap_or(1.0));
             tip.hardness = 100.0;
+            tip.auto_tip.spikes = m("spikes").map_or(2, |s| s.round().clamp(2.0, 200.0) as u32);
+            tip.auto_tip.density = attr("density").unwrap_or(1.0).clamp(0.0, 1.0);
+            tip.auto_tip.randomness = attr("randomness").unwrap_or(0.0).clamp(0.0, 1.0);
             match mask.attr("id").unwrap_or("default") {
                 // A Gaussian tip ignores softness.
                 "gauss" => tip.softness = Some(gauss_falloff(fh, fv)),
@@ -870,6 +919,10 @@ fn tip_from_definition(
                         .attr("softness_curve")
                         .and_then(parse_curve)
                         .map(Softening::SquaredCurve);
+                }
+                // Different fades across and down: the tip's own fades.
+                _ if (fh - fv).abs() > 1e-3 => {
+                    tip.auto_tip.fade = [fh.clamp(0.0, 1.0), fv.clamp(0.0, 1.0)];
                 }
                 _ => tip.softening = Some(Softening::Fade(fh.min(fv).clamp(0.0, 1.0))),
             }
@@ -949,6 +1002,7 @@ fn auto_spacing(tip: &mut TipDef, brush: &Node) {
         .unwrap_or(1.0);
     let d = tip.diameter.max(1.0);
     tip.spacing = (100.0 * coeff * d.sqrt() / d).clamp(1.0, 1000.0);
+    tip.auto_spacing = Some(coeff.clamp(0.01, 10.0));
 }
 
 /// A tip picture by file name, from the preset or the bundle: the tip,
@@ -1003,6 +1057,8 @@ fn krita_sensor(id: &str) -> Option<Sensor> {
         "pressurein" => Sensor::PressureIn,
         "fade" => Sensor::Fade,
         "perspective" => Sensor::Perspective,
+        "xtilt" => Sensor::XTilt,
+        "ytilt" => Sensor::YTilt,
         _ => return None,
     })
 }
@@ -1529,7 +1585,8 @@ mod tests {
             mapped.contains(&(Sensor::RandomDab, DabSetting::Squash)),
             "{mapped:?}"
         );
-        // Auto spacing: 0.5 × √36 = 3 px of 36.
+        // Auto spacing: 0.5 × √size (3 px of 36).
+        assert_eq!(o.auto_spacing, Some(0.5));
         assert!(
             (o.spacing - 100.0 * 3.0 / 36.0).abs() < 1e-3,
             "{}",
@@ -1559,6 +1616,46 @@ mod tests {
     }
 
     /// A preset's XML with `params` added.
+    #[test]
+    fn spikes_fades_grain_tilt_flow_and_random_colour_come_across() {
+        const XTILT: &str = r#"<!DOCTYPE params><params id="xtilt"/>"#;
+        let xml = AUTO
+            .replace(
+                r#"spacing="0.08" angle="0.5""#,
+                r#"spacing="0.08" angle="0.5" density="0.7" randomness="0.3""#,
+            )
+            .replace(
+                r#"hfade="0.25" vfade="0.25""#,
+                r#"hfade="0.25" vfade="0.75" spikes="5""#,
+            );
+        let brush = with_params_xml(
+            &xml,
+            &[
+                ("PressureFlow", "true"),
+                ("FlowSensor", XTILT),
+                ("ColorSource/Type", "total_random"),
+            ],
+        );
+        let imported = import_kpp(&brush, "file").unwrap();
+        let b = &imported.presets[0].brush;
+        let t = b.brush_options.auto_tip;
+        assert_eq!(
+            (t.spikes, t.fade, t.density, t.randomness),
+            (5, [0.25, 0.75], 0.7, 0.3)
+        );
+        assert_eq!(
+            b.brush_options.color_source,
+            crate::brush_engine::brush_options::ColorSource::TotalRandom
+        );
+        assert!(
+            b.inputs
+                .iter()
+                .any(|m| (m.sensor, m.setting) == (Sensor::XTilt, DabSetting::Flow)),
+            "{:?}",
+            b.inputs
+        );
+    }
+
     fn with_params_xml(xml: &str, params: &[(&str, &str)]) -> Vec<u8> {
         let extra: String = params
             .iter()

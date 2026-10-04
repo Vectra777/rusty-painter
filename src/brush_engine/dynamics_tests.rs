@@ -2606,3 +2606,121 @@ fn fade_counts_the_strokes_dabs() {
     );
     assert_eq!(thick(150), thick(200));
 }
+
+/// A single dab of a hard round tip 40 px across at (128, 64), with
+/// `set` applied to the brush.
+fn one_dab(set: impl FnOnce(&mut Brush)) -> Canvas {
+    let mut b = brush(BrushDynamics::default());
+    b.brush_options.diameter = 40.0;
+    set(&mut b);
+    paint(&mut b, &[(Vec2::new(128.0, 64.0), 0.0)], 1, true).0
+}
+
+/// The painted (over half) pixels' width and height.
+fn extent(canvas: &Canvas) -> (usize, usize) {
+    let painted: Vec<(usize, usize)> = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .filter(|&(x, y)| alpha(canvas, x, y) > 127)
+        .collect();
+    let xs = painted.iter().map(|p| p.0);
+    let ys = painted.iter().map(|p| p.1);
+    (
+        xs.clone().max().unwrap() - xs.min().unwrap() + 1,
+        ys.clone().max().unwrap() - ys.min().unwrap() + 1,
+    )
+}
+
+#[test]
+fn spikes_make_a_squashed_tip_a_star() {
+    let squashed = |spikes| {
+        one_dab(|b| {
+            b.dynamics.tip.ratio = 0.25;
+            b.brush_options.auto_tip.spikes = spikes;
+        })
+    };
+    let (w, h) = extent(&squashed(2));
+    assert!(w >= 38 && h <= 12, "{w}×{h}");
+    // Four spikes: as tall as wide, and thin between the points.
+    let star = squashed(4);
+    let (w, h) = extent(&star);
+    assert!(w >= 38 && h >= 38, "{w}×{h}");
+    assert_eq!(alpha(&star, 128 + 12, 64 + 12), 0);
+}
+
+#[test]
+fn fades_across_and_down_are_their_own() {
+    let canvas = one_dab(|b| b.brush_options.auto_tip.fade = [0.2, 1.0]);
+    assert_eq!(alpha(&canvas, 128, 64 + 15), 255);
+    assert!(alpha(&canvas, 128 + 15, 64) < 128);
+}
+
+#[test]
+fn density_and_randomness_leave_a_repeatable_grain() {
+    let grainy = || {
+        one_dab(|b| {
+            b.brush_options.auto_tip.density = 0.5;
+            b.brush_options.auto_tip.randomness = 0.5;
+        })
+    };
+    let canvas = grainy();
+    let inside: Vec<u8> = (54..74)
+        .flat_map(|y| (118..138).map(move |x| (x, y)))
+        .map(|(x, y)| alpha(&canvas, x, y))
+        .collect();
+    let empty = inside.iter().filter(|&&a| a == 0).count();
+    assert!((120..280).contains(&empty), "{empty} of 400 left out");
+    assert!(inside.iter().any(|&a| a > 0 && a < 250), "strength varies");
+    assert_eq!(pixels(&canvas), pixels(&grainy()));
+}
+
+#[test]
+fn random_colour_sources_vary_by_dab_or_by_pixel() {
+    use crate::brush_engine::brush_options::ColorSource;
+    let colours = |source| {
+        let canvas = one_dab(|b| b.brush_options.color_source = source);
+        let mut seen: Vec<Color32> = (60..68)
+            .flat_map(|y| (124..132).map(move |x| (x, y)))
+            .map(|(x, y)| pixel(&canvas, x, y))
+            .collect();
+        seen.sort_by_key(|c| c.to_array());
+        seen.dedup();
+        seen
+    };
+    // One colour for the dab, not the brush's black.
+    let dab = colours(ColorSource::UniformRandom);
+    assert_eq!(dab.len(), 1);
+    assert_ne!(dab[0], Color32::BLACK);
+    assert!(colours(ColorSource::TotalRandom).len() > 30);
+}
+
+#[test]
+fn flow_spacing_and_tilt_inputs_drive_their_settings() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    // No tilt reads the middle: half the flow.
+    let canvas = one_dab(|b| {
+        b.inputs.push(InputMapping {
+            sensor: Sensor::XTilt,
+            setting: DabSetting::Flow,
+            ..Default::default()
+        })
+    });
+    let a = alpha(&canvas, 128, 64);
+    assert!((125..=130).contains(&a), "{a}");
+    // Full pressure spacing the dabs closer builds a faint line up more.
+    let line_alpha = |closer: bool| {
+        let mut b = brush(BrushDynamics::default());
+        b.brush_options.flow = 5.0;
+        b.brush_options.spacing = 40.0;
+        if closer {
+            b.inputs.push(InputMapping {
+                sensor: Sensor::Pressure,
+                setting: DabSetting::Spacing,
+                amount: -0.75,
+                ..Default::default()
+            });
+        }
+        let (canvas, _) = paint(&mut b, &line(64.0, 0.5), 1, true);
+        alpha(&canvas, 128, 64)
+    };
+    assert!(line_alpha(true) > line_alpha(false) + 10);
+}

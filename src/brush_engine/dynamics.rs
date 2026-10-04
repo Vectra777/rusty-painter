@@ -261,10 +261,15 @@ pub enum Sensor {
     /// horizon, 1 at its corner farthest from it (and anywhere off the
     /// assistants).
     Perspective,
+    /// How far the pen leans left (0) or right (1), upright in the middle.
+    XTilt,
+    /// How far the pen leans away (0) or toward you (1), upright in the
+    /// middle.
+    YTilt,
 }
 
 impl Sensor {
-    pub const ALL: [Sensor; 14] = [
+    pub const ALL: [Sensor; 16] = [
         Sensor::Pressure,
         Sensor::Speed,
         Sensor::Tilt,
@@ -279,6 +284,8 @@ impl Sensor {
         Sensor::PressureIn,
         Sensor::Fade,
         Sensor::Perspective,
+        Sensor::XTilt,
+        Sensor::YTilt,
     ];
 
     pub fn label(self) -> &'static str {
@@ -297,6 +304,8 @@ impl Sensor {
             Sensor::PressureIn => "Pressure in (highest so far)",
             Sensor::Fade => "Fade (dabs)",
             Sensor::Perspective => "Perspective",
+            Sensor::XTilt => "X tilt",
+            Sensor::YTilt => "Y tilt",
         }
     }
 
@@ -346,10 +355,17 @@ pub enum DabSetting {
     SketchDensity,
     SketchWidth,
     SketchOffset,
+    /// Scales the flow, like size scales the dab.
+    Flow,
+    /// Scales the spacing between dabs (read where each sample comes in).
+    Spacing,
+    /// How strongly a lightness-mapped tip's picture lightens and darkens
+    /// the colour (0: the plain colour).
+    Lightness,
 }
 
 impl DabSetting {
-    pub const ALL: [DabSetting; 18] = [
+    pub const ALL: [DabSetting; 21] = [
         DabSetting::Size,
         DabSetting::Opacity,
         DabSetting::Angle,
@@ -368,6 +384,9 @@ impl DabSetting {
         DabSetting::SketchDensity,
         DabSetting::SketchWidth,
         DabSetting::SketchOffset,
+        DabSetting::Flow,
+        DabSetting::Spacing,
+        DabSetting::Lightness,
     ];
 
     pub fn label(self) -> &'static str {
@@ -390,6 +409,9 @@ impl DabSetting {
             DabSetting::SketchDensity => "Sketch density",
             DabSetting::SketchWidth => "Sketch line width",
             DabSetting::SketchOffset => "Sketch line offset",
+            DabSetting::Flow => "Flow",
+            DabSetting::Spacing => "Spacing",
+            DabSetting::Lightness => "Lightness strength",
         }
     }
 
@@ -483,6 +505,8 @@ pub struct SensorValues {
     /// Dabs since the stroke started (raw, like distance).
     pub dabs: f32,
     pub perspective: f32,
+    pub x_tilt: f32,
+    pub y_tilt: f32,
 }
 
 impl InputMapping {
@@ -511,6 +535,8 @@ impl InputMapping {
             Sensor::Wheel => s.wheel,
             Sensor::PressureIn => s.pressure_in,
             Sensor::Perspective => s.perspective,
+            Sensor::XTilt => s.x_tilt,
+            Sensor::YTilt => s.y_tilt,
         };
         self.curve.eval(raw.clamp(0.0, 1.0)).clamp(0.0, 1.0)
     }
@@ -547,6 +573,9 @@ impl InputMapping {
             DabSetting::SketchDensity => v.sketch[0] *= factor.max(0.0),
             DabSetting::SketchWidth => v.sketch[1] *= factor.max(0.0),
             DabSetting::SketchOffset => v.sketch[2] *= factor.max(0.0),
+            DabSetting::Flow => v.flow *= factor.max(0.0),
+            DabSetting::Spacing => v.spacing *= factor.max(0.05),
+            DabSetting::Lightness => v.lightness *= factor.max(0.0),
         }
     }
 }
@@ -592,6 +621,13 @@ pub struct DabVar {
     pub mirror: f32,
     /// A sketch brush's density, line width and line offset factors.
     pub sketch: [f32; 3],
+    /// Flow, spacing and lightness strength factors (1 = the brush's).
+    pub flow: f32,
+    pub spacing: f32,
+    pub lightness: f32,
+    /// A colour (sRGB 0..1) in place of the brush colour (a random colour
+    /// source).
+    pub base: Option<[f32; 3]>,
 }
 
 impl Default for DabVar {
@@ -615,6 +651,10 @@ impl Default for DabVar {
             softness: 1.0,
             mirror: 1.0,
             sketch: [1.0; 3],
+            flow: 1.0,
+            spacing: 1.0,
+            lightness: 1.0,
+            base: None,
         }
     }
 }

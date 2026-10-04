@@ -875,8 +875,91 @@ fn bench_feature_strokes(c: &mut Criterion) {
     group.finish();
 }
 
+/// The same stroke with each of the round tip's extras and colour sources.
+fn bench_auto_tip_strokes(c: &mut Criterion) {
+    use rusty_painter::brush_engine::brush_options::{AutoTip, ColorSource};
+    let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let canvas = Canvas::new(1024, 1024, Color32::WHITE, 64);
+    let points: Vec<(Vec2, f32, f64)> = (0..60)
+        .map(|i| {
+            let t = i as f32 / 59.0;
+            let pos = Vec2::new(150.0 + t * 700.0, 500.0 + (t * 9.0).sin() * 200.3);
+            (
+                pos,
+                0.3 + 0.7 * (t * std::f32::consts::PI).sin(),
+                t as f64 * 0.6,
+            )
+        })
+        .collect();
+    let tip = |t: AutoTip| move |b: &mut Brush| b.brush_options.auto_tip = t;
+    let source = |s: ColorSource| move |b: &mut Brush| b.brush_options.color_source = s.clone();
+    type Setup = Box<dyn Fn(&mut Brush)>;
+    let cases: Vec<(&str, Setup)> = vec![
+        ("plain", Box::new(|_: &mut Brush| {})),
+        (
+            "spikes",
+            Box::new(|b: &mut Brush| {
+                b.dynamics.tip.ratio = 0.4;
+                b.brush_options.auto_tip.spikes = 5;
+            }),
+        ),
+        (
+            "fades",
+            Box::new(tip(AutoTip {
+                fade: [0.3, 0.8],
+                ..Default::default()
+            })),
+        ),
+        (
+            "density_randomness",
+            Box::new(tip(AutoTip {
+                density: 0.7,
+                randomness: 0.3,
+                ..Default::default()
+            })),
+        ),
+        (
+            "uniform_random",
+            Box::new(source(ColorSource::UniformRandom)),
+        ),
+        ("total_random", Box::new(source(ColorSource::TotalRandom))),
+        (
+            "pattern",
+            Box::new(source(ColorSource::Pattern {
+                pattern: rusty_painter::brush_engine::texture::builtin()[0].clone(),
+                scale: 1.0,
+            })),
+        ),
+    ];
+    let mut group = c.benchmark_group("auto_tip_stroke_60_samples");
+    for (name, set) in cases {
+        let mut brush = Brush::new(60.0, 40.0, Color32::from_rgb(30, 60, 200), 10.0);
+        set(&mut brush);
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let mut undo_action = UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                };
+                let mut stroke_tiles = StrokeTiles::default();
+                let mut stroke = StrokeState::with_seed(1);
+                let mut context =
+                    StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut stroke_tiles);
+                for &(pos, pressure, time) in &points {
+                    stroke.add_sample(&mut brush, pos, pressure, Some(time), &mut context);
+                }
+                stroke.finish(&mut brush, &mut context);
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_auto_tip_strokes,
     bench_soft_dab,
     bench_pressure_stroke,
     bench_pressure_stroke_app_pool,

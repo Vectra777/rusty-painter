@@ -42,7 +42,6 @@ Engines you don't have (K has about 20)
 Tips and textures
 
 - Define a brush tip from the selection (PS, K clipboard brush, C). You can import tips but cs. This is cheap to add.
-- Krita auto tip options: spikes, density, random edge.
 - Tip as a colour source: Krita's "lightness / gradient mode" image tips.
 - Text as a tip (K).
 - Grain that moves with the stroke vs fixed to the canvas (Procreate's "moving vs texturized".
