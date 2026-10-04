@@ -159,6 +159,65 @@ pub(crate) fn read_entry<'a>(bytes: &'a [u8], name: &str) -> Result<&'a [u8], St
     Err(format!("{name} is missing from the project file"))
 }
 
+/// The data of stored entry `name` in the archive at `path`, reading only
+/// the directory and that entry (a project's thumbnail without loading the
+/// whole project).
+pub(crate) fn read_entry_from_file(path: &std::path::Path, name: &str) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let broken = || "Damaged project file".to_string();
+    let io = |e: std::io::Error| e.to_string();
+    let mut file = std::fs::File::open(path).map_err(io)?;
+    let len = file.metadata().map_err(io)?.len();
+    let mut read_at = |at: u64, n: usize| -> Result<Vec<u8>, String> {
+        let mut buf = vec![0; n];
+        file.seek(SeekFrom::Start(at)).map_err(io)?;
+        file.read_exact(&mut buf).map_err(io)?;
+        Ok(buf)
+    };
+    let tail_len = len.min(22 + u64::from(u16::MAX));
+    let tail = read_at(len - tail_len, tail_len as usize)?;
+    let end = (0..=tail.len().saturating_sub(22))
+        .rev()
+        .find(|&at| get32(&tail, at) == Some(END_OF_DIRECTORY))
+        .ok_or_else(broken)?;
+    let count = get16(&tail, end + 10).ok_or_else(broken)?;
+    let dir_len = get32(&tail, end + 12).ok_or_else(broken)? as usize;
+    let dir_start = get32(&tail, end + 16).ok_or_else(broken)?;
+    let dir = read_at(u64::from(dir_start), dir_len)?;
+    let mut at = 0;
+    for _ in 0..count {
+        if get32(&dir, at) != Some(CENTRAL_HEADER) {
+            return Err(broken());
+        }
+        let method = get16(&dir, at + 10).ok_or_else(broken)?;
+        let crc = get32(&dir, at + 16).ok_or_else(broken)?;
+        let size = get32(&dir, at + 20).ok_or_else(broken)? as usize;
+        let name_len = get16(&dir, at + 28).ok_or_else(broken)? as usize;
+        let extra_len = get16(&dir, at + 30).ok_or_else(broken)? as usize;
+        let comment_len = get16(&dir, at + 32).ok_or_else(broken)? as usize;
+        let offset = u64::from(get32(&dir, at + 42).ok_or_else(broken)?);
+        if dir.get(at + 46..at + 46 + name_len) == Some(name.as_bytes()) {
+            if method != 0 {
+                return Err(format!("Unsupported compression for {name}"));
+            }
+            let local = read_at(offset, 30)?;
+            if get32(&local, 0) != Some(LOCAL_HEADER) {
+                return Err(broken());
+            }
+            let skip = 30
+                + get16(&local, 26).ok_or_else(broken)? as u64
+                + get16(&local, 28).ok_or_else(broken)? as u64;
+            let data = read_at(offset + skip, size)?;
+            if crc32fast::hash(&data) != crc {
+                return Err(broken());
+            }
+            return Ok(data);
+        }
+        at += 46 + name_len + extra_len + comment_len;
+    }
+    Err(format!("{name} is missing from the project file"))
+}
+
 /// Largest entry inflated from another app's archive (a brush bundle).
 const MAX_INFLATED: usize = 256 << 20;
 
@@ -220,6 +279,21 @@ pub(crate) fn read_all(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_entry_reads_from_the_file_alone() {
+        let mut zip = super::ZipWriter::default();
+        zip.add("big", &vec![7u8; 100_000]).unwrap();
+        zip.add("small", b"thumb").unwrap();
+        let path = std::env::temp_dir().join(format!("rp-zip-{}.zip", std::process::id()));
+        std::fs::write(&path, zip.finish().unwrap()).unwrap();
+        assert_eq!(
+            super::read_entry_from_file(&path, "small").unwrap(),
+            b"thumb"
+        );
+        assert!(super::read_entry_from_file(&path, "none").is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
     use super::*;
 
     #[test]

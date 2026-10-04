@@ -138,6 +138,17 @@ impl PainterApp {
         if let Err(err) = result {
             log::error!("Autosave failed: {err}");
         }
+        // Which library project the work belongs to, to save it back there
+        // once recovered.
+        let source = path.with_extension("source");
+        match &self.workspace.library.project {
+            Some(project) => {
+                let _ = std::fs::write(&source, project.to_string_lossy().as_bytes());
+            }
+            None => {
+                let _ = std::fs::remove_file(&source);
+            }
+        }
         let version = self.doc_version();
         let state = &mut self.workspace.autosave;
         state.autosaved = version;
@@ -164,7 +175,15 @@ impl PainterApp {
             return;
         };
         match self.load_project_from_path(&path) {
-            Ok(()) => self.mark_unsaved(),
+            Ok(()) => {
+                self.mark_unsaved();
+                self.workspace.library.open = false;
+                self.workspace.library.project =
+                    std::fs::read_to_string(path.with_extension("source"))
+                        .ok()
+                        .map(std::path::PathBuf::from)
+                        .filter(|p| p.exists());
+            }
             Err(err) => {
                 log::error!("{err}");
                 self.export_state.message = Some(format!("Couldn't recover the work: {err}"));
@@ -188,15 +207,7 @@ pub fn recovery_dialog(app: &mut PainterApp, ctx: &eframe::egui::Context) {
     };
     let age = std::fs::metadata(path)
         .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| match d.as_secs() / 60 {
-            0 => "less than a minute ago".to_string(),
-            1 => "a minute ago".to_string(),
-            m if m < 120 => format!("{m} minutes ago"),
-            m if m < 48 * 60 => format!("{} hours ago", m / 60),
-            m => format!("{} days ago", m / (24 * 60)),
-        })
+        .map(crate::ui::library::ago)
         .unwrap_or_default();
     let (mut recover, mut discard) = (false, false);
     egui::Window::new("Recover unsaved work?")

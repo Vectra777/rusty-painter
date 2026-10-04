@@ -567,18 +567,8 @@ impl PainterApp {
     }
 }
 
-/// Write `presets` to `path` as one `.rpbrush` file.
-#[cfg(not(target_os = "android"))]
-pub(crate) fn export_presets(
-    presets: &[BrushPreset],
-    path: &std::path::Path,
-) -> Result<(), String> {
-    let bytes = preset_file::encode(presets)?;
-    crate::project::write_atomically(path, &bytes)
-        .map_err(|e| format!("Couldn't write {}: {e}", path.display()))
-}
-
-#[cfg(not(target_os = "android"))]
+/// Save the presets at `indices` as one `.rpbrush` file, where the user
+/// picks.
 pub(crate) fn export_presets_dialog(app: &mut PainterApp, indices: &[usize], name: &str) {
     let presets: Vec<BrushPreset> = indices
         .iter()
@@ -587,50 +577,18 @@ pub(crate) fn export_presets_dialog(app: &mut PainterApp, indices: &[usize], nam
     if presets.is_empty() {
         return;
     }
-    let Some(path) = crate::app::settings::file_dialog()
-        .add_filter("Brush presets", &[preset_file::EXTENSION])
-        .set_file_name(format!(
-            "{}.{}",
-            preset_file::file_stem(name),
-            preset_file::EXTENSION
-        ))
-        .save_file()
-        .inspect(|p| crate::app::settings::remember_dir(p))
-    else {
-        return;
-    };
-    if let Err(err) = export_presets(&presets, &path) {
-        log::error!("{err}");
-        app.export_state.message = Some(err);
+    match preset_file::encode(&presets) {
+        Ok(bytes) => {
+            let ext = preset_file::EXTENSION;
+            let file = format!("{}.{ext}", preset_file::file_stem(name));
+            app.pick_save(&file, ext, "application/octet-stream", bytes);
+        }
+        Err(err) => app.report(err),
     }
 }
 
-#[cfg(not(target_os = "android"))]
 pub(crate) fn import_presets_dialog(app: &mut PainterApp) {
-    let mut all: Vec<&str> = vec![preset_file::EXTENSION];
-    all.extend(crate::brush_engine::import::EXTENSIONS);
-    let Some(paths) = crate::app::settings::file_dialog()
-        .add_filter("Brushes", &all)
-        .add_filter("Rusty Painter presets", &[preset_file::EXTENSION])
-        .add_filter("Photoshop", &["abr"])
-        .add_filter("Krita", &["kpp", "bundle"])
-        .add_filter("GIMP", &["gbr", "gih"])
-        .add_filter("MyPaint", &["myb"])
-        .pick_files()
-        .inspect(|ps| {
-            ps.iter()
-                .take(1)
-                .for_each(|p| crate::app::settings::remember_dir(p))
-        })
-    else {
-        return;
-    };
-    for path in paths {
-        if let Err(err) = app.import_brushes_path(&path) {
-            log::error!("{err}");
-            app.export_state.message = Some(err);
-        }
-    }
+    app.pick_open(crate::app::files::OpenFor::Brushes);
 }
 
 impl PainterApp {

@@ -185,8 +185,7 @@ pub fn save_color_image(
     std::io::Write::flush(&mut out).map_err(|e| e.to_string())
 }
 
-/// Encode a color image in memory (for Android's MediaStore).
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+/// Encode a color image in memory.
 pub fn encode_color_image(img: ColorImage, format: ExportFormat) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     encode_into(img, format, &mut std::io::Cursor::new(&mut bytes))?;

@@ -333,6 +333,10 @@ pub struct ModalState {
     pub menu_sheet_section: crate::ui::menus::MenuSection,
     /// The Canvas Size or Image Size dialog, while open.
     pub size_dialog: Option<crate::ui::image_menu::SizeDialog>,
+    /// The New Canvas dialog's presets: the shelf shown, the user's own
+    /// (read when first shown), the name for saving one, and whether the
+    /// clipboard is pasted into the new canvas.
+    pub canvas_presets: crate::ui::canvas_creation::PresetsState,
 }
 
 impl ModalState {
@@ -349,6 +353,7 @@ impl ModalState {
             menu_sheet_open: false,
             menu_sheet_section: Default::default(),
             size_dialog: None,
+            canvas_presets: Default::default(),
         }
     }
 }
@@ -362,6 +367,9 @@ pub struct ExportState {
     pub progress: f32,
     pub progress_rx: Option<mpsc::Receiver<ExportProgress>>,
     pub show_modal: bool,
+    /// Android: the last export's (URI, MIME type), for Share.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub share: Option<(String, String)>,
 }
 
 impl ExportState {
@@ -374,6 +382,7 @@ impl ExportState {
             progress: 0.0,
             progress_rx: None,
             show_modal: false,
+            share: None,
         }
     }
 }
@@ -462,6 +471,11 @@ pub struct WorkspaceState {
     pub quickshape: crate::app::tools::quickshape::QuickShapeState,
     /// Android's image picker (the photo library).
     pub gallery: crate::ui::image_gallery::GalleryState,
+    /// The project library, and the file the document saves to.
+    pub library: crate::ui::library::LibraryState,
+    /// Android's file picker is open for this.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub file_pick: Option<crate::app::files::PendingPick>,
     /// Textures dropped this frame, kept until the next one. egui-wgpu frees
     /// a texture before submitting the frame's uploads, so one updated and
     /// freed in the same frame fails the submit.
@@ -523,6 +537,8 @@ impl WorkspaceState {
             palette: Default::default(),
             blend: Default::default(),
             gallery: Default::default(),
+            library: Default::default(),
+            file_pick: None,
             transform_pick_layer: true,
             select: Default::default(),
             symmetry: Default::default(),

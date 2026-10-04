@@ -10,7 +10,6 @@ use crate::{
             dab_reaches_tile, dispatch_over_buckets, tile_overlap, tile_overlaps_selection,
         },
         hardness::SoftnessSelector,
-        masks::calc_soft_brush_alpha,
         stroke::{StrokeBuffer, StrokeTiles},
     },
     canvas::{
@@ -64,24 +63,48 @@ pub enum StabilizerAlgorithm {
 /// the (sub-pixel quantized) dab center.
 struct GaussianTip {
     r_ceil: i32,
+    radius: f32,
     r_sq: f32,
     inv_radius: f32,
     hardness: f32,
+    /// Krita's anti-aliased edge (see `masks::auto_tip_alpha`): from here
+    /// out the falloff's value here fades linearly to nothing at the edge.
     fade_start: f32,
+    fade_base: f32,
     inv_fade_width: f32,
 }
 
 impl GaussianTip {
+    fn new(r: f32, hardness: f32) -> Self {
+        let fade_start = (r - 1.0).max(0.0);
+        let inv_radius = if r > 0.0 { 1.0 / r } else { 0.0 };
+        Self {
+            r_ceil: r.ceil() as i32,
+            radius: r,
+            r_sq: r * r,
+            inv_radius,
+            hardness,
+            fade_start,
+            fade_base: super::masks::gaussian_falloff(fade_start * inv_radius, hardness),
+            inv_fade_width: if r > fade_start {
+                1.0 / (r - fade_start)
+            } else {
+                0.0
+            },
+        }
+    }
+
     /// Scalar reference for one pixel; [`row_kernel`] must match it bit for bit.
     #[cfg(test)]
     fn alpha(&self, dist_sq: f32, dist: f32, t: f32) -> f32 {
         if dist_sq >= self.r_sq {
             return 0.0;
         }
-        let mut alpha_factor = super::masks::gaussian_falloff(t, self.hardness);
-        if dist > self.fade_start {
-            alpha_factor *= 1.0 - (dist - self.fade_start) * self.inv_fade_width;
-        }
+        let alpha_factor = if dist > self.fade_start {
+            self.fade_base * ((self.radius - dist) * self.inv_fade_width)
+        } else {
+            super::masks::gaussian_falloff(t, self.hardness)
+        };
         alpha_factor.clamp(0.0, 1.0)
     }
 
@@ -152,7 +175,7 @@ fn row_kernel(tip: &GaussianTip, pdy: f32, frac_x: f32, mx0: usize, out: &mut [f
             let smooth = falloff * falloff * (3.0 - 2.0 * falloff);
             alpha = if t < hardness { 1.0 } else { smooth };
         }
-        let faded = alpha * (1.0 - (dist - tip.fade_start) * tip.inv_fade_width);
+        let faded = tip.fade_base * ((tip.radius - dist) * tip.inv_fade_width);
         alpha = if dist > tip.fade_start { faded } else { alpha };
         alpha = if alpha > 0.0 { alpha } else { 0.0 };
         alpha = if alpha < 1.0 { alpha } else { 1.0 };
@@ -1912,68 +1935,58 @@ impl Brush {
         let general = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
             let pixel_shape = &tips[dab.tip as usize];
             let r = dab.r;
-            let r_sq = r * r;
-            // 1.5 pixel outer anti-aliasing fade
-            let fade_start = (r - 1.5).max(0.0);
-            let fade_width = 1.5_f32.min(r);
-            let inv_fade_width = if fade_width > 0.0 {
-                1.0 / fade_width
-            } else {
-                0.0
-            };
             let strength = (strength * dab.strength).min(1.0);
             let hardness_val = (hardness_val + dab.hardness).clamp(0.0, 1.0) * dab.softness();
             let softness_curve = lut_for(dab);
             let turned = custom || !dab.upright();
+            let falloff = |t: f32| match softness_selector {
+                SoftnessSelector::Gaussian => super::masks::gaussian_falloff(t, hardness_val),
+                SoftnessSelector::Curve => softness_curve.map_or(1.0, |c| c.at(t)),
+            };
+            // A custom tip turns with its mirror copy; any tip with its
+            // dynamics.
+            let alpha_at = |pdx: f32, pdy: f32| {
+                let (pdx, pdy) = if turned {
+                    dab.tip_offset(pdx, pdy)
+                } else {
+                    (pdx, pdy)
+                };
+                match pixel_shape {
+                    // The mask's own edges are smooth already (sampled, not
+                    // clipped).
+                    PixelBrushShape::Custom(tip) if anti_aliasing => tip.sample(pdx, pdy, r),
+                    PixelBrushShape::Custom(tip) => tip.sample_nearest(pdx, pdy, r),
+                    shape => super::masks::auto_tip_alpha(
+                        (pdx, pdy),
+                        r,
+                        matches!(shape, PixelBrushShape::Square),
+                        softness_selector,
+                        falloff,
+                        anti_aliasing,
+                    ),
+                }
+            };
+            // Small anti-aliased round and square tips: several samples a
+            // pixel, as Krita takes them.
+            let samples = if matches!(pixel_shape, PixelBrushShape::Custom(_)) {
+                1
+            } else {
+                super::masks::supersamples(r, anti_aliasing)
+            };
+            let offset = |s: usize| (s as f32 + 0.5) / samples as f32 - 0.5;
             let pdy_canvas = gy as f32 + 0.5 - dab.center.y;
             for (i, slot) in out.iter_mut().enumerate() {
                 let pdx_canvas = (x0 + i) as f32 + 0.5 - dab.center.x;
-                // A custom tip turns with its mirror copy; any tip with its
-                // dynamics.
-                let (pdx, pdy) = if turned {
-                    dab.tip_offset(pdx_canvas, pdy_canvas)
+                let alpha_factor = if samples == 1 {
+                    alpha_at(pdx_canvas, pdy_canvas)
                 } else {
-                    (pdx_canvas, pdy_canvas)
-                };
-                let alpha_factor = if anti_aliasing {
-                    let (base_alpha_at_pixel, dist_sq) = calc_soft_brush_alpha(
-                        pdx,
-                        pdy,
-                        r,
-                        pixel_shape,
-                        hardness_val,
-                        softness_selector,
-                        softness_curve,
-                    );
-                    if base_alpha_at_pixel <= 0.0 {
-                        0.0
-                    } else {
-                        let dist_for_aa = match pixel_shape {
-                            PixelBrushShape::Circle => dist_sq.sqrt(),
-                            PixelBrushShape::Square => pdx.abs().max(pdy.abs()),
-                            // The mask's own edges are smooth already
-                            // (sampled, not clipped).
-                            PixelBrushShape::Custom(_) => 0.0,
-                        };
-                        if dist_for_aa >= r {
-                            0.0
-                        } else if dist_for_aa > fade_start {
-                            base_alpha_at_pixel
-                                * (1.0 - (dist_for_aa - fade_start) * inv_fade_width)
-                        } else {
-                            base_alpha_at_pixel
+                    let mut sum = 0.0;
+                    for sy in 0..samples {
+                        for sx in 0..samples {
+                            sum += alpha_at(pdx_canvas + offset(sx), pdy_canvas + offset(sy));
                         }
                     }
-                } else {
-                    let (in_shape, alpha_mod) = match pixel_shape {
-                        PixelBrushShape::Circle => ((pdx * pdx + pdy * pdy) <= r_sq, 1.0),
-                        PixelBrushShape::Square => (pdx.abs() <= r && pdy.abs() <= r, 1.0),
-                        PixelBrushShape::Custom(tip) => {
-                            let v = tip.sample_nearest(pdx, pdy, r);
-                            (v > 0.0, v)
-                        }
-                    };
-                    if in_shape { alpha_mod } else { 0.0 }
+                    sum / (samples * samples) as f32
                 };
                 *slot = if alpha_factor <= 0.0 {
                     0.0
@@ -2059,25 +2072,12 @@ impl Brush {
             && softness_selector == SoftnessSelector::Gaussian
             && matches!(pixel_shape, PixelBrushShape::Circle)
         {
-            let tip_for = |r: f32, hardness: f32| {
-                let fade_width = 1.5_f32.min(r);
-                GaussianTip {
-                    r_ceil: r.ceil() as i32,
-                    r_sq: r * r,
-                    inv_radius: if r > 0.0 { 1.0 / r } else { 0.0 },
-                    hardness,
-                    fade_start: (r - 1.5).max(0.0),
-                    inv_fade_width: if fade_width > 0.0 {
-                        1.0 / fade_width
-                    } else {
-                        0.0
-                    },
-                }
-            };
+            let tip_for = GaussianTip::new;
             let batch_tip = tip_for(ctx.r, hardness_val);
             let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
                 // Turning a round tip changes nothing; squashing it does.
-                if !dab.rigid {
+                // Small tips are supersampled.
+                if !dab.rigid || super::masks::supersamples(dab.r, true) > 1 {
                     return general(dab, gy, x0, out);
                 }
                 let own;
@@ -2251,14 +2251,7 @@ mod tests {
         // sub-pixel offsets and rows: every non-zero pixel must be inside the
         // chord, and the values inside must be identical.
         for &r in &[0.6_f32, 1.0, 2.3, 7.5, 31.0, 120.25] {
-            let tip = GaussianTip {
-                r_ceil: r.ceil() as i32,
-                r_sq: r * r,
-                inv_radius: 1.0 / r,
-                hardness: 0.4,
-                fade_start: (r - 1.5).max(0.0),
-                inv_fade_width: 1.0 / 1.5_f32.min(r),
-            };
+            let tip = GaussianTip::new(r, 0.4);
             let len = (2 * tip.r_ceil + 3) as usize;
             for step in 0..7 {
                 let frac = step as f32 / 7.0;
@@ -2461,7 +2454,7 @@ mod tests {
         assert_eq!(brush.brush_options.pixel_shape, PixelBrushShape::Circle);
         let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
         assert_eq!(
-            checksum, 0xfcf6cc6ce4d2d650,
+            checksum, 0x2e19e339e81f9a29,
             "GOLDEN_PLACEHOLDER:soft_dab_gaussian_fast_path_output_is_stable"
         );
     }
@@ -2479,13 +2472,13 @@ mod tests {
         brush.brush_options.pixel_shape = PixelBrushShape::Square;
         let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
         assert_eq!(
-            checksum, 0x3be4088e1a6b28ad,
+            checksum, 0x73e7076fcdc50db1,
             "GOLDEN_PLACEHOLDER:soft_dab_general_path_square_output_is_stable"
         );
     }
 
     /// Golden-master check for the Soft brush's general path without
-    /// anti-aliasing (hard edges, still goes through calc_soft_brush_alpha).
+    /// anti-aliasing (hard edges, the falloff kept inside, as in Krita).
     #[test]
     fn soft_dab_general_path_no_aa_output_is_stable() {
         let mut brush = Brush::new(
@@ -2497,7 +2490,7 @@ mod tests {
         brush.anti_aliasing = false;
         let checksum = paint_and_checksum(&[(brush, stroke_centers())]);
         assert_eq!(
-            checksum, 0x80c2a24b62e25d05,
+            checksum, 0x3add87818d40766a,
             "GOLDEN_PLACEHOLDER:soft_dab_general_path_no_aa_output_is_stable"
         );
     }
@@ -2525,7 +2518,7 @@ mod tests {
             (eraser_brush, stroke_centers()),
         ]);
         assert_eq!(
-            checksum, 0x9ec526431d3a5f6,
+            checksum, 0x26f16f7573c9fa96,
             "GOLDEN_PLACEHOLDER:soft_dab_eraser_output_is_stable"
         );
     }
@@ -2540,7 +2533,7 @@ mod tests {
         );
         let checksum = paint_and_checksum_in(&[(brush, stroke_centers())], Some(&star_selection()));
         assert_eq!(
-            checksum, 0x43e95c8b28ef7b5c,
+            checksum, 0x58c2a1b16f52a5a8,
             "GOLDEN_PLACEHOLDER:soft_dab_selection_output_is_stable"
         );
     }
@@ -2608,7 +2601,7 @@ mod tests {
         brush.brush_options.flow = 50.0;
         let checksum = paint_and_checksum(&[(brush, fractional_centers())]);
         assert_eq!(
-            checksum, 0x38d00942f73404f9,
+            checksum, 0x6c7f6feffff7bc06,
             "GOLDEN_PLACEHOLDER:soft_partial_flow_fractional_output_is_stable"
         );
     }
@@ -2629,7 +2622,7 @@ mod tests {
             (eraser, fractional_centers()),
         ]);
         assert_eq!(
-            checksum, 0x4a01292a66855c9d,
+            checksum, 0xc844f31153ed347a,
             "GOLDEN_PLACEHOLDER:eraser_partial_flow_fractional_output_is_stable"
         );
     }
@@ -2689,16 +2682,7 @@ mod tests {
     fn gaussian_tip_matches_soft_brush_formula() {
         let r = 12.0;
         let hardness = 0.2;
-        let fade_start = 10.5;
-        let inv_fade_width = 1.0 / 1.5;
-        let tip = GaussianTip {
-            r_ceil: 12,
-            r_sq: r * r,
-            inv_radius: 1.0 / r,
-            hardness,
-            fade_start,
-            inv_fade_width,
-        };
+        let tip = GaussianTip::new(r, hardness);
         let (frac_x, frac_y) = (0.25, 0.5);
         let my = 12usize;
         let pdy = my as f32 - 12.0 + 0.5 - frac_y;
@@ -2707,23 +2691,15 @@ mod tests {
 
         for (mx, &alpha) in row.iter().enumerate() {
             let pdx = mx as f32 - 12.0 + 0.5 - frac_x;
-            let (base, dist_sq) = calc_soft_brush_alpha(
-                pdx,
-                pdy,
+            let soft = |t| super::super::masks::gaussian_falloff(t, hardness);
+            let expected = super::super::masks::auto_tip_alpha(
+                (pdx, pdy),
                 r,
-                &PixelBrushShape::Circle,
-                hardness,
+                false,
                 SoftnessSelector::Gaussian,
-                None,
+                soft,
+                true,
             );
-            let dist = dist_sq.sqrt();
-            let expected = if dist >= r {
-                0.0
-            } else if dist > fade_start {
-                base * (1.0 - (dist - fade_start) * inv_fade_width)
-            } else {
-                base
-            };
             assert!((alpha - expected).abs() <= 1e-5, "mx={mx}");
         }
     }
@@ -2732,16 +2708,7 @@ mod tests {
     fn gaussian_tip_kernels_match_scalar_reference() {
         for hardness in [0.0, 0.2, 0.5, 0.99, 1.0] {
             for r in [0.6_f32, 3.0, 12.0, 40.5] {
-                let fade_start = (r - 1.5).max(0.0);
-                let fade_width = 1.5_f32.min(r);
-                let tip = GaussianTip {
-                    r_ceil: r.ceil() as i32,
-                    r_sq: r * r,
-                    inv_radius: 1.0 / r,
-                    hardness,
-                    fade_start,
-                    inv_fade_width: 1.0 / fade_width,
-                };
+                let tip = GaussianTip::new(r, hardness);
                 let side = (2 * tip.r_ceil + 1) as usize;
                 for (frac_x, frac_y) in [(0.0, 0.0), (0.3125, 0.9375), (0.5, 0.0625)] {
                     for my in 0..side {

@@ -30,7 +30,6 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
                 if ui.button("Extract palette").clicked() {
                     app.extract_palette();
                 }
-                #[cfg(not(target_os = "android"))]
                 if ui
                     .button("From an image…")
                     .on_hover_text("Take the colours of a picture file")
@@ -91,24 +90,8 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
     app.workspace.palette.open = open;
 }
 
-#[cfg(not(target_os = "android"))]
 fn palette_from_image_dialog(app: &mut PainterApp) {
-    let Some(path) = crate::app::settings::file_dialog()
-        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
-        .pick_file()
-        .inspect(|p| crate::app::settings::remember_dir(p))
-    else {
-        return;
-    };
-    let name = path
-        .file_stem()
-        .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
-    let result = std::fs::read(&path)
-        .map_err(|e| format!("Couldn't read {}: {e}", path.display()))
-        .and_then(|bytes| app.extract_palette_from_image(&name, &bytes));
-    if let Err(err) = result {
-        app.export_state.message = Some(err);
-    }
+    app.pick_open(crate::app::files::OpenFor::Palette);
 }
 
 /// Swatches in the colour panel: click to pick, right-click or long-press

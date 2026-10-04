@@ -23,6 +23,7 @@ pub(crate) mod brush_library;
 pub(crate) mod canvas_ops;
 pub(crate) mod clipboard;
 pub(crate) mod document;
+pub(crate) mod files;
 pub(crate) mod frame_stats;
 pub(crate) mod import;
 pub(crate) mod init;

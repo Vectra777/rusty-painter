@@ -2,10 +2,6 @@
 //! file access.
 
 #[cfg(target_os = "android")]
-use crate::project::export::{ExportFormat, encode_color_image};
-#[cfg(target_os = "android")]
-use eframe::egui::ColorImage;
-#[cfg(target_os = "android")]
 use jni::objects::{JObject, JString, JValue};
 #[cfg(target_os = "android")]
 use jni::sys::jobject;
@@ -27,8 +23,9 @@ fn with_android_env<T>(
     let activity = unsafe { JObject::from_raw(ctx.context() as jobject) };
     let result = f(&mut env, activity);
     // A failed call leaves its Java exception pending, which would abort the
-    // next JNI call: clear it.
+    // next JNI call: log it (which clears it).
     if result.is_err() && env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
         let _ = env.exception_clear();
     }
     result
@@ -69,44 +66,51 @@ fn uri_to_string(env: &mut jni::JNIEnv<'_>, uri: &JObject<'_>) -> Result<String,
         .map_err(|e| e.to_string())
 }
 
+/// Where `publish_file` puts a file of this type, by MediaStore collection:
+/// pictures the gallery shows, videos, and everything else in Downloads.
 #[cfg(target_os = "android")]
-pub fn save_image_to_media_store(
-    img: ColorImage,
-    file_name: &str,
-    format: ExportFormat,
-) -> Result<AndroidExport, String> {
-    let bytes = encode_color_image(img, format)?;
-    let mime = format.mime_type();
+fn media_collection(mime: &str) -> (&'static str, &'static str) {
+    match mime {
+        m if m.starts_with("video/") => (
+            "android/provider/MediaStore$Video$Media",
+            "Movies/Rusty Painter",
+        ),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/tiff" => (
+            "android/provider/MediaStore$Images$Media",
+            "Pictures/Rusty Painter",
+        ),
+        _ => (
+            "android/provider/MediaStore$Downloads",
+            "Download/Rusty Painter",
+        ),
+    }
+}
 
-    with_android_env(|env, activity| {
-        let resolver = env
-            .call_method(
-                &activity,
-                "getContentResolver",
-                "()Landroid/content/ContentResolver;",
-                &[],
-            )
-            .map_err(|e| e.to_string())?
-            .l()
-            .map_err(|e| e.to_string())?;
-
+/// Move the file at `path` into the shared storage (Pictures, Movies or
+/// Download, under "Rusty Painter"), where other apps see it.
+#[cfg(target_os = "android")]
+pub fn publish_file(path: &std::path::Path, mime: &str) -> Result<AndroidExport, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read the export: {e}"))?;
+    let file_name = path
+        .file_name()
+        .map_or_else(|| "export".into(), |n| n.to_string_lossy().into_owned());
+    let (collection_class, dir) = media_collection(mime);
+    let result = with_android_env(|env, activity| {
+        let resolver = content_resolver(env, &activity)?;
         let values = env
             .new_object("android/content/ContentValues", "()V", &[])
-            .map_err(|e| e.to_string())?;
-        put_string(env, &values, "_display_name", file_name)?;
+            .map_err(jerr)?;
+        put_string(env, &values, "_display_name", &file_name)?;
         put_string(env, &values, "mime_type", mime)?;
-        put_string(env, &values, "relative_path", "Pictures/Rusty Painter")?;
-
+        put_string(env, &values, "relative_path", dir)?;
         let collection = env
             .get_static_field(
-                "android/provider/MediaStore$Images$Media",
+                collection_class,
                 "EXTERNAL_CONTENT_URI",
                 "Landroid/net/Uri;",
             )
-            .map_err(|e| e.to_string())?
-            .l()
-            .map_err(|e| e.to_string())?;
-
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
         let uri = env
             .call_method(
                 &resolver,
@@ -114,46 +118,309 @@ pub fn save_image_to_media_store(
                 "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
                 &[JValue::Object(&collection), JValue::Object(&values)],
             )
-            .map_err(|e| e.to_string())?
-            .l()
-            .map_err(|e| e.to_string())?;
-
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
         if uri.is_null() {
-            return Err("Android MediaStore insert returned null".to_string());
+            return Err("Android refused to create the file".to_string());
         }
-
-        let output_stream = env
+        let out = env
             .call_method(
                 &resolver,
                 "openOutputStream",
                 "(Landroid/net/Uri;)Ljava/io/OutputStream;",
                 &[JValue::Object(&uri)],
             )
-            .map_err(|e| e.to_string())?
-            .l()
-            .map_err(|e| e.to_string())?;
-
-        let byte_array = env
-            .byte_array_from_slice(&bytes)
-            .map_err(|e| e.to_string())?;
-        env.call_method(
-            &output_stream,
-            "write",
-            "([B)V",
-            &[JValue::Object(&JObject::from(byte_array))],
-        )
-        .map_err(|e| e.to_string())?;
-        env.call_method(&output_stream, "flush", "()V", &[])
-            .map_err(|e| e.to_string())?;
-        env.call_method(&output_stream, "close", "()V", &[])
-            .map_err(|e| e.to_string())?;
-
-        let uri_string = uri_to_string(env, &uri)?;
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        let array = env.byte_array_from_slice(&bytes).map_err(jerr)?;
+        env.call_method(&out, "write", "([B)V", &[JValue::Object(&array)])
+            .map_err(jerr)?;
+        env.call_method(&out, "close", "()V", &[]).map_err(jerr)?;
         Ok(AndroidExport {
-            message: format!("Saved to Pictures/Rusty Painter/{file_name}"),
-            share_uri: Some(uri_string),
+            message: format!("Saved to {dir}/{file_name}"),
+            share_uri: Some(uri_to_string(env, &uri)?),
             share_mime: Some(mime.to_string()),
         })
+    });
+    let _ = std::fs::remove_file(path);
+    result
+}
+
+/// The app's cache folder, for files on their way to shared storage.
+#[cfg(target_os = "android")]
+pub fn cache_dir() -> std::path::PathBuf {
+    let dir = crate::ANDROID_DATA
+        .get()
+        .and_then(|d| d.parent())
+        .map_or_else(std::env::temp_dir, |d| d.join("cache"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// The Java helpers (`android/java`: the file picker, the keyboard), built
+/// into `classes.dex` by `scripts/build-android-dex.sh`.
+#[cfg(target_os = "android")]
+static HELPER_DEX: &[u8] = include_bytes!("../android/classes.dex");
+#[cfg(target_os = "android")]
+static HELPER_LOADER: std::sync::OnceLock<jni::objects::GlobalRef> = std::sync::OnceLock::new();
+
+/// Helper class `name` (like "FilePicker"), loaded from the embedded dex.
+#[cfg(target_os = "android")]
+fn helper_class<'a>(
+    env: &mut jni::JNIEnv<'a>,
+    activity: &JObject<'_>,
+    name: &str,
+) -> Result<jni::objects::JClass<'a>, String> {
+    if HELPER_LOADER.get().is_none() {
+        let dex = env.byte_array_from_slice(HELPER_DEX).map_err(jerr)?;
+        let buffer = env
+            .call_static_method(
+                "java/nio/ByteBuffer",
+                "wrap",
+                "([B)Ljava/nio/ByteBuffer;",
+                &[JValue::Object(&dex)],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        let parent = env
+            .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        let loader = env
+            .new_object(
+                "dalvik/system/InMemoryDexClassLoader",
+                "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V",
+                &[JValue::Object(&buffer), JValue::Object(&parent)],
+            )
+            .map_err(jerr)?;
+        let _ = HELPER_LOADER.set(env.new_global_ref(loader).map_err(jerr)?);
+    }
+    let loader = HELPER_LOADER.get().expect("set above");
+    let name = env
+        .new_string(format!("io.vectra.rustypainter.{name}"))
+        .map_err(jerr)?;
+    let class = env
+        .call_method(
+            loader.as_obj(),
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&name)],
+        )
+        .and_then(|v| v.l())
+        .map_err(jerr)?;
+    Ok(jni::objects::JClass::from(class))
+}
+
+#[cfg(target_os = "android")]
+fn picker_class<'a>(
+    env: &mut jni::JNIEnv<'a>,
+    activity: &JObject<'_>,
+) -> Result<jni::objects::JClass<'a>, String> {
+    helper_class(env, activity, "FilePicker")
+}
+
+/// Show or hide the soft keyboard (NativeActivity can't by itself).
+#[cfg(target_os = "android")]
+pub fn show_keyboard(on: bool) -> Result<(), String> {
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "TextInput")?;
+        env.call_static_method(
+            &class,
+            "show",
+            "(Landroid/app/Activity;Z)V",
+            &[JValue::Object(&activity), JValue::Bool(on.into())],
+        )
+        .map_err(jerr)?;
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "android")]
+static KEYBOARD_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Once a frame: the keyboard shown while a text field has focus, and what
+/// was typed on it.
+#[cfg(target_os = "android")]
+pub fn keyboard_input(wanted: bool) -> Vec<eframe::egui::Event> {
+    use std::sync::atomic::Ordering;
+    if KEYBOARD_SHOWN.swap(wanted, Ordering::Relaxed) != wanted
+        && let Err(err) = show_keyboard(wanted)
+    {
+        log::error!("Keyboard: {err}");
+    }
+    if wanted { typed() } else { Vec::new() }
+}
+
+/// What was typed on the soft keyboard since last asked.
+#[cfg(target_os = "android")]
+pub fn typed() -> Vec<eframe::egui::Event> {
+    use eframe::egui::{Event, Key, Modifiers};
+    let key = |key, pressed| Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    };
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "TextInput")?;
+        let mut events = Vec::new();
+        loop {
+            let s = env
+                .call_static_method(&class, "poll", "()Ljava/lang/String;", &[])
+                .and_then(|v| v.l())
+                .map_err(jerr)?;
+            if s.is_null() {
+                return Ok(events);
+            }
+            let s: String = env.get_string(&JString::from(s)).map_err(jerr)?.into();
+            match s.split_at(1) {
+                ("t", text) => events.push(Event::Text(text.to_string())),
+                (code, _) => {
+                    let k = if code == "b" {
+                        Key::Backspace
+                    } else {
+                        Key::Enter
+                    };
+                    events.extend([key(k, true), key(k, false)]);
+                }
+            }
+        }
+    })
+    .unwrap_or_default()
+}
+
+/// Open the system picker for existing files (`mimes` like "image/*";
+/// "*/*" for any). The answer comes from [`picker_poll`].
+#[cfg(target_os = "android")]
+pub fn picker_open(mimes: &[&str], multiple: bool) -> Result<(), String> {
+    with_android_env(|env, activity| {
+        let class = picker_class(env, &activity)?;
+        let array = env
+            .new_object_array(mimes.len() as i32, "java/lang/String", JObject::null())
+            .map_err(jerr)?;
+        for (i, m) in mimes.iter().enumerate() {
+            let s = env.new_string(m).map_err(jerr)?;
+            env.set_object_array_element(&array, i as i32, s)
+                .map_err(jerr)?;
+        }
+        env.call_static_method(
+            &class,
+            "open",
+            "(Landroid/app/Activity;[Ljava/lang/String;Z)V",
+            &[
+                JValue::Object(&activity),
+                JValue::Object(&array),
+                JValue::Bool(multiple.into()),
+            ],
+        )
+        .map_err(jerr)?;
+        Ok(())
+    })
+}
+
+/// Open the system picker to create a file called `name`. The answer comes
+/// from [`picker_poll`].
+#[cfg(target_os = "android")]
+pub fn picker_create(mime: &str, name: &str) -> Result<(), String> {
+    with_android_env(|env, activity| {
+        let class = picker_class(env, &activity)?;
+        let mime = env.new_string(mime).map_err(jerr)?;
+        let name = env.new_string(name).map_err(jerr)?;
+        env.call_static_method(
+            &class,
+            "create",
+            "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                JValue::Object(&activity),
+                JValue::Object(&mime),
+                JValue::Object(&name),
+            ],
+        )
+        .map_err(jerr)?;
+        Ok(())
+    })
+}
+
+/// The picker's answer once it closes: the picked URIs (none when
+/// cancelled). `None` while it's open.
+#[cfg(target_os = "android")]
+pub fn picker_poll() -> Option<Vec<String>> {
+    with_android_env(|env, activity| {
+        let class = picker_class(env, &activity)?;
+        let array = env
+            .call_static_method(&class, "poll", "()[Ljava/lang/String;", &[])
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        if array.is_null() {
+            return Ok(None);
+        }
+        let array = jni::objects::JObjectArray::from(array);
+        let n = env.get_array_length(&array).map_err(jerr)?;
+        let mut uris = Vec::new();
+        for i in 0..n {
+            let s = JString::from(env.get_object_array_element(&array, i).map_err(jerr)?);
+            uris.push(env.get_string(&s).map_err(jerr)?.into());
+        }
+        Ok(Some(uris))
+    })
+    .unwrap_or_else(|e| {
+        log::error!("File picker: {e}");
+        Some(Vec::new())
+    })
+}
+
+/// A picked file's name and contents.
+#[cfg(target_os = "android")]
+pub fn picker_read(uri: &str) -> Result<(String, Vec<u8>), String> {
+    with_android_env(|env, activity| {
+        let class = picker_class(env, &activity)?;
+        let juri = env.new_string(uri).map_err(jerr)?;
+        let name = env
+            .call_static_method(
+                &class,
+                "displayName",
+                "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&activity), JValue::Object(&juri)],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        let name: String = env.get_string(&JString::from(name)).map_err(jerr)?.into();
+        let bytes = env
+            .call_static_method(
+                &class,
+                "read",
+                "(Landroid/content/Context;Ljava/lang/String;)[B",
+                &[JValue::Object(&activity), JValue::Object(&juri)],
+            )
+            .and_then(|v| v.l())
+            .map_err(|_| format!("Couldn't read {name}"))?;
+        let bytes = env
+            .convert_byte_array(jni::objects::JByteArray::from(bytes))
+            .map_err(jerr)?;
+        Ok((name, bytes))
+    })
+}
+
+/// Write `bytes` into a file the picker created.
+#[cfg(target_os = "android")]
+pub fn picker_write(uri: &str, bytes: &[u8]) -> Result<(), String> {
+    with_android_env(|env, activity| {
+        let class = picker_class(env, &activity)?;
+        let juri = env.new_string(uri).map_err(jerr)?;
+        let array = env.byte_array_from_slice(bytes).map_err(jerr)?;
+        env.call_static_method(
+            &class,
+            "write",
+            "(Landroid/content/Context;Ljava/lang/String;[B)V",
+            &[
+                JValue::Object(&activity),
+                JValue::Object(&juri),
+                JValue::Object(&array),
+            ],
+        )
+        .map_err(|_| "Couldn't write the file".to_string())?;
+        Ok(())
     })
 }
 
@@ -259,20 +526,6 @@ pub fn share_uri(uri: &str, mime: &str, title: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
         Ok(())
     })
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn save_image_to_media_store(
-    _img: eframe::egui::ColorImage,
-    _file_name: &str,
-    _format: crate::project::export::ExportFormat,
-) -> Result<AndroidExport, String> {
-    Err("Android export backend is unavailable on this platform".to_string())
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn share_uri(_uri: &str, _mime: &str, _title: &str) -> Result<(), String> {
-    Err("Android share backend is unavailable on this platform".to_string())
 }
 
 /// An image in the device's photo library.

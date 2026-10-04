@@ -187,6 +187,10 @@ impl PainterApp {
             } else {
                 write_mp4(&frames, &path)?;
             }
+            // Android: from the cache into Pictures.
+            #[cfg(target_os = "android")]
+            return crate::android::publish_file(&path, "image/gif").map(|done| done.message);
+            #[cfg(not(target_os = "android"))]
             Ok(format!("Time-lapse saved to {}", path.display()))
         }));
     }

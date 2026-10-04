@@ -49,6 +49,13 @@ pub struct PainterApp {
 }
 
 impl eframe::App for PainterApp {
+    /// Android: the soft keyboard's typing (NativeActivity gets none).
+    #[cfg(target_os = "android")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let typed = crate::android::keyboard_input(ctx.wants_keyboard_input());
+        raw_input.events.extend(typed);
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_active_preset(false);
         self.save_settings(false);
@@ -81,11 +88,22 @@ impl eframe::App for PainterApp {
         self.selection_manager.canvas_size = [self.canvas.width(), self.canvas.height()];
         self.keep_guides_on_canvas();
 
+        self.poll_file_pick();
+        self.poll_export();
+        // The library takes the window: no canvas, bars or shortcuts.
+        if self.workspace.library.open {
+            ui::library::library_screen(self, ctx);
+            ui::canvas_creation::canvas_creation_modal(self, ctx);
+            ui::library::library_dialogs(self, ctx);
+            crate::app::autosave::recovery_dialog(self, ctx);
+            self.autosave_tick(ctx);
+            self.save_settings(false);
+            return;
+        }
+
         if crate::app::input::shortcuts::handle_shortcuts(self, ctx) {
             needs_repaint = true;
         }
-
-        self.poll_export();
 
         ui::layers::refresh_thumbnails(self, ctx);
         self.workspace.frame_stats.mark(Stage::Setup);
@@ -262,6 +280,18 @@ impl PainterApp {
 
     /// Finish a background export: report its result and progress.
     fn poll_export(&mut self) {
+        // Progress first: the last update carries what to share.
+        if let Some(rx) = &self.export_state.progress_rx {
+            for update in rx.try_iter() {
+                self.export_state.progress = update.progress;
+                if update.share.is_some() {
+                    self.export_state.share = update.share;
+                }
+                if let Some(msg) = update.message {
+                    self.export_state.message = Some(msg);
+                }
+            }
+        }
         if let Some(handle) = self.export_state.task.as_ref()
             && handle.is_finished()
         {
@@ -275,20 +305,13 @@ impl PainterApp {
             match result {
                 Ok(msg) => {
                     self.export_state.message = Some(msg);
-                    self.export_state.show_modal = false;
+                    // Android keeps it open, to share what was saved.
+                    if self.export_state.share.is_none() {
+                        self.export_state.show_modal = false;
+                    }
                 }
                 Err(err) => {
                     self.export_state.message = Some(err);
-                }
-            }
-        }
-
-        // Drain progress updates
-        if let Some(rx) = &self.export_state.progress_rx {
-            for update in rx.try_iter() {
-                self.export_state.progress = update.progress;
-                if let Some(msg) = update.message {
-                    self.export_state.message = Some(msg);
                 }
             }
         }
@@ -529,6 +552,7 @@ impl PainterApp {
         ui::layer_style_dialog::border_dialog(self, ctx);
         ui::layer_style_dialog::line_width_dialog(self, ctx);
         crate::app::autosave::recovery_dialog(self, ctx);
+        ui::library::library_dialogs(self, ctx);
         ui::image_menu::size_dialog(self, ctx);
         ui::select_dialog::select_dialog(self, ctx);
         ui::text_dialog::text_dialog(self, ctx);

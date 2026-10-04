@@ -60,6 +60,9 @@ This is an experimental setup and may need platform fixes. Building for Android 
 - `vendor-winit/` — a patched copy of `winit`, pulled in via `[patch.crates-io]` in `Cargo.toml`, needed for Android windowing/lifecycle support beyond what upstream `winit` provides out of the box.
 - `scripts/linkers/` + `scripts/build-android.sh` — wrapper scripts that route each Android target's linker invocation through the NDK toolchain; `.cargo/config.toml` points cargo at them. Run `scripts/build-android.sh` rather than a bare `cargo apk build` to make sure these are picked up.
 - `src/android.rs` — the native JNI/lifecycle glue (`android_logger`, `jni`, `ndk-context`) that makes the app actually run once launched, as opposed to just compiling for the target.
+- `android/java/` + `android/classes.dex` — two small Java helpers the NativeActivity can't do without: the system file picker (open/save documents, brushes, palettes) and the soft keyboard. `cargo-apk` packs no Java, so the dex is committed, embedded in the library and loaded at run time; after editing the Java, rebuild it with `scripts/build-android-dex.sh` (needs a JDK, e.g. Android Studio's `jbr`).
+
+On Android the app starts in the project library (projects live in the app's storage, in folders); exports go to `Pictures/Rusty Painter` (images) or `Download/Rusty Painter` (PSD, SVG), time-lapses to Pictures as GIF (there's no ffmpeg on Android).
 
 To build:
 

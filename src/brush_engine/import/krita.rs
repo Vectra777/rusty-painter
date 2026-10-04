@@ -197,6 +197,7 @@ fn read_kpp(
                 }
                 o.pixel_shape = tip.shape;
                 o.extra_tips = tip.extra;
+                b.anti_aliasing = tip.antialias;
                 b.dynamics.tip.angle = tip.angle;
                 b.dynamics.tip.ratio = tip.ratio;
             }
@@ -814,6 +815,8 @@ struct TipDef {
     /// How the Softness option softens it: none for Gaussian and
     /// picture tips, which it leaves alone.
     softening: Option<Softening>,
+    /// A generated tip's Anti-aliasing box (picture tips are always smooth).
+    antialias: bool,
 }
 
 /// The tip a `brush_definition` describes: a generated round or square one,
@@ -841,9 +844,12 @@ fn tip_from_definition(
         softness: None,
         mapping: None,
         softening: None,
+        antialias: true,
     };
     if brush.attr("type") == Some("auto_brush") {
         if let Some(mask) = brush.find("MaskGenerator") {
+            // Krita reads a missing flag as off.
+            tip.antialias = mask.attr("antialiasEdges") == Some("1");
             let m = |k: &str| mask.attr(k).and_then(|v| v.parse::<f32>().ok());
             let diameter = m("diameter").or(m("radius").map(|r| r * 2.0));
             tip.diameter = diameter.unwrap_or(40.0).clamp(1.0, 3000.0);
@@ -1619,6 +1625,21 @@ mod tests {
             o.tip_mapping,
             crate::brush_engine::brush_options::TipMapping::Lightness
         );
+    }
+
+    #[test]
+    fn the_anti_aliasing_box_comes_across() {
+        let aa = |xml: &str| {
+            import_kpp(&kpp(xml), "file").unwrap().presets[0]
+                .brush
+                .anti_aliasing
+        };
+        // Krita reads a missing flag as off.
+        assert!(!aa(AUTO));
+        assert!(aa(&AUTO.replace(
+            r#"type="circle""#,
+            r#"antialiasEdges="1" type="circle""#
+        )));
     }
 
     #[test]

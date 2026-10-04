@@ -51,6 +51,14 @@ pub(crate) fn touch_buttons(app: &mut PainterApp, ui: &mut egui::Ui, bar_height:
 /// Right-to-left: `[flip] [ruler] [Fit] [zoom%]`, then the rotation if
 /// the view is turned. The zoom's tooltip tells the canvas size.
 pub(crate) fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
+    view_toggles(app, ui);
+    fit_button(app, ui);
+    zoom_value(app, ui);
+    rotation_reset(app, ui);
+}
+
+/// The flip and ruler toggles.
+pub(crate) fn view_toggles(app: &mut PainterApp, ui: &mut egui::Ui) {
     let flipped = app.viewport.flip_x;
     let size = (ui.available_height() - 2.0).clamp(18.0, 36.0);
     if icon_button(
@@ -76,6 +84,9 @@ pub(crate) fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     {
         app.set_ruler(!ruler);
     }
+}
+
+pub(crate) fn fit_button(app: &mut PainterApp, ui: &mut egui::Ui) {
     let fit_tip = crate::app::input::keyboard::with_keycaps(
         ui.ctx(),
         "Fit to window (Ctrl+{0}); actual pixels: Ctrl+{1}",
@@ -83,7 +94,9 @@ pub(crate) fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     if small_button(ui, "Fit", &fit_tip) {
         app.fit_view();
     }
+}
 
+fn zoom_value(app: &mut PainterApp, ui: &mut egui::Ui) {
     let mut percent = app.viewport.zoom * 100.0;
     let size = format!(
         "Zoom (drag or type). Canvas {} × {} px",
@@ -102,7 +115,10 @@ pub(crate) fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     if response.changed() {
         app.set_zoom_from_center(percent / 100.0);
     }
+}
 
+/// When the view is turned: its angle and a reset.
+pub(crate) fn rotation_reset(app: &mut PainterApp, ui: &mut egui::Ui) {
     let degrees = app.viewport.rotation.to_degrees().rem_euclid(360.0);
     if degrees > 0.05 && degrees < 359.95 {
         vdivider(ui);

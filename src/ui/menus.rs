@@ -99,6 +99,9 @@ impl MenuSection {
 /// on the canvas instead).
 pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
     let m = metrics(ctx);
+    // A phone held upright can't fit it all on one row: the sliders and
+    // the view toggles go on a second.
+    let two_rows = m.touch && ctx.screen_rect().width() < TWO_ROW_WIDTH;
     egui::TopBottomPanel::top("top_bar")
         .exact_height(m.menu_height)
         .frame(bar_frame(BG_PANEL))
@@ -124,7 +127,10 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         if m.touch {
-                            crate::ui::canvas_sliders::bar_sliders(app, ui);
+                            // On two rows the second has them.
+                            if !two_rows {
+                                crate::ui::canvas_sliders::bar_sliders(app, ui, None);
+                            }
                         } else {
                             crate::ui::tool_options::options_inline(app, ui);
                         }
@@ -138,25 +144,78 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                             crate::ui::widgets::vdivider(ui);
                         }
                         crate::ui::frame_times::status_readout(app, ui);
-                        crate::ui::status_bar::view_controls(app, ui);
+                        if two_rows {
+                            // Pinching zooms: Fit is the one view control
+                            // a phone needs at hand.
+                            crate::ui::status_bar::fit_button(app, ui);
+                        } else {
+                            crate::ui::status_bar::view_controls(app, ui);
+                        }
                         ui.min_rect().width()
                     })
                     .inner;
                 ui.data_mut(|d| d.insert_temp(right_id, right));
             });
         });
+    if two_rows {
+        egui::TopBottomPanel::top("top_bar_sliders")
+            .exact_height(m.menu_height)
+            .frame(bar_frame(BG_PANEL))
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().button_padding = egui::vec2(7.0, 3.0);
+                    // The two sliders share what the toggles and their
+                    // number boxes leave.
+                    let toggles = 2.0 * (m.menu_height + ui.spacing().item_spacing.x)
+                        + if app.viewport.rotation.rem_euclid(std::f32::consts::TAU) > 1e-3 {
+                            ROTATION_WIDTH
+                        } else {
+                            0.0
+                        };
+                    let numbers = 2.0 * (SLIDER_NUMBER_WIDTH + 2.0 * ui.spacing().item_spacing.x);
+                    let width = ((ui.available_width() - toggles - numbers) / 2.0).max(40.0);
+                    crate::ui::canvas_sliders::bar_sliders(app, ui, Some(width));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        crate::ui::status_bar::view_toggles(app, ui);
+                        crate::ui::status_bar::rotation_reset(app, ui);
+                    });
+                });
+            });
+    }
 }
+
+/// Narrower touch screens (in points) get the top bar on two rows.
+const TWO_ROW_WIDTH: f32 = 840.0;
+/// Room for the rotation's reset button and angle.
+const ROTATION_WIDTH: f32 = 100.0;
+/// Room for a slider's number box ("100%", "1000 px").
+const SLIDER_NUMBER_WIDTH: f32 = 64.0;
 
 fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     let ctx = &ui.ctx().clone();
     if menu_item(ui, "New Canvas…", keys(app, ctx, Action::NewCanvas)) {
         open_new_canvas_dialog(app);
     }
+    if menu_item(ui, "Projects…", None) {
+        app.open_library();
+    }
     if menu_item(ui, "Open…", keys(app, ctx, Action::Open)) {
         open_project(app);
     }
-    if menu_item(ui, "Save…", keys(app, ctx, Action::Save)) {
+    if menu_item(ui, "Save", keys(app, ctx, Action::Save)) {
         save_project(app);
+    }
+    if menu_item(ui, "Save As…", None) {
+        save_project_as(app);
+    }
+    // Android's Save As goes to the library already.
+    if !cfg!(target_os = "android") && menu_item(ui, "Save to Library…", None) {
+        app.workspace
+            .library
+            .ask_save_name(&app.modal_state.new_canvas.name);
+    }
+    if cfg!(target_os = "android") && menu_item(ui, "Export Project File…", None) {
+        export_project_file(app);
     }
     ui.separator();
     if menu_item(ui, "Import Image…", keys(app, ctx, Action::Import)) {
@@ -593,46 +652,62 @@ pub(crate) fn open_export_dialog(app: &mut PainterApp) {
 }
 
 pub(crate) fn open_project(app: &mut PainterApp) {
-    if let Some(path) = open_project_dialog()
-        && let Err(err) = app.load_project_from_path(path)
-    {
-        log::error!("{err}");
-        app.export_state.message = Some(err);
-    }
+    app.pick_open(crate::app::files::OpenFor::Document);
 }
 
+/// Save back to the document's file, or ask for one.
 pub(crate) fn save_project(app: &mut PainterApp) {
-    if let Some(path) = save_project_dialog()
-        && let Err(err) = app.save_project_to_path(path)
-    {
-        log::error!("{err}");
-        app.export_state.message = Some(err);
+    match app.workspace.library.project.clone() {
+        Some(path) => {
+            if let Err(err) = app.save_project_to_path(path) {
+                app.report(err);
+            }
+        }
+        None => save_project_as(app),
     }
 }
 
 #[cfg(not(target_os = "android"))]
-fn open_project_dialog() -> Option<std::path::PathBuf> {
-    crate::app::settings::file_dialog()
-        .add_filter(
-            "Rusty Painter, Photoshop, Krita or Clip Studio",
-            &["rpainter", "psd", "PSD", "kra", "KRA", "clip", "CLIP"],
-        )
-        .pick_file()
-        .inspect(|p| crate::app::settings::remember_dir(p))
-}
-
-#[cfg(target_os = "android")]
-fn open_project_dialog() -> Option<std::path::PathBuf> {
-    None
-}
-
-#[cfg(not(target_os = "android"))]
-fn save_project_dialog() -> Option<std::path::PathBuf> {
-    crate::app::settings::file_dialog()
+pub(crate) fn save_project_as(app: &mut PainterApp) {
+    let Some(path) = crate::app::settings::file_dialog()
         .add_filter("Rusty Painter", &["rpainter"])
         .set_file_name("project.rpainter")
         .save_file()
         .inspect(|p| crate::app::settings::remember_dir(p))
+    else {
+        return;
+    };
+    let path = crate::project::with_project_extension(&path);
+    match app.save_project_to_path(&path) {
+        Ok(()) => app.workspace.library.project = Some(path),
+        Err(err) => app.report(err),
+    }
+}
+
+/// No file system to save to on Android: into the library.
+#[cfg(target_os = "android")]
+pub(crate) fn save_project_as(app: &mut PainterApp) {
+    let name = app.modal_state.new_canvas.name.clone();
+    app.workspace.library.ask_save_name(&name);
+}
+
+/// The document as a project file, saved where the user picks (Android:
+/// to share or back up outside the app).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn export_project_file(app: &mut PainterApp) {
+    let name = app.workspace.library.project.as_ref().map_or_else(
+        || format!("{}.rpainter", app.modal_state.new_canvas.name),
+        |p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        },
+    );
+    match app.encode_document() {
+        Ok(bytes) => app.pick_save(&name, "rpainter", "application/octet-stream", bytes),
+        Err(err) => app.report(err),
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -645,12 +720,8 @@ fn timelapse_dialog() -> Option<std::path::PathBuf> {
         .inspect(|p| crate::app::settings::remember_dir(p))
 }
 
+/// Android: a GIF (no ffmpeg there), moved to Pictures once written.
 #[cfg(target_os = "android")]
 fn timelapse_dialog() -> Option<std::path::PathBuf> {
-    None
-}
-
-#[cfg(target_os = "android")]
-fn save_project_dialog() -> Option<std::path::PathBuf> {
-    None
+    Some(crate::android::cache_dir().join("timelapse.gif"))
 }

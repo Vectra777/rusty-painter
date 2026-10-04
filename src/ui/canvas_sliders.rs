@@ -17,8 +17,8 @@ const MAX_SIZE: f32 = 3000.0;
 
 /// Touch mode, on the top bar: brush size and opacity, a thumb's reach
 /// from the tools.
-pub(crate) fn bar_sliders(app: &mut PainterApp, ui: &mut egui::Ui) {
-    ui.spacing_mut().slider_width = SLIDER_WIDTH;
+pub(crate) fn bar_sliders(app: &mut PainterApp, ui: &mut egui::Ui, slider_width: Option<f32>) {
+    ui.spacing_mut().slider_width = slider_width.unwrap_or(SLIDER_WIDTH);
     let options = &mut app.brush_state.brush.brush_options;
     let size = ui
         .add(

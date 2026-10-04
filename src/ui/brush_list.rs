@@ -65,7 +65,6 @@ pub(crate) fn presets_contents(app: &mut PainterApp, ui: &mut egui::Ui) {
         }
         Some(PresetAction::Delete(index)) => app.delete_user_preset(index),
         Some(PresetAction::Reset(index)) => app.reset_preset(index),
-        #[cfg(not(target_os = "android"))]
         Some(PresetAction::RestoreDefaults) => app.restore_default_presets(),
         Some(PresetAction::ToggleFavourite(index)) => {
             let name = app.brush_state.presets[index].name.clone();
@@ -82,12 +81,10 @@ pub(crate) fn presets_contents(app: &mut PainterApp, ui: &mut egui::Ui) {
             let name = app.brush_state.presets[index].name.clone();
             app.edit_library(|lib| lib.remove_tag(&name, &tag));
         }
-        #[cfg(not(target_os = "android"))]
         Some(PresetAction::Export(index)) => {
             let name = app.brush_state.presets[index].name.clone();
             crate::app::brush_io::export_presets_dialog(app, &[index], &name);
         }
-        #[cfg(not(target_os = "android"))]
         Some(PresetAction::ExportMine) => {
             let mine: Vec<usize> = (app.brush_state.presets.iter().enumerate())
                 .filter(|(_, p)| !PainterApp::is_default_preset(&p.name))
@@ -95,12 +92,10 @@ pub(crate) fn presets_contents(app: &mut PainterApp, ui: &mut egui::Ui) {
                 .collect();
             crate::app::brush_io::export_presets_dialog(app, &mine, "My brushes");
         }
-        #[cfg(not(target_os = "android"))]
         Some(PresetAction::ExportAll) => {
             let all: Vec<usize> = (0..app.brush_state.presets.len()).collect();
             crate::app::brush_io::export_presets_dialog(app, &all, "Brushes");
         }
-        #[cfg(not(target_os = "android"))]
         Some(PresetAction::Import) => crate::app::brush_io::import_presets_dialog(app),
         None => {}
     }
@@ -154,18 +149,13 @@ enum PresetAction {
     Pick(usize),
     Delete(usize),
     Reset(usize),
-    #[cfg(not(target_os = "android"))]
     RestoreDefaults,
     ToggleFavourite(usize),
     AddTag(usize, String),
     RemoveTag(usize, String),
-    #[cfg(not(target_os = "android"))]
     Export(usize),
-    #[cfg(not(target_os = "android"))]
     ExportMine,
-    #[cfg(not(target_os = "android"))]
     ExportAll,
-    #[cfg(not(target_os = "android"))]
     Import,
 }
 
@@ -201,7 +191,6 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
                 ui.ctx()
                     .data_mut(|d| d.remove::<bool>(egui::Id::new(DUPLICATE_NAME_WARNING_ID)));
             }
-            #[cfg(not(target_os = "android"))]
             {
                 let menu = icon_button(ui, Icon::Menu, m.header_button, false, "Import and export");
                 let id = ui.make_persistent_id("brush_presets_menu");
@@ -404,7 +393,6 @@ fn preset_row(
             });
         });
         ui.separator();
-        #[cfg(not(target_os = "android"))]
         if ui.button("Export…").clicked() {
             picked = Some(PresetAction::Export(index));
         }

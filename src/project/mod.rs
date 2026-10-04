@@ -57,11 +57,6 @@ pub(crate) struct LoadedProject {
     pub saved_selections: Vec<crate::app::tools::select::SavedSelection>,
 }
 
-pub(crate) fn save_project(app: &PainterApp, path: impl AsRef<Path>) -> Result<(), String> {
-    write_atomically(path.as_ref(), &encode_project(app)?)
-        .map_err(|err| format!("Save failed: {err}"))
-}
-
 /// Replace `path` with `bytes` so that a crash, a full disk or a power cut
 /// part-way leaves the old file whole: written beside it, flushed to the
 /// disk, then renamed over it.
@@ -105,36 +100,52 @@ fn foreign_decoder(extension: &str) -> Option<Decoder> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, String> {
     decode_project(&fs::read(path).map_err(|err| format!("Open failed: {err}"))?)
 }
 
 impl PainterApp {
     pub(crate) fn save_project_to_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
+        let bytes = self.encode_document()?;
+        write_atomically(&with_project_extension(path.as_ref()), &bytes)
+            .map_err(|err| format!("Save failed: {err}"))?;
+        self.saved_by_user();
+        Ok(())
+    }
+
+    /// The document as a project file.
+    pub(crate) fn encode_document(&mut self) -> Result<Vec<u8>, String> {
         // Saves every painted pixel and files the stroke into undo history.
         self.release_canvas();
         // The mask layer isn't part of the document.
         self.quick_mask_leave();
         // Shader layers are saved with their current frame.
         self.bake_shader_layers();
-        save_project(self, with_project_extension(path.as_ref()))?;
-        self.saved_by_user();
-        Ok(())
+        encode_project(self)
     }
 
     pub(crate) fn load_project_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
-        let extension = path
+        let bytes = fs::read(path).map_err(|err| format!("Open failed: {err}"))?;
+        self.load_project_bytes(&path.to_string_lossy(), &bytes)?;
+        self.workspace.library.project = crate::ui::library::is_project(path).then(|| path.into());
+        Ok(())
+    }
+
+    /// Open the document file called `name` (its extension says which
+    /// app's) from its contents.
+    pub(crate) fn load_project_bytes(&mut self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        let extension = Path::new(name)
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase());
         if let Some(decode) = extension.as_deref().and_then(foreign_decoder) {
-            let bytes = fs::read(path).map_err(|err| format!("Open failed: {err}"))?;
-            let canvas = decode(&bytes)?.into_canvas()?;
+            let canvas = decode(bytes)?.into_canvas()?;
             self.replace_document(canvas, History::new());
             self.active_tool = Tool::Brush;
             return Ok(());
         }
-        let loaded = load_project(path)?;
+        let loaded = decode_project(bytes)?;
         self.replace_document(loaded.canvas, loaded.history);
         self.workspace.color_model = loaded.color_model;
         if let Some(guides) = loaded.guides {
@@ -276,7 +287,7 @@ fn decode_project_data(bytes: &[u8]) -> Result<LoadedProject, String> {
     manifest.into_loaded_project(&bytes[manifest_end..])
 }
 
-fn with_project_extension(path: &Path) -> std::path::PathBuf {
+pub(crate) fn with_project_extension(path: &Path) -> std::path::PathBuf {
     if path.extension().and_then(|s| s.to_str()) == Some("rpainter") {
         path.to_path_buf()
     } else {
