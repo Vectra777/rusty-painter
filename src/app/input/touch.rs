@@ -59,9 +59,19 @@ pub struct TouchState {
     pub(crate) pen_barrel: crate::brush_engine::dynamics::PenBarrel,
     /// The current pen contact started on the canvas.
     pub(crate) pen_on_canvas: bool,
-    /// Where the active layer's history stood when the current stroke began
-    /// (layer index, push count), to take the stroke back if it's cancelled.
-    pub(crate) action_mark: Option<u64>,
+    /// Where the history stood when the current stroke began, to take the
+    /// stroke back if it's cancelled.
+    pub(crate) action_mark: Option<ActionMark>,
+}
+
+/// Where the history stood as a stroke began.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ActionMark {
+    /// This many pushes.
+    Pushes(u64),
+    /// Once the first `n` strokes the stroke worker ended are filed (earlier
+    /// strokes may still be painting: the new one doesn't wait for them).
+    AfterStroke(u64),
 }
 
 struct Gesture {
@@ -103,10 +113,23 @@ impl PainterApp {
 
     /// Remember where the history stands, as a stroke begins.
     pub(crate) fn mark_action(&mut self) {
-        // File the previous stroke first, so it can't land after the mark
-        // and be mistaken for this one.
-        self.settle_strokes();
-        self.viewport.touch.action_mark = Some(self.layer_state.history.push_count());
+        // The previous strokes may still be painting: the mark settles once
+        // they're filed (without waiting for them here), so none can land
+        // after it and be mistaken for this one.
+        self.viewport.touch.action_mark =
+            Some(ActionMark::AfterStroke(self.stroke_worker.ends_sent()));
+        self.sync_stroke_worker();
+    }
+
+    /// The first `ended` strokes are filed: a mark waiting on them (or on
+    /// fewer) now knows where the history stands.
+    pub(crate) fn settle_action_mark(&mut self, ended: u64) {
+        let touch = &mut self.viewport.touch;
+        if let Some(ActionMark::AfterStroke(n)) = touch.action_mark
+            && n <= ended
+        {
+            touch.action_mark = Some(ActionMark::Pushes(self.layer_state.history.push_count()));
+        }
     }
 
     /// End the stroke in progress (brush or smudge/blur) and take it back,
@@ -116,14 +139,16 @@ impl PainterApp {
         // The mark belongs to the last stroke begun; once that has ended
         // there is nothing in progress to take back.
         let in_progress = self.brush_state.is_drawing || self.brush_state.blend_stroke.is_some();
-        let mark = self.viewport.touch.action_mark.take();
+        // (Finishing it files it, which settles the mark.)
         self.release_canvas();
         self.blend_release();
-        let Some(count) = mark.filter(|_| in_progress) else {
+        let mark = self.viewport.touch.action_mark.take();
+        let Some(ActionMark::Pushes(count)) = mark.filter(|_| in_progress) else {
             return;
         };
         if self.layer_state.history.push_count() > count {
-            self.apply_history(false);
+            // (Now: its redo entry is dropped straight after.)
+            self.apply_history_now(false);
             self.layer_state.history.discard_redo();
         }
     }
@@ -378,6 +403,22 @@ mod tests {
         );
         app.discard_current_action();
         assert_eq!(undo_len(&app), 1, "the earlier stroke stays");
+    }
+
+    #[test]
+    fn discarding_takes_back_only_the_newest_of_strokes_still_painting() {
+        let mut app = app();
+        // Pressed one after the other with no frame between: the worker
+        // may still be painting the earlier ones as the last begins (the
+        // press doesn't wait for them).
+        stroke(&mut app, Vec2::new(10.0, 10.0), Vec2::new(40.0, 20.0));
+        app.finish_stroke();
+        stroke(&mut app, Vec2::new(10.0, 60.0), Vec2::new(40.0, 70.0));
+        app.finish_stroke();
+        stroke(&mut app, Vec2::new(80.0, 80.0), Vec2::new(100.0, 90.0));
+        app.discard_current_action();
+        assert_eq!(undo_len(&app), 2, "the two earlier strokes stay");
+        assert_eq!(app.layer_state.history.stacks().1.len(), 0, "no redo");
     }
 
     #[test]

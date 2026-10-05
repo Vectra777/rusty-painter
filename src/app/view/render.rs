@@ -749,6 +749,11 @@ mod tests {
         atlas: std::collections::HashMap<usize, Vec<[u8; 4]>>,
         /// The pointer is down (a slider being dragged).
         dragging: bool,
+        /// Frames to settle in before giving up.
+        max_frames: usize,
+        /// Run `max_frames` and stop, settled or not (off-screen tiles stay
+        /// dirty when zoomed in).
+        unsettled_ok: bool,
     }
 
     impl ScreenSim {
@@ -757,6 +762,8 @@ mod tests {
                 ctx: egui::Context::default(),
                 atlas: Default::default(),
                 dragging: false,
+                max_frames: 50,
+                unsettled_ok: false,
             }
         }
 
@@ -774,7 +781,7 @@ mod tests {
         fn run_frames(&mut self, app: &mut PainterApp, keep: bool) -> (usize, std::time::Duration) {
             use crate::app::view::gpu_canvas::ATLAS_TEXTURE_SIZE;
             let mut spent = std::time::Duration::ZERO;
-            for frame in 1..=50 {
+            for frame in 1..=self.max_frames {
                 let mut more = false;
                 let mut uploads = Vec::new();
                 let input = egui::RawInput {
@@ -791,6 +798,7 @@ mod tests {
                         // As the frame does: a filter's run, then the screen.
                         let screen = preview_view(app, &view, view.rect);
                         app.filter_update(self.dragging.then_some(&screen));
+                        app.liquify_flush();
                         let (u, m) = update_dirty_textures(app, &view, view.rect);
                         spent += started.elapsed();
                         uploads = u;
@@ -822,6 +830,9 @@ mod tests {
                 if !more && !app.render_cache.tiles.iter().any(|t| t.dirty) {
                     return (frame, spent);
                 }
+            }
+            if self.unsettled_ok {
+                return (self.max_frames, spent);
             }
             panic!("screen never settled");
         }
@@ -1523,5 +1534,79 @@ mod tests {
         screen.dragging = false;
         let (frames, spent) = screen.settle_counting(&mut app);
         eprintln!("adjustment slider let go: exact in {frames} frames, {spent:?}");
+    }
+
+    /// Liquify as a pen drives it, frame by frame: what the UI thread
+    /// spends on the field, drawing the layer and the screen update.
+    #[test]
+    #[ignore = "timing: cargo test --release -- --ignored --nocapture"]
+    fn liquify_frame_timing_4k() {
+        use crate::app::tools::Tool;
+        use crate::canvas::liquify::LiquifyMode;
+        use std::time::{Duration, Instant};
+        for (view, zoom) in [("fit", None), ("100%", Some(1.0))] {
+            for (mode, radius, speed) in [
+                (LiquifyMode::Push, 60.0, 8.0),
+                (LiquifyMode::Push, 150.0, 8.0),
+                (LiquifyMode::Push, 300.0, 8.0),
+                (LiquifyMode::Push, 150.0, 40.0),
+                (LiquifyMode::TwirlCw, 150.0, 8.0),
+                (LiquifyMode::TwirlCw, 300.0, 0.0),
+            ] {
+                let mut app = painted(4000);
+                if let Some(z) = zoom {
+                    app.viewport.zoom = z;
+                    app.viewport.offset = eframe::egui::Vec2::new(-1400.0, -1550.0);
+                }
+                let mut screen = ScreenSim::new();
+                if zoom.is_some() {
+                    // What's on screen uploaded, then one frame a call.
+                    screen.unsettled_ok = true;
+                    screen.max_frames = 300;
+                    screen.settle(&mut app);
+                    screen.max_frames = 1;
+                } else {
+                    screen.settle(&mut app);
+                }
+                app.active_tool = Tool::Liquify;
+                app.workspace.liquify.mode = mode;
+                app.workspace.liquify.radius = radius;
+                let mut pos = eframe::egui::Vec2::new(1800.0, 2000.0);
+                app.liquify_press(pos);
+                let frames = 60;
+                let (mut field, mut layer, mut shown) =
+                    (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+                let mut worst = Duration::ZERO;
+                for _ in 0..frames {
+                    // A 240 Hz pen at 60 fps: four samples a frame.
+                    let t = Instant::now();
+                    for _ in 0..4 {
+                        pos.x += speed / 4.0;
+                        app.liquify_drag(pos);
+                    }
+                    if mode.is_continuous() {
+                        app.liquify_hold(1.0 / 60.0);
+                    }
+                    let f = t.elapsed();
+                    let t = Instant::now();
+                    app.liquify_flush();
+                    let l = t.elapsed();
+                    let (_, s) = screen.settle_counting(&mut app);
+                    (field, layer, shown) = (field + f, layer + l, shown + s);
+                    worst = worst.max(f + l + s);
+                }
+                app.liquify_release();
+                app.liquify_commit();
+                let n = frames as u32;
+                eprintln!(
+                    "liquify {view:>4} {mode:?} r{radius} {speed}px/frame: field {:>7.2?}  layer {:>7.2?}  screen {:>7.2?}  = {:>7.2?}/frame (worst {:.2?})",
+                    field / n,
+                    layer / n,
+                    shown / n,
+                    (field + layer + shown) / n,
+                    worst
+                );
+            }
+        }
     }
 }

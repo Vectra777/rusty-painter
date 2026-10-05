@@ -2,6 +2,7 @@
 //! textured tips for the brush list.
 
 use crate::app::PainterApp;
+use crate::app::import::FileSource;
 use crate::app::state::LoadedTip;
 use crate::brush_engine::brush::BrushPreset;
 use crate::brush_engine::brush_options::PixelBrushShape;
@@ -278,10 +279,23 @@ impl PainterApp {
             .filter(|p| p.extension().is_some_and(|e| e == preset_file::EXTENSION))
             .collect();
         paths.sort();
-        for path in paths {
-            let loaded = std::fs::read(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| preset_file::decode(&bytes));
+        // Read and decoded in parallel (a big library takes a while), then
+        // listed in order.
+        let loaded: Vec<_> = {
+            use rayon::prelude::*;
+            self.workspace.pool.install(|| {
+                paths
+                    .into_par_iter()
+                    .map(|path| {
+                        let presets = std::fs::read(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|bytes| preset_file::decode(&bytes));
+                        (path, presets)
+                    })
+                    .collect()
+            })
+        };
+        for (path, loaded) in loaded {
             match loaded {
                 Ok(presets) => {
                     for mut preset in presets {
@@ -297,14 +311,9 @@ impl PainterApp {
 
     /// `name`, or `name 2`, `name 3`… if a preset already has it.
     pub(crate) fn unique_preset_name(&self, name: &str) -> String {
-        let taken = |n: &str| self.brush_state.presets.iter().any(|p| p.name == n);
-        if !taken(name) {
-            return name.to_string();
-        }
-        (2..)
-            .map(|i| format!("{name} {i}"))
-            .find(|n| !taken(n))
-            .expect("some number is free")
+        unique_name(name, |n| {
+            self.brush_state.presets.iter().any(|p| p.name == n)
+        })
     }
 
     /// Add `preset` to the list and keep it in the user's library.
@@ -321,17 +330,7 @@ impl PainterApp {
     }
 
     fn write_library_file(&self, preset: &BrushPreset) -> Result<std::path::PathBuf, String> {
-        let dir = self.presets_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let stem = preset_file::file_stem(&preset.name);
-        let path = std::iter::once(stem.clone())
-            .chain((2..).map(|i| format!("{stem} {i}")))
-            .map(|s| dir.join(format!("{s}.{}", preset_file::EXTENSION)))
-            .find(|p| !p.exists())
-            .expect("some name is free");
-        let bytes = preset_file::encode(std::slice::from_ref(preset))?;
-        crate::project::write_atomically(&path, &bytes)?;
-        Ok(path)
+        write_preset_file(&self.presets_dir(), preset)
     }
 
     /// First start: copy the presets that come with the app into the
@@ -392,6 +391,8 @@ impl PainterApp {
     /// the frame's submit on a texture freed meanwhile (see
     /// `retired_textures`).
     fn forget_preset_preview(&mut self, name: &str) {
+        // (One being drawn is out of date too.)
+        self.brush_state.preset_preview_worker.forget(name);
         if let Some(texture) = self.brush_state.preset_previews.remove(name) {
             self.workspace.retired_textures.push(texture);
         }
@@ -426,8 +427,11 @@ impl PainterApp {
                     .filter(|p| p.file.as_ref() == Some(path))
                     .cloned()
                     .collect();
-                preset_file::encode(&in_file)
-                    .and_then(|bytes| crate::project::write_atomically(path, &bytes))
+                // Encoded and written on the file writer's thread.
+                crate::app::jobs::write_later(path.clone(), "brush preset", move || {
+                    preset_file::encode(&in_file)
+                });
+                Ok(())
             }
             None => self
                 .write_library_file(&preset)
@@ -484,6 +488,8 @@ impl PainterApp {
         let Some(path) = preset.file.clone() else {
             return;
         };
+        // A change to it still on its way to the disk would bring it back.
+        crate::app::jobs::flush_writes();
         if let Err(err) = std::fs::remove_file(&path)
             && err.kind() != std::io::ErrorKind::NotFound
         {
@@ -506,24 +512,74 @@ impl PainterApp {
     /// Import the brushes in file `name` (a `.rpbrush`, or another app's
     /// brush file) into the library; returns how many there were. Another
     /// app's brushes come with a report of what was approximated.
+    #[cfg(test)]
     pub(crate) fn import_brushes_bytes(
         &mut self,
         name: &str,
         bytes: &[u8],
     ) -> Result<usize, String> {
-        let is_preset_file = std::path::Path::new(name)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case(preset_file::EXTENSION));
-        let (presets, notes) = if is_preset_file {
-            (preset_file::decode(bytes)?, Vec::new())
-        } else {
-            let imported = crate::brush_engine::import::import(name, bytes)?;
-            (imported.presets, imported.notes)
-        };
+        let brushes = read_brushes(name, bytes)?;
+        let count = brushes.presets.len();
+        self.add_imported_brushes(name, brushes);
+        Ok(count)
+    }
+
+    /// [`Self::import_brushes_bytes`] without holding up the frames: the
+    /// file is read, decoded, and its presets written into the library
+    /// folder on another thread; they're listed once that's done.
+    pub(crate) fn import_brushes_in_background(&mut self, name: String, source: FileSource) {
+        let taken: std::collections::HashSet<String> = self
+            .brush_state
+            .presets
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let dir = self.presets_dir();
+        self.spawn_job(None, move || {
+            let result = source.read().and_then(|bytes: std::borrow::Cow<'_, [u8]>| {
+                let mut brushes = read_brushes(&name, &bytes)?;
+                brushes.write_files(&dir, taken);
+                Ok(brushes)
+            });
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok(brushes) => app.add_imported_brushes(&name, brushes),
+                Err(err) => app.report(err),
+            })
+        });
+    }
+
+    /// List the brushes read from file `name`, tagged, with the report.
+    fn add_imported_brushes(&mut self, name: &str, brushes: ImportedBrushes) {
+        let ImportedBrushes {
+            presets,
+            notes,
+            is_preset_file,
+            errors,
+        } = brushes;
+        if let Some(err) = errors.into_iter().next() {
+            self.export_state.message = Some(format!("Couldn't save the preset: {err}"));
+        }
         let count = presets.len();
         let app = crate::app::brush_library::source_app(name);
         for preset in presets {
-            self.add_user_preset(preset);
+            let taken = self
+                .brush_state
+                .presets
+                .iter()
+                .any(|p| p.name == preset.name);
+            match preset.file {
+                // Written already, under a name that's still free.
+                Some(_) if !taken => self.brush_state.presets.push(preset),
+                _ => {
+                    // (A preset of that name was made meanwhile: it gets
+                    // another name, and its own file.)
+                    let mut preset = preset;
+                    if let Some(old) = preset.file.take() {
+                        let _ = std::fs::remove_file(old);
+                    }
+                    self.add_user_preset(preset);
+                }
+            }
             // Tagged so they can be found again: "Imported", and the app.
             let name = self.brush_state.presets.last().map(|p| p.name.clone());
             if let Some(name) = name {
@@ -545,16 +601,6 @@ impl PainterApp {
         }
         // Show them (and the report) in the presets window.
         self.brush_state.show_presets = true;
-        Ok(count)
-    }
-
-    pub(crate) fn import_brushes_path(&mut self, path: &std::path::Path) -> Result<usize, String> {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
-        let name = path
-            .file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        self.import_brushes_bytes(&name, &bytes)
     }
 
     /// Whether `name` is a file of brushes this app imports.
@@ -591,6 +637,81 @@ pub(crate) fn import_presets_dialog(app: &mut PainterApp) {
     app.pick_open(crate::app::files::OpenFor::Brushes);
 }
 
+/// Brushes read from a file.
+struct ImportedBrushes {
+    presets: Vec<BrushPreset>,
+    /// What was approximated (another app's brushes).
+    notes: Vec<String>,
+    is_preset_file: bool,
+    /// Presets that couldn't be written into the library folder.
+    errors: Vec<String>,
+}
+
+/// The brushes in file `name` (a `.rpbrush`, or another app's brush file).
+fn read_brushes(name: &str, bytes: &[u8]) -> Result<ImportedBrushes, String> {
+    let is_preset_file = std::path::Path::new(name)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(preset_file::EXTENSION));
+    let (presets, notes) = if is_preset_file {
+        (preset_file::decode(bytes)?, Vec::new())
+    } else {
+        let imported = crate::brush_engine::import::import(name, bytes)?;
+        (imported.presets, imported.notes)
+    };
+    Ok(ImportedBrushes {
+        presets,
+        notes,
+        is_preset_file,
+        errors: Vec::new(),
+    })
+}
+
+impl ImportedBrushes {
+    /// Give each preset a name none in `taken` has, and write it into the
+    /// library folder `dir` (slow: encoding, and a flush per file).
+    fn write_files(&mut self, dir: &std::path::Path, mut taken: std::collections::HashSet<String>) {
+        for preset in &mut self.presets {
+            preset.name = unique_name(&preset.name, |n| taken.contains(n));
+            taken.insert(preset.name.clone());
+            match write_preset_file(dir, preset) {
+                Ok(path) => preset.file = Some(path),
+                Err(err) => {
+                    log::warn!("Couldn't save brush preset {}: {err}", preset.name);
+                    self.errors.push(err);
+                }
+            }
+        }
+    }
+}
+
+/// `name`, or `name 2`, `name 3`… if it's `taken`.
+fn unique_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(name) {
+        return name.to_string();
+    }
+    (2..)
+        .map(|i| format!("{name} {i}"))
+        .find(|n| !taken(n))
+        .expect("some number is free")
+}
+
+/// Write `preset` into the library folder `dir`, as a file of its own.
+fn write_preset_file(
+    dir: &std::path::Path,
+    preset: &BrushPreset,
+) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let stem = preset_file::file_stem(&preset.name);
+    let path = std::iter::once(stem.clone())
+        .chain((2..).map(|i| format!("{stem} {i}")))
+        .map(|s| dir.join(format!("{s}.{}", preset_file::EXTENSION)))
+        .find(|p| !p.exists())
+        .expect("some name is free");
+    let bytes = preset_file::encode(std::slice::from_ref(preset))?;
+    crate::project::write_atomically(&path, &bytes)?;
+    Ok(path)
+}
+
 impl PainterApp {
     /// Where the swatches are kept: next to the brushes folder.
     fn swatches_path(&self) -> std::path::PathBuf {
@@ -624,11 +745,11 @@ impl PainterApp {
                 format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
             })
             .collect();
-        let result = serde_json::to_vec_pretty(&hex)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| crate::project::write_atomically(&self.swatches_path(), &bytes));
-        if let Err(err) = result {
-            log::warn!("Couldn't save swatches: {err}");
+        match serde_json::to_vec_pretty(&hex) {
+            Ok(bytes) => {
+                crate::app::jobs::write_later(self.swatches_path(), "swatches", move || Ok(bytes))
+            }
+            Err(err) => log::warn!("Couldn't save swatches: {err}"),
         }
     }
 }

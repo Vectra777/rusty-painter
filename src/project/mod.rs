@@ -57,6 +57,91 @@ pub(crate) struct LoadedProject {
     pub saved_selections: Vec<crate::app::tools::select::SavedSelection>,
 }
 
+/// Everything a project file holds, copied off the app: it's encoded and
+/// written on another thread while painting goes on.
+pub(crate) struct ProjectSnapshot {
+    canvas: Canvas,
+    color_model: ColorModel,
+    history: History,
+    guides: crate::app::tools::guides::StoredGuides,
+    saved_selections: Vec<crate::app::tools::select::SavedSelection>,
+}
+
+impl ProjectSnapshot {
+    /// The document as it is now (the stroke worker must be idle). Only
+    /// copies: the slow part is [`Self::encode`].
+    pub(crate) fn capture(app: &PainterApp) -> Self {
+        Self {
+            canvas: app.canvas.detached_copy(),
+            color_model: app.workspace.color_model,
+            history: app.layer_state.history.clone(),
+            guides: crate::app::tools::guides::StoredGuides::from_app(app),
+            saved_selections: app.workspace.select.saved.clone(),
+        }
+    }
+
+    /// The `.rpainter` file's bytes.
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
+        let data = encode_project_data(self)?;
+        let flat = self.canvas.flatten_final();
+        let thumbnail =
+            preview::encode_png(preview::thumbnail(&flat, preview::THUMBNAIL_MAX_EDGE))?;
+        let [w, h] = flat.size;
+        let merged = preview::encode_png(flat)?;
+        // One layer: the flattened picture. Apps that read OpenRaster open
+        // that; the layers, undo and settings are in the project entry.
+        let stack = format!(
+            "<?xml version='1.0' encoding='UTF-8'?>\n\
+             <image version=\"0.0.3\" w=\"{w}\" h=\"{h}\">\n\
+             <stack>\n\
+             <layer name=\"{}\" src=\"mergedimage.png\" x=\"0\" y=\"0\" \
+             opacity=\"1.000\" visibility=\"visible\"/>\n\
+             </stack>\n\
+             </image>\n",
+            crate::APP_NAME
+        );
+
+        let mut zip = zip::ZipWriter::default();
+        // The type check reads "mimetype" as the first entry, uncompressed.
+        zip.add("mimetype", b"image/openraster")?;
+        zip.add("stack.xml", stack.as_bytes())?;
+        zip.add("mergedimage.png", &merged)?;
+        zip.add("Thumbnails/thumbnail.png", &thumbnail)?;
+        zip.add(PROJECT_ENTRY, &data)?;
+        zip.finish()
+    }
+
+    /// Encode and write it to `path` (a whole file or nothing).
+    pub(crate) fn write(&self, path: &Path) -> Result<(), String> {
+        write_atomically(path, &self.encode()?).map_err(|err| format!("Save failed: {err}"))
+    }
+}
+
+/// A document read from disk, ready to replace the open one.
+pub(crate) enum OpenedDocument {
+    /// Another app's (Photoshop, Krita, Clip Studio).
+    Foreign(Canvas),
+    Project(Box<LoadedProject>),
+}
+
+/// Read and decode the document at `path` (slow: off the UI thread).
+pub(crate) fn read_document(path: &Path) -> Result<OpenedDocument, String> {
+    let bytes = fs::read(path).map_err(|err| format!("Open failed: {err}"))?;
+    decode_document(&path.to_string_lossy(), &bytes)
+}
+
+/// Decode the document file called `name` (its extension says which app's)
+/// from its contents (slow: off the UI thread).
+pub(crate) fn decode_document(name: &str, bytes: &[u8]) -> Result<OpenedDocument, String> {
+    let extension = Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    if let Some(decode) = extension.as_deref().and_then(foreign_decoder) {
+        return Ok(OpenedDocument::Foreign(decode(bytes)?.into_canvas()?));
+    }
+    decode_project(bytes).map(|p| OpenedDocument::Project(Box::new(p)))
+}
+
 /// Replace `path` with `bytes` so that a crash, a full disk or a power cut
 /// part-way leaves the old file whole: written beside it, flushed to the
 /// disk, then renamed over it.
@@ -65,7 +150,11 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> 
     let name = path
         .file_name()
         .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    // Unique per write: two may be on their way at once (an autosave and a
+    // save, on their own threads).
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()));
     let result = (|| {
         let mut file = fs::File::create(&tmp)?;
         file.write_all(bytes)?;
@@ -106,6 +195,9 @@ pub(crate) fn load_project(path: impl AsRef<Path>) -> Result<LoadedProject, Stri
 }
 
 impl PainterApp {
+    /// Save to `path` now (the library's saves, which other steps wait
+    /// for). Saving from the menu goes through
+    /// [`Self::save_project_in_background`].
     pub(crate) fn save_project_to_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let bytes = self.encode_document()?;
         write_atomically(&with_project_extension(path.as_ref()), &bytes)
@@ -118,42 +210,84 @@ impl PainterApp {
     pub(crate) fn encode_document(&mut self) -> Result<Vec<u8>, String> {
         // Saves every painted pixel and files the stroke into undo history.
         self.release_canvas();
+        self.project_snapshot().encode()
+    }
+
+    /// The document as a project file can hold it: every painted pixel
+    /// (strokes filed into the history), without the quick mask, shader
+    /// layers at their current frame. The stroke worker must be idle.
+    fn project_snapshot(&mut self) -> ProjectSnapshot {
+        self.sync_stroke_worker();
         // The mask layer isn't part of the document.
         self.quick_mask_leave();
         // Shader layers are saved with their current frame.
         self.bake_shader_layers();
-        encode_project(self)
+        ProjectSnapshot::capture(self)
     }
 
+    /// Save, waiting for nothing: what's painted is copied once the stroke
+    /// worker has painted what's queued, then encoded and written on
+    /// another thread while painting goes on.
+    pub(crate) fn save_project_in_background(&mut self, path: impl AsRef<Path>) {
+        let path = with_project_extension(path.as_ref());
+        self.when_strokes_painted(move |app| {
+            let snapshot = app.project_snapshot();
+            let version = app.doc_version();
+            app.spawn_job(Some("Saving…"), move || {
+                let result = snapshot.write(&path);
+                Box::new(move |app: &mut PainterApp| match result {
+                    Ok(()) => app.saved_by_user_at(version),
+                    Err(err) => app.report(err),
+                })
+            });
+        });
+    }
+
+    /// Open `path`, read and decoded on another thread (the canvas waits
+    /// meanwhile); `then` runs once it's the document.
+    pub(crate) fn open_project_in_background(
+        &mut self,
+        path: impl AsRef<Path>,
+        then: impl FnOnce(&mut PainterApp) + Send + 'static,
+    ) {
+        let path = path.as_ref().to_path_buf();
+        self.spawn_job(Some("Opening…"), move || {
+            let result = read_document(&path);
+            Box::new(move |app: &mut PainterApp| match result {
+                // The old document goes once the stroke worker lets go of it.
+                Ok(doc) => app.when_strokes_painted(move |app| {
+                    app.open_document(doc);
+                    then(app);
+                }),
+                Err(err) => app.report(err),
+            })
+        });
+    }
+
+    /// Open `path` now (the library's opens, which other steps wait for).
     pub(crate) fn load_project_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
-        let bytes = fs::read(path).map_err(|err| format!("Open failed: {err}"))?;
-        self.load_project_bytes(&path.to_string_lossy(), &bytes)?;
+        let doc = read_document(path)?;
+        self.open_document(doc);
         self.workspace.library.project = crate::ui::library::is_project(path).then(|| path.into());
         Ok(())
     }
 
-    /// Open the document file called `name` (its extension says which
-    /// app's) from its contents.
-    pub(crate) fn load_project_bytes(&mut self, name: &str, bytes: &[u8]) -> Result<(), String> {
-        let extension = Path::new(name)
-            .extension()
-            .map(|e| e.to_string_lossy().to_ascii_lowercase());
-        if let Some(decode) = extension.as_deref().and_then(foreign_decoder) {
-            let canvas = decode(bytes)?.into_canvas()?;
-            self.replace_document(canvas, History::new());
-            self.active_tool = Tool::Brush;
-            return Ok(());
+    /// Make `doc` the document.
+    pub(crate) fn open_document(&mut self, doc: OpenedDocument) {
+        match doc {
+            OpenedDocument::Foreign(canvas) => self.replace_document(canvas, History::new()),
+            OpenedDocument::Project(loaded) => {
+                let loaded = *loaded;
+                self.replace_document(loaded.canvas, loaded.history);
+                self.workspace.color_model = loaded.color_model;
+                if let Some(guides) = loaded.guides {
+                    guides.apply(self);
+                }
+                self.workspace.select.saved = loaded.saved_selections;
+            }
         }
-        let loaded = decode_project(bytes)?;
-        self.replace_document(loaded.canvas, loaded.history);
-        self.workspace.color_model = loaded.color_model;
-        if let Some(guides) = loaded.guides {
-            guides.apply(self);
-        }
-        self.workspace.select.saved = loaded.saved_selections;
         self.active_tool = Tool::Brush;
-        Ok(())
     }
 }
 
@@ -213,38 +347,13 @@ fn checked_layer_tree(
 }
 
 pub(crate) fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
-    let data = encode_project_data(app)?;
-    let flat = app.canvas.flatten_final();
-    let thumbnail = preview::encode_png(preview::thumbnail(&flat, preview::THUMBNAIL_MAX_EDGE))?;
-    let [w, h] = flat.size;
-    let merged = preview::encode_png(flat)?;
-    // One layer: the flattened picture. Apps that read OpenRaster open that;
-    // the layers, undo and settings are in the project entry.
-    let stack = format!(
-        "<?xml version='1.0' encoding='UTF-8'?>\n\
-         <image version=\"0.0.3\" w=\"{w}\" h=\"{h}\">\n\
-         <stack>\n\
-         <layer name=\"{}\" src=\"mergedimage.png\" x=\"0\" y=\"0\" \
-         opacity=\"1.000\" visibility=\"visible\"/>\n\
-         </stack>\n\
-         </image>\n",
-        crate::APP_NAME
-    );
-
-    let mut zip = zip::ZipWriter::default();
-    // The type check reads "mimetype" as the first entry, uncompressed.
-    zip.add("mimetype", b"image/openraster")?;
-    zip.add("stack.xml", stack.as_bytes())?;
-    zip.add("mergedimage.png", &merged)?;
-    zip.add("Thumbnails/thumbnail.png", &thumbnail)?;
-    zip.add(PROJECT_ENTRY, &data)?;
-    zip.finish()
+    ProjectSnapshot::capture(app).encode()
 }
 
 /// The project itself: the header and blob area.
-fn encode_project_data(app: &PainterApp) -> Result<Vec<u8>, String> {
+fn encode_project_data(snapshot: &ProjectSnapshot) -> Result<Vec<u8>, String> {
     let mut blobs = Vec::new();
-    let manifest = ProjectFile::from_app(app, &mut blobs)?;
+    let manifest = ProjectFile::from_snapshot(snapshot, &mut blobs)?;
     let manifest =
         serde_json::to_vec(&manifest).map_err(|err| format!("Serialize failed: {err}"))?;
     let manifest_len = u64::try_from(manifest.len()).map_err(|_| "Manifest is too large")?;
@@ -340,32 +449,29 @@ struct ProjectFile {
 }
 
 impl ProjectFile {
-    fn from_app(app: &PainterApp, blobs: &mut Vec<u8>) -> Result<Self, String> {
+    fn from_snapshot(snapshot: &ProjectSnapshot, blobs: &mut Vec<u8>) -> Result<Self, String> {
+        let canvas = &snapshot.canvas;
         Ok(Self {
             format: PROJECT_FORMAT.to_string(),
             version: PROJECT_VERSION,
-            width: app.canvas.width(),
-            height: app.canvas.height(),
-            tile_size: app.canvas.tile_size(),
-            clear_color: StoredColor::from_color(app.canvas.clear_color()),
-            color_model: StoredColorModel::from(app.workspace.color_model),
-            blend_space: match app.canvas.blend_space {
+            width: canvas.width(),
+            height: canvas.height(),
+            tile_size: canvas.tile_size(),
+            clear_color: StoredColor::from_color(canvas.clear_color()),
+            color_model: StoredColorModel::from(snapshot.color_model),
+            blend_space: match canvas.blend_space {
                 BlendSpace::Linear => None,
                 BlendSpace::Gamma => Some("gamma".to_string()),
             },
-            active_layer_idx: app.canvas.active_layer_idx,
-            layers: app
-                .canvas
+            active_layer_idx: canvas.active_layer_idx,
+            layers: canvas
                 .layer_snapshots()
                 .into_iter()
                 .map(|layer| StoredLayer::from_snapshot(layer, blobs))
                 .collect::<Result<_, _>>()?,
-            histories: vec![StoredHistory::from_history(
-                &app.layer_state.history,
-                blobs,
-            )?],
-            guides: Some(crate::app::tools::guides::StoredGuides::from_app(app)),
-            saved_selections: StoredSavedSelection::from_app(app, blobs)?,
+            histories: vec![StoredHistory::from_history(&snapshot.history, blobs)?],
+            guides: Some(snapshot.guides.clone()),
+            saved_selections: StoredSavedSelection::from_saved(&snapshot.saved_selections, blobs)?,
         })
     }
 
@@ -580,8 +686,10 @@ struct StoredSavedSelection {
 }
 
 impl StoredSavedSelection {
-    fn from_app(app: &PainterApp, blobs: &mut Vec<u8>) -> Result<Vec<Self>, String> {
-        let saved = &app.workspace.select.saved;
+    fn from_saved(
+        saved: &[crate::app::tools::select::SavedSelection],
+        blobs: &mut Vec<u8>,
+    ) -> Result<Vec<Self>, String> {
         let raws: Vec<Vec<u8>> = saved.iter().map(|s| s.mask.data.clone()).collect();
         let stored = push_blobs(blobs, &raws)?;
         Ok(saved
@@ -1844,7 +1952,7 @@ pub(crate) mod tests {
         assert!(encoded.len() < TILE_SIZE * TILE_SIZE * 4);
 
         // Files saved before the OpenRaster container: the bare data.
-        let bare = encode_project_data(&app).unwrap();
+        let bare = encode_project_data(&ProjectSnapshot::capture(&app)).unwrap();
         assert!(bare.starts_with(MAGIC));
         for bytes in [&encoded, &bare] {
             let loaded = decode_project(bytes).unwrap();
@@ -1952,7 +2060,7 @@ mod fuzz_tests {
     fn fuzz_project_values() {
         // Well-formed files with nonsense in them: sizes, indices, ids and
         // counts at extremes, wrong types, missing parts.
-        let bare = encode_project_data(&rich_app()).unwrap();
+        let bare = encode_project_data(&ProjectSnapshot::capture(&rich_app())).unwrap();
         let start = MAGIC.len() + 8;
         let len = u64::from_le_bytes(bare[MAGIC.len()..start].try_into().unwrap()) as usize;
         let manifest: serde_json::Value =
@@ -2040,7 +2148,8 @@ mod fuzz_tests {
         let ai = app.canvas.layer_index_of(a).unwrap();
         app.canvas_mut().layers[ai].parent = Some(b);
         app.canvas_mut().layers[bi].parent = Some(a);
-        let loaded = decode_project(&encode_project_data(&app).unwrap()).unwrap();
+        let loaded =
+            decode_project(&encode_project_data(&ProjectSnapshot::capture(&app)).unwrap()).unwrap();
         let parent_of = |id| {
             let c = &loaded.canvas;
             c.layers[c.layer_index_of(id).unwrap()].parent
@@ -2056,7 +2165,7 @@ mod fuzz_tests {
         let mut app = rich_app();
         let id = app.canvas.layers[1].id;
         app.canvas_mut().layers[2].id = id;
-        let err = decode_project(&encode_project_data(&app).unwrap())
+        let err = decode_project(&encode_project_data(&ProjectSnapshot::capture(&app)).unwrap())
             .err()
             .unwrap();
         assert!(err.contains("layer ids"), "{err}");
@@ -2067,7 +2176,7 @@ mod fuzz_tests {
     fn fuzz_project() {
         let app = rich_app();
         open(&encode_project(&app).unwrap());
-        let bare = encode_project_data(&app).unwrap();
+        let bare = encode_project_data(&ProjectSnapshot::capture(&app)).unwrap();
         crate::fuzz::fuzz("rpainter", &bare, std::time::Duration::from_secs(2), open);
     }
 }
@@ -2213,6 +2322,104 @@ mod perf {
         r
     }
 
+    /// A smudge-tool or mixing-brush stroke across the canvas, painted on
+    /// the stroke worker and waited for.
+    #[test]
+    #[ignore = "timing"]
+    fn smudge() {
+        let path: Vec<(Vec2, f32)> = (0..240)
+            .map(|i| {
+                let t = i as f32 / 239.0;
+                let p = Vec2::new(800.0 + 2400.0 * t, 2000.0 + 600.0 * (t * 9.0).sin());
+                (p, 0.3 + 0.7 * t)
+            })
+            .collect();
+        for diameter in [40.0, 80.0, 200.0] {
+            for (what, smudge, mixing) in [
+                ("smudge", true, false),
+                ("blur", false, false),
+                ("mixing brush", false, true),
+            ] {
+                let mut app = big_app();
+                app.brush_state.brush.brush_options.diameter = diameter;
+                if mixing {
+                    app.brush_state.brush.mixing = Some(Default::default());
+                }
+                let started = Instant::now();
+                if mixing {
+                    app.set_brush_tool(false);
+                    app.start_stroke_with_pressure(path[0].0, path[0].1);
+                    for &(p, pressure) in &path[1..] {
+                        app.add_stroke_point(p, pressure);
+                    }
+                    app.finish_stroke();
+                } else {
+                    app.set_blend_tool(smudge);
+                    app.blend_press(path[0].0, path[0].1);
+                    for &(p, pressure) in &path[1..] {
+                        app.blend_drag(p, pressure);
+                    }
+                    app.blend_release();
+                }
+                app.settle_strokes();
+                eprintln!(
+                    "{:<40} {:>10.1?}",
+                    format!("{what}: {diameter} px, 240 samples"),
+                    started.elapsed()
+                );
+            }
+        }
+        // Krita's colour smudge (imported presets), the default one and
+        // the ones in the bundles at hand.
+        let stroke_with = |label: &str, brush: crate::brush_engine::brush::Brush| {
+            let mut app = big_app();
+            app.brush_state.brush = brush;
+            app.set_brush_tool(false);
+            let started = Instant::now();
+            app.start_stroke_with_pressure(path[0].0, path[0].1);
+            for &(p, pressure) in &path[1..] {
+                app.add_stroke_point(p, pressure);
+            }
+            app.finish_stroke();
+            app.settle_strokes();
+            eprintln!("{label:<60} {:>10.1?}", started.elapsed());
+        };
+        for diameter in [80.0, 200.0] {
+            let mut brush = big_app().brush_state.brush.clone();
+            brush.brush_options.diameter = diameter;
+            brush.mixing = Some(crate::brush_engine::brush_options::Mixing {
+                krita: Some(Default::default()),
+                ..Default::default()
+            });
+            stroke_with(&format!("krita smudge: {diameter} px"), brush);
+        }
+        let home = std::env::var("HOME").unwrap_or_default();
+        for bundle in [
+            "Peaches_Painting_Brushes.bundle",
+            "Rakurri_Brush_Set_V2.0.bundle",
+        ] {
+            let Ok(bytes) = std::fs::read(format!("{home}/Downloads/{bundle}")) else {
+                continue;
+            };
+            let Ok(imported) = crate::brush_engine::import::import(bundle, &bytes) else {
+                continue;
+            };
+            let smudges = imported
+                .presets
+                .into_iter()
+                .filter(|p| p.brush.mixing.is_some_and(|m| m.krita.is_some()));
+            for preset in smudges.take(4) {
+                stroke_with(
+                    &format!(
+                        "{} ({} px)",
+                        preset.name, preset.brush.brush_options.diameter
+                    ),
+                    preset.brush,
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "timing"]
     fn export() {
@@ -2344,9 +2551,11 @@ mod perf {
         time("liquify: begin + 1st dab", || {
             app.liquify_press(Vec2::new(2000.0, 2000.0))
         });
+        // Each move as a frame: the field, then the layer drawn.
         time("liquify: 300 px drag", || {
             for i in 1..=30 {
                 app.liquify_drag(Vec2::new(2000.0 + i as f32 * 10.0, 2000.0));
+                app.liquify_flush();
             }
         });
         app.liquify_release();
@@ -2363,11 +2572,13 @@ mod perf {
             time(&format!("liquify: {mode:?} hold, 30 frames"), || {
                 for _ in 0..30 {
                     app.liquify_hold(1.0 / 60.0);
+                    app.liquify_flush();
                 }
             });
             time(&format!("liquify: {mode:?} 300 px drag"), || {
                 for i in 1..=30 {
                     app.liquify_drag(Vec2::new(2000.0 + i as f32 * 10.0, 2000.0));
+                    app.liquify_flush();
                 }
             });
             app.liquify_release();
@@ -2452,12 +2663,23 @@ mod perf {
     fn every_filter() {
         use crate::canvas::filters::Filter;
         let mut app = big_app();
+        // As the app runs them: the UI thread queues the filter, the
+        // stroke worker runs it.
+        app.workspace.jobs.defer = true;
         for f in Filter::MENU.iter().flat_map(|g| g.iter()) {
-            time(&format!("filter: {}", f.name()), || {
-                app.filter_open(*f);
-                app.filter_commit();
-            });
-            app.apply_history(false);
+            let started = std::time::Instant::now();
+            app.filter_open(*f);
+            app.filter_commit();
+            let ui = started.elapsed();
+            app.run_jobs();
+            app.release_canvas();
+            eprintln!(
+                "filter: {:<28} UI thread {:>7.1?}   done {:>7.1?}",
+                f.name(),
+                ui,
+                started.elapsed()
+            );
+            app.apply_history_now(false);
         }
     }
 

@@ -178,26 +178,23 @@ pub fn radial_palette(app: &mut PainterApp, ctx: &egui::Context) {
             let chord = std::f32::consts::TAU * mid / count.max(1) as f32;
             let side = ((outer - inner) * 0.6).min(chord * 0.75).max(16.0);
             let pool = app.workspace.pool.clone();
+            crate::ui::brush_list::collect_preset_previews(app, ctx);
             let bs = &mut app.brush_state;
             for (i, name) in names.iter().enumerate() {
-                let Some(preset) = bs.presets.iter().find(|p| &p.name == name) else {
+                let Some(index) = bs.presets.iter().position(|p| &p.name == name) else {
                     continue;
                 };
                 let dir = slice_direction(i, count);
                 let hovered = hit == Some(RadialHit::Slice(i));
                 // The middle of the stroke preview, square.
-                let texture = bs
-                    .preset_previews
-                    .entry(name.clone())
-                    .or_insert_with(|| {
-                        crate::ui::brush_list::preview_texture(&preset.brush, &pool, ctx)
-                    })
-                    .id();
+                let texture = crate::ui::brush_list::preset_preview(bs, index, &pool, ctx);
                 let thumb =
                     egui::Rect::from_center_size(centre + dir * mid, egui::vec2(side, side));
                 painter.rect_filled(thumb, 0.0, BG_INSET);
                 let uv = egui::Rect::from_min_max(egui::pos2(0.4, 0.0), egui::pos2(0.6, 1.0));
-                painter.image(texture, thumb, uv, Color32::WHITE);
+                if let Some(texture) = texture {
+                    painter.image(texture, thumb, uv, Color32::WHITE);
+                }
                 let active = bs.active_preset.as_deref() == Some(name.as_str());
                 let outline = if active {
                     Stroke::new(2.0_f32, ACCENT)

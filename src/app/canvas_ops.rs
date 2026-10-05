@@ -264,23 +264,27 @@ impl PainterApp {
     /// Merge the selected layer into the one below (Ctrl+Alt+E).
     pub(crate) fn merge_down(&mut self) {
         let idx = self.canvas.active_layer_idx;
-        self.apply_merge(|canvas| canvas.merge_down(idx));
+        self.apply_merge(move |canvas| canvas.plan_merge_down(idx));
     }
 
     /// Merge every layer that shows into one (Ctrl+Shift+E).
     pub(crate) fn merge_visible(&mut self) {
-        self.apply_merge(Canvas::merge_visible);
+        self.apply_merge(Canvas::plan_merge_visible);
     }
 
     /// Flatten everything into the background (drafts stay).
     pub(crate) fn flatten_image(&mut self) {
-        self.apply_merge(Canvas::flatten_image);
+        self.apply_merge(Canvas::plan_flatten_image);
     }
 
-    /// Run a merge as one undo step, or say why it can't be done.
+    /// Run a merge as one undo step, or say why it can't be done. The
+    /// layers are composited on the stroke worker (the frames go on); the
+    /// merged layer takes their place once that's done.
     fn apply_merge(
         &mut self,
-        merge: impl FnOnce(&mut Canvas) -> Result<crate::canvas::storage::LayerSwap, &'static str>,
+        plan: impl FnOnce(&Canvas) -> Result<crate::canvas::storage::MergePlan, &'static str>
+        + Send
+        + 'static,
     ) {
         self.quick_mask_leave();
         // Sessions hold tiles or indices of the layers as they are now.
@@ -292,7 +296,16 @@ impl PainterApp {
         self.release_canvas();
         // Shader layers merge as their current frame.
         self.bake_shader_layers();
-        match merge(exclusive(&mut self.canvas)) {
+        let canvas = std::sync::Arc::clone(&self.canvas);
+        self.run_on_worker("Merging…", move || {
+            let plan = plan(&canvas);
+            drop(canvas);
+            Box::new(move |app: &mut PainterApp| app.finish_merge(plan))
+        });
+    }
+
+    fn finish_merge(&mut self, plan: Result<crate::canvas::storage::MergePlan, &'static str>) {
+        match plan.map(|plan| self.canvas_mut().apply_merge_plan(plan)) {
             Ok(swap) => {
                 let (out, put) = swap.applied.clone();
                 self.replace_layer_states(&out, &put);
@@ -595,13 +608,18 @@ impl PainterApp {
     /// Go back or forward through the history until `undo_len` steps can
     /// be undone (the History panel's click).
     pub(crate) fn history_jump(&mut self, undo_len: usize) {
+        // Once the strokes queued are painted (they're steps too).
+        self.when_strokes_painted(move |app| app.history_jump_now(undo_len));
+    }
+
+    fn history_jump_now(&mut self, undo_len: usize) {
         loop {
             let (undo, redo) = self.layer_state.history.labels();
             let (have, can_redo) = (undo.len(), redo.len());
             if have > undo_len {
-                self.apply_history(false);
+                self.apply_history_now(false);
             } else if have < undo_len && can_redo > 0 {
-                self.apply_history(true);
+                self.apply_history_now(true);
             } else {
                 break;
             }

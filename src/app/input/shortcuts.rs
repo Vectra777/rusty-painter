@@ -175,7 +175,15 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     // Before the keys below consume V (the Transform tool).
     let clipboard = app.clipboard_keys(ctx);
 
-    let actions = app.workspace.keymap.take_actions(ctx);
+    let mut actions = std::mem::take(&mut app.workspace.jobs.deferred_actions);
+    actions.extend(app.workspace.keymap.take_actions(ctx));
+    // Strokes still being painted: the shortcuts wait for them (a frame or
+    // a few) instead of the frame waiting.
+    if !actions.is_empty() && app.strokes_settling() {
+        app.workspace.jobs.deferred_actions = actions;
+        ctx.request_repaint();
+        return clipboard;
+    }
     let on = |a: Action| actions.contains(&a);
     // Esc isn't a shortcut to change: it cancels what's in progress.
     let escape = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));

@@ -4,6 +4,7 @@
 //! write of the bytes waiting to be saved.
 
 use crate::PainterApp;
+use crate::app::import::FileSource;
 use std::path::PathBuf;
 
 /// What a picked file is for.
@@ -17,14 +18,6 @@ pub(crate) enum OpenFor {
     Brushes,
     /// An image whose colours become a palette.
     Palette,
-}
-
-/// A file picked to open: its name, contents, and its path where files have
-/// one (desktop).
-pub(crate) struct Picked {
-    pub name: String,
-    pub bytes: Vec<u8>,
-    pub path: Option<PathBuf>,
 }
 
 /// A picker open on Android, and what its answer is for.
@@ -69,7 +62,9 @@ impl OpenFor {
 }
 
 impl PainterApp {
-    /// Ask for a file (several for brushes) to open for `purpose`.
+    /// Ask for a file (several for brushes) to open for `purpose`. The
+    /// dialog doesn't hold up the window, and the file is read and decoded
+    /// on another thread.
     #[cfg(not(target_os = "android"))]
     pub(crate) fn pick_open(&mut self, purpose: OpenFor) {
         let (label, extensions) = purpose.filter();
@@ -78,26 +73,19 @@ impl PainterApp {
         let mut all: Vec<&str> = extensions.clone();
         all.extend(upper.iter().map(String::as_str));
         let dialog = crate::app::settings::file_dialog().add_filter(label, &all);
-        let paths = if matches!(purpose, OpenFor::Brushes) {
-            dialog.pick_files().unwrap_or_default()
+        let pick = if matches!(purpose, OpenFor::Brushes) {
+            crate::app::jobs::Pick::Files
         } else {
-            dialog.pick_file().into_iter().collect()
+            crate::app::jobs::Pick::File
         };
-        if let Some(first) = paths.first() {
-            crate::app::settings::remember_dir(first);
-        }
-        for path in paths {
-            let picked = std::fs::read(&path)
-                .map_err(|e| format!("Couldn't read {}: {e}", path.display()))
-                .map(|bytes| Picked {
-                    name: path
-                        .file_name()
-                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-                    bytes,
-                    path: Some(path.clone()),
-                });
-            self.open_picked_or_report(&purpose, picked);
-        }
+        self.file_dialog_job(dialog, pick, move |app, paths| {
+            for path in paths {
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                app.open_picked(&purpose, name, FileSource::Path(path.clone()), Some(path));
+            }
+        });
     }
 
     #[cfg(target_os = "android")]
@@ -110,20 +98,24 @@ impl PainterApp {
     }
 
     /// Ask where to save `bytes` as `name` (extension `ext`), and write them
-    /// there.
+    /// there (the dialog and the write on other threads).
     #[cfg(not(target_os = "android"))]
     pub(crate) fn pick_save(&mut self, name: &str, ext: &str, _mime: &str, bytes: Vec<u8>) {
-        let Some(path) = crate::app::settings::file_dialog()
+        let dialog = crate::app::settings::file_dialog()
             .add_filter(ext, &[ext])
-            .set_file_name(name)
-            .save_file()
-            .inspect(|p| crate::app::settings::remember_dir(p))
-        else {
-            return;
-        };
-        if let Err(err) = crate::project::write_atomically(&path, &bytes) {
-            self.report(format!("Couldn't write {}: {err}", path.display()));
-        }
+            .set_file_name(name);
+        self.file_dialog_job(dialog, crate::app::jobs::Pick::Save, move |app, paths| {
+            let path = paths[0].clone();
+            app.spawn_job(None, move || {
+                let result = crate::project::write_atomically(&path, &bytes)
+                    .map_err(|err| format!("Couldn't write {}: {err}", path.display()));
+                Box::new(move |app: &mut PainterApp| {
+                    if let Err(err) = result {
+                        app.report(err);
+                    }
+                })
+            });
+        });
     }
 
     #[cfg(target_os = "android")]
@@ -146,12 +138,12 @@ impl PainterApp {
         match self.workspace.file_pick.take() {
             Some(PendingPick::Open(purpose)) => {
                 for uri in uris {
-                    let picked = crate::android::picker_read(&uri).map(|(name, bytes)| Picked {
-                        name,
-                        bytes,
-                        path: None,
-                    });
-                    self.open_picked_or_report(&purpose, picked);
+                    match crate::android::picker_read(&uri) {
+                        Ok((name, bytes)) => {
+                            self.open_picked(&purpose, name, FileSource::Bytes(bytes.into()), None)
+                        }
+                        Err(err) => self.report(err),
+                    }
                 }
             }
             Some(PendingPick::Save(bytes)) => {
@@ -169,45 +161,72 @@ impl PainterApp {
     #[cfg(not(target_os = "android"))]
     pub(crate) fn poll_file_pick(&mut self) {}
 
-    fn open_picked_or_report(&mut self, purpose: &OpenFor, picked: Result<Picked, String>) {
-        if let Err(err) = picked.and_then(|p| self.open_picked(purpose, p)) {
-            self.report(err);
+    /// Use a picked file (`name`, its bytes from `source`, its `path` where
+    /// files have one) as `purpose` says: read and decoded on another
+    /// thread, then taken in.
+    pub(crate) fn open_picked(
+        &mut self,
+        purpose: &OpenFor,
+        name: String,
+        source: FileSource,
+        path: Option<PathBuf>,
+    ) {
+        match purpose {
+            OpenFor::Document | OpenFor::Library(_) => {
+                let purpose = purpose.clone();
+                self.spawn_job(Some("Opening…"), move || {
+                    let doc = source
+                        .read()
+                        .and_then(|bytes| crate::project::decode_document(&name, &bytes));
+                    Box::new(move |app: &mut PainterApp| match doc {
+                        // The old document goes once the stroke worker lets
+                        // go of it.
+                        Ok(doc) => app.when_strokes_painted(move |app| {
+                            if let Err(err) = app.take_picked_document(&purpose, &name, doc, path) {
+                                app.report(err);
+                            }
+                        }),
+                        Err(err) => app.report(err),
+                    })
+                });
+            }
+            OpenFor::Brushes => self.import_brushes_in_background(name, source),
+            OpenFor::Palette => {
+                let stem = std::path::Path::new(&name)
+                    .file_stem()
+                    .map_or_else(|| "Image".into(), |s| s.to_string_lossy().into_owned());
+                self.palette_from_image_in_background(stem, source);
+            }
         }
     }
 
-    /// Use a picked file as `purpose` says.
-    pub(crate) fn open_picked(&mut self, purpose: &OpenFor, picked: Picked) -> Result<(), String> {
+    /// A picked document, decoded: the document now (and, for the library,
+    /// one of its projects).
+    fn take_picked_document(
+        &mut self,
+        purpose: &OpenFor,
+        name: &str,
+        doc: crate::project::OpenedDocument,
+        path: Option<PathBuf>,
+    ) -> Result<(), String> {
+        self.leave_document();
+        self.open_document(doc);
         match purpose {
-            OpenFor::Document => {
-                self.leave_document();
-                self.load_project_bytes(&picked.name, &picked.bytes)?;
-                // Saving goes back to where it came from, if it was ours.
-                self.workspace.library.project =
-                    picked.path.filter(|p| crate::ui::library::is_project(p));
-                Ok(())
-            }
             OpenFor::Library(folder) => {
-                self.leave_document();
-                self.load_project_bytes(&picked.name, &picked.bytes)?;
-                let stem = std::path::Path::new(&picked.name)
+                let stem = std::path::Path::new(name)
                     .file_stem()
                     .map_or_else(|| "Imported".into(), |s| s.to_string_lossy().into_owned());
                 let path = crate::ui::library::unused_path(folder, &stem);
                 self.save_project_to_path(&path)?;
                 self.workspace.library.project = Some(path);
                 self.workspace.library.refresh();
-                Ok(())
             }
-            OpenFor::Brushes => self
-                .import_brushes_bytes(&picked.name, &picked.bytes)
-                .map(|_| ()),
-            OpenFor::Palette => {
-                let name = std::path::Path::new(&picked.name)
-                    .file_stem()
-                    .map_or_else(|| "Image".into(), |s| s.to_string_lossy().into_owned());
-                self.extract_palette_from_image(&name, &picked.bytes)
+            // Saving goes back to where it came from, if it was ours.
+            _ => {
+                self.workspace.library.project = path.filter(|p| crate::ui::library::is_project(p));
             }
         }
+        Ok(())
     }
 
     /// Show `msg` to the user (and log it).

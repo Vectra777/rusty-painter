@@ -67,7 +67,7 @@ impl Default for Ruler {
 
 /// The guides as saved in a project: the ruler, the assistants and the
 /// mirror painting.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct StoredGuides {
     ruler: [[f32; 2]; 2],

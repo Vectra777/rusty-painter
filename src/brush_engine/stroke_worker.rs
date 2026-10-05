@@ -57,10 +57,35 @@ pub trait SequentialStroke: Send {
     fn finish(self: Box<Self>) -> Option<UndoAction>;
 }
 
+/// Canvas work queued behind the strokes (a filter, a merge, a fill): it
+/// shares the canvas the way a stroke does, so it runs here, in order with
+/// them, and whatever waits for the strokes waits for it too.
+pub type Task = Box<dyn FnOnce() -> Box<dyn std::any::Any + Send> + Send>;
+
+/// What the worker finished, in the order it did.
+pub enum Finished {
+    Stroke(Box<FinishedStroke>),
+    /// A task's result, or `Err` if it panicked.
+    Task(Result<Box<dyn std::any::Any + Send>, String>),
+}
+
+impl Finished {
+    /// The stroke, if it's one (tests).
+    pub fn stroke(&self) -> Option<&FinishedStroke> {
+        match self {
+            Self::Stroke(s) => Some(s),
+            Self::Task(_) => None,
+        }
+    }
+}
+
 /// A completed stroke's undo record.
 pub struct FinishedStroke {
     pub layer_idx: usize,
     pub undo: UndoAction,
+    /// Which stroke this was: the `n`th one ended (from 1), as
+    /// [`StrokeWorker::ends_sent`] counts them.
+    pub seq: u64,
 }
 
 /// Shortest and longest the worker sleeps between airbrush dabs (seconds):
@@ -82,6 +107,7 @@ enum Job {
         barrel: PenBarrel,
     },
     End,
+    Task(Task),
 }
 
 #[derive(Default)]
@@ -91,7 +117,23 @@ struct SharedState {
     /// Tiles painted since the UI last collected them, with the tile-local
     /// rectangle that changed in each.
     dirty: HashMap<(usize, usize), [usize; 4]>,
-    finished: Vec<FinishedStroke>,
+    finished: Vec<Finished>,
+    /// Strokes ended so far (painted to the end, with or without an undo
+    /// record), counted once each one's record is in `finished`.
+    ended: u64,
+}
+
+impl SharedState {
+    /// A record for the stroke ending now.
+    fn finish(&mut self, layer_idx: usize, undo: UndoAction) {
+        let seq = self.ended + 1;
+        self.finished
+            .push(Finished::Stroke(Box::new(FinishedStroke {
+                layer_idx,
+                undo,
+                seq,
+            })));
+    }
 }
 
 #[derive(Default)]
@@ -110,6 +152,8 @@ pub struct StrokeWorker {
     /// Sample times count from here.
     epoch: std::time::Instant,
     jobs: Option<Sender<Job>>,
+    /// Strokes ended so far ([`Self::end`] calls).
+    ends_sent: std::sync::atomic::AtomicU64,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
@@ -170,6 +214,7 @@ impl StrokeWorker {
                             }
                         }
                     };
+                    let is_end = matches!(job, Job::End);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         run_job(&mut session, &mut sequential, job, &thread_shared)
                     }));
@@ -179,6 +224,10 @@ impl StrokeWorker {
                         sequential = None;
                     }
                     let mut state = thread_shared.lock();
+                    // (Counted even if it panicked: it's over either way.)
+                    if is_end {
+                        state.ended += 1;
+                    }
                     state.pending -= 1;
                     if state.pending == 0 {
                         thread_shared.idle.notify_all();
@@ -189,6 +238,7 @@ impl StrokeWorker {
         Self {
             epoch,
             jobs: Some(jobs),
+            ends_sent: Default::default(),
             shared,
             thread: Some(thread),
         }
@@ -226,8 +276,21 @@ impl StrokeWorker {
         });
     }
 
+    /// Run `task` once what's queued before it is done.
+    pub fn task(&self, task: Task) {
+        self.send(Job::Task(task));
+    }
+
     pub fn end(&self) {
+        self.ends_sent
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.send(Job::End);
+    }
+
+    /// How many strokes have been ended (sent [`Self::end`]) so far: the
+    /// `seq` of the last one's [`FinishedStroke`].
+    pub fn ends_sent(&self) -> u64 {
+        self.ends_sent.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn send(&self, job: Job) {
@@ -280,9 +343,11 @@ impl StrokeWorker {
         std::mem::take(&mut self.shared.lock().dirty)
     }
 
-    /// Undo records of strokes that have ended since the last call.
-    pub fn take_finished(&self) -> Vec<FinishedStroke> {
-        std::mem::take(&mut self.shared.lock().finished)
+    /// Undo records of strokes that have ended since the last call, in
+    /// order, and how many strokes have ended in all (some leave no record).
+    pub fn take_finished(&self) -> (Vec<Finished>, u64) {
+        let mut state = self.shared.lock();
+        (std::mem::take(&mut state.finished), state.ended)
     }
 }
 
@@ -348,10 +413,7 @@ fn run_job(
                 if let Some(stroke) = sequential.take() {
                     let layer_idx = stroke.layer_idx();
                     if let Some(undo) = stroke.finish() {
-                        shared
-                            .lock()
-                            .finished
-                            .push(FinishedStroke { layer_idx, undo });
+                        shared.lock().finish(layer_idx, undo);
                     }
                 }
                 return;
@@ -359,6 +421,8 @@ fn run_job(
             // A new stroke: this one is left as it is (a stroke always
             // ends first).
             Job::Begin(_) | Job::BeginSequential(_) => *sequential = None,
+            // (Tasks come after a stroke has ended.)
+            Job::Task(task) => return run_task(task, shared),
         }
     }
     match job {
@@ -421,6 +485,7 @@ fn run_job(
                 stroke.add_sample(brush, pos, pressure, Some(time), context);
             });
         }
+        Job::Task(task) => run_task(task, shared),
         Job::End => {
             // The pen lifted: the end of the stroke (an end taper) first.
             if let Some(session) = session.as_mut() {
@@ -434,13 +499,22 @@ fn run_job(
             if let Some(Session { setup, undo, .. }) = session.take()
                 && !undo.tiles.is_empty()
             {
-                shared.lock().finished.push(FinishedStroke {
-                    layer_idx: setup.layer_idx,
-                    undo,
-                });
+                shared.lock().finish(setup.layer_idx, undo);
             }
         }
     }
+}
+
+/// Run `task`, its result (or its panic) to the UI.
+fn run_task(task: Task, shared: &Shared) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).map_err(|panic| {
+        panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "it stopped".to_string())
+    });
+    shared.lock().finished.push(Finished::Task(result));
 }
 
 /// A sequential stroke's painted rectangles to the UI, as tile-local
@@ -685,10 +759,12 @@ mod tests {
         worker.wait_idle();
 
         assert!(tiles_of(&canvas) == tiles_of(&sync_canvas));
-        let finished = worker.take_finished();
+        let (finished, ended) = worker.take_finished();
         assert_eq!(finished.len(), 1);
-        assert_eq!(finished[0].layer_idx, 1);
-        assert_eq!(finished[0].undo.tiles.len(), undo.tiles.len());
+        let stroke = finished[0].stroke().unwrap();
+        assert_eq!((stroke.seq, ended), (1, 1));
+        assert_eq!(stroke.layer_idx, 1);
+        assert_eq!(stroke.undo.tiles.len(), undo.tiles.len());
         assert!(!worker.take_dirty().is_empty());
         assert!(!worker.is_busy());
         assert_eq!(
@@ -722,8 +798,15 @@ mod tests {
         }
         worker.end();
         worker.wait_idle();
-        let finished = worker.take_finished();
-        (canvas, finished)
+        let (finished, _) = worker.take_finished();
+        let strokes = finished
+            .into_iter()
+            .filter_map(|f| match f {
+                Finished::Stroke(s) => Some(*s),
+                Finished::Task(_) => None,
+            })
+            .collect();
+        (canvas, strokes)
     }
 
     #[test]

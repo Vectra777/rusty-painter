@@ -344,11 +344,11 @@ pub fn content_aware_fill(app: &mut PainterApp) {
 }
 
 pub fn undo(app: &mut PainterApp) {
-    app.apply_history(false);
+    app.apply_history_now(false);
 }
 
 pub fn redo(app: &mut PainterApp) {
-    app.apply_history(true);
+    app.apply_history_now(true);
 }
 
 /// The project file bytes (as Save writes them).

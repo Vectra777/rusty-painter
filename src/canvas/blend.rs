@@ -268,6 +268,28 @@ pub(crate) fn color32_to_linear(c: Color32) -> Rgba {
     )
 }
 
+/// [`color32_to_linear`] with its table looked up once, for loops over
+/// pixels.
+#[derive(Clone, Copy)]
+pub(crate) struct LinearDecoder(&'static [f32; 256]);
+
+impl LinearDecoder {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self(srgb_to_linear_lut())
+    }
+
+    #[inline]
+    pub(crate) fn decode(self, c: Color32) -> Rgba {
+        Rgba::from_rgba_premultiplied(
+            self.0[c.r() as usize],
+            self.0[c.g() as usize],
+            self.0[c.b() as usize],
+            c.a() as f32 / 255.0,
+        )
+    }
+}
+
 /// Convert a whole tile to linear light, resolving the lookup table once.
 pub(crate) fn color32s_to_linear(data: &[Color32]) -> Vec<Rgba> {
     let lut = srgb_to_linear_lut();

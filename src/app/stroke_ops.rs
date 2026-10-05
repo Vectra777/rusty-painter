@@ -6,7 +6,7 @@ use crate::app::PainterApp;
 use crate::app::view::render::ScreenMap;
 use crate::brush_engine::brush::StabilizerAlgorithm;
 use crate::brush_engine::brush_options::BlendMode;
-use crate::brush_engine::stroke_worker::StrokeSetup;
+use crate::brush_engine::stroke_worker::{Finished, StrokeSetup};
 use crate::canvas::Canvas;
 use crate::selection::SelectionManager;
 use eframe::egui::{self, Color32, Stroke, Vec2};
@@ -175,12 +175,35 @@ impl PainterApp {
         for ((tx, ty), rect) in self.stroke_worker.take_dirty() {
             self.mark_tile_damage(tx, ty, rect);
         }
-        for mut finished in self.stroke_worker.take_finished() {
-            self.attach_stroke_rasterised(&mut finished.undo);
-            self.attach_vector_rasterised(&mut finished.undo);
-            self.layer_state.history.push_action(finished.undo);
+        let (finished, ended) = self.stroke_worker.take_finished();
+        // Through a queue on the app: a task's result applied below may
+        // sync again, and what it collects must still come after the rest.
+        self.workspace.jobs.finished.extend(finished);
+        while let Some(next) = self.workspace.jobs.finished.front() {
+            // A task's result takes the canvas to itself: once the worker
+            // is idle (next frame, if it's busy), so nothing waits for it.
+            if matches!(next, Finished::Task(_)) && self.stroke_worker.is_busy() {
+                break;
+            }
+            let Some(next) = self.workspace.jobs.finished.pop_front() else {
+                break;
+            };
+            match next {
+                Finished::Stroke(mut finished) => {
+                    // A stroke begun after the mark: the history stands
+                    // where the mark belongs.
+                    self.settle_action_mark(finished.seq - 1);
+                    self.attach_stroke_rasterised(&mut finished.undo);
+                    self.attach_vector_rasterised(&mut finished.undo);
+                    self.layer_state.history.push_action(finished.undo);
+                }
+                Finished::Task(result) => self.apply_task_result(result),
+            }
         }
-        self.stroke_worker.is_busy()
+        if self.workspace.jobs.finished.is_empty() {
+            self.settle_action_mark(ended);
+        }
+        self.stroke_worker.is_busy() || !self.workspace.jobs.finished.is_empty()
     }
 
     /// Wait until every queued sample is painted and its results collected,

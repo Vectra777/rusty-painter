@@ -26,10 +26,13 @@ pub struct FilterSession {
     pub filter: Filter,
     /// By id: the layers panel stays usable while the dialog is open.
     layer: LayerId,
-    /// The area's tiles before the filter (every preview starts from them).
-    original: Region,
+    /// The area's tiles before the filter (every preview starts from them;
+    /// shared with the stroke worker, which runs the filter).
+    original: Arc<Region>,
     /// The selection's coverage over the area, if there's a selection.
-    coverage: Option<SelectionMask>,
+    coverage: Option<Arc<SelectionMask>>,
+    /// A run is on the stroke worker: no other is queued meanwhile.
+    running: bool,
     /// Needs running again (a setting changed).
     pub dirty: bool,
     /// The last run took long enough to stall a slider drag: while one is
@@ -220,12 +223,13 @@ impl PainterApp {
             _ => ([0, 0, w, h], None),
         };
         let pool = Arc::clone(&self.workspace.pool);
-        let original = pool.install(|| self.canvas.capture_region(layer, bounds));
+        let original = Arc::new(pool.install(|| self.canvas.capture_region(layer, bounds)));
         self.workspace.filter.session = Some(FilterSession {
             filter,
             layer: layer_id,
             original,
-            coverage,
+            coverage: coverage.map(Arc::new),
+            running: false,
             dirty: true,
             slow: false,
             exact: false,
@@ -256,7 +260,8 @@ impl PainterApp {
                 }
             }
             _ => {
-                if session.dirty || !session.exact {
+                // (One run at a time: the next goes once it's back.)
+                if (session.dirty || !session.exact) && !session.running {
                     self.filter_run();
                 }
             }
@@ -281,7 +286,7 @@ impl PainterApp {
             if session.source.as_ref().is_none_or(|s| s.block != block) {
                 session.source = Some(ShrunkSource::new(
                     &session.original,
-                    session.coverage.as_ref(),
+                    session.coverage.as_deref(),
                     block,
                     ts,
                 ));
@@ -380,45 +385,64 @@ impl PainterApp {
         idx
     }
 
+    /// Run the filter on the layer, on the stroke worker (a big blur takes
+    /// a while): the frames go on meanwhile, the canvas waiting for it.
     fn filter_run(&mut self) {
         let Some(layer) = self.filter_layer() else {
             return;
         };
-        self.release_canvas();
         let Some(session) = self.workspace.filter.session.as_mut() else {
             return;
         };
-        let pool = Arc::clone(&self.workspace.pool);
-        let canvas = &self.canvas;
-        let [x0, y0, x1, y1] = session.original.bounds;
-        let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-        let started = std::time::Instant::now();
-        pool.install(|| {
-            let src = session.original.pixels(canvas.tile_size());
-            let out = session.filter.apply(&src, w, h, (x0, y0));
-            canvas.replace_region(layer, &session.original, &out, session.coverage.as_ref());
-        });
+        session.running = true;
         session.dirty = false;
-        session.exact = true;
-        session.preview = None;
-        session.slow = started.elapsed() > LIVE_BUDGET;
-        let area = egui::Rect::from_min_max(
-            egui::pos2(x0 as f32, y0 as f32),
-            egui::pos2(x1 as f32, y1 as f32),
-        );
-        self.mark_tiles_in_bounds_dirty(area);
-        self.layer_state.thumbnails_dirty = true;
+        let id = session.layer;
+        let (filter, original) = (session.filter, Arc::clone(&session.original));
+        let coverage = session.coverage.clone();
+        let pool = Arc::clone(&self.workspace.pool);
+        let canvas = Arc::clone(&self.canvas);
+        self.run_on_worker(&format!("{}…", filter.name()), move || {
+            let [x0, y0, x1, y1] = original.bounds;
+            let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+            let started = std::time::Instant::now();
+            pool.install(|| {
+                let src = original.pixels(canvas.tile_size());
+                let out = filter.apply(&src, w, h, (x0, y0));
+                canvas.replace_region(layer, &original, &out, coverage.as_deref());
+            });
+            // The worker lets go of the canvas before it says it's done.
+            drop(canvas);
+            let slow = started.elapsed() > LIVE_BUDGET;
+            Box::new(move |app: &mut PainterApp| {
+                if let Some(session) = app.workspace.filter.session.as_mut()
+                    && session.layer == id
+                {
+                    session.running = false;
+                    // (Unless a setting changed meanwhile: then it runs
+                    // again.)
+                    session.exact = !session.dirty;
+                    session.preview = None;
+                    session.slow = slow;
+                }
+                app.mark_tiles_in_bounds_dirty(egui::Rect::from_min_max(
+                    egui::pos2(x0 as f32, y0 as f32),
+                    egui::pos2(x1 as f32, y1 as f32),
+                ));
+                app.layer_state.thumbnails_dirty = true;
+            })
+        });
     }
 
-    /// Keep the filter as one undo step.
+    /// Keep the filter as one undo step. The dialog closes at once; the
+    /// filter finishes on the stroke worker.
     pub(crate) fn filter_commit(&mut self) {
-        if self
+        let needs_run = self
             .workspace
             .filter
             .session
             .as_ref()
-            .is_some_and(|s| s.dirty || !s.exact)
-        {
+            .is_some_and(|s| s.dirty || (!s.exact && !s.running));
+        if needs_run {
             self.filter_run();
         }
         let Some(layer) = self.filter_layer() else {
@@ -428,32 +452,45 @@ impl PainterApp {
             return;
         };
         let pool = Arc::clone(&self.workspace.pool);
-        let tiles = pool.install(|| self.canvas.region_snapshots(layer, &session.original));
-        if tiles.is_empty() {
-            return;
-        }
-        self.layer_state.history.label_next(session.filter.name());
-        self.push_undo(UndoAction {
-            tiles,
-            selection: None,
-            transform: None,
-            layer_action: None,
+        let canvas = Arc::clone(&self.canvas);
+        let name = session.filter.name();
+        // After the run: what the layer holds then.
+        self.run_on_worker(&format!("{name}…"), move || {
+            let tiles = pool.install(|| canvas.region_snapshots(layer, &session.original));
+            drop(canvas);
+            Box::new(move |app: &mut PainterApp| {
+                if tiles.is_empty() {
+                    return;
+                }
+                app.layer_state.history.label_next(name);
+                app.push_undo(UndoAction {
+                    tiles,
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                });
+            })
         });
     }
 
-    /// Put the layer back as it was.
+    /// Put the layer back as it was (after any run still going).
     pub(crate) fn filter_cancel(&mut self) {
         let Some(session) = self.workspace.filter.session.take() else {
             return;
         };
-        self.release_canvas();
-        self.canvas.restore_region(&session.original);
-        let [x0, y0, x1, y1] = session.original.bounds;
-        self.mark_tiles_in_bounds_dirty(egui::Rect::from_min_max(
-            egui::pos2(x0 as f32, y0 as f32),
-            egui::pos2(x1 as f32, y1 as f32),
-        ));
-        self.layer_state.thumbnails_dirty = true;
+        let canvas = Arc::clone(&self.canvas);
+        self.run_on_worker("Cancelling…", move || {
+            canvas.restore_region(&session.original);
+            drop(canvas);
+            let [x0, y0, x1, y1] = session.original.bounds;
+            Box::new(move |app: &mut PainterApp| {
+                app.mark_tiles_in_bounds_dirty(egui::Rect::from_min_max(
+                    egui::pos2(x0 as f32, y0 as f32),
+                    egui::pos2(x1 as f32, y1 as f32),
+                ));
+                app.layer_state.thumbnails_dirty = true;
+            })
+        });
     }
 }
 

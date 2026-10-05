@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### A window that never stops answering
+- Liquify keeps up with a pen: its dabs are spaced along the stroke however finely the tablet reports it (a pen's many short moves did the full work each, and twirl, pinch and bloat came out stronger than with a mouse), and the layer is drawn once a frame.
+- File dialogs no longer hold up the window while they're open.
+- Opening, saving, autosaving and exporting a document, importing an image, a reference picture or a palette's picture, and importing brushes are read, decoded, encoded and written on other threads; the canvas waits (with a note) only while a document is being opened or saved.
+- Brush previews (the presets list, the pop-up palette, the brush settings strip) are drawn on a thread of their own, only for the presets on screen; a brush that fails to draw loses its preview, not the app.
+- Settings, presets, the brush library, swatches, gradients and panel sizes are written to disk on their own thread.
+- A new stroke no longer waits for the last one to finish painting; undo, shortcuts, the layer panel and the menus wait their turn instead of holding up the frame.
+- Pasting and copying images to the system clipboard happen off the UI thread.
+- Brush presets load in parallel at startup.
+- Filters, merges (down, visible, flatten) and fills run on the stroke worker, in order with the strokes: the window keeps drawing while a big blur works (the filter dialog closes at once), and undo, the layer panel and saving wait their turn.
+- The Smudge and Blur tools and mixing brushes paint big dabs across all cores and convert colours without a table lookup per pixel: a 200 px smudge stroke about 40% faster, blur 45%, deform, clone and sharpen 15–20%.
+
 ### Brushes: Krita's missing options
 - Colour mixing for any brush (Brush → Colour mixing), like Krita's Colour Smudge: smudge length and colour rate, each optionally by pressure. Krita's colour smudge presets import as mixing brushes.
 - Tips flipped at random (left-right, top-bottom), like Krita's Mirror option.

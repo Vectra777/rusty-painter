@@ -4,11 +4,13 @@
 
 use crate::PainterApp;
 use crate::app::stroke_ops::exclusive;
+use crate::canvas::Canvas;
 use crate::canvas::fill::{self, FillSettings};
 use crate::canvas::history::UndoAction;
 use crate::canvas::storage::{LayerKind, SampleLayers};
-use crate::selection::SelectionMask;
+use crate::selection::{SelectionManager, SelectionMask};
 use eframe::egui::Vec2;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FillMode {
@@ -89,8 +91,7 @@ impl PainterApp {
         match self.workspace.fill.mode {
             FillMode::Bucket => {
                 let (x, y) = (pos.x.floor() as i32, pos.y.floor() as i32);
-                self.run_fill(|app, source, settings| {
-                    let canvas = &app.canvas;
+                self.run_fill(move |canvas, source, settings| {
                     let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
                     fill::bucket_fill(
                         &reference,
@@ -142,8 +143,7 @@ impl PainterApp {
             self.erase_under(mask, true);
             return;
         }
-        self.run_fill(|app, source, settings| {
-            let canvas = &app.canvas;
+        self.run_fill(move |canvas, source, settings| {
             let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
             fill::enclose_fill(&reference, canvas.width(), canvas.height(), &path, settings)
         });
@@ -206,27 +206,19 @@ impl PainterApp {
 
     /// Limit `mask` to the selection's coverage, if there is a selection.
     fn clip_to_selection(&self, mask: &mut SelectionMask) {
-        if !self.selection_manager.has_selection() {
-            return;
-        }
-        let bounds = [
-            mask.x0,
-            mask.y0,
-            mask.x0 + mask.w as i32,
-            mask.y0 + mask.h as i32,
-        ];
-        let selection = &self.selection_manager;
-        let sel = SelectionMask::rasterize(bounds, |y, x0, out| selection.row_coverage(y, x0, out));
-        for (m, s) in mask.data.iter_mut().zip(&sel.data) {
-            *m = ((*m as u32 * *s as u32 + 127) / 255) as u8;
+        if self.selection_manager.has_selection() {
+            clip_to(&self.selection_manager, mask);
         }
     }
 
     /// Compute a fill mask with `make`, clip it to the selection and paint
-    /// it with the brush colour as one undo step.
+    /// it with the brush colour as one undo step, on the stroke worker (a
+    /// big area takes a while; the frames go on).
     fn run_fill(
         &mut self,
-        make: impl FnOnce(&Self, SampleLayers, &FillSettings) -> Option<SelectionMask>,
+        make: impl FnOnce(&Canvas, SampleLayers, &FillSettings) -> Option<SelectionMask>
+        + Send
+        + 'static,
     ) {
         let Some(target) = self.fill_target() else {
             return;
@@ -237,24 +229,50 @@ impl PainterApp {
                 Some("No reference layer: mark one in the Layers panel".into());
             return;
         }
-        self.release_canvas();
         let settings = self.workspace.fill.settings;
-        let Some(mut mask) = make(self, source, &settings) else {
-            return;
-        };
-        self.clip_to_selection(&mut mask);
+        let selection = self
+            .selection_manager
+            .has_selection()
+            .then(|| SelectionManager::with_shape(self.selection_manager.current_shape.clone()));
         let color = self.brush_state.brush.brush_options.color;
-        let mut action = UndoAction {
-            tiles: Vec::new(),
-            selection: None,
-            transform: None,
-            layer_action: None,
-        };
-        let changed = exclusive(&mut self.canvas).paint_mask(target, &mask, color, &mut action);
-        if let Some(rect) = changed {
-            self.push_undo(action);
-            self.mark_tiles_in_bounds_dirty(rect);
-        }
+        let canvas = Arc::clone(&self.canvas);
+        let pool = Arc::clone(&self.workspace.pool);
+        self.run_on_worker("Filling…", move || {
+            let mut action = UndoAction {
+                tiles: Vec::new(),
+                selection: None,
+                transform: None,
+                layer_action: None,
+            };
+            let changed = pool.install(|| {
+                let mut mask = make(&canvas, source, &settings)?;
+                if let Some(selection) = &selection {
+                    clip_to(selection, &mut mask);
+                }
+                canvas.paint_mask(target, &mask, color, &mut action)
+            });
+            drop(canvas);
+            Box::new(move |app: &mut PainterApp| {
+                if let Some(rect) = changed {
+                    app.push_undo(action);
+                    app.mark_tiles_in_bounds_dirty(rect);
+                }
+            })
+        });
+    }
+}
+
+/// Keep only what of `mask` is inside `selection` (soft edges fade).
+fn clip_to(selection: &SelectionManager, mask: &mut SelectionMask) {
+    let bounds = [
+        mask.x0,
+        mask.y0,
+        mask.x0 + mask.w as i32,
+        mask.y0 + mask.h as i32,
+    ];
+    let sel = SelectionMask::rasterize(bounds, |y, x0, out| selection.row_coverage(y, x0, out));
+    for (m, s) in mask.data.iter_mut().zip(&sel.data) {
+        *m = ((*m as u32 * *s as u32 + 127) / 255) as u8;
     }
 }
 

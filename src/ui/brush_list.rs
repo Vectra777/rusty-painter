@@ -10,14 +10,15 @@
 use crate::PainterApp;
 use crate::app::brush_library::{Shelf, shown_presets};
 use crate::app::state::BrushState;
-use crate::brush_engine::brush::{Brush, BrushPreset};
+use crate::brush_engine::brush::BrushPreset;
 use crate::brush_engine::brush_options::BlendMode;
-use crate::brush_engine::preview::stroke_preview_image;
 use crate::ui::icons::Icon;
+use crate::ui::preview_worker::PreviewLook;
 use crate::ui::style::*;
 use crate::ui::widgets::icon_button;
-use eframe::egui::{self, Color32, RichText, Stroke, TextureOptions};
+use eframe::egui::{self, Color32, RichText, Stroke};
 use rayon::ThreadPool;
+use std::sync::Arc;
 
 /// Temp-memory id used to flag a duplicate preset name in the save modal.
 const DUPLICATE_NAME_WARNING_ID: &str = "brush_preset_duplicate_name";
@@ -232,6 +233,7 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
 
     let tile_height = if m.touch { 76.0 } else { 58.0 };
     let pool = app.workspace.pool.clone();
+    collect_preset_previews(app, ui.ctx());
     let eraser_first = app.brush_state.eraser_active;
     let bs = &mut app.brush_state;
     let lib = &bs.library;
@@ -328,16 +330,21 @@ fn preset_row(
     bs: &mut BrushState,
     index: usize,
     all_tags: &[String],
-    pool: &ThreadPool,
+    pool: &Arc<ThreadPool>,
     tile_height: f32,
 ) -> Option<PresetAction> {
     let mut picked = None;
+    // Only the tiles on screen ask for their preview.
+    let tile = egui::Rect::from_min_size(
+        ui.next_widget_position(),
+        egui::vec2(ui.available_width(), tile_height),
+    );
+    let texture = if ui.is_rect_visible(tile) {
+        preset_preview(bs, index, pool, ui.ctx())
+    } else {
+        None
+    };
     let preset = &bs.presets[index];
-    let texture = bs
-        .preset_previews
-        .entry(preset.name.clone())
-        .or_insert_with(|| preview_texture(&preset.brush, pool, ui.ctx()))
-        .id();
     // Any brush can be the eraser's, so the name alone says which is in use.
     let active = bs.active_preset.as_deref() == Some(preset.name.as_str());
     let favourite = bs.library.file.is_favourite(&preset.name);
@@ -411,7 +418,7 @@ fn preset_row(
 fn preset_tile(
     ui: &mut egui::Ui,
     name: &str,
-    texture: egui::TextureId,
+    texture: Option<egui::TextureId>,
     height: f32,
     active: bool,
     favourite: bool,
@@ -435,12 +442,15 @@ fn preset_tile(
     let inner = rect.shrink2(egui::vec2(8.0, 6.0));
     let aspect = PREVIEW_PX[0] as f32 / PREVIEW_PX[1] as f32;
     let size = egui::vec2(inner.width().min(inner.height() * aspect), inner.height());
-    painter.image(
-        texture,
-        egui::Rect::from_center_size(inner.center(), size),
-        uv,
-        Color32::WHITE,
-    );
+    // (Not drawn yet: just the name.)
+    if let Some(texture) = texture {
+        painter.image(
+            texture,
+            egui::Rect::from_center_size(inner.center(), size),
+            uv,
+            Color32::WHITE,
+        );
+    }
 
     // Name in the top-left corner on a dark chip so it reads over the stroke.
     let font = egui::TextStyle::Small.resolve(ui.style());
@@ -531,21 +541,39 @@ fn draw_star(
     }
 }
 
-pub(crate) fn preview_texture(
-    brush: &Brush,
-    pool: &ThreadPool,
+/// The presets' previews drawn since last frame, kept as textures (any
+/// they replace are freed next frame).
+pub(crate) fn collect_preset_previews(app: &mut PainterApp, ctx: &egui::Context) {
+    let bs = &mut app.brush_state;
+    for (name, texture) in bs.preset_preview_worker.collect(ctx) {
+        if let Some(old) = bs.preset_previews.insert(name, texture) {
+            app.workspace.retired_textures.push(old);
+        }
+    }
+}
+
+/// Preset `index`'s preview, once drawn: the first time it's wanted, it's
+/// asked for (drawn off the UI thread).
+pub(crate) fn preset_preview(
+    bs: &mut BrushState,
+    index: usize,
+    pool: &Arc<ThreadPool>,
     ctx: &egui::Context,
-) -> egui::TextureHandle {
-    let mut brush = brush.clone();
-    let image = stroke_preview_image(
-        &mut brush,
-        pool,
-        PREVIEW_PX,
-        64,
-        PREVIEW_INK,
-        PREVIEW_DIAMETER,
-    );
-    ctx.load_texture("preset_preview", image, TextureOptions::LINEAR)
+) -> Option<egui::TextureId> {
+    let preset = bs.presets.get(index)?;
+    if let Some(texture) = bs.preset_previews.get(&preset.name) {
+        return Some(texture.id());
+    }
+    if !bs.preset_preview_worker.is_requested(&preset.name) {
+        let look = PreviewLook {
+            size: PREVIEW_PX,
+            diameter: PREVIEW_DIAMETER,
+            ink: PREVIEW_INK,
+        };
+        bs.preset_preview_worker
+            .request(&preset.name, &preset.brush, look, pool, ctx);
+    }
+    None
 }
 
 /// Name prompt for saving the active tool's settings as a new preset.

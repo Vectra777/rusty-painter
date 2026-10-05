@@ -107,6 +107,29 @@ impl PainterApp {
     }
 
     /// Take the palette from a picture file instead of the canvas.
+    /// The colours of the picture `source` holds, found on another thread.
+    pub(crate) fn palette_from_image_in_background(
+        &mut self,
+        name: String,
+        source: crate::app::import::FileSource,
+    ) {
+        let count = self.workspace.palette.count;
+        self.spawn_job(None, move || {
+            let result = source
+                .read()
+                .and_then(|bytes| crate::app::import::decode_image(&bytes))
+                .map(|img| extract_palette(&image_samples(&img), count));
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok(colors) => {
+                    app.workspace.palette.extracted = colors;
+                    app.workspace.palette.source_image = Some(name);
+                }
+                Err(err) => app.report(err),
+            })
+        });
+    }
+
+    #[cfg(test)]
     pub(crate) fn extract_palette_from_image(
         &mut self,
         name: &str,

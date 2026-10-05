@@ -7,6 +7,7 @@
 use crate::PainterApp;
 use crate::app::document::{BackgroundChoice, CanvasUnit, MAX_CANVAS_DPI};
 use crate::app::input::keyboard::KeyboardLayout;
+use crate::app::jobs::write_later;
 use crate::app::tools::{
     Tool,
     blend::BlendToolSettings,
@@ -93,8 +94,8 @@ fn last_dir() -> Option<PathBuf> {
 
 /// A file dialog opening in the folder used last.
 #[cfg(not(target_os = "android"))]
-pub fn file_dialog() -> rfd::FileDialog {
-    let dialog = rfd::FileDialog::new();
+pub fn file_dialog() -> rfd::AsyncFileDialog {
+    let dialog = rfd::AsyncFileDialog::new();
     match last_dir() {
         Some(dir) if dir.is_dir() => dialog.set_directory(dir),
         _ => dialog,
@@ -342,12 +343,11 @@ impl PainterApp {
         let settings_changed = settings != saved.settings;
         let brushes_changed =
             (brushes.iter().zip(&saved.brushes)).any(|(a, b)| !preset_file::same_settings(a, b));
+        // Written on the file writer's thread (a disk flush can be slow).
         if settings_changed {
-            let result = serde_json::to_vec_pretty(&settings)
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| crate::project::write_atomically(&self.settings_path(), &bytes));
-            if let Err(err) = result {
-                log::warn!("Couldn't save the settings: {err}");
+            match serde_json::to_vec_pretty(&settings) {
+                Ok(bytes) => write_later(self.settings_path(), "settings", move || Ok(bytes)),
+                Err(err) => log::warn!("Couldn't save the settings: {err}"),
             }
         }
         if brushes_changed {
@@ -356,14 +356,9 @@ impl PainterApp {
                 brush,
                 file: None,
             });
-            let path = self.current_brushes_path();
-            let result = std::fs::create_dir_all(&self.brush_state.brushes_path)
-                .map_err(|e| e.to_string())
-                .and_then(|()| preset_file::encode(&presets))
-                .and_then(|bytes| crate::project::write_atomically(&path, &bytes));
-            if let Err(err) = result {
-                log::warn!("Couldn't save the brushes in use: {err}");
-            }
+            write_later(self.current_brushes_path(), "brushes in use", move || {
+                preset_file::encode(&presets)
+            });
         }
         if settings_changed || brushes_changed {
             self.workspace.settings_saved = Some(Saved { settings, brushes });

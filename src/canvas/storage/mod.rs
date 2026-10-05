@@ -4,6 +4,7 @@
 
 mod composite;
 mod merge;
+pub use merge::MergePlan;
 mod pixels;
 #[cfg(test)]
 mod tests;
@@ -227,12 +228,18 @@ impl Layer {
 
     /// The layer's settings and painted tiles, sorted row by row.
     pub(crate) fn snapshot(&self) -> CanvasLayerSnapshot {
-        let mut tiles: Vec<_> = self
+        use rayon::prelude::*;
+        let cells: Vec<(TileKey, SharedCell)> = self
             .tiles
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter_map(|(&(tx, ty), cell)| {
+            .map(|(&k, c)| (k, Arc::clone(c)))
+            .collect();
+        // Copied in parallel (a 4K layer is ~64 MB).
+        let mut tiles: Vec<_> = cells
+            .par_iter()
+            .filter_map(|&((tx, ty), ref cell)| {
                 let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.is_empty {
                     return None;
@@ -594,6 +601,16 @@ impl Canvas {
 
     pub fn layer_snapshots(&self) -> Vec<CanvasLayerSnapshot> {
         self.layers.iter().map(Layer::snapshot).collect()
+    }
+
+    /// A copy sharing nothing with this canvas: saved or exported on
+    /// another thread while this one changes.
+    pub fn detached_copy(&self) -> Canvas {
+        let mut copy = Canvas::new(self.width, self.height, self.clear_color, self.tile_size);
+        copy.replace_layers_from_snapshots(self.layer_snapshots(), self.active_layer_idx);
+        copy.blend_space = self.blend_space;
+        copy.next_layer_id = copy.next_layer_id.max(self.next_layer_id);
+        copy
     }
 
     pub fn replace_layers_from_snapshots(

@@ -192,11 +192,13 @@ impl PainterApp {
         if *saved == now || ctx.input(|i| i.pointer.any_down()) {
             return;
         }
-        let result = serde_json::to_vec_pretty(&now)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| crate::project::write_atomically(&self.view_settings_path(), &bytes));
-        if let Err(err) = result {
-            log::warn!("Couldn't save the view settings: {err}");
+        match serde_json::to_vec_pretty(&now) {
+            Ok(bytes) => crate::app::jobs::write_later(
+                self.view_settings_path(),
+                "view settings",
+                move || Ok(bytes),
+            ),
+            Err(err) => log::warn!("Couldn't save the view settings: {err}"),
         }
         self.workspace.view_aids.saved = Some(now);
     }

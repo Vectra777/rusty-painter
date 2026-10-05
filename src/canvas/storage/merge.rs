@@ -263,6 +263,12 @@ impl Canvas {
         Some(j)
     }
 
+    /// Put a merge planned with the layers as they still are in place.
+    /// Returns what undoes it.
+    pub fn apply_merge_plan(&mut self, plan: MergePlan) -> LayerSwap {
+        self.replace_with_merged(plan.removed, plan.layer)
+    }
+
     /// Replace the entries `removed` with `merged`, which goes where the
     /// lowest of them was. Returns what undoes it.
     fn replace_with_merged(&mut self, removed: Vec<usize>, merged: Layer) -> LayerSwap {
@@ -294,6 +300,13 @@ impl Canvas {
     /// into it as it shows over it alone); otherwise opacity, masks and
     /// clipping are all baked in.
     pub fn merge_down(&mut self, idx: usize) -> Result<LayerSwap, &'static str> {
+        let plan = self.plan_merge_down(idx)?;
+        Ok(self.apply_merge_plan(plan))
+    }
+
+    /// [`Self::merge_down`]'s merged layer, without changing the layers
+    /// yet (the slow part, which only reads them).
+    pub fn plan_merge_down(&self, idx: usize) -> Result<MergePlan, &'static str> {
         let idx = match self.layers.get(idx).map(|l| l.kind) {
             Some(LayerKind::Mask { owner }) => self.layer_index_of(owner).ok_or("No layer")?,
             Some(_) => idx,
@@ -351,12 +364,21 @@ impl Canvas {
             merged.opacity = 1.0;
         }
         let merged = Self::layer_with_tiles(merged, tiles);
-        Ok(self.replace_with_merged(vec![below, idx], merged))
+        Ok(MergePlan {
+            removed: vec![below, idx],
+            layer: merged,
+        })
     }
 
     /// Merge every layer that shows (drafts aside) into one, where the
     /// lowest of them was; hidden layers stay as they are.
     pub fn merge_visible(&mut self) -> Result<LayerSwap, &'static str> {
+        let plan = self.plan_merge_visible()?;
+        Ok(self.apply_merge_plan(plan))
+    }
+
+    /// [`Self::merge_visible`]'s merged layer, the layers left as they are.
+    pub fn plan_merge_visible(&self) -> Result<MergePlan, &'static str> {
         let n = self.layers.len();
         let shows = |i: usize| {
             let l = &self.layers[i];
@@ -427,12 +449,18 @@ impl Canvas {
         let layer = Self::layer_with_tiles(layer, tiles);
         let mut removed: Vec<usize> = removed.into_iter().collect();
         removed.sort_unstable();
-        Ok(self.replace_with_merged(removed, layer))
+        Ok(MergePlan { removed, layer })
     }
 
     /// Flatten everything into the background, as it shows. Hidden layers
     /// are dropped; draft layers (and the folders holding them) stay.
     pub fn flatten_image(&mut self) -> Result<LayerSwap, &'static str> {
+        let plan = self.plan_flatten_image()?;
+        Ok(self.apply_merge_plan(plan))
+    }
+
+    /// [`Self::flatten_image`]'s background, the layers left as they are.
+    pub fn plan_flatten_image(&self) -> Result<MergePlan, &'static str> {
         let n = self.layers.len();
         let kept: Vec<usize> = (1..n)
             .filter(|&i| {
@@ -462,6 +490,16 @@ impl Canvas {
         background.visible = true;
         background.draft = false;
         let background = Self::layer_with_tiles(background, tiles);
-        Ok(self.replace_with_merged(removed, background))
+        Ok(MergePlan {
+            removed,
+            layer: background,
+        })
     }
+}
+
+/// A merge worked out (the merged layer composited) but not yet in place:
+/// the entries it replaces, and what replaces them.
+pub struct MergePlan {
+    removed: Vec<usize>,
+    layer: Layer,
 }

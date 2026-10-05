@@ -21,6 +21,7 @@ pub(crate) mod library;
 pub(crate) mod menus;
 pub(crate) mod navigator;
 pub(crate) mod palette_window;
+pub(crate) mod preview_worker;
 pub(crate) mod radial_palette;
 pub(crate) mod reference_window;
 pub(crate) mod select_dialog;

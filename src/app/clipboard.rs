@@ -179,15 +179,28 @@ impl PainterApp {
     /// Paste as a new layer, with the Transform tool ready to place it.
     pub(crate) fn paste(&mut self) {
         let ours = self.workspace.clipboard.clip.clone();
-        let theirs = self.import_clip();
-        self.labelled("Paste", |app| match theirs {
-            // Another program's image: centred, scaled to fit.
-            Some(img) => app.import_rgba("Pasted", img),
-            None => {
-                if let Some(clip) = ours {
-                    app.paste_clip(&clip);
+        let exported = self.workspace.clipboard.exported;
+        let finish = move |app: &mut PainterApp, theirs: Option<image::RgbaImage>| {
+            app.labelled("Paste", |app| match theirs {
+                // Another program's image: centred, scaled to fit.
+                Some(img) => app.import_rgba("Pasted", img),
+                None => {
+                    if let Some(clip) = ours {
+                        app.paste_clip(&clip);
+                    }
                 }
-            }
+            });
+        };
+        let has_ours = self.workspace.clipboard.clip.is_some();
+        // The system clipboard is read on another thread: the program
+        // holding it may be slow to answer, and its image to decode.
+        if cfg!(test) {
+            finish(self, import_clip(exported, has_ours));
+            return;
+        }
+        self.spawn_job(None, move || {
+            let theirs = import_clip(exported, has_ours);
+            Box::new(move |app: &mut PainterApp| finish(app, theirs))
         });
     }
 
@@ -318,49 +331,57 @@ impl PainterApp {
         acted
     }
 
-    /// Put `clip` on the system clipboard (desktop).
+    /// Put `clip` on the system clipboard (desktop), from another thread.
     #[cfg(not(target_os = "android"))]
     fn export_clip(&mut self, clip: &Clip) {
-        let bytes = clip.to_rgba();
-        let fp = fingerprint(&bytes);
-        let image = arboard::ImageData {
-            width: clip.w,
-            height: clip.h,
-            bytes: std::borrow::Cow::Owned(bytes),
-        };
-        match arboard::Clipboard::new().and_then(|mut c| c.set_image(image)) {
-            Ok(()) => self.workspace.clipboard.exported = Some((clip.w, clip.h, fp)),
-            Err(err) => {
-                log::warn!("Couldn't put the image on the system clipboard: {err}");
-                self.workspace.clipboard.exported = None;
-            }
-        }
+        let clip = clip.clone();
+        self.workspace.clipboard.exported = None;
+        self.spawn_job(None, move || {
+            let bytes = clip.to_rgba();
+            let fp = fingerprint(&bytes);
+            let image = arboard::ImageData {
+                width: clip.w,
+                height: clip.h,
+                bytes: std::borrow::Cow::Owned(bytes),
+            };
+            let result = arboard::Clipboard::new().and_then(|mut c| c.set_image(image));
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok(()) => app.workspace.clipboard.exported = Some((clip.w, clip.h, fp)),
+                Err(err) => {
+                    log::warn!("Couldn't put the image on the system clipboard: {err}");
+                }
+            })
+        });
     }
 
     #[cfg(target_os = "android")]
     fn export_clip(&mut self, _clip: &Clip) {}
+}
 
-    /// An image on the system clipboard that isn't our own last copy.
-    #[cfg(not(target_os = "android"))]
-    fn import_clip(&self) -> Option<image::RgbaImage> {
-        let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
-        let ours = self.workspace.clipboard.exported.is_some_and(|(w, h, fp)| {
-            (w, h) == (image.width, image.height) && fp == fingerprint(&image.bytes)
-        });
-        if ours && self.workspace.clipboard.clip.is_some() {
-            return None;
-        }
-        image::RgbaImage::from_raw(
-            image.width as u32,
-            image.height as u32,
-            image.bytes.into_owned(),
-        )
+/// An image on the system clipboard that isn't our own last copy
+/// (`exported`, when `has_ours`).
+#[cfg(not(target_os = "android"))]
+fn import_clip(exported: Option<(usize, usize, u64)>, has_ours: bool) -> Option<image::RgbaImage> {
+    let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    let ours = exported.is_some_and(|(w, h, fp)| {
+        (w, h) == (image.width, image.height) && fp == fingerprint(&image.bytes)
+    });
+    if ours && has_ours {
+        return None;
     }
+    image::RgbaImage::from_raw(
+        image.width as u32,
+        image.height as u32,
+        image.bytes.into_owned(),
+    )
+}
 
-    #[cfg(target_os = "android")]
-    fn import_clip(&self) -> Option<image::RgbaImage> {
-        None
-    }
+#[cfg(target_os = "android")]
+fn import_clip(
+    _exported: Option<(usize, usize, u64)>,
+    _has_ours: bool,
+) -> Option<image::RgbaImage> {
+    None
 }
 
 #[cfg(test)]

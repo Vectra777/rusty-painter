@@ -26,6 +26,8 @@ pub struct BrushState {
     pub brush_preview: BrushPreviewState,
     pub presets: Vec<BrushPreset>,
     pub preset_previews: HashMap<String, egui::TextureHandle>,
+    /// Draws the presets' previews off the UI thread.
+    pub preset_preview_worker: crate::ui::preview_worker::PreviewWorker,
     pub loaded_brush_tips: Vec<LoadedTip>,
     /// Paper textures from `brushes/textures/` (besides the built-in ones).
     pub loaded_textures: Vec<Arc<crate::brush_engine::texture::Pattern>>,
@@ -87,6 +89,7 @@ impl BrushState {
             brush_preview: BrushPreviewState::default(),
             presets,
             preset_previews: HashMap::new(),
+            preset_preview_worker: Default::default(),
             loaded_brush_tips: Vec::new(),
             loaded_textures: Vec::new(),
             brushes_path,
@@ -457,6 +460,8 @@ pub struct WorkspaceState {
     pub gradient: crate::app::tools::gradient::GradientToolState,
     /// Content-aware fill (smart patch).
     pub patch: crate::app::tools::patch::PatchState,
+    /// Work running off the UI thread (files, decoding), applied when done.
+    pub jobs: crate::app::jobs::Jobs,
     /// The filter being previewed (Filter menu).
     pub filter: crate::app::tools::filter::FilterState,
     /// Autosave and the recovery offer.
@@ -548,6 +553,7 @@ impl WorkspaceState {
             shapes: Default::default(),
             gradient: Default::default(),
             patch: Default::default(),
+            jobs: Default::default(),
             filter: Default::default(),
             autosave: crate::app::autosave::AutosaveState::new(std::path::Path::new("")),
             timelapse: Default::default(),

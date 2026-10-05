@@ -111,9 +111,14 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                 if m.touch {
                     crate::ui::status_bar::touch_buttons(app, ui, m.menu_height);
                 } else {
-                    for (section, title) in MenuSection::ALL {
-                        ui.menu_button(title, |ui| section.items(app, ui));
-                    }
+                    // (Their commands need the canvas: they wait while
+                    // strokes are still being painted.)
+                    let settling = app.strokes_settling();
+                    ui.add_enabled_ui(!settling, |ui| {
+                        for (section, title) in MenuSection::ALL {
+                            ui.menu_button(title, |ui| section.items(app, ui));
+                        }
+                    });
                 }
                 crate::ui::widgets::vdivider(ui);
                 // The view controls go on the right; the tool options get
@@ -246,9 +251,8 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
                 menu_item(ui, &format!("Export… ({frames} frames)"), None)
             })
             .inner
-            && let Some(path) = timelapse_dialog()
         {
-            app.export_timelapse(path);
+            export_timelapse_dialog(app);
         }
         if ui
             .add_enabled_ui(frames > 0, |ui| menu_item(ui, "Clear", None))
@@ -655,33 +659,26 @@ pub(crate) fn open_project(app: &mut PainterApp) {
     app.pick_open(crate::app::files::OpenFor::Document);
 }
 
-/// Save back to the document's file, or ask for one.
+/// Save back to the document's file (in the background), or ask for one.
 pub(crate) fn save_project(app: &mut PainterApp) {
     match app.workspace.library.project.clone() {
-        Some(path) => {
-            if let Err(err) = app.save_project_to_path(path) {
-                app.report(err);
-            }
-        }
+        Some(path) => app.save_project_in_background(path),
         None => save_project_as(app),
     }
 }
 
+/// Ask where to save (the dialog doesn't hold up the window), then save
+/// there in the background.
 #[cfg(not(target_os = "android"))]
 pub(crate) fn save_project_as(app: &mut PainterApp) {
-    let Some(path) = crate::app::settings::file_dialog()
+    let dialog = crate::app::settings::file_dialog()
         .add_filter("Rusty Painter", &["rpainter"])
-        .set_file_name("project.rpainter")
-        .save_file()
-        .inspect(|p| crate::app::settings::remember_dir(p))
-    else {
-        return;
-    };
-    let path = crate::project::with_project_extension(&path);
-    match app.save_project_to_path(&path) {
-        Ok(()) => app.workspace.library.project = Some(path),
-        Err(err) => app.report(err),
-    }
+        .set_file_name("project.rpainter");
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::Save, |app, paths| {
+        let path = crate::project::with_project_extension(&paths[0]);
+        app.save_project_in_background(&path);
+        app.workspace.library.project = Some(path);
+    });
 }
 
 /// No file system to save to on Android: into the library.
@@ -711,17 +708,18 @@ fn export_project_file(app: &mut PainterApp) {
 }
 
 #[cfg(not(target_os = "android"))]
-fn timelapse_dialog() -> Option<std::path::PathBuf> {
-    crate::app::settings::file_dialog()
+fn export_timelapse_dialog(app: &mut PainterApp) {
+    let dialog = crate::app::settings::file_dialog()
         .add_filter("Video (MP4)", &["mp4"])
         .add_filter("Animated GIF", &["gif"])
-        .set_file_name("timelapse.mp4")
-        .save_file()
-        .inspect(|p| crate::app::settings::remember_dir(p))
+        .set_file_name("timelapse.mp4");
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::Save, |app, paths| {
+        app.export_timelapse(paths[0].clone());
+    });
 }
 
 /// Android: a GIF (no ffmpeg there), moved to Pictures once written.
 #[cfg(target_os = "android")]
-fn timelapse_dialog() -> Option<std::path::PathBuf> {
-    Some(crate::android::cache_dir().join("timelapse.gif"))
+fn export_timelapse_dialog(app: &mut PainterApp) {
+    app.export_timelapse(crate::android::cache_dir().join("timelapse.gif"));
 }

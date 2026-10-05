@@ -26,6 +26,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
         .resizable(false)
         .show(ctx, |ui| {
             let settings = &mut app.export_state.settings;
+            let mut choose = false;
 
             ui.horizontal(|ui| {
                 ui.label("Format");
@@ -61,12 +62,14 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| settings.default_file_name());
                     ui.monospace(display);
-                    if ui.button("Choose...").clicked()
-                        && let Some(path) = pick_file(&settings.default_file_name())
-                    {
-                        settings.chosen_path = Some(path);
+                    if ui.button("Choose...").clicked() {
+                        choose = true;
                     }
                 });
+            }
+
+            if choose {
+                choose_file(app);
             }
 
             if let Some(msg) = &app.export_state.message {
@@ -104,68 +107,13 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                         return;
                     }
 
-                    // Flatten on the UI thread, then save on a worker thread.
-                    // The shared canvas is not cloned across threads; size limits keep this bounded.
-                    app.stroke_worker.wait_idle();
-                    // Shader layers export as their current frame.
-                    app.bake_shader_layers();
-                    enum Data {
-                        Image(egui::ColorImage),
-                        Layers(Box<crate::project::psd::PsdDocument>),
-                        Svg(Result<String, String>),
-                    }
-                    let data = match format {
-                        ExportFormat::Psd => Data::Layers(Box::new(
-                            crate::project::psd::PsdDocument::from_canvas(&app.canvas),
-                        )),
-                        ExportFormat::Svg => {
-                            Data::Svg(crate::project::svg::document_svg(&app.canvas))
-                        }
-                        _ => Data::Image(app.canvas.flatten_final()),
-                    };
-
                     app.export_state.share = None;
                     app.export_state.in_progress = true;
                     app.export_state.progress = 0.05;
                     app.export_state.message = Some("Exporting...".to_string());
-                    let (tx, rx) = mpsc::channel();
-                    app.export_state.progress_rx = Some(rx);
-                    app.export_state.task = Some(thread::spawn(move || {
-                        let _ = tx.send(ExportProgress {
-                            progress: 0.2,
-                            message: Some("Saving file...".to_string()),
-                            share: None,
-                        });
-                        let result = match data {
-                            Data::Image(img) => save_color_image(img, target.clone(), format),
-                            Data::Layers(doc) => {
-                                crate::project::export::save_psd(&doc, target.clone())
-                            }
-                            Data::Svg(svg) => svg.and_then(|svg| {
-                                crate::project::export::save_svg(&svg, target.clone())
-                            }),
-                        }
-                        .and_then(|_| published(&target, format));
-                        match result {
-                            Ok((msg, share)) => {
-                                let _ = tx.send(ExportProgress {
-                                    progress: 1.0,
-                                    message: Some(msg.clone()),
-                                    share,
-                                });
-                                Ok(msg)
-                            }
-                            Err(err) => {
-                                let msg = format!("Export failed: {err}");
-                                let _ = tx.send(ExportProgress {
-                                    progress: 1.0,
-                                    message: Some(msg.clone()),
-                                    share: None,
-                                });
-                                Err(msg)
-                            }
-                        }
-                    }));
+                    // Once the strokes are painted: copy the document, then
+                    // flatten and save it on another thread.
+                    app.when_strokes_painted(move |app| start_export(app, target, format));
                 }
                 if ui
                     .add_enabled(!disabled, egui::Button::new("Cancel"))
@@ -179,18 +127,62 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
     app.export_state.show_modal = open;
 }
 
+/// Copy the document as it is now and export the copy on another thread.
+fn start_export(app: &mut PainterApp, target: PathBuf, format: ExportFormat) {
+    // Shader layers export as their current frame.
+    app.bake_shader_layers();
+    let canvas = app.canvas.detached_copy();
+    let (tx, rx) = mpsc::channel();
+    app.export_state.progress_rx = Some(rx);
+    app.export_state.task = Some(thread::spawn(move || {
+        let _ = tx.send(ExportProgress {
+            progress: 0.2,
+            message: Some("Saving file...".to_string()),
+            share: None,
+        });
+        let result = match format {
+            ExportFormat::Psd => crate::project::export::save_psd(
+                &crate::project::psd::PsdDocument::from_canvas(&canvas),
+                target.clone(),
+            ),
+            ExportFormat::Svg => crate::project::svg::document_svg(&canvas)
+                .and_then(|svg| crate::project::export::save_svg(&svg, target.clone())),
+            _ => save_color_image(canvas.flatten_final(), target.clone(), format),
+        }
+        .and_then(|_| published(&target, format));
+        match result {
+            Ok((msg, share)) => {
+                let _ = tx.send(ExportProgress {
+                    progress: 1.0,
+                    message: Some(msg.clone()),
+                    share,
+                });
+                Ok(msg)
+            }
+            Err(err) => {
+                let msg = format!("Export failed: {err}");
+                let _ = tx.send(ExportProgress {
+                    progress: 1.0,
+                    message: Some(msg.clone()),
+                    share: None,
+                });
+                Err(msg)
+            }
+        }
+    }));
+}
+
 #[cfg(not(target_os = "android"))]
-fn pick_file(default_name: &str) -> Option<PathBuf> {
-    crate::app::settings::file_dialog()
-        .set_file_name(default_name)
-        .save_file()
-        .inspect(|p| crate::app::settings::remember_dir(p))
+fn choose_file(app: &mut PainterApp) {
+    let dialog = crate::app::settings::file_dialog()
+        .set_file_name(app.export_state.settings.default_file_name());
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::Save, |app, paths| {
+        app.export_state.settings.chosen_path = Some(paths[0].clone());
+    });
 }
 
 #[cfg(target_os = "android")]
-fn pick_file(_default_name: &str) -> Option<PathBuf> {
-    None
-}
+fn choose_file(_app: &mut PainterApp) {}
 
 /// Export settings tracked by the app.
 #[derive(Clone)]

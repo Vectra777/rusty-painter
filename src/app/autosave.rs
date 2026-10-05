@@ -79,7 +79,19 @@ impl PainterApp {
 
     /// The user saved: the autosave has nothing more to keep.
     pub(crate) fn saved_by_user(&mut self) {
-        self.mark_saved();
+        self.saved_by_user_at(self.doc_version());
+    }
+
+    /// The user saved the document as it was at `version` (it may have
+    /// changed since, while the file was written).
+    pub(crate) fn saved_by_user_at(&mut self, version: Version) {
+        let state = &mut self.workspace.autosave;
+        state.saved = version;
+        state.autosaved = version;
+        // Changed meanwhile: the autosave keeps what the file doesn't.
+        if self.doc_version() != version {
+            return;
+        }
         if self.workspace.autosave.recovery.is_none() {
             let _ = std::fs::remove_file(self.autosave_path());
         }
@@ -111,10 +123,38 @@ impl PainterApp {
             ctx.request_repaint_after(due - now);
             return;
         }
-        if self.brush_state.is_drawing || self.session_running() {
+        // Not before the strokes are painted, nor while a file is being
+        // opened or saved.
+        if self.brush_state.is_drawing
+            || self.stroke_worker.is_busy()
+            || self.session_running()
+            || !self.workspace.jobs.is_idle()
+        {
             return;
         }
-        self.write_autosave();
+        self.autosave_in_background();
+    }
+
+    /// Copy the document, then encode and write it on another thread.
+    fn autosave_in_background(&mut self) {
+        self.sync_stroke_worker();
+        let snapshot = crate::project::ProjectSnapshot::capture(self);
+        let path = self.autosave_path();
+        let project = self.workspace.library.project.clone();
+        let version = self.doc_version();
+        let state = &mut self.workspace.autosave;
+        state.autosaved = version;
+        state.last_write = Some(Instant::now());
+        self.spawn_job(None, move || {
+            // A crash mid-write keeps the last one.
+            let result = snapshot.write(&path);
+            write_autosave_source(&path, project.as_deref());
+            Box::new(move |_: &mut PainterApp| {
+                if let Err(err) = result {
+                    log::error!("Autosave failed: {err}");
+                }
+            })
+        });
     }
 
     /// A tool session is previewing pixels that aren't applied yet.
@@ -138,17 +178,7 @@ impl PainterApp {
         if let Err(err) = result {
             log::error!("Autosave failed: {err}");
         }
-        // Which library project the work belongs to, to save it back there
-        // once recovered.
-        let source = path.with_extension("source");
-        match &self.workspace.library.project {
-            Some(project) => {
-                let _ = std::fs::write(&source, project.to_string_lossy().as_bytes());
-            }
-            None => {
-                let _ = std::fs::remove_file(&source);
-            }
-        }
+        write_autosave_source(&path, self.workspace.library.project.as_deref());
         let version = self.doc_version();
         let state = &mut self.workspace.autosave;
         state.autosaved = version;
@@ -174,27 +204,37 @@ impl PainterApp {
         let Some(path) = self.workspace.autosave.recovery.take() else {
             return;
         };
-        match self.load_project_from_path(&path) {
-            Ok(()) => {
-                self.mark_unsaved();
-                self.workspace.library.open = false;
-                self.workspace.library.project =
-                    std::fs::read_to_string(path.with_extension("source"))
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                        .filter(|p| p.exists());
-            }
-            Err(err) => {
-                log::error!("{err}");
-                self.export_state.message = Some(format!("Couldn't recover the work: {err}"));
-            }
-        }
+        // Read and decoded on another thread; then the library project it
+        // belongs to, to save it back there.
+        let source = path.with_extension("source");
+        self.open_project_in_background(&path, move |app| {
+            app.mark_unsaved();
+            app.workspace.library.open = false;
+            app.workspace.library.project = std::fs::read_to_string(&source)
+                .ok()
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.exists());
+        });
     }
 
     /// Drop the file left by the last session.
     pub(crate) fn discard_autosave(&mut self) {
         if let Some(path) = self.workspace.autosave.recovery.take() {
             let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Note which library project the autosave at `path` belongs to, to save
+/// it back there once recovered.
+fn write_autosave_source(path: &std::path::Path, project: Option<&std::path::Path>) {
+    let source = path.with_extension("source");
+    match project {
+        Some(project) => {
+            let _ = std::fs::write(&source, project.to_string_lossy().as_bytes());
+        }
+        None => {
+            let _ = std::fs::remove_file(&source);
         }
     }
 }
@@ -276,6 +316,7 @@ mod tests {
         next.workspace.autosave = super::AutosaveState::new(&path);
         assert!(next.workspace.autosave.recovery.is_some(), "offered");
         next.recover_autosave();
+        next.run_jobs();
         assert!(
             next.has_unsaved_work(),
             "recovered work isn't saved anywhere yet"

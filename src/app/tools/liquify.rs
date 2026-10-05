@@ -36,8 +36,14 @@ pub struct LiquifySession {
     field: LiquifyField,
     /// Tiles written into the layer so far.
     written: HashSet<(i32, i32)>,
-    /// Where the brush last dabbed, while it's down.
+    /// Where the brush last dabbed, while it's down: dabs are spaced along
+    /// the path from here, however finely the pen reports its moves.
     last: Option<Vec2>,
+    /// Where the pen is, while it's down (held-still modes work here).
+    pen: Option<Vec2>,
+    /// Canvas area changed since the layer was last redrawn: pen samples
+    /// only edit the field, and the layer is rendered once a frame.
+    pending: Option<[i32; 4]>,
 }
 
 impl PainterApp {
@@ -70,6 +76,8 @@ impl PainterApp {
             ),
             written: HashSet::new(),
             last: None,
+            pen: None,
+            pending: None,
         });
         true
     }
@@ -80,13 +88,17 @@ impl PainterApp {
         }
         if let Some(s) = self.layer_state.liquify.as_mut() {
             s.last = Some(pos);
+            s.pen = Some(pos);
         }
         if self.workspace.liquify.mode.is_continuous() {
             self.liquify_hold(1.0 / 30.0);
         }
     }
 
-    /// Brush moved to `pos`: dab along the way.
+    /// Brush moved to `pos`: dab along the way, a spacing apart. A tablet
+    /// reports many short moves where a mouse reports a few long ones; both
+    /// get the same dabs (and the same strength), the rest carries over to
+    /// the next move.
     pub(crate) fn liquify_drag(&mut self, pos: Vec2) {
         let settings = &self.workspace.liquify;
         let (mode, radius, strength) = (settings.mode, settings.radius, settings.strength);
@@ -96,11 +108,14 @@ impl PainterApp {
         let Some(last) = session.last else {
             return;
         };
+        session.pen = Some(pos);
         let travel = pos - last;
         let spacing = (radius * 0.12).max(1.0);
-        let steps = (travel.length() / spacing).ceil().max(1.0) as usize;
-        let step = travel / steps as f32;
-        let mut changed: Option<[i32; 4]> = None;
+        let steps = (travel.length() / spacing).floor() as usize;
+        if steps == 0 {
+            return;
+        }
+        let step = travel.normalized() * spacing;
         for i in 1..=steps {
             let center = last + step * i as f32;
             let (amount, delta) = match mode {
@@ -108,13 +123,10 @@ impl PainterApp {
                 _ => (strength * 0.15, Vec2::ZERO),
             };
             if let Some(r) = session.field.dab(mode, center, radius, amount, delta) {
-                changed = Some(union(changed, r));
+                session.pending = Some(union(session.pending, r));
             }
         }
-        session.last = Some(pos);
-        if let Some(rect) = changed {
-            self.liquify_redraw(rect);
-        }
+        session.last = Some(last + step * steps as f32);
     }
 
     /// Brush held still for `dt` seconds: continuous modes keep working.
@@ -127,33 +139,49 @@ impl PainterApp {
         let Some(session) = self.layer_state.liquify.as_mut() else {
             return;
         };
-        let Some(center) = session.last else {
+        let Some(center) = session.pen else {
             return;
         };
         // About 1.75 rad/s of twirl (or 60% pinch/bloat per second) at the
         // centre at 50% strength; it was a sluggish third of that.
         let amount = (strength * dt * 10.0).min(1.0);
         if let Some(rect) = session.field.dab(mode, center, radius, amount, Vec2::ZERO) {
-            self.liquify_redraw(rect);
+            session.pending = Some(union(session.pending, rect));
         }
     }
 
     pub(crate) fn liquify_release(&mut self) {
         if let Some(s) = self.layer_state.liquify.as_mut() {
             s.last = None;
+            s.pen = None;
         }
+        self.liquify_flush();
     }
 
     pub(crate) fn liquify_is_holding(&self) -> bool {
         self.layer_state
             .liquify
             .as_ref()
-            .is_some_and(|s| s.last.is_some())
+            .is_some_and(|s| s.pen.is_some())
     }
 
-    /// Re-render the tiles under `rect` into the layer.
+    /// Render what the field changed since the last call into the layer
+    /// (once a frame, however many pen samples came in).
+    pub(crate) fn liquify_flush(&mut self) {
+        if let Some(rect) = self
+            .layer_state
+            .liquify
+            .as_mut()
+            .and_then(|s| s.pending.take())
+        {
+            self.liquify_redraw(rect);
+        }
+    }
+
+    /// Re-render the tiles under `rect` into the layer. The session began
+    /// with the canvas released, and tile writes go through the tiles' own
+    /// locks: no wait for the stroke worker here.
     fn liquify_redraw(&mut self, rect: [i32; 4]) {
-        self.release_canvas();
         let Some(session) = self.layer_state.liquify.as_mut() else {
             return;
         };
@@ -177,6 +205,7 @@ impl PainterApp {
 
     /// Keep the result as one undo step.
     pub(crate) fn liquify_commit(&mut self) {
+        self.liquify_flush();
         let Some(session) = self.layer_state.liquify.take() else {
             return;
         };
@@ -260,5 +289,87 @@ fn union(a: Option<[i32; 4]>, b: [i32; 4]) -> [i32; 4] {
             a[2].max(b[2]),
             a[3].max(b[3]),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::canvas::Canvas;
+    use crate::canvas::liquify::LiquifyMode;
+    use crate::project::tests::test_app_pub;
+    use eframe::egui::{Color32, Vec2};
+
+    /// A layer of stripes, liquify active on it.
+    fn app() -> crate::PainterApp {
+        let mut app = test_app_pub(Canvas::new(256, 256, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        for ty in 0..4 {
+            for tx in 0..4 {
+                let tile = (0..64 * 64)
+                    .map(|i| Color32::from_rgb(((tx * 64 + i % 64) * 3 % 256) as u8, 0, 90))
+                    .collect();
+                app.canvas_mut().set_layer_tile_data(1, tx, ty, tile);
+            }
+        }
+        app.active_tool = crate::app::tools::Tool::Liquify;
+        app.workspace.liquify.radius = 40.0;
+        app
+    }
+
+    fn drag(app: &mut crate::PainterApp, mode: LiquifyMode, step: f32) {
+        app.workspace.liquify.mode = mode;
+        app.liquify_press(Vec2::new(60.0, 128.0));
+        let mut x = 60.0;
+        while x < 180.0 {
+            x += step;
+            app.liquify_drag(Vec2::new(x, 128.0));
+        }
+        app.liquify_release();
+        app.liquify_commit();
+    }
+
+    fn layer(app: &crate::PainterApp) -> Vec<Option<Vec<Color32>>> {
+        (0..16)
+            .map(|i| app.canvas.get_layer_tile_data(1, i % 4, i / 4))
+            .collect()
+    }
+
+    #[test]
+    fn a_pens_many_short_moves_liquify_like_a_mouses_few_long_ones() {
+        for mode in [LiquifyMode::Push, LiquifyMode::TwirlCw, LiquifyMode::Bloat] {
+            let mut pen = app();
+            drag(&mut pen, mode, 0.5);
+            let mut mouse = app();
+            drag(&mut mouse, mode, 12.0);
+            // The same dabs (to float rounding in where they land).
+            let worst = layer(&pen)
+                .iter()
+                .zip(layer(&mouse))
+                .flat_map(|(a, b)| {
+                    let (a, b) = (a.clone().unwrap_or_default(), b.unwrap_or_default());
+                    a.iter()
+                        .zip(b)
+                        .map(|(p, q)| (0..4).map(|c| p[c].abs_diff(q[c])).max().unwrap_or(0))
+                        .collect::<Vec<_>>()
+                })
+                .max()
+                .unwrap_or(0);
+            assert!(worst <= 2, "{mode:?}: off by {worst}");
+            assert!(layer(&pen) != layer(&app()), "{mode:?} changed nothing");
+        }
+    }
+
+    #[test]
+    fn moves_edit_the_field_and_the_layer_is_drawn_once_a_frame() {
+        let mut app = app();
+        let before = layer(&app);
+        app.workspace.liquify.mode = LiquifyMode::Push;
+        app.liquify_press(Vec2::new(60.0, 128.0));
+        for i in 1..=20 {
+            app.liquify_drag(Vec2::new(60.0 + i as f32 * 2.0, 128.0));
+        }
+        assert!(layer(&app) == before, "not drawn yet");
+        app.liquify_flush();
+        assert!(layer(&app) != before, "drawn by the frame");
     }
 }

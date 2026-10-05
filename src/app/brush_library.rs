@@ -316,17 +316,13 @@ impl PainterApp {
 
     /// Keep the library for next time. Errors are logged.
     pub(crate) fn save_brush_library(&self) {
-        let path = self.library_path();
-        let result = serde_json::to_vec_pretty(&self.brush_state.library.file)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| {
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-                }
-                crate::project::write_atomically(&path, &bytes)
-            });
-        if let Err(err) = result {
-            log::warn!("Couldn't save the brush library: {err}");
+        match serde_json::to_vec_pretty(&self.brush_state.library.file) {
+            Ok(bytes) => {
+                crate::app::jobs::write_later(self.library_path(), "brush library", move || {
+                    Ok(bytes)
+                })
+            }
+            Err(err) => log::warn!("Couldn't save the brush library: {err}"),
         }
     }
 

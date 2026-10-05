@@ -59,7 +59,10 @@ impl eframe::App for PainterApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_active_preset(false);
         self.save_settings(false);
+        self.finish_jobs_on_exit();
         self.autosave_on_exit();
+        // The settings and presets just written: on disk before quitting.
+        crate::app::jobs::flush_writes();
     }
 
     /// Handle UI, input, painting updates, and tile uploads each frame.
@@ -90,6 +93,7 @@ impl eframe::App for PainterApp {
 
         self.poll_file_pick();
         self.poll_export();
+        self.poll_jobs(ctx);
         // The library takes the window: no canvas, bars or shortcuts.
         if self.workspace.library.open {
             ui::library::library_screen(self, ctx);
@@ -160,6 +164,10 @@ impl eframe::App for PainterApp {
                 if self.poll_patch() {
                     ctx.set_cursor_icon(egui::CursorIcon::Progress);
                     needs_repaint = true;
+                } else if self.workspace.jobs.blocking_label().is_some() {
+                    // A document is being opened or saved: no painting
+                    // into what's about to be replaced.
+                    ctx.set_cursor_icon(egui::CursorIcon::Progress);
                 } else if closing || self.workspace.filter.session.is_some() {
                     // A filter dialog is open: the layer shows its preview.
                 } else {
@@ -190,6 +198,8 @@ impl eframe::App for PainterApp {
                     self.liquify_hold(dt);
                     needs_repaint = true;
                 }
+                // This frame's liquify dabs, rendered into the layer at once.
+                self.liquify_flush();
                 self.workspace.frame_stats.mark(Stage::Tools);
                 // 5. Pixels: let the stroke worker catch up, upload dirty
                 // tiles, paint the canvas, then the overlays on top.
@@ -247,6 +257,7 @@ impl eframe::App for PainterApp {
 
         // 6. Modals and floating windows.
         self.show_windows(ctx);
+        self.show_job_progress(ctx);
         self.workspace.frame_stats.mark(Stage::Windows);
         if std::mem::take(&mut self.brush_state.swatches_dirty) {
             self.save_swatches();
@@ -582,8 +593,15 @@ impl PainterApp {
         self.layer_state.thumbnails_dirty = true;
     }
 
-    /// Undo (or redo) the last action on the active layer.
+    /// Undo (or redo) the last action, once the strokes queued are painted
+    /// (at once if there are none; else on a later frame, in order).
     pub(crate) fn apply_history(&mut self, redo: bool) {
+        self.when_strokes_painted(move |app| app.apply_history_now(redo));
+    }
+
+    /// Undo (or redo) the last action on the active layer, now (waiting
+    /// for the stroke worker if it's painting).
+    pub(crate) fn apply_history_now(&mut self, redo: bool) {
         // Undo inside a magnetic outline takes back its last anchor.
         if self.workspace.select.magnetic.is_some() {
             if !redo {

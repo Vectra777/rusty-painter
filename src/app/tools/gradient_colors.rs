@@ -381,11 +381,11 @@ impl GradientLibrary {
         let Some(path) = &self.path else {
             return;
         };
-        let result = serde_json::to_vec_pretty(&self.custom)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| crate::project::write_atomically(path, &bytes));
-        if let Err(err) = result {
-            log::warn!("Couldn't save gradients to {}: {err}", path.display());
+        match serde_json::to_vec_pretty(&self.custom) {
+            Ok(bytes) => {
+                crate::app::jobs::write_later(path.clone(), "gradients", move || Ok(bytes))
+            }
+            Err(err) => log::warn!("Couldn't save gradients to {}: {err}", path.display()),
         }
     }
 }

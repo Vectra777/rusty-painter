@@ -4,6 +4,7 @@
 //! project; the last one opened comes back next session.
 
 use crate::PainterApp;
+use crate::app::import::FileSource;
 use crate::ui::style::*;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Vec2};
 use std::path::PathBuf;
@@ -86,35 +87,41 @@ impl RefView {
 
 impl PainterApp {
     /// Use the picture at `path` as the reference image.
-    pub(crate) fn open_reference_path(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+    /// Show the picture at `path`, read and decoded on another thread.
+    pub(crate) fn open_reference_path(&mut self, path: &std::path::Path) {
         let name = path.file_name().map_or_else(
             || "Reference".to_string(),
             |s| s.to_string_lossy().into_owned(),
         );
-        self.open_reference_bytes(&name, &bytes)?;
-        self.workspace.view_aids.reference.path = Some(path.to_path_buf());
-        Ok(())
+        self.open_reference_in_background(name, FileSource::Path(path.to_path_buf()));
     }
 
-    pub(crate) fn open_reference_bytes(&mut self, name: &str, bytes: &[u8]) -> Result<(), String> {
-        let img = image::load_from_memory(bytes)
-            .map_err(|e| format!("Couldn't open the image: {e}"))?
-            .to_rgba8();
-        self.set_reference_image(name, img);
-        Ok(())
+    /// Show the picture `source` holds, read, decoded and shrunk on another
+    /// thread.
+    pub(crate) fn open_reference_in_background(&mut self, name: String, source: FileSource) {
+        self.spawn_job(None, move || {
+            let result = source
+                .read()
+                .and_then(|bytes| crate::app::import::decode_image(&bytes))
+                .map(shrink_reference);
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok(img) => {
+                    app.set_reference_image(&name, img);
+                    if let FileSource::Path(path) = source {
+                        app.workspace.view_aids.reference.path = Some(path);
+                    }
+                }
+                Err(err) => {
+                    log::error!("{err}");
+                    app.workspace.view_aids.reference.error = Some(err);
+                }
+            })
+        });
     }
 
     /// Show `img` in the reference window (shrunk if it's huge).
-    pub(crate) fn set_reference_image(&mut self, name: &str, mut img: image::RgbaImage) {
-        let longest = img.width().max(img.height());
-        if longest > MAX_SIDE {
-            let k = MAX_SIDE as f32 / longest as f32;
-            let w = ((img.width() as f32 * k).round() as u32).max(1);
-            let h = ((img.height() as f32 * k).round() as u32).max(1);
-            img = crate::app::import::downscale(&img, w, h);
-        }
+    pub(crate) fn set_reference_image(&mut self, name: &str, img: image::RgbaImage) {
+        let img = shrink_reference(img);
         let r = &mut self.workspace.view_aids.reference;
         r.pending = Some((name.to_string(), img));
         r.error = None;
@@ -152,22 +159,27 @@ impl PainterApp {
     }
 }
 
+/// `img`, shrunk if it's huge.
+fn shrink_reference(img: image::RgbaImage) -> image::RgbaImage {
+    let longest = img.width().max(img.height());
+    if longest <= MAX_SIDE {
+        return img;
+    }
+    let k = MAX_SIDE as f32 / longest as f32;
+    let w = ((img.width() as f32 * k).round() as u32).max(1);
+    let h = ((img.height() as f32 * k).round() as u32).max(1);
+    crate::app::import::downscale(&img, w, h)
+}
+
 #[cfg(not(target_os = "android"))]
 fn open_dialog(app: &mut PainterApp) {
-    let Some(path) = crate::app::settings::file_dialog()
-        .add_filter(
-            "Images",
-            &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif"],
-        )
-        .pick_file()
-        .inspect(|p| crate::app::settings::remember_dir(p))
-    else {
-        return;
-    };
-    if let Err(err) = app.open_reference_path(&path) {
-        log::error!("{err}");
-        app.workspace.view_aids.reference.error = Some(err);
-    }
+    let dialog = crate::app::settings::file_dialog().add_filter(
+        "Images",
+        &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "gif"],
+    );
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::File, |app, paths| {
+        app.open_reference_path(&paths[0]);
+    });
 }
 
 /// No file dialog on Android: pick from the photo library.
@@ -187,9 +199,8 @@ pub fn reference_window(app: &mut PainterApp, ctx: &egui::Context) {
         && r.image.is_none()
         && r.pending.is_none()
         && let Some(path) = r.path.clone()
-        && let Err(err) = app.open_reference_path(&path)
     {
-        log::warn!("{err}");
+        app.open_reference_path(&path);
     }
     let r = &mut app.workspace.view_aids.reference;
     if let Some((name, img)) = r.pending.take() {

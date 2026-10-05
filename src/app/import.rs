@@ -6,17 +6,67 @@ use crate::PainterApp;
 use crate::app::tools::Tool;
 use crate::selection::transform::TransformInfo;
 use eframe::egui::Color32;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Where a file's bytes come from: read on a job's thread.
+#[derive(Clone)]
+pub(crate) enum FileSource {
+    Path(PathBuf),
+    /// Already in memory (dropped on the window on the web, Android's
+    /// gallery).
+    Bytes(Arc<[u8]>),
+}
+
+impl FileSource {
+    pub(crate) fn read(&self) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+        match self {
+            Self::Path(path) => std::fs::read(path)
+                .map(std::borrow::Cow::Owned)
+                .map_err(|e| format!("Couldn't read {}: {e}", path.display())),
+            Self::Bytes(bytes) => Ok(std::borrow::Cow::Borrowed(bytes)),
+        }
+    }
+}
+
+pub(crate) fn decode_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    Ok(image::load_from_memory(bytes)
+        .map_err(|e| format!("Couldn't open the image: {e}"))?
+        .to_rgba8())
+}
+
+/// `img` scaled down to fit `w`×`h` if it's bigger.
+fn fit_image(img: image::RgbaImage, (cw, ch): (u32, u32)) -> image::RgbaImage {
+    if img.width() <= cw && img.height() <= ch {
+        return img;
+    }
+    let k = (cw as f32 / img.width() as f32).min(ch as f32 / img.height() as f32);
+    let (w, h) = (
+        ((img.width() as f32 * k).round() as u32).max(1),
+        ((img.height() as f32 * k).round() as u32).max(1),
+    );
+    downscale(&img, w, h)
+}
 
 impl PainterApp {
-    pub(crate) fn import_image_path(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
-        let name = path
-            .file_stem()
-            .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
-        self.import_image_bytes(&name, &bytes)
+    /// Import a picture as a new layer: read, decoded and fitted to the
+    /// canvas on another thread.
+    pub(crate) fn import_image_in_background(&mut self, name: String, source: FileSource) {
+        let size = (self.canvas.width() as u32, self.canvas.height() as u32);
+        self.spawn_job(None, move || {
+            let result = source
+                .read()
+                .and_then(|bytes| decode_image(&bytes))
+                .map(|img| fit_image(img, size));
+            Box::new(move |app: &mut PainterApp| match result {
+                // (Fitted again if the canvas changed size meanwhile.)
+                Ok(img) => app.import_rgba(&name, img),
+                Err(err) => app.report(err),
+            })
+        });
     }
 
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn import_image_bytes(&mut self, name: &str, bytes: &[u8]) -> Result<(), String> {
         let img = image::load_from_memory(bytes)
             .map_err(|e| format!("Couldn't open the image: {e}"))?
@@ -26,16 +76,9 @@ impl PainterApp {
     }
 
     /// Put `img` on a new layer above the selected one.
-    pub(crate) fn import_rgba(&mut self, name: &str, mut img: image::RgbaImage) {
+    pub(crate) fn import_rgba(&mut self, name: &str, img: image::RgbaImage) {
         let (cw, ch) = (self.canvas.width() as u32, self.canvas.height() as u32);
-        if img.width() > cw || img.height() > ch {
-            let k = (cw as f32 / img.width() as f32).min(ch as f32 / img.height() as f32);
-            let (w, h) = (
-                ((img.width() as f32 * k).round() as u32).max(1),
-                ((img.height() as f32 * k).round() as u32).max(1),
-            );
-            img = downscale(&img, w, h);
-        }
+        let img = fit_image(img, (cw, ch));
         let (w, h) = (img.width() as i32, img.height() as i32);
         let (ox, oy) = ((cw as i32 - w) / 2, (ch as i32 - h) / 2);
 
@@ -83,40 +126,34 @@ impl PainterApp {
                         .iter()
                         .any(|e| extension(e))
             });
-            let result = if let Some(project) = project {
-                // Projects open.
-                self.load_project_from_path(project)
+            let source = match (&file.bytes, path) {
+                (Some(bytes), _) => FileSource::Bytes(Arc::clone(bytes)),
+                (None, Some(path)) => FileSource::Path(path.to_path_buf()),
+                (None, None) => continue,
+            };
+            // All read and decoded on other threads.
+            if let Some(project) = project {
+                // Projects open (as File → Open does).
+                self.open_picked(
+                    &crate::app::files::OpenFor::Document,
+                    file.name.clone(),
+                    source,
+                    Some(project.to_path_buf()),
+                );
             } else if Self::is_brush_file(&file.name)
                 || path.is_some_and(|p| Self::is_brush_file(&p.to_string_lossy()))
             {
                 // Brushes (ours or another app's) join the library.
-                match (&file.bytes, path) {
-                    (Some(bytes), _) => self.import_brushes_bytes(&file.name, bytes).map(|_| ()),
-                    (None, Some(path)) => self.import_brushes_path(path).map(|_| ()),
-                    (None, None) => continue,
-                }
+                let name = path
+                    .and_then(|p| p.file_name())
+                    .map_or_else(|| file.name.clone(), |n| n.to_string_lossy().into_owned());
+                self.import_brushes_in_background(name, source);
+            } else if to_reference {
+                self.open_reference_in_background(file.name.clone(), source);
+            } else if to_palette {
+                self.palette_from_image_in_background(name, source);
             } else {
-                let bytes = match (&file.bytes, path) {
-                    (Some(bytes), _) => Ok(bytes.to_vec()),
-                    (None, Some(path)) => std::fs::read(path)
-                        .map_err(|e| format!("Couldn't read {}: {e}", path.display())),
-                    (None, None) => continue,
-                };
-                bytes.and_then(|bytes| {
-                    if to_reference {
-                        self.open_reference_bytes(&file.name, &bytes)?;
-                        self.workspace.view_aids.reference.path = path.map(|p| p.to_path_buf());
-                        Ok(())
-                    } else if to_palette {
-                        self.extract_palette_from_image(&name, &bytes)
-                    } else {
-                        self.import_image_bytes(&name, &bytes)
-                    }
-                })
-            };
-            if let Err(err) = result {
-                log::error!("{err}");
-                self.export_state.message = Some(err);
+                self.import_image_in_background(name, source);
             }
         }
     }
@@ -194,17 +231,15 @@ pub(crate) fn downscale(src: &image::RgbaImage, w: u32, h: u32) -> image::RgbaIm
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn import_image_dialog(app: &mut PainterApp) {
-    let Some(path) = crate::app::settings::file_dialog()
-        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
-        .pick_file()
-        .inspect(|p| crate::app::settings::remember_dir(p))
-    else {
-        return;
-    };
-    if let Err(err) = app.import_image_path(&path) {
-        log::error!("{err}");
-        app.export_state.message = Some(err);
-    }
+    let dialog = crate::app::settings::file_dialog()
+        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"]);
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::File, |app, paths| {
+        let path = paths[0].clone();
+        let name = path
+            .file_stem()
+            .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
+        app.import_image_in_background(name, FileSource::Path(path));
+    });
 }
 
 /// No file dialog on Android: pick from the photo library instead.

@@ -48,6 +48,8 @@ criterion = "0.5"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 octotablet = "0.1"
 rfd = "0.17.2"
+# Waiting on rfd's file dialogs off the UI thread.
+pollster = "0.4"
 # Images on the system clipboard (copy / paste between apps).
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 # Telling an X11 window from a Wayland one (octotablet has no X11 backend).

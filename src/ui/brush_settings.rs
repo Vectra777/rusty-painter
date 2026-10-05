@@ -6,9 +6,13 @@ use crate::brush_engine::brush_options::{PaintingMode, PixelBrushShape, Placemen
 use crate::brush_engine::hardness::SoftnessSelector;
 use crate::ui::style::*;
 use crate::ui::widgets::{percent_of_unit, property_row, section, segmented, slider_row};
-use crate::ui::{brush_preview::render_preview, curve_editor::curve_editor};
+use crate::ui::{
+    brush_preview::{collect_preview, render_preview},
+    curve_editor::curve_editor,
+};
 use eframe::egui::{self, Color32};
 use rayon::ThreadPool;
+use std::sync::Arc;
 
 pub struct BrushPreviewState {
     /// Strip size in points.
@@ -17,6 +21,10 @@ pub struct BrushPreviewState {
     pub dirty: bool,
     /// Display scale the texture was rendered at.
     pub pixels_per_point: f32,
+    /// Draws the strip off the UI thread.
+    pub worker: crate::ui::preview_worker::PreviewWorker,
+    /// The display scale of the strip being drawn.
+    pub pending_pixels_per_point: f32,
 }
 
 impl Default for BrushPreviewState {
@@ -26,6 +34,8 @@ impl Default for BrushPreviewState {
             texture: None,
             dirty: true,
             pixels_per_point: 1.0,
+            worker: Default::default(),
+            pending_pixels_per_point: 1.0,
         }
     }
 }
@@ -61,7 +71,7 @@ pub fn brush_settings_panel(
     ui: &mut egui::Ui,
     brush: &mut Brush,
     preview: &mut BrushPreviewState,
-    pool: &ThreadPool,
+    pool: &Arc<ThreadPool>,
     loaded_tips: &[crate::app::state::LoadedTip],
     textures: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
 ) {
@@ -85,7 +95,7 @@ fn brush_settings_contents(
     ui: &mut egui::Ui,
     brush: &mut Brush,
     preview: &mut BrushPreviewState,
-    pool: &ThreadPool,
+    pool: &Arc<ThreadPool>,
     loaded_tips: &[crate::app::state::LoadedTip],
     textures: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
 ) -> (bool, bool) {
@@ -105,6 +115,7 @@ fn brush_settings_contents(
         render_preview(preview, brush, pool, ui.ctx());
         preview.dirty = false;
     }
+    collect_preview(preview, ui.ctx());
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), PREVIEW_HEIGHT as f32),
         egui::Sense::hover(),

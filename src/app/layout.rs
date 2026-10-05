@@ -480,11 +480,13 @@ impl PainterApp {
         for (id, width) in panel_width_slots(&mut widths) {
             *width = ctx.data(|d| d.get_temp(egui::Id::new((id, "width"))));
         }
-        let result = serde_json::to_vec_pretty(&widths)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| crate::project::write_atomically(&self.panel_widths_path(), &bytes));
-        if let Err(err) = result {
-            log::warn!("Couldn't save the panel widths: {err}");
+        match serde_json::to_vec_pretty(&widths) {
+            Ok(bytes) => {
+                crate::app::jobs::write_later(self.panel_widths_path(), "panel widths", move || {
+                    Ok(bytes)
+                })
+            }
+            Err(err) => log::warn!("Couldn't save the panel widths: {err}"),
         }
     }
 }
@@ -569,7 +571,13 @@ fn right_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
         }
         panel_title(ui, "LAYERS");
         let ctx = ui.ctx().clone();
-        ui::layers::layers_panel(&ctx, ui, app);
+        // Waits (greyed) while strokes are still being painted: its edits
+        // need the canvas to itself.
+        let settling = app.strokes_settling();
+        ui.add_enabled_ui(!settling, |ui| ui::layers::layers_panel(&ctx, ui, app));
+        if settling {
+            ctx.request_repaint();
+        }
     }
 }
 
