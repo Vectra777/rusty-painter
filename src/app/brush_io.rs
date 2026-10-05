@@ -524,7 +524,7 @@ impl PainterApp {
         Ok(count)
     }
 
-    /// [`Self::import_brushes_bytes`] without holding up the frames: the
+    /// `import_brushes_bytes` (test-only) without holding up the frames: the
     /// file is read, decoded, and its presets written into the library
     /// folder on another thread; they're listed once that's done.
     pub(crate) fn import_brushes_in_background(&mut self, name: String, source: FileSource) {
