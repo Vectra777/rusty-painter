@@ -6,6 +6,7 @@
 use crate::PainterApp;
 use crate::app::import::FileSource;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Vec2};
 use std::path::PathBuf;
 
@@ -221,6 +222,7 @@ pub fn reference_window(app: &mut PainterApp, ctx: &egui::Context) {
     let mut picked = None;
     let mut browse = false;
     let response = egui::Window::new("Reference")
+        .fit_screen_size(ctx)
         .open(&mut open)
         .resizable(true)
         .collapsible(true)

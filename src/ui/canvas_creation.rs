@@ -3,6 +3,7 @@
 use crate::app::document::{MAX_CANVAS_DIMENSION, MAX_CANVAS_DPI};
 use crate::canvas::blend_modes::BlendSpace;
 use crate::ui::style::TEXT_DIM;
+use crate::ui::widgets::FitScreen;
 use crate::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation, PainterApp};
 use eframe::egui::{self, RichText};
 
@@ -14,6 +15,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     let mut open = app.modal_state.show_new_canvas_modal;
     egui::Window::new("New Canvas")
+        .fit_screen(ctx)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .collapsible(false)

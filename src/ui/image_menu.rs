@@ -3,6 +3,7 @@
 
 use crate::PainterApp;
 use crate::canvas::geometry::ImageOp;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{property_row, segmented};
 use eframe::egui;
 
@@ -99,6 +100,7 @@ pub fn size_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         SizeDialog::Image { .. } => "Image Size",
     };
     egui::Window::new(title)
+        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

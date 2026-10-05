@@ -8,6 +8,7 @@
 use crate::PainterApp;
 use crate::app::view::viewport::{MAX_ZOOM, MIN_ZOOM};
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use std::time::{Duration, Instant};
 
@@ -150,6 +151,7 @@ pub fn navigator_window(app: &mut PainterApp, ctx: &egui::Context) {
     refresh(app, ctx);
     let mut open = true;
     egui::Window::new("Navigator")
+        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(true)

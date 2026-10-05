@@ -1,5 +1,6 @@
 //! The Export dialog: format, file name and progress.
 
+use crate::ui::widgets::FitScreen;
 use crate::{
     PainterApp,
     app::document::validate_canvas_size,
@@ -20,6 +21,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     let mut open = app.export_state.show_modal;
     egui::Window::new("Export Canvas")
+        .fit_screen(ctx)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .collapsible(false)

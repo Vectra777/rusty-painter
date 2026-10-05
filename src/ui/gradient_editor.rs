@@ -7,6 +7,7 @@
 use crate::PainterApp;
 use crate::app::tools::gradient_colors::{CustomGradient, StopColor};
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{paint_gradient_strip, paint_swatch, percent_of_unit, segmented};
 use eframe::egui::{self, Color32, RichText, Stroke};
 
@@ -39,6 +40,7 @@ pub fn gradient_editor_window(app: &mut PainterApp, ctx: &egui::Context) {
     let mut changed = false;
     let mut delete = false;
     egui::Window::new("Gradient Editor")
+        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)

@@ -5,6 +5,7 @@
 use crate::PainterApp;
 use crate::app::frame_stats::{FrameTimes, Group, Stage};
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, Color32, RichText, Stroke};
 
 /// One colour per group, in [`Group::ALL`] order (checked for colour-blind
@@ -55,6 +56,7 @@ pub fn frame_times_window(app: &mut PainterApp, ctx: &egui::Context) {
     }
     let mut open = true;
     egui::Window::new("Frame Times")
+        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(true)

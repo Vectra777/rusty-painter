@@ -3,6 +3,7 @@
 
 use crate::PainterApp;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{color_swatch, segmented};
 use eframe::egui::{self, RichText};
 
@@ -14,6 +15,7 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
     let touch = metrics(ctx).touch;
     let swatch = if touch { 34.0 } else { 24.0 };
     let response = egui::Window::new("Palette")
+        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)

@@ -4,6 +4,7 @@
 use crate::PainterApp;
 use crate::canvas::filters::{Filter, GradientMap, MAP_STOPS, MAX_REACH, ToneCurve};
 use crate::ui::curve_editor::{CurvePreset, curve_editor_with};
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{paint_gradient_strip, percent_of_unit, segmented, slider_row};
 use eframe::egui::{self, Key};
 
@@ -15,6 +16,7 @@ pub fn filter_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = true;
     let (mut ok, mut cancel) = (false, false);
     egui::Window::new(filter.name())
+        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
@@ -558,6 +560,7 @@ pub fn adjustment_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = true;
     let mut done = false;
     egui::Window::new(title)
+        .fit_screen(ctx)
         .id(egui::Id::new("adjustment_dialog"))
         .open(&mut open)
         .collapsible(false)

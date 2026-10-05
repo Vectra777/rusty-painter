@@ -537,6 +537,76 @@ fn blur_columns(
     }
 }
 
+/// Point `i` (from 1) of the Halton sequence in `base`, in 0..1.
+fn halton(mut i: u32, base: u32) -> f32 {
+    let (mut f, mut out) = (1.0f32, 0.0f32);
+    while i > 0 {
+        f /= base as f32;
+        out += f * (i % base) as f32;
+        i /= base;
+    }
+    out
+}
+
+/// Dulling's colour: the average of `source` (a `side`² patch) weighted by
+/// `mask`, over the pixels within `reach` of the middle. Like Krita, it
+/// samples spread-out pixels (a Halton sequence) until the colour stops
+/// moving rather than reading them all: at least 64 (or 2%), then 16 at a
+/// time until no channel moves more than 2/255. `None` if what it read
+/// carried less than half a pixel's weight.
+fn halton_dull(
+    source: &[Color32],
+    mask: &[f32],
+    side: usize,
+    reach: f32,
+    codec: Codec,
+) -> Option<[f32; 4]> {
+    let mid = side as f32 * 0.5;
+    let inside = |l: usize| (l as f32 + 0.5 - mid).abs() <= reach;
+    let lo = (0..side).find(|&l| inside(l))?;
+    let hi = (0..side).rfind(|&l| inside(l))? + 1;
+    let n_side = hi - lo;
+    let n = n_side * n_side;
+    let first = n.min(64.max((n as f32 * 0.02).round() as usize));
+    let (mut sum, mut weight) = ([0.0f32; 4], 0.0f32);
+    let take = |i: u32, sum: &mut [f32; 4], weight: &mut f32| {
+        let x = lo + ((halton(i, 2) * n_side as f32) as usize).min(n_side - 1);
+        let y = lo + ((halton(i, 3) * n_side as f32) as usize).min(n_side - 1);
+        let at = y * side + x;
+        let w = mask[at];
+        if w > 0.0 {
+            let px = codec.to_f(source[at]);
+            for c in 0..4 {
+                sum[c] += px[c] * w;
+            }
+            *weight += w;
+        }
+    };
+    let mean = |sum: [f32; 4], weight: f32| sum.map(|v| v / weight.max(1e-6));
+    let mut i = 1u32;
+    for _ in 0..first {
+        take(i, &mut sum, &mut weight);
+        i += 1;
+    }
+    let mut taken = first;
+    let mut last = mean(sum, weight);
+    while taken < n {
+        let batch = (n - taken).min(16);
+        for _ in 0..batch {
+            take(i, &mut sum, &mut weight);
+            i += 1;
+        }
+        taken += batch;
+        let now = mean(sum, weight);
+        let moved = (0..4).map(|c| (now[c] - last[c]).abs()).fold(0.0, f32::max);
+        last = now;
+        if moved * 255.0 <= 2.0 {
+            break;
+        }
+    }
+    (weight > 0.5).then_some(last)
+}
+
 impl PainterApp {
     pub(crate) fn set_blend_tool(&mut self, smudge: bool) {
         // They use the brush's settings, not the eraser's.
@@ -1339,43 +1409,18 @@ impl BlendSession {
         let source = read_patch(&self.canvas, Some(idx), (sx, sy), side, side, wrap);
         // Dulling: one colour, the weighted average (by the tip and the
         // paint's coverage, premultiplied) of the middle of the source, out
-        // to the smudge radius; all of it if that held no paint.
+        // to the smudge radius, widened while that holds no paint.
         let dulled = k.dulling.then(|| {
-            let mid = side as f32 * 0.5;
-            let average = |radius: f32| {
-                let reach = (r * radius).max(0.5);
-                let inside = |l: usize| (l as f32 + 0.5 - mid).abs() <= reach;
-                let (sum, weight) = pool.install(|| {
-                    (0..side)
-                        .into_par_iter()
-                        .filter(|&ly| inside(ly))
-                        .map(|ly| {
-                            let (mut sum, mut weight) = ([0.0f32; 4], 0.0f32);
-                            let (first, last) = spans[ly];
-                            for lx in (first..last).filter(|&lx| inside(lx)) {
-                                let i = ly * side + lx;
-                                let w = mask[i];
-                                if w <= 0.0 {
-                                    continue;
-                                }
-                                let px = codec.to_f(source[i]);
-                                for c in 0..4 {
-                                    sum[c] += px[c] * w;
-                                }
-                                weight += w;
-                            }
-                            (sum, weight)
-                        })
-                        .reduce(
-                            || ([0.0f32; 4], 0.0f32),
-                            |(a, wa), (b, wb)| (std::array::from_fn(|c| a[c] + b[c]), wa + wb),
-                        )
-                });
-                (weight > 0.5).then(|| sum.map(|v| v / weight))
-            };
-            average(k.radius)
-                .or_else(|| average(1.0))
-                .unwrap_or([0.0; 4])
+            let mut radius = k.radius;
+            loop {
+                if let Some(c) = halton_dull(&source, &mask, side, (r * radius).max(0.5), codec) {
+                    break c;
+                }
+                if radius >= 1.0 {
+                    break [0.0; 4];
+                }
+                radius = (radius + 0.05).min(1.0);
+            }
         });
 
         // One pixel under the tip: the picked-up paint over the layer,
@@ -1659,6 +1704,7 @@ mod tests {
 
 #[cfg(test)]
 mod mix_tests {
+    use super::{Codec, halton_dull};
     use crate::canvas::Canvas;
     use eframe::egui::{Color32, Vec2};
 
@@ -2020,6 +2066,48 @@ mod mix_tests {
         };
         let (dull, smear) = (spread(true), spread(false));
         assert!(dull < smear / 2, "dulling evens out: {dull} vs {smear}");
+    }
+
+    #[test]
+    fn halton_dulling_lands_near_the_full_weighted_average() {
+        let side = 81;
+        let codec = Codec::new();
+        // Noise under a soft round tip.
+        let mut seed = 12345u32;
+        let source: Vec<Color32> = (0..side * side)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                let v = (seed >> 16) as u8;
+                Color32::from_rgb(v, v / 2, 255 - v)
+            })
+            .collect();
+        let mid = side as f32 * 0.5;
+        let mask: Vec<f32> = (0..side * side)
+            .map(|i| {
+                let (x, y) = ((i % side) as f32 + 0.5 - mid, (i / side) as f32 + 0.5 - mid);
+                (1.0 - (x * x + y * y).sqrt() / 40.0).max(0.0)
+            })
+            .collect();
+        let (mut sum, mut weight) = ([0.0f32; 4], 0.0f32);
+        for (c, &w) in source.iter().zip(&mask) {
+            let px = codec.to_f(*c);
+            for k in 0..4 {
+                sum[k] += px[k] * w;
+            }
+            weight += w;
+        }
+        let full = sum.map(|v| v / weight);
+        let quick = halton_dull(&source, &mask, side, 40.0, codec).expect("paint");
+        // Pure noise is the worst case: it stops once a batch moves the
+        // colour by 2/255 or less (as Krita does), a few levels off.
+        for k in 0..4 {
+            assert!(
+                (quick[k] - full[k]).abs() * 255.0 <= 10.0,
+                "{quick:?} vs {full:?}"
+            );
+        }
+        // Nothing under the tip: no colour.
+        assert!(halton_dull(&source, &vec![0.0; side * side], side, 40.0, codec).is_none());
     }
 
     #[test]

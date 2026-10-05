@@ -28,6 +28,7 @@ pub(crate) mod select_dialog;
 pub(crate) mod select_menu;
 pub(crate) mod shader_editor;
 pub(crate) mod shape_menu;
+pub(crate) mod splash;
 pub(crate) mod status_bar;
 pub(crate) mod style;
 pub(crate) mod symmetry_menu;

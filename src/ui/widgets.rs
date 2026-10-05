@@ -6,6 +6,41 @@ use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use eframe::egui::{self, Color32, Rect, Response, RichText, Sense, Stroke};
 
+/// Room kept between a floating window and the app's edges.
+const WINDOW_MARGIN: f32 = 8.0;
+
+/// Floating windows kept whole inside the app, whatever its size: never
+/// wider or taller than the window (or, after a resize, left past its
+/// edges).
+pub(crate) trait FitScreen: Sized {
+    /// Sized by its contents: what doesn't fit scrolls.
+    fn fit_screen(self, ctx: &egui::Context) -> Self;
+    /// Resizable (it scrolls its own contents): only capped.
+    fn fit_screen_size(self, ctx: &egui::Context) -> Self;
+}
+
+impl FitScreen for egui::Window<'_> {
+    fn fit_screen(self, ctx: &egui::Context) -> Self {
+        self.fit_screen_size(ctx).vscroll(true)
+    }
+
+    fn fit_screen_size(self, ctx: &egui::Context) -> Self {
+        let room = ctx.screen_rect().shrink(WINDOW_MARGIN);
+        // The cap is on the contents: without the title bar and the
+        // frame's margins and border, those stuck out past the app's edge.
+        let style = ctx.style();
+        let frame = egui::Frame::window(&style);
+        let title = ctx.fonts(|f| f.row_height(&egui::TextStyle::Body.resolve(&style)))
+            + frame.inner_margin.sum().y;
+        let chrome = frame.inner_margin.sum()
+            + frame.outer_margin.sum()
+            + egui::vec2(0.0, title)
+            + egui::Vec2::splat(2.0 * frame.stroke.width);
+        self.constrain_to(room)
+            .max_size((room.size() - chrome).max(egui::Vec2::splat(40.0)))
+    }
+}
+
 /// A bar's frame: flat `fill`, 8 px side padding.
 pub(crate) fn bar_frame(fill: Color32) -> egui::Frame {
     egui::Frame::none()

@@ -4,6 +4,7 @@
 
 use crate::PainterApp;
 use crate::app::input::keymap::{self, Action};
+use crate::ui::widgets::FitScreen;
 use eframe::egui;
 use rayon::ThreadPoolBuilder;
 
@@ -136,6 +137,7 @@ pub fn general_settings_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     let mut open = app.modal_state.show_general_settings;
     egui::Window::new("Settings")
+        .fit_screen(ctx)
         .open(&mut open)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
@@ -277,6 +279,7 @@ pub fn shortcuts_window(app: &mut PainterApp, ctx: &egui::Context) {
     let columns = shortcut_columns(columns);
     let mut open = true;
     egui::Window::new("Keyboard Shortcuts")
+        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

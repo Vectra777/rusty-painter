@@ -25,7 +25,7 @@ pub use app::document::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSetti
 use winit::platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp};
 
 /// The window title (desktop) and app name.
-const APP_NAME: &str = "Rusty Painter";
+pub(crate) const APP_NAME: &str = "Rusty Painter";
 
 /// Launch the desktop app (the binary's `main`).
 #[cfg(not(target_os = "android"))]

@@ -288,6 +288,7 @@ impl PainterApp {
             }
         }
         self.active_tool = Tool::Brush;
+        self.workspace.library.has_document = true;
     }
 }
 

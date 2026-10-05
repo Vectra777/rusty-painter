@@ -4,6 +4,7 @@
 use crate::PainterApp;
 use crate::app::tools::select::SelectionModify;
 use crate::selection::SelectionMode;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{property_row, slider_row};
 use eframe::egui::{self, Key};
 
@@ -116,6 +117,7 @@ pub fn select_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         SelectDialog::Save { .. } => "Save Selection".to_string(),
     };
     egui::Window::new(title)
+        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

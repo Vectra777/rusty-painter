@@ -224,6 +224,7 @@ impl PainterApp {
             // Saving goes back to where it came from, if it was ours.
             _ => {
                 self.workspace.library.project = path.filter(|p| crate::ui::library::is_project(p));
+                self.workspace.library.open = false;
             }
         }
         Ok(())

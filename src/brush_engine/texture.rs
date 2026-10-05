@@ -559,9 +559,7 @@ pub fn builtin() -> &'static [Arc<Pattern>] {
     static PATTERNS: OnceLock<Vec<Arc<Pattern>>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         let make = |name: &str, f: &(dyn Fn(f32, f32) -> f32 + Sync)| {
-            use rayon::prelude::*;
             let data = (0..TILE * TILE)
-                .into_par_iter()
                 .map(|i| f((i % TILE) as f32, (i / TILE) as f32))
                 .collect();
             Arc::new(Pattern {
@@ -570,23 +568,38 @@ pub fn builtin() -> &'static [Arc<Pattern>] {
                 data: normalized(data),
             })
         };
-        vec![
+        type Recipe<'a> = (&'a str, &'a (dyn Fn(f32, f32) -> f32 + Sync));
+        let recipes: [Recipe; 5] = [
             // Fine tooth with a little larger-scale unevenness.
-            make("Paper", &|x, y| {
+            ("Paper", &|x, y| {
                 0.75 * fbm(x, y, (8.0, 8.0), 3, 1) + 0.25 * fbm(x, y, (64.0, 64.0), 2, 2)
             }),
             // Coarser, deeper tooth: pronounced peaks and valleys.
-            make("Rough paper", &|x, y| {
+            ("Rough paper", &|x, y| {
                 smoothstep(0.3, 0.7, fbm(x, y, (16.0, 16.0), 4, 3))
             }),
-            make("Canvas", &weave),
+            ("Canvas", &weave),
             // Pixel-scale grain.
-            make("Fine grain", &|x, y| fbm(x, y, (3.0, 3.0), 1, 5)),
+            ("Fine grain", &|x, y| fbm(x, y, (3.0, 3.0), 1, 5)),
             // Streaks along x on a fine tooth.
-            make("Charcoal", &|x, y| {
+            ("Charcoal", &|x, y| {
                 0.55 * fbm(x, y, (64.0, 4.0), 3, 6) + 0.45 * fbm(x, y, (4.0, 4.0), 2, 7)
             }),
-        ]
+        ];
+        // A thread each, not rayon: this runs inside a once-lock, often
+        // from a rayon worker (decoding presets), and the pool's other
+        // workers waiting on the lock couldn't take a share of the work,
+        // deadlocking it.
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = recipes
+                .iter()
+                .map(|(name, f)| scope.spawn(move || make(name, *f)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("texture thread"))
+                .collect()
+        })
     })
 }
 

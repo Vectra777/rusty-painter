@@ -3,6 +3,7 @@
 
 use crate::PainterApp;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{segmented, slider_row};
 use eframe::egui::{self, Color32, RichText};
 
@@ -129,6 +130,7 @@ pub fn guides_window(app: &mut PainterApp, ctx: &egui::Context) {
     }
     let (w, h) = (app.canvas.width() as f32, app.canvas.height() as f32);
     egui::Window::new("Guides")
+        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)

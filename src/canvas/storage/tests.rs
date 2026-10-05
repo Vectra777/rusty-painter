@@ -1186,3 +1186,23 @@ fn a_gamma_documents_zoomed_out_preview_matches_the_final_picture() {
         assert!(worst <= 1, "level {level}: preview off by {worst}");
     }
 }
+
+#[test]
+fn write_layer_region_keeps_the_empty_flag_right() {
+    let canvas = Canvas::new(128, 128, Color32::WHITE, 64);
+    let empty = |c: &Canvas| {
+        let cell = c.layer_tile_cell(1, 0, 0).expect("tile");
+        let cell = cell.lock().unwrap();
+        cell.is_empty
+    };
+    let red = vec![Color32::RED; 4];
+    canvas.write_layer_region(1, (10, 10, 2, 2), &red, None);
+    assert!(!empty(&canvas));
+    // Clearing part of it: still paint left.
+    let clear = vec![Color32::TRANSPARENT; 2];
+    canvas.write_layer_region(1, (10, 10, 2, 1), &clear, None);
+    assert!(!empty(&canvas));
+    // Clearing the rest: empty again.
+    canvas.write_layer_region(1, (10, 11, 2, 1), &clear, None);
+    assert!(empty(&canvas));
+}

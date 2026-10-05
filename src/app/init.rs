@@ -42,6 +42,42 @@ pub(crate) fn data_dir() -> PathBuf {
     )
 }
 
+type LoadStep = fn(&mut PainterApp, &eframe::egui::Context);
+
+/// What start-up loads after the window is up, in order, with what the
+/// splash screen says meanwhile.
+pub(crate) const LOAD_STEPS: [(&str, LoadStep); 7] = [
+    ("Loading brush tips", |app, ctx| {
+        app.load_brush_tips(ctx.clone())
+    }),
+    ("Loading your brushes", |app, _| app.load_user_presets()),
+    ("Loading the brush library", |app, _| {
+        app.load_brush_library()
+    }),
+    ("Installing default brushes", |app, _| {
+        app.install_default_presets();
+        app.brush_state.pick_eraser();
+    }),
+    ("Loading gradients and swatches", |app, _| {
+        // The user's gradients sit next to the brushes folder.
+        let gradients = app
+            .brush_state
+            .brushes_path
+            .with_file_name("gradients.json");
+        app.workspace.gradient.library =
+            crate::app::tools::gradient::GradientLibrary::load(gradients);
+        app.load_swatches();
+    }),
+    ("Loading settings", |app, ctx| {
+        app.load_view_settings();
+        app.load_panel_widths(ctx);
+        app.load_settings();
+    }),
+    ("Checking for unsaved work", |app, _| {
+        app.workspace.autosave = crate::app::autosave::AutosaveState::new(&app.autosave_path());
+    }),
+];
+
 impl PainterApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let canvas_w = 4000;
@@ -95,25 +131,26 @@ impl PainterApp {
             tablet: crate::tablet::TabletInput::new(cc),
         };
 
-        app.load_brush_tips(cc.egui_ctx.clone());
-        app.load_user_presets();
-        app.load_brush_library();
-        app.install_default_presets();
-        app.brush_state.pick_eraser();
-        // The user's gradients sit next to the brushes folder.
-        let gradients = app
-            .brush_state
-            .brushes_path
-            .with_file_name("gradients.json");
-        app.workspace.gradient.library =
-            crate::app::tools::gradient::GradientLibrary::load(gradients);
-        app.load_swatches();
-        app.load_view_settings();
-        app.load_panel_widths(&cc.egui_ctx);
-        app.load_settings();
-        app.workspace.autosave = crate::app::autosave::AutosaveState::new(&app.autosave_path());
         app.workspace.shaders.gpu = cc.wgpu_render_state.clone();
+        // The rest loads a step a frame behind the splash screen (see
+        // `run_load_step`), so the window shows at once.
+        app.workspace.loading = Some(0);
         app
+    }
+
+    /// Run the next start-up step; `true` once all are done.
+    pub(crate) fn run_load_step(&mut self, ctx: &eframe::egui::Context) -> bool {
+        let Some(step) = self.workspace.loading else {
+            return true;
+        };
+        if let Some((label, load)) = LOAD_STEPS.get(step) {
+            let started = std::time::Instant::now();
+            load(self, ctx);
+            log::info!("Start-up: {label} in {:.1?}", started.elapsed());
+        }
+        let next = step + 1;
+        self.workspace.loading = (next < LOAD_STEPS.len()).then_some(next);
+        self.workspace.loading.is_none()
     }
 
     /// The presets that come with the app, from `assets/default-brushes.rpbrush`

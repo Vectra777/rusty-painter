@@ -15,6 +15,7 @@ use crate::brush_engine::brush_options::BlendMode;
 use crate::ui::icons::Icon;
 use crate::ui::preview_worker::PreviewLook;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::icon_button;
 use eframe::egui::{self, Color32, RichText, Stroke};
 use rayon::ThreadPool;
@@ -38,6 +39,7 @@ pub fn presets_window(app: &mut PainterApp, ctx: &egui::Context) {
     if !m.touch {
         let default_pos = egui::pos2(m.toolbar_width + 8.0, m.menu_height + 8.0);
         egui::Window::new("Brush Presets")
+            .fit_screen_size(ctx)
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -111,6 +113,7 @@ fn import_report_window(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = true;
     let mut close = false;
     egui::Window::new("Imported Brushes")
+        .fit_screen_size(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
@@ -585,6 +588,7 @@ fn save_preset_modal(app: &mut PainterApp, ctx: &egui::Context) {
     let warning_id = egui::Id::new(DUPLICATE_NAME_WARNING_ID);
     let mut save = None;
     egui::Window::new("Save Brush Preset")
+        .fit_screen(ctx)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])

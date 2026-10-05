@@ -4,6 +4,7 @@
 
 use crate::PainterApp;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, RichText};
 
 pub fn history_window(app: &mut PainterApp, ctx: &egui::Context) {
@@ -26,6 +27,7 @@ pub fn history_window(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = true;
     let mut jump = None;
     egui::Window::new("History")
+        .fit_screen_size(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(true)

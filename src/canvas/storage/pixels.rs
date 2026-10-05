@@ -222,6 +222,7 @@ impl Canvas {
                     continue;
                 };
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let was_empty = cell.is_empty;
                 let data = cell
                     .data
                     .get_or_insert_with(|| vec![Color32::TRANSPARENT; (ts * ts) as usize]);
@@ -230,13 +231,20 @@ impl Canvas {
                 }
                 let (ox, oy) = (tx * ts, ty * ts);
                 let (cx0, cx1) = (x0.max(ox), x1.min(ox + ts));
+                let mut wrote_paint = false;
                 for py in y0.max(oy)..y1.min(oy + ts) {
                     let src = ((py - y) as usize) * w + (cx0 - x) as usize;
                     let dst = ((py - oy) * ts + (cx0 - ox)) as usize;
                     let n = (cx1 - cx0) as usize;
-                    data[dst..dst + n].copy_from_slice(&pixels[src..src + n]);
+                    let row = &pixels[src..src + n];
+                    wrote_paint |= row.iter().any(|&p| p != Color32::TRANSPARENT);
+                    data[dst..dst + n].copy_from_slice(row);
                 }
-                cell.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
+                // Only what was written can change emptiness: the whole
+                // tile is looked at only when clearing pixels of a painted one.
+                let empty =
+                    !wrote_paint && (was_empty || data.iter().all(|&p| p == Color32::TRANSPARENT));
+                cell.is_empty = empty;
             }
         }
     }

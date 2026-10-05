@@ -6,6 +6,7 @@ use crate::canvas::gradient::GradientShape;
 use crate::canvas::layer_style::{Border, LayerFill, MAX_BORDER};
 use crate::canvas::storage::LayerId;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{percent_of_unit, segmented, slider_row};
 use eframe::egui::{self, RichText};
 
@@ -31,6 +32,7 @@ pub fn fill_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let title = format!("Fill: {}", app.canvas.layers[idx].name);
     let (mut open, mut done) = (true, false);
     egui::Window::new(title)
+        .fit_screen(ctx)
         .id(egui::Id::new("fill_dialog"))
         .open(&mut open)
         .collapsible(false)
@@ -156,6 +158,7 @@ pub fn border_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let title = format!("Border: {}", app.canvas.layers[idx].name);
     let (mut open, mut done) = (true, false);
     egui::Window::new(title)
+        .fit_screen(ctx)
         .id(egui::Id::new("border_dialog"))
         .open(&mut open)
         .collapsible(false)
@@ -216,6 +219,7 @@ pub fn line_width_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let title = format!("Line Width: {}", app.canvas.layers[idx].name);
     let (mut open, mut ok, mut cancel) = (true, false, false);
     egui::Window::new(title)
+        .fit_screen(ctx)
         .id(egui::Id::new("line_width_dialog"))
         .open(&mut open)
         .collapsible(false)

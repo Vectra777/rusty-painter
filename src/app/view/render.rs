@@ -326,7 +326,12 @@ pub fn update_dirty_textures(
 ) -> (Vec<TileUpload>, bool) {
     // A filter or adjustment setting being dragged: a quick preview at
     // about the screen's resolution, made exact when it's let go.
-    let live = app.workspace.filter.live();
+    let liquify_live = app
+        .layer_state
+        .liquify
+        .as_ref()
+        .is_some_and(|s| s.previewing());
+    let live = app.workspace.filter.live() || liquify_live;
     let ppp = view.response.ctx.pixels_per_point();
     let level = preview_level(app.brush_state.is_drawing || live, app.viewport.zoom, ppp);
     let screen = preview_view(app, view, clip);
@@ -364,6 +369,7 @@ pub fn update_dirty_textures(
     let max_tiles = MAX_TILES_PER_FRAME * live_block.map_or(1, |b| b * b);
     let chosen: Vec<usize> = candidates.by_ref().take(max_tiles).collect();
     let filter = &app.workspace.filter;
+    let liquify = app.layer_state.liquify.as_ref().filter(|s| s.previewing());
     let more = candidates.next().is_some();
     // Shader layers showing live: each run of layers between them is
     // composited on its own (the others hidden), into its own atlases.
@@ -406,7 +412,7 @@ pub fn update_dirty_textures(
                         });
                     let start = uploads.len();
                     uploads.extend(tile_run_uploads(
-                        canvas, cache, tile, level, live_block, below, quick_mask, filter,
+                        canvas, cache, tile, level, live_block, below, quick_mask, filter, liquify,
                     ));
                     for upload in &mut uploads[start..] {
                         upload.atlas += run * per_run;
@@ -445,6 +451,7 @@ fn tile_run_uploads(
     below: Option<BelowComposite<'_>>,
     quick_mask: Option<usize>,
     filter: &crate::app::tools::filter::FilterState,
+    liquify: Option<&crate::app::tools::liquify::LiquifySession>,
 ) -> Vec<TileUpload> {
     // Only the part a stroke changed, when that's all that did;
     // aligned to the mip block so downsampling stays exact.
@@ -463,7 +470,9 @@ fn tile_run_uploads(
     });
     let mut img = egui::ColorImage::new([0, 0], Color32::TRANSPARENT);
     if let Some(block) = live_block {
-        let layer = filter.preview_pixels(canvas, tile.tx, tile.ty, block);
+        let layer = filter
+            .preview_pixels(canvas, tile.tx, tile.ty, block)
+            .or_else(|| liquify?.preview_pixels(canvas, tile.tx, tile.ty, block));
         canvas.write_tile_preview(tile.tx, tile.ty, block, &mut img, layer);
         let img = preview_at_level(&img, block, tile_size, level);
         let full = [0, 0, tile_size[0], tile_size[1]];
@@ -798,7 +807,7 @@ mod tests {
                         // As the frame does: a filter's run, then the screen.
                         let screen = preview_view(app, &view, view.rect);
                         app.filter_update(self.dragging.then_some(&screen));
-                        app.liquify_flush();
+                        app.liquify_frame(&screen);
                         let (u, m) = update_dirty_textures(app, &view, view.rect);
                         spent += started.elapsed();
                         uploads = u;
@@ -1589,7 +1598,7 @@ mod tests {
                     }
                     let f = t.elapsed();
                     let t = Instant::now();
-                    app.liquify_flush();
+                    // The screen's frame draws it (zoomed out, a preview).
                     let l = t.elapsed();
                     let (_, s) = screen.settle_counting(&mut app);
                     (field, layer, shown) = (field + f, layer + l, shown + s);

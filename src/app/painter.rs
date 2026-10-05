@@ -57,6 +57,11 @@ impl eframe::App for PainterApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Closed while starting: what's on disk wasn't read yet, so
+        // nothing here may be written over it.
+        if self.workspace.loading.is_some() {
+            return;
+        }
         self.save_active_preset(false);
         self.save_settings(false);
         self.finish_jobs_on_exit();
@@ -67,6 +72,18 @@ impl eframe::App for PainterApp {
 
     /// Handle UI, input, painting updates, and tile uploads each frame.
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Start-up: a step a frame behind the splash (none on the first
+        // frame, so the window shows the splash at once).
+        if self.workspace.loading.is_some() {
+            if ctx.cumulative_pass_nr() > 0 {
+                self.run_load_step(ctx);
+            }
+            if let Some(step) = self.workspace.loading {
+                ui::splash::splash(ctx, step);
+                ctx.request_repaint();
+                return;
+            }
+        }
         self.workspace.frame_stats.begin(frame.info().cpu_usage);
         self.workspace.refresh.tick();
         self.workspace.keyboard.observe(ctx);
@@ -198,8 +215,9 @@ impl eframe::App for PainterApp {
                     self.liquify_hold(dt);
                     needs_repaint = true;
                 }
-                // This frame's liquify dabs, rendered into the layer at once.
-                self.liquify_flush();
+                // This frame's liquify dabs: into the layer, or zoomed out
+                // with the pen down, a screen-sized preview.
+                self.liquify_frame(&screen);
                 self.workspace.frame_stats.mark(Stage::Tools);
                 // 5. Pixels: let the stroke worker catch up, upload dirty
                 // tiles, paint the canvas, then the overlays on top.
@@ -781,6 +799,72 @@ mod window_size_tests {
             for (i, s) in sizes.iter().enumerate().skip(20) {
                 assert_eq!(base, s, "at {ppp}x, frame {i}: windows changed size");
             }
+        }
+    }
+
+    /// On a small screen, or after the window shrinks, every floating
+    /// window stays whole inside it (scrolling what doesn't fit).
+    #[test]
+    fn floating_windows_fit_a_small_or_shrunk_screen() {
+        let mut app =
+            crate::project::tests::test_app_pub(Canvas::new(256, 256, Color32::WHITE, 64));
+        app.workspace.palette.open = true;
+        app.modal_state.show_history = true;
+        app.brush_state.show_presets = true;
+        app.workspace.view_aids.guides.new_guide.open = true;
+        app.workspace.view_aids.navigator.open = true;
+        app.workspace.frame_stats.enabled = true;
+        app.workspace.frame_stats.window_open = true;
+        app.modal_state.show_general_settings = true;
+        app.modal_state.show_new_canvas_modal = true;
+        app.export_state.show_modal = true;
+        app.filter_open(crate::canvas::filters::Filter::Exposure { stops: 0.0 });
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_global_style(&ctx);
+        let screen = |w: f32, h: f32| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+        let frame = |app: &mut crate::PainterApp, rect: egui::Rect| {
+            let input = egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.show_windows(ctx));
+            let titles = [
+                "Palette",
+                "History",
+                "Brush Presets",
+                "Guides",
+                "Navigator",
+                "Frame Times",
+                "Settings",
+                "New Canvas",
+                "Export Canvas",
+                "Exposure",
+            ];
+            ctx.memory(|m| {
+                m.areas()
+                    .visible_layer_ids()
+                    .into_iter()
+                    .filter_map(|l| {
+                        let name = titles.iter().find(|t| egui::Id::new(**t) == l.id)?;
+                        Some((*name, m.area_rect(l.id)?))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        for _ in 0..5 {
+            frame(&mut app, screen(1600.0, 1000.0));
+        }
+        let small = screen(640.0, 420.0);
+        let mut rects = Vec::new();
+        for _ in 0..5 {
+            rects = frame(&mut app, small);
+        }
+        assert!(rects.len() >= 6, "windows shown: {rects:?}");
+        for (name, r) in rects {
+            assert!(
+                small.expand(1.0).contains_rect(r),
+                "{name}: {r:?} outside {small:?}"
+            );
         }
     }
 }

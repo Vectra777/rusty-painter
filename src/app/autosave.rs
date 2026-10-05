@@ -9,6 +9,7 @@
 //! their own.
 
 use crate::PainterApp;
+use crate::ui::widgets::FitScreen;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -251,6 +252,7 @@ pub fn recovery_dialog(app: &mut PainterApp, ctx: &eframe::egui::Context) {
         .unwrap_or_default();
     let (mut recover, mut discard) = (false, false);
     egui::Window::new("Recover unsaved work?")
+        .fit_screen(ctx)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)

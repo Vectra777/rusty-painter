@@ -398,6 +398,9 @@ impl Default for ExportState {
 
 /// Threading and workspace-level settings
 pub struct WorkspaceState {
+    /// Start-up still loading: the next step of [`crate::app::init::LOAD_STEPS`]
+    /// (one a frame, behind the splash screen).
+    pub loading: Option<usize>,
     pub thread_count: usize,
     pub max_threads: usize,
     pub pool: Arc<ThreadPool>,
@@ -512,6 +515,7 @@ impl WorkspaceState {
         color_model: ColorModel,
     ) -> Self {
         Self {
+            loading: None,
             thread_count,
             max_threads,
             pool,

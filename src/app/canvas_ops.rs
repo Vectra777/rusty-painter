@@ -219,6 +219,7 @@ impl PainterApp {
             .new_canvas
             .background_color32(self.workspace.color_model);
         self.rebuild_canvas(width, height, background);
+        self.workspace.library.has_document = true;
         self.canvas_mut().blend_space = self.modal_state.new_canvas.blend_space;
         self.brush_state.brush.brush_options.color = Self::convert_color_for_model(
             self.brush_state.brush.brush_options.color,

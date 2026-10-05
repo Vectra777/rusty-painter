@@ -6,6 +6,7 @@ use crate::PainterApp;
 use crate::canvas::shader::{ShaderError, TEMPLATES};
 use crate::canvas::storage::LayerId;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, Color32, RichText, text::LayoutJob};
 
 const KEYWORD: Color32 = Color32::from_rgb(198, 120, 221);
@@ -234,6 +235,7 @@ fn shader_editor(app: &mut PainterApp, ctx: &egui::Context, id: LayerId) {
     let mut new_speed = speed;
     let mut bake = false;
     egui::Window::new(name)
+        .fit_screen_size(ctx)
         .id(egui::Id::new(("shader editor", id.0)))
         .open(&mut open)
         .resizable(true)

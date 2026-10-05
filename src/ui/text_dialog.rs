@@ -3,6 +3,7 @@
 
 use crate::PainterApp;
 use crate::canvas::text::TextAlign;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::segmented;
 use eframe::egui;
 
@@ -76,6 +77,7 @@ pub fn text_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let (mut ok, mut cancel) = (false, false);
     let mut open = true;
     egui::Window::new("Text")
+        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

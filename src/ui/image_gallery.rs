@@ -4,6 +4,7 @@
 
 use crate::PainterApp;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, RichText};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -248,6 +249,7 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = true;
     let mut pick = None;
     egui::Window::new("Import image")
+        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
