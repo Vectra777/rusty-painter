@@ -235,6 +235,15 @@ fn read_kpp(
                     } else {
                         0.0
                     },
+                    // Paint thickness (a lightness tip): its value when
+                    // on (its sensors below), full when off; mode 1
+                    // overwrites, 2 overlays.
+                    thickness: if yes("PressurePaintThickness") {
+                        strength("PaintThickness").clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    },
+                    overwrite: param("PaintThicknessThicknessMode") == Some("1"),
                 }),
                 color_rate: if yes("PressureColorRate") {
                     rate("ColorRateValue")
@@ -249,16 +258,21 @@ fn read_kpp(
             for (option, setting) in [
                 ("SmudgeRate", DabSetting::SmudgeLength),
                 ("ColorRate", DabSetting::ColorRate),
+                ("PaintThickness", DabSetting::PaintThickness),
             ] {
                 let key = format!("{option}Sensor");
                 let ids = sensors(&key);
-                if !yes(&format!("Pressure{option}")) || ids.is_empty() || ids == ["pressure"] {
+                // (Pressure alone on the smudge length and colour rate:
+                // their own pressure switches.)
+                let by_switch = ids == ["pressure"] && setting != DabSetting::PaintThickness;
+                if !yes(&format!("Pressure{option}")) || ids.is_empty() || by_switch {
                     continue;
                 }
                 if let Some(m) = b.mixing.as_mut() {
                     match setting {
                         DabSetting::SmudgeLength => m.pressure_length = false,
-                        _ => m.pressure_color = false,
+                        DabSetting::ColorRate => m.pressure_color = false,
+                        _ => {}
                     }
                 }
                 for id in &ids {
@@ -452,7 +466,7 @@ fn read_kpp(
         b.brush_options.flow = (v * 100.0).clamp(0.0, 100.0);
     }
     // Options switched on that don't come across, for the report.
-    const READ: [&str; 23] = [
+    const READ: [&str; 24] = [
         "Size",
         "Density",
         "Line width",
@@ -470,6 +484,7 @@ fn read_kpp(
         "SmudgeRate",
         "ColorRate",
         "SmudgeRadius",
+        "PaintThickness",
         "h",
         "s",
         "v",
@@ -1107,9 +1122,22 @@ fn tip_from_definition(
         Some("3") => Some(crate::brush_engine::brush_options::TipMapping::Gradient),
         _ => None,
     };
-    let Some((mask, extra)) = picture_tip(file, embedded, bundle, tip.mapping.is_some()) else {
+    let Some((mut mask, mut extra)) = picture_tip(file, embedded, bundle, tip.mapping.is_some())
+    else {
         return Ok(Err(file.to_string()));
     };
+    // A picture painting by its grey: as Krita levels it.
+    if tip.mapping.is_some() {
+        let attr = |k: &str| brush.attr(k).and_then(|v| v.parse::<f64>().ok());
+        let levels = GreyLevels {
+            brightness: attr("BrightnessAdjustment").unwrap_or(0.0),
+            contrast: attr("ContrastAdjustment").unwrap_or(0.0),
+            mid: (brush.attr("AutoAdjustMidPoint") != Some("1"))
+                .then(|| attr("AdjustmentMidPoint").unwrap_or(127.0)),
+        };
+        mask = levels.apply(&mask);
+        extra = extra.iter().map(|t| levels.apply(t)).collect();
+    }
     tip.diameter =
         (mask.width.max(mask.height) as f32 * attr("scale").unwrap_or(1.0)).clamp(1.0, 3000.0);
     // A colour picture paints its colours unless it's used as a mask
@@ -1123,6 +1151,79 @@ fn tip_from_definition(
     tip.extra = extra;
     auto_spacing(&mut tip, brush);
     Ok(Ok(tip))
+}
+
+/// Krita's levelling of a picture tip that paints by its grey (a
+/// lightness or gradient map): grey, then stretched about a mid point by
+/// its brightness and contrast (`KisColorfulBrush::brushTipImage`).
+struct GreyLevels {
+    brightness: f64,
+    contrast: f64,
+    /// The grey that maps to the brightness's; `None`: the picture's own
+    /// average (by coverage).
+    mid: Option<f64>,
+}
+
+impl GreyLevels {
+    fn apply(&self, tip: &Arc<TipMask>) -> Arc<TipMask> {
+        let Some(colors) = &tip.colors else {
+            return tip.clone();
+        };
+        // Krita's grey (`qGray`).
+        let grey = |c: &[u8; 3]| (c[0] as u32 * 11 + c[1] as u32 * 16 + c[2] as u32 * 5) / 32;
+        let mid_x = self.mid.unwrap_or_else(|| {
+            let (mut sum, mut cover) = (0u64, 0u64);
+            for (c, &a) in colors.iter().zip(&tip.pixels) {
+                sum += (grey(c) as f64 * a as f64 / 255.0).round() as u64;
+                cover += a as u64;
+            }
+            if cover == 0 {
+                0.0
+            } else {
+                255.0 * sum as f64 / cover as f64
+            }
+        });
+        let (half, unit) = (127.0, 255.0);
+        let (b, k) = (self.brightness, self.contrast);
+        let levelled = (mid_x - 127.0).abs() > 0.1 || b != 0.0 || k != 0.0;
+        let mid_y = if b > 0.0 {
+            half + (unit - half) * b
+        } else {
+            half - half * -b
+        };
+        let (mut lo_a, mut hi_a, mut lo_b, mut hi_b) = (0.0, 0.0, 0.0, 255.0);
+        if (k - 1.0).abs() > 1e-9 {
+            let mid_x = mid_x.clamp(1e-6, unit - 1e-6);
+            (lo_a, hi_a) = if k > 0.0 {
+                (
+                    mid_y / (1.0 - k) / mid_x,
+                    (unit - mid_y) / (1.0 - k) / (unit - mid_x),
+                )
+            } else {
+                (
+                    mid_y * (1.0 + k) / mid_x,
+                    (unit - mid_y) * (1.0 + k) / (unit - mid_x),
+                )
+            };
+            lo_b = mid_y - mid_x * lo_a;
+            hi_b = mid_y - mid_x * hi_a;
+        }
+        let out: Vec<[u8; 3]> = colors
+            .iter()
+            .map(|c| {
+                let v = grey(c) as f64;
+                let v = if !levelled {
+                    v
+                } else if v >= mid_x {
+                    (hi_a * v + hi_b).round().min(unit)
+                } else {
+                    (lo_a * v + lo_b).round().max(0.0)
+                };
+                [v as u8; 3]
+            })
+            .collect();
+        TipMask::from_colored(tip.width, tip.height, tip.pixels.clone(), out)
+    }
 }
 
 /// A Gaussian round tip: its
@@ -1497,7 +1598,14 @@ pub(crate) fn parse_xml(xml: &str) -> Result<Node, String> {
         };
         for a in e.attributes().flatten() {
             let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-            let value = a.unescape_value().map_err(|e| bad(&e))?.into_owned();
+            let value = a
+                .normalized_value_with(
+                    quick_xml::XmlVersion::Implicit1_0,
+                    128,
+                    quick_xml::escape::resolve_predefined_entity,
+                )
+                .map_err(|e| bad(&e))?
+                .into_owned();
             node.attrs.push((key, value));
         }
         Ok(node)
@@ -1517,7 +1625,20 @@ pub(crate) fn parse_xml(xml: &str) -> Result<Node, String> {
                 parent.children.push(node);
             }
             Event::Text(t) => {
-                let text = t.unescape().map_err(|e| bad(&e))?;
+                let text = t.decode().map_err(|e| bad(&e))?;
+                stack.last_mut().expect("the root").text.push_str(&text);
+            }
+            // `&amp;`, `&#38;`: the text they stand for.
+            Event::GeneralRef(r) => {
+                let text = match r.resolve_char_ref().map_err(|e| bad(&e))? {
+                    Some(c) => c.to_string(),
+                    None => {
+                        let name = r.decode().map_err(|e| bad(&e))?;
+                        quick_xml::escape::resolve_predefined_entity(&name)
+                            .ok_or_else(|| bad(&format!("an unknown entity &{name};")))?
+                            .to_string()
+                    }
+                };
                 stack.last_mut().expect("the root").text.push_str(&text);
             }
             Event::CData(t) => {
@@ -1722,7 +1843,8 @@ mod tests {
                 ("Pressureh", "true"),
                 ("hSensor", FUZZY),
                 ("hValue", "0.5"),
-                ("PressurePaintThickness", "true"),
+                ("PaintOpSettings/isAirbrushing", "true"),
+                ("PressureRate", "true"),
             ],
         );
         let imported = import_kpp(&brush, "file").unwrap();
@@ -1764,10 +1886,7 @@ mod tests {
         );
         // An option with no counterpart is named in the report.
         assert!(
-            imported
-                .notes
-                .iter()
-                .any(|n| n.contains("paint thickness option")),
+            imported.notes.iter().any(|n| n.contains("Rate option")),
             "{:?}",
             imported.notes
         );
@@ -2124,6 +2243,58 @@ mod tests {
         assert!((at(&angle, 0.0) - 0.5).abs() < 0.01);
         assert!((at(&angle, 0.25) - 0.25).abs() < 0.01);
         assert!(!angle.both_ways);
+    }
+
+    #[test]
+    fn krita_paint_thickness_and_grey_levels_come_across() {
+        let brush = with_params(
+            "colorsmudge",
+            &[
+                ("PressurePaintThickness", "true"),
+                ("PaintThicknessValue", "0.6"),
+                ("PaintThicknessThicknessMode", "1"),
+                ("PaintThicknessSensor", PRESSURE),
+            ],
+        );
+        let imported = import_kpp(&brush, "file").unwrap();
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+        let b = &imported.presets[0].brush;
+        let k = b.mixing.unwrap().krita.unwrap();
+        assert_eq!((k.thickness, k.overwrite), (0.6, true));
+        assert!(
+            b.inputs
+                .iter()
+                .any(|m| (m.sensor, m.setting) == (Sensor::Pressure, DabSetting::PaintThickness))
+        );
+        // Krita's levels: contrast halved about mid grey 127.
+        let tip = TipMask::from_colored(3, 1, vec![255; 3], vec![[0; 3], [127; 3], [255; 3]]);
+        let levels = GreyLevels {
+            brightness: 0.0,
+            contrast: -0.5,
+            mid: Some(127.0),
+        };
+        let out = levels.apply(&tip);
+        let greys: Vec<u8> = out.colors.as_ref().unwrap().iter().map(|c| c[0]).collect();
+        assert_eq!(greys, [64, 127, 191]);
+        // By its own average: a picture all at one grey stays at mid.
+        let flat = TipMask::from_colored(2, 1, vec![255; 2], vec![[200; 3]; 2]);
+        let auto = GreyLevels {
+            mid: None,
+            ..levels
+        };
+        assert_eq!(auto.apply(&flat).colors.as_ref().unwrap()[0][0], 127);
+    }
+
+    #[test]
+    fn escaped_text_and_attributes_read_as_they_stand_for() {
+        let root = parse_xml(
+            r#"<Preset name="Ink &amp; Wash"><param>a &lt; b &#38; c<![CDATA[ <raw> ]]></param></Preset>"#,
+        )
+        .unwrap();
+        let preset = &root.children[0];
+        assert_eq!(preset.attr("name"), Some("Ink & Wash"));
+        assert_eq!(preset.children[0].text, "a < b & c <raw> ");
+        assert!(parse_xml("<p>&nope;</p>").is_err(), "an unknown entity");
     }
 
     #[test]

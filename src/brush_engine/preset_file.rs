@@ -551,8 +551,10 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
         let b = &p.brush;
         !b.input_combine.is_empty()
             || b.inputs.iter().any(|m| {
-                matches!(m.setting, DabSetting::SmudgeLength | DabSetting::ColorRate)
-                    || m.amount.abs() > 1.0
+                matches!(
+                    m.setting,
+                    DabSetting::SmudgeLength | DabSetting::ColorRate | DabSetting::PaintThickness
+                ) || m.amount.abs() > 1.0
             })
     });
     let library = StoredLibrary {
@@ -986,6 +988,7 @@ mod tests {
                 dulling: true,
                 smear_alpha: false,
                 radius: 0.3,
+                ..Default::default()
             }),
         };
         brush.mixing = Some(mixing);

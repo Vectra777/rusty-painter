@@ -160,6 +160,93 @@ pub fn from_pixels(pixels: &[Color32]) -> Vec<u16> {
         .collect()
 }
 
+/// A lightness map's value (see `LayerStyle::lightness_map`): grey and
+/// its coverage (0..1 each), a byte each.
+pub fn pack_lightness(grey: f32, coverage: f32) -> u16 {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u16;
+    (byte(grey) << 8) | byte(coverage)
+}
+
+/// The grey and coverage of a lightness map's value.
+pub fn unpack_lightness(v: u16) -> (f32, f32) {
+    ((v >> 8) as f32 / 255.0, (v & 0xff) as f32 / 255.0)
+}
+
+/// `grey` at `coverage` laid over the lightness map's value `under`, as
+/// Krita paints its colour smudge's heightmap (over).
+pub fn lay_lightness(under: u16, grey: f32, coverage: f32) -> u16 {
+    let (g0, a0) = unpack_lightness(under);
+    let a = coverage + a0 * (1.0 - coverage);
+    if a <= 0.0 {
+        return 0;
+    }
+    pack_lightness((grey * coverage + g0 * a0 * (1.0 - coverage)) / a, a)
+}
+
+/// Tile `(tx, ty)`'s `pixels` (stored: linear-light premultiplied, sRGB
+/// encoded) lightened and darkened by the lightness map `map`, as Krita
+/// shows its colour smudge's heightmap (`modulateLightnessByGrayBrush`):
+/// mid grey keeps the colour, lighter and darker grey take its lightness
+/// up and down, by their coverage.
+pub fn modulate(pixels: &mut [Color32], map: &HeightMap, tx: i32, ty: i32) {
+    let Some(tile) = map.tile((tx, ty)) else {
+        return;
+    };
+    let (decoder, encoder) = (
+        crate::canvas::blend::LinearDecoder::new(),
+        crate::canvas::blend::LinearEncoder::new(),
+    );
+    for (px, &v) in pixels.iter_mut().zip(&tile) {
+        let (grey, coverage) = unpack_lightness(v);
+        if coverage <= 0.0 || px.a() == 0 {
+            continue;
+        }
+        let m = (grey - 0.5) * coverage + 0.5;
+        // Unmultiplied 8-bit sRGB, as Krita's colour (through the tables).
+        let [r, g, b, a] = decoder.decode(*px).to_array();
+        let unmultiplied = |c: f32| (c / a).clamp(0.0, 1.0);
+        let opaque = eframe::egui::Rgba::from_rgba_premultiplied(
+            unmultiplied(r),
+            unmultiplied(g),
+            unmultiplied(b),
+            1.0,
+        );
+        let srgb = encoder.encode(opaque).to_array().map(|c| c as f32 / 255.0);
+        let out = crate::brush_engine::brush_options::TipMapping::Lightness.map(
+            [m; 3],
+            [srgb[0], srgb[1], srgb[2]],
+            [0.0; 3],
+        );
+        let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let back = Color32::from_rgb(byte(out[0]), byte(out[1]), byte(out[2]));
+        let [r, g, b, _] = decoder.decode(back).to_array();
+        *px = encoder.encode(eframe::egui::Rgba::from_rgba_premultiplied(
+            r * a,
+            g * a,
+            b * a,
+            a,
+        ));
+    }
+}
+
+/// A layer's relief on tile `(tx, ty)`'s `pixels`, as its style (as
+/// shown: [`crate::canvas::storage::Layer::shown_style`]) says: its
+/// lightness map, or its heights lit.
+pub fn relief(
+    style: crate::canvas::layer_style::LayerStyle,
+    map: &HeightMap,
+    pixels: &mut [Color32],
+    tx: i32,
+    ty: i32,
+    side: usize,
+) {
+    if style.lightness_map {
+        modulate(pixels, map, tx, ty);
+    } else if let Some(light) = style.impasto {
+        light.shade(pixels, map, tx, ty, side);
+    }
+}
+
 /// The light on a layer's paint.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -211,6 +298,10 @@ impl ImpastoLight {
         let gloss = self.gloss.clamp(0.0, 1.0);
         let k = MAX_HEIGHT / u16::MAX as f32;
         let w = side + 2;
+        let (decoder, encoder) = (
+            crate::canvas::blend::LinearDecoder::new(),
+            crate::canvas::blend::LinearEncoder::new(),
+        );
         for y in 0..side {
             for x in 0..side {
                 let at = |dx: i32, dy: i32| {
@@ -226,14 +317,17 @@ impl ImpastoLight {
                 }
                 let n = normalize([-gx, -gy, 1.0]);
                 let lit = 1.0 + strength * (dot(n, light).max(0.0) / se - 1.0);
-                let spec = gloss * (shine(n) - flat_shine).max(0.0) * px.a() as f32;
-                let [r, g, b, a] = px.to_array();
-                let f = |c: u8| {
-                    (c as f32 * lit.max(0.0) + spec)
-                        .round()
-                        .clamp(0.0, a as f32) as u8
-                };
-                *px = Color32::from_rgba_premultiplied(f(r), f(g), f(b), a);
+                // In linear light, as the compositor reads the pixel (its
+                // shine as much as its coverage).
+                let [r, g, b, a] = decoder.decode(*px).to_array();
+                let spec = gloss * (shine(n) - flat_shine).max(0.0) * a;
+                let f = |c: f32| (c * lit.max(0.0) + spec).clamp(0.0, a);
+                *px = encoder.encode(eframe::egui::Rgba::from_rgba_premultiplied(
+                    f(r),
+                    f(g),
+                    f(b),
+                    a,
+                ));
             }
         }
     }
@@ -357,6 +451,49 @@ mod tests {
         map.set_tile((1, 1), Some(vec![0, 3, 0, 0]));
         assert_eq!(map.tile((1, 1)), Some(vec![0, 3, 0, 0]));
         assert_eq!(map.bytes(), 8);
+    }
+
+    #[test]
+    fn a_lightness_map_lays_over_and_lightens_and_darkens_as_krita_does() {
+        // Packed a byte each; laid over, as alpha compositing.
+        assert_eq!(
+            unpack_lightness(pack_lightness(1.0, 0.5)),
+            (1.0, 128.0 / 255.0)
+        );
+        let once = lay_lightness(0, 0.8, 0.5);
+        let (g, a) = unpack_lightness(once);
+        assert!((g - 0.8).abs() < 0.01 && (a - 0.5).abs() < 0.01);
+        let twice = lay_lightness(once, 0.2, 0.5);
+        let (g, a) = unpack_lightness(twice);
+        assert!((a - 0.75).abs() < 0.01, "covers more: {a}");
+        assert!((g - (0.2 * 0.5 + 0.8 * 0.25) / 0.75).abs() < 0.01, "{g}");
+        // On paint: mid grey keeps it, light lightens, dark darkens, and
+        // nothing where the map has no coverage.
+        let paint = Color32::from_rgb(40, 120, 200);
+        let shown = |grey: f32, coverage: f32| {
+            let map = HeightMap::default();
+            map.set_tile((0, 0), Some(vec![pack_lightness(grey, coverage); S * S]));
+            let mut px = vec![paint; S * S];
+            modulate(&mut px, &map, 0, 0);
+            px[0]
+        };
+        let near = |a: Color32, b: Color32| {
+            a.to_array()
+                .iter()
+                .zip(b.to_array())
+                .all(|(x, y)| x.abs_diff(y) <= 2)
+        };
+        assert!(near(shown(0.5, 1.0), paint), "{:?}", shown(0.5, 1.0));
+        let light = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+        assert!(light(shown(0.9, 1.0)) > light(paint) + 60);
+        assert!(light(shown(0.1, 1.0)) + 60 < light(paint));
+        assert_eq!(shown(0.9, 0.0), paint);
+        // Transparent paint stays so.
+        let map = HeightMap::default();
+        map.set_tile((0, 0), Some(vec![pack_lightness(1.0, 1.0); S * S]));
+        let mut clear = vec![Color32::TRANSPARENT; S * S];
+        modulate(&mut clear, &map, 0, 0);
+        assert!(clear.iter().all(|&c| c == Color32::TRANSPARENT));
     }
 
     #[test]

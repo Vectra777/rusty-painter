@@ -23,7 +23,8 @@
 
 use crate::PainterApp;
 use crate::app::tools::Tool;
-use crate::canvas::history::{TileSnapshot, UndoAction};
+use crate::brush_engine::brush_options::PixelBrushShape;
+use crate::canvas::history::{LayerHistoryOp, TileSnapshot, UndoAction};
 use crate::canvas::storage::LayerKind;
 use eframe::egui::{Color32, Vec2};
 use rayon::prelude::*;
@@ -285,6 +286,9 @@ struct BlendStroke {
     /// layer there), and the stroke's random state (a turning tip).
     krita_last: Vec<Option<Vec2>>,
     random: u32,
+    /// Krita's colour smudge with a lightness tip: the layer's lightness
+    /// map tiles as they were before the stroke first changed them.
+    lightness_before: HashMap<(i32, i32), Option<Vec<u16>>>,
 }
 
 /// Pixels are mixed as linear-light premultiplied colour, the same space
@@ -761,6 +765,11 @@ impl PainterApp {
         self.mark_action();
         let mut brush = self.brush_state.brush.clone();
         brush.second_color = self.brush_state.secondary_color;
+        // Krita's colour smudge with a lightness tip lays its tip's grey on
+        // the layer's lightness map.
+        if kind == BlendKind::Smudge && brush.lays_lightness() {
+            self.ensure_lightness_map(idx);
+        }
         let dabber = (kind == BlendKind::Smudge).then(|| {
             let mut placing = brush.clone();
             placing.dynamics.taper.end = 0.0;
@@ -817,6 +826,7 @@ impl PainterApp {
                 mix,
                 krita_last: Vec::new(),
                 random: 0x9e37_79b9,
+                lightness_before: HashMap::new(),
             },
         };
         self.brush_state.blend_stroke = Some(ActiveBlend {
@@ -936,11 +946,23 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
             let dabs = self.place(|stroke, brush, context| stroke.finish(brush, context));
             self.lay(dabs);
         }
-        if self.stroke.before.is_empty() {
+        if self.stroke.before.is_empty() && self.stroke.lightness_before.is_empty() {
             return None;
         }
         let ts = self.canvas.tile_size();
         let layer_id = self.canvas.layers.get(self.idx)?.id;
+        // The lightness map's tiles as they were, sorted (the same step
+        // every time).
+        let mut lightness: Vec<_> = std::mem::take(&mut self.stroke.lightness_before)
+            .into_iter()
+            .collect();
+        lightness.sort_by_key(|(k, _)| (k.1, k.0));
+        let layer_action = (!lightness.is_empty()).then_some(LayerHistoryOp::Height {
+            layer: layer_id,
+            tiles: lightness,
+            map: None,
+            inner: None,
+        });
         let tiles = self
             .stroke
             .before
@@ -960,7 +982,7 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
             tiles,
             selection: None,
             transform: None,
-            layer_action: None,
+            layer_action,
         })
     }
 
@@ -1072,6 +1094,20 @@ impl BlendSession {
             self.canvas.write_layer_region(self.idx, rect, pixels, None);
             self.damage
                 .push([rect.0, rect.1, rect.0 + ts as i32, rect.1 + ts as i32]);
+        }
+        // The lightness map as it was too (what it held is kept, for the
+        // step).
+        if let Some(map) = self
+            .canvas
+            .layers
+            .get(self.idx)
+            .and_then(|l| l.height.as_deref())
+        {
+            for (key, tile) in &self.stroke.lightness_before {
+                map.set_tile(*key, tile.clone());
+                let (x, y) = (key.0 * ts as i32, key.1 * ts as i32);
+                self.damage.push([x, y, x + ts as i32, y + ts as i32]);
+            }
         }
         self.stroke.carries.clear();
         self.stroke.krita_last.clear();
@@ -1714,6 +1750,107 @@ impl BlendSession {
         if changed {
             self.write_blend_patch(idx, (x0, y0), side, &result, wrap);
         }
+        // A lightness tip: its grey on the lightness map, as much as the
+        // paint thickness says (overwriting: at the dab's opacity; else as
+        // much more as the smudge length leaves).
+        if self.brush.lays_lightness() {
+            let thickness = (k.thickness * placed.dab.thickness).clamp(0.0, 1.0);
+            let share = if k.overwrite {
+                1.0
+            } else {
+                (rate - 0.01) + (1.0 - (rate - 0.01)) * thickness
+            };
+            self.lay_lightness(placed, (x0, y0), side, opacity * share, thickness);
+        }
+    }
+
+    /// The dab's tip grey (pulled toward mid grey at less than full paint
+    /// `thickness`) over the layer's lightness map, at `strength` times
+    /// the tip's coverage (and the selection's), as Krita lays its colour
+    /// smudge's heightmap.
+    fn lay_lightness(
+        &mut self,
+        placed: &Placed,
+        (x0, y0): (i32, i32),
+        side: usize,
+        strength: f32,
+        thickness: f32,
+    ) {
+        let tips = self.brush.brush_options.tip_shapes();
+        let d = placed.dab;
+        let Some(PixelBrushShape::Custom(tip)) = tips.get(d.tip as usize) else {
+            return;
+        };
+        let Some(map) = self
+            .canvas
+            .layers
+            .get(self.idx)
+            .and_then(|l| l.height.as_deref())
+        else {
+            return;
+        };
+        if strength <= 0.0 {
+            return;
+        }
+        let sampler = tip.sampler(d.r);
+        let [a, b, c, e] = d.orient;
+        let ts = self.canvas.tile_size() as i32;
+        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let wrap = self.wrap;
+        // Per tile: each pixel's index, grey and coverage laid.
+        type Laid = Vec<(usize, f32, f32)>;
+        let mut edits: HashMap<(i32, i32), Laid> = HashMap::new();
+        let (mut cover, mut colours, mut sel) = (
+            vec![0.0f32; side],
+            vec![[0.0f32; 3]; side],
+            vec![1.0f32; side],
+        );
+        for ly in 0..side {
+            let gy = y0 + ly as i32;
+            let Some(y) = canvas_row(gy, ch, wrap) else {
+                continue;
+            };
+            let (pdx, pdy) = (x0 as f32 + 0.5 - d.center.x, gy as f32 + 0.5 - d.center.y);
+            let start = (a * pdx + b * pdy, c * pdx + e * pdy);
+            tip.row(&sampler, start, (a, c), &mut cover);
+            if cover.iter().all(|&v| v <= 0.0) {
+                continue;
+            }
+            tip.color_row(&sampler, start, (a, c), &cover, 1.0, &mut colours);
+            if let Some(selection) = &self.selection {
+                sel.fill(0.0);
+                for (sx, dx, w) in wrap_pieces_or_clip(x0, side, cw, wrap) {
+                    selection.row_coverage(y, sx as usize, &mut sel[dx..dx + w]);
+                }
+            }
+            for (sx, dx, w) in wrap_pieces_or_clip(x0, side, cw, wrap) {
+                for k in 0..w {
+                    let lx = dx + k;
+                    let coverage = cover[lx].min(1.0) * sel[lx] * strength;
+                    if coverage <= 0.0 {
+                        continue;
+                    }
+                    let [r, g, bl] = colours[lx];
+                    let grey = 0.299 * r + 0.587 * g + 0.114 * bl;
+                    let grey = (grey - 0.5) * thickness + 0.5;
+                    let (x, y) = (sx + k as i32, y as i32);
+                    let key = (x.div_euclid(ts), y.div_euclid(ts));
+                    let i = (y.rem_euclid(ts) * ts + x.rem_euclid(ts)) as usize;
+                    edits.entry(key).or_default().push((i, grey, coverage));
+                }
+            }
+        }
+        let before = &mut self.stroke.lightness_before;
+        for (key, list) in edits {
+            before.entry(key).or_insert_with(|| map.tile(key));
+            map.edit_tile(key, ts as usize, |t| {
+                for (i, grey, coverage) in list {
+                    t[i] = crate::canvas::impasto::lay_lightness(t[i], grey, coverage);
+                }
+            });
+            let (x, y) = (key.0 * ts, key.1 * ts);
+            self.damage.push([x, y, x + ts, y + ts]);
+        }
     }
 
     /// Put a blend stroke's `side`² `result` on layer `idx` at `origin`
@@ -2214,6 +2351,101 @@ mod mix_tests {
     }
 
     #[test]
+    fn a_lightness_tip_lays_relief_that_undoes_saves_and_bakes() {
+        use crate::brush_engine::brush_options::{
+            KritaSmudge, Mixing, PixelBrushShape, TipMapping,
+        };
+        // A colour tip: dark on its top half, light on its bottom (along
+        // the stroke, each keeps its own side of the line).
+        let side = 16;
+        let colors: Vec<[u8; 3]> = (0..side * side)
+            .map(|i| {
+                if i / side < side / 2 {
+                    [40; 3]
+                } else {
+                    [220; 3]
+                }
+            })
+            .collect();
+        let tip = crate::brush_engine::tip::TipMask::from_colored(
+            side,
+            side,
+            vec![255; side * side],
+            colors,
+        );
+        let paint = Color32::from_rgb(200, 120, 40);
+        let mut a = app(Some(paint));
+        a.active_tool = crate::app::tools::Tool::Brush;
+        let b = &mut a.brush_state.brush;
+        b.brush_options.pixel_shape = PixelBrushShape::Custom(tip);
+        b.brush_options.tip_mapping = TipMapping::Lightness;
+        b.brush_options.color = paint;
+        b.mixing = Some(Mixing {
+            smudge_length: 0.5,
+            color_rate: 0.0,
+            krita: Some(KritaSmudge::default()),
+            ..Default::default()
+        });
+        assert!(b.lays_lightness());
+        let before = a.canvas.flatten().pixels;
+        let pushes = a.layer_state.history.push_count();
+        a.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
+        for i in 1..=20 {
+            a.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), 1.0);
+        }
+        a.finish_stroke();
+        a.settle_strokes();
+        assert_eq!(a.layer_state.history.push_count(), pushes + 1, "one step");
+        let layer = &a.canvas.layers[1];
+        assert!(layer.style.lightness_map);
+        assert!(layer.height.as_deref().is_some_and(|h| !h.is_empty()));
+        // The colour is one colour still; what shows has light and shade.
+        assert!(layer_px(&a).iter().all(|&c| c == paint), "colour unchanged");
+        let shown = a.canvas.flatten().pixels;
+        let light = |c: &Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+        let (above, below) = (light(&shown[28 * 128 + 60]), light(&shown[36 * 128 + 60]));
+        assert!(below > above + 60, "relief: {above} above, {below} below");
+        // Saved and opened: the same.
+        let bytes = crate::project::encode_project(&a).unwrap();
+        assert!(
+            crate::project::decode_project(&bytes)
+                .unwrap()
+                .canvas
+                .flatten()
+                .pixels
+                == shown
+        );
+        // Undone: flat again; redone: back.
+        a.apply_history(false);
+        assert!(a.canvas.flatten().pixels == before);
+        a.apply_history(true);
+        assert!(a.canvas.flatten().pixels == shown);
+        // An impasto brush there: the relief goes into the paint first,
+        // looking the same.
+        a.ensure_impasto(1);
+        assert!(!a.canvas.layers[1].style.lightness_map);
+        let baked = a.canvas.flatten().pixels;
+        let off = (0..baked.len())
+            .filter(|&i| {
+                baked[i]
+                    .to_array()
+                    .iter()
+                    .zip(shown[i].to_array())
+                    .any(|(x, y)| x.abs_diff(y) > 1)
+            })
+            .count();
+        assert_eq!(off, 0, "baked as it showed");
+    }
+
+    /// Layer 1's pixels where the stroke went (y 28..36).
+    fn layer_px(app: &crate::PainterApp) -> Vec<Color32> {
+        (28..36)
+            .flat_map(|y| (0..128).map(move |x| (x, y)))
+            .map(|(x, y)| px(app, x, y))
+            .collect()
+    }
+
+    #[test]
     fn a_mixing_brush_turns_and_squashes_its_tip() {
         let extents = |angle: f32| {
             let mut app = app(Some(Color32::WHITE));
@@ -2421,6 +2653,7 @@ mod mix_tests {
                 dulling,
                 smear_alpha: true,
                 radius: 0.5,
+                ..Default::default()
             }),
             ..Default::default()
         });

@@ -161,6 +161,11 @@ impl Layer {
         let mut style = self.style;
         if self.height.as_deref().is_none_or(|h| h.is_empty()) {
             style.impasto = None;
+            style.lightness_map = false;
+        }
+        // Lightness, not heights: no light on it.
+        if style.lightness_map {
+            style.impasto = None;
         }
         style
     }

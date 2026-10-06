@@ -22,11 +22,19 @@ pub struct LayerStyle {
     /// The light on the paint's thickness (the layer's impasto heights).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impasto: Option<crate::canvas::impasto::ImpastoLight>,
+    /// The layer's heights are a lightness map instead (Krita's colour
+    /// smudge with a lightness tip): grey and its coverage, lightening and
+    /// darkening the paint (see [`crate::canvas::impasto::modulate`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lightness_map: bool,
 }
 
 impl LayerStyle {
     pub fn is_plain(&self) -> bool {
-        self.fill.is_none() && self.border.is_none() && self.impasto.is_none()
+        self.fill.is_none()
+            && self.border.is_none()
+            && self.impasto.is_none()
+            && !self.lightness_map
     }
 
     /// How far (pixels) past its paint the layer shows: the border's width.
@@ -315,6 +323,7 @@ mod tests {
             fill: None,
             border: Some(Border::default()),
             impasto: None,
+            lightness_map: false,
         };
         let json = serde_json::to_string(&style).unwrap();
         assert_eq!(serde_json::from_str::<LayerStyle>(&json).unwrap(), style);

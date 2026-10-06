@@ -366,10 +366,13 @@ pub enum DabSetting {
     /// scales the dab.
     SmudgeLength,
     ColorRate,
+    /// Krita's colour smudge with a lightness tip: its paint thickness,
+    /// like size scales the dab.
+    PaintThickness,
 }
 
 impl DabSetting {
-    pub const ALL: [DabSetting; 23] = [
+    pub const ALL: [DabSetting; 24] = [
         DabSetting::Size,
         DabSetting::Opacity,
         DabSetting::Angle,
@@ -393,6 +396,7 @@ impl DabSetting {
         DabSetting::Lightness,
         DabSetting::SmudgeLength,
         DabSetting::ColorRate,
+        DabSetting::PaintThickness,
     ];
 
     pub fn label(self) -> &'static str {
@@ -420,6 +424,7 @@ impl DabSetting {
             DabSetting::Lightness => "Lightness strength",
             DabSetting::SmudgeLength => "Smudge length",
             DabSetting::ColorRate => "Colour rate",
+            DabSetting::PaintThickness => "Paint thickness",
         }
     }
 
@@ -743,6 +748,7 @@ impl InputMapping {
             DabSetting::Lightness => v.lightness *= factor.max(0.0),
             DabSetting::SmudgeLength => v.smudge *= factor.max(0.0),
             DabSetting::ColorRate => v.color_rate *= factor.max(0.0),
+            DabSetting::PaintThickness => v.thickness *= factor.max(0.0),
         }
     }
 }
@@ -792,9 +798,11 @@ pub struct DabVar {
     pub flow: f32,
     pub spacing: f32,
     pub lightness: f32,
-    /// A mixing brush's smudge length and colour rate factors.
+    /// A mixing brush's smudge length, colour rate and paint thickness
+    /// factors.
     pub smudge: f32,
     pub color_rate: f32,
+    pub thickness: f32,
     /// A colour (sRGB 0..1) in place of the brush colour (a random colour
     /// source).
     pub base: Option<[f32; 3]>,
@@ -826,6 +834,7 @@ impl Default for DabVar {
             lightness: 1.0,
             smudge: 1.0,
             color_rate: 1.0,
+            thickness: 1.0,
             base: None,
         }
     }

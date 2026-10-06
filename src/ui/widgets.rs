@@ -447,14 +447,17 @@ pub(crate) fn dropdown(
     }
 }
 
-/// Sliders reset to this "default" epoch's first value; bumped when a preset
-/// is chosen, so their defaults become the preset's.
-static DEFAULTS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// Sliders reset to this "default" epoch's first value; bumped when a
+    /// preset is chosen, so their defaults become the preset's. (The UI's
+    /// thread's own: tests running side by side each keep theirs.)
+    static DEFAULTS_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// The brush changed wholesale (a preset): sliders take their current
 /// values as the ones a double-click returns to.
 pub(crate) fn new_slider_defaults() {
-    DEFAULTS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    DEFAULTS_EPOCH.with(|e| e.set(e.get() + 1));
 }
 
 /// A slider that a double-click (or double-tap) resets: to its value when
@@ -481,7 +484,7 @@ where
     fn ui(self, ui: &mut egui::Ui) -> Response {
         let before = *self.value;
         let mut response = ui.add((self.build)(self.value));
-        let epoch = DEFAULTS_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+        let epoch = DEFAULTS_EPOCH.with(std::cell::Cell::get);
         let key = response.id.with(("slider_default", epoch));
         let default = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(key, || before));
         // The second click of a double-click is also a press the slider acts

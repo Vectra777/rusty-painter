@@ -1049,7 +1049,7 @@ impl Brush {
             return;
         }
         // (A brush whose dabs vary in colour lays its own colour wet.)
-        let colour = o.color.to_array().map(|v| v as f32 / 255.0);
+        let colour = crate::canvas::wet::linear(o.color);
         let side = canvas.tile_size();
         for (&key, buffer) in &stroke_tiles.buffers {
             let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
@@ -1133,6 +1133,15 @@ impl Brush {
     pub fn is_ribbon(&self) -> bool {
         self.brush_options.placement == crate::brush_engine::brush_options::Placement::Ribbon
             && matches!(self.brush_options.pixel_shape, PixelBrushShape::Custom(_))
+    }
+
+    /// Krita's colour smudge with a lightness tip: each dab also lays the
+    /// tip's grey on the layer's lightness map (its relief).
+    pub fn lays_lightness(&self) -> bool {
+        let o = &self.brush_options;
+        self.mixing.is_some_and(|m| m.krita.is_some())
+            && o.tip_mapping == crate::brush_engine::brush_options::TipMapping::Lightness
+            && matches!(&o.pixel_shape, PixelBrushShape::Custom(tip) if tip.has_colors())
     }
 
     /// The dabs paint their tips' own colours (smooth image tips only).
@@ -1379,6 +1388,7 @@ impl Brush {
                 dab.lightness = var.lightness;
                 dab.smudge = var.smudge;
                 dab.color_rate = var.color_rate;
+                dab.thickness = var.thickness;
                 if colored {
                     let own = var.base.map_or(self.brush_options.color, |c| {
                         let [r, g, b] = c.map(|v| (v * 255.0).round() as u8);

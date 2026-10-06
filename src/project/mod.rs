@@ -2808,6 +2808,7 @@ mod perf {
                         ..Border::default()
                     }),
                     impasto: None,
+                    lightness_map: false,
                 },
             );
             time(

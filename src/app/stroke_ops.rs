@@ -28,15 +28,39 @@ impl PainterApp {
     /// shows until paint is laid thick) and a light on them.
     pub(crate) fn ensure_impasto(&mut self, idx: usize) {
         let has = self.canvas.layers.get(idx).is_none_or(|l| {
-            l.height.is_some() && l.style.impasto.is_some()
+            l.height.is_some() && l.style.impasto.is_some() && !l.style.lightness_map
                 || l.kind != crate::canvas::storage::LayerKind::Paint
         });
         if has {
             return;
         }
+        // A lightness map there: into the paint first (its own undo step).
+        if self.canvas.layers[idx].shown_style().lightness_map {
+            self.bake_impasto(idx);
+        }
         let layer = &mut self.canvas_mut().layers[idx];
+        layer.style.lightness_map = false;
         layer.height.get_or_insert_with(Default::default);
         layer.style.impasto.get_or_insert_with(Default::default);
+    }
+
+    /// Layer `idx` has a lightness map (for Krita's colour smudge with a
+    /// lightness tip): impasto heights there are baked into its paint
+    /// first.
+    pub(crate) fn ensure_lightness_map(&mut self, idx: usize) {
+        let has = self.canvas.layers.get(idx).is_none_or(|l| {
+            l.height.is_some() && l.style.lightness_map
+                || l.kind != crate::canvas::storage::LayerKind::Paint
+        });
+        if has {
+            return;
+        }
+        if self.canvas.layers[idx].shown_style().impasto.is_some() {
+            self.bake_impasto(idx);
+        }
+        let layer = &mut self.canvas_mut().layers[idx];
+        layer.style.lightness_map = true;
+        layer.height.get_or_insert_with(Default::default);
     }
 
     /// Wet paint dries on (between strokes): each layer's, by the time
@@ -162,7 +186,8 @@ impl PainterApp {
         self.mark_all_tiles_dirty();
     }
 
-    /// Layer `idx`'s impasto made plain paint: its pixels lit as they show,
+    /// Layer `idx`'s impasto made plain paint: its pixels lit (or
+    /// lightened and darkened by its lightness map) as they show,
     /// its heights put aside (one undo step brings them back). For what
     /// moves its pixels (the transform tool), which the heights wouldn't
     /// follow. Returns whether it had any.
@@ -171,10 +196,10 @@ impl PainterApp {
         let Some(layer) = self.canvas.layers.get(idx) else {
             return false;
         };
-        let (Some(_), Some(light), id) = (layer.height.as_ref(), layer.style.impasto, layer.id)
-        else {
+        let (style, id) = (layer.shown_style(), layer.id);
+        if layer.height.is_none() || style.impasto.is_none() && !style.lightness_map {
             return false;
-        };
+        }
         self.release_canvas();
         let ts = self.canvas.tile_size();
         let mut tiles = Vec::new();
@@ -184,7 +209,7 @@ impl PainterApp {
             };
             let mut lit = data.clone();
             if let Some(h) = self.canvas.layers[idx].height.as_deref() {
-                light.shade(&mut lit, h, tx, ty, ts);
+                crate::canvas::impasto::relief(style, h, &mut lit, tx, ty, ts);
             }
             if lit == data {
                 continue;
@@ -703,6 +728,41 @@ mod tests {
             green,
             "the dry stroke is still there"
         );
+    }
+
+    #[test]
+    fn wet_paint_spreading_on_an_empty_layer_keeps_its_colour() {
+        // Yellow spreading thin over nothing: over white it's a paler
+        // yellow, never browner (its red stays full).
+        let mut app = wet_app();
+        wet_stroke(
+            &mut app,
+            true,
+            Vec2::new(20.0, 32.0),
+            Vec2::new(170.0, 32.0),
+            |b| {
+                b.brush_options.color = Color32::from_rgb(252, 202, 68);
+                b.wet = Some(crate::canvas::wet::WetPaint {
+                    water: 1.5,
+                    flow: 1.0,
+                    drying: 3.0,
+                    lift: 0.0,
+                    ..Default::default()
+                });
+            },
+        );
+        let wet = app.canvas.layers[1].wet.clone().unwrap();
+        for _ in 0..100 {
+            app.wet_steps(&[(1, wet.clone())], 4);
+        }
+        assert!(wet.is_empty(), "dry");
+        let picture = app.canvas.flatten().pixels;
+        let thin: Vec<Color32> = (0..64)
+            .map(|y| picture[y * 192 + 90])
+            .filter(|c| c.b() < 250 && c.b() > 90)
+            .collect();
+        assert!(!thin.is_empty(), "spread thin somewhere");
+        assert!(thin.iter().all(|c| c.r() >= 250), "{thin:?}");
     }
 
     #[test]

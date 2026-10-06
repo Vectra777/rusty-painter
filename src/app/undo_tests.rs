@@ -324,6 +324,7 @@ fn a_fill_layer_and_a_border_undo_redo_and_save() {
         fill: None,
         border: Some(Border::default()),
         impasto: None,
+        lightness_map: false,
     };
     app.set_layer_style(below, border);
     let bytes = crate::project::encode_project(&app).unwrap();
@@ -364,6 +365,7 @@ fn painting_a_bordered_layer_redraws_the_tiles_around() {
             fill: None,
             border: Some(Border::default()),
             impasto: None,
+            lightness_map: false,
         },
     );
     app.render_cache = crate::app::state::RenderCache::new(app.canvas.width(), app.canvas.height());

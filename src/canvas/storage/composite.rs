@@ -796,9 +796,9 @@ impl Canvas {
                 guard.data.clone()?
             }
         };
-        // Impasto: the paint lit by its thickness.
-        if let (Some(light), Some(heights)) = (layer.style.impasto, layer.height.as_deref()) {
-            light.shade(&mut out, heights, tx, ty, ts);
+        // Impasto: the paint lit by its thickness, or by its lightness map.
+        if let Some(heights) = layer.height.as_deref() {
+            crate::canvas::impasto::relief(layer.shown_style(), heights, &mut out, tx, ty, ts);
         }
         Some(out)
     }

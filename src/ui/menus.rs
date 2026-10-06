@@ -384,12 +384,12 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     })
     .response
     .on_disabled_hover_text("For vector layers (Layer → New Vector Layer)");
-    let lit = app
-        .canvas
-        .layers
-        .get(active)
-        .and_then(|l| l.style.impasto.filter(|_| l.height.is_some()));
-    ui.add_enabled_ui(lit.is_some(), |ui| {
+    let shown = app.canvas.layers.get(active).map(|l| l.shown_style());
+    let lit = shown.and_then(|s| s.impasto);
+    // A lightness map (Krita's colour smudge with a lightness tip): no
+    // light to set, but it bakes the same.
+    let relief = shown.is_some_and(|s| s.lightness_map);
+    ui.add_enabled_ui(lit.is_some() || relief, |ui| {
         ui.menu_button("Impasto", |ui| {
             if let Some(mut light) = lit {
                 let mut changed = false;

@@ -686,6 +686,29 @@ fn brush_settings_contents(
                 .checkbox(&mut k.smear_alpha, "Smear alpha")
                 .on_hover_text("Smudge transparency too, not just the paint over what's there.")
                 .changed();
+            // Paint thickness: what a lightness tip leaves on the layer's
+            // lightness map (its relief).
+            changed |= slider_row(
+                ui,
+                "Paint thickness",
+                crate::ui::widgets::reset(&mut k.thickness, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                }),
+            )
+            .on_hover_text(
+                "With a Lightness tip: how much of the tip's light and shade each dab lays \
+                 on the layer (its relief), as Krita's paint thickness. Less flattens it \
+                 toward mid grey.",
+            )
+            .changed();
+            property_row(ui, "Thickness", |ui| {
+                changed |= segmented(
+                    ui,
+                    &mut k.overwrite,
+                    &[(false, "Overlay"), (true, "Overwrite")],
+                    false,
+                );
+            });
             if k.dulling {
                 changed |= slider_row(
                     ui,

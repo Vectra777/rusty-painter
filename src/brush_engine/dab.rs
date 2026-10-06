@@ -121,6 +121,7 @@ pub(crate) struct PlacedDab {
     /// inputs).
     pub smudge: f32,
     pub color_rate: f32,
+    pub thickness: f32,
 }
 
 /// Steps a dab's softness comes in (each a falloff of its own).
@@ -168,6 +169,7 @@ impl PlacedDab {
             lightness: 1.0,
             smudge: 1.0,
             color_rate: 1.0,
+            thickness: 1.0,
         }
     }
 

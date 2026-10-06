@@ -186,6 +186,12 @@ pub struct KritaSmudge {
     /// Dulling: how much of the dab the colour is sampled from (0 its
     /// centre, 1 all of it).
     pub radius: f32,
+    /// With a lightness tip: how much of the tip's lightness each dab lays
+    /// on the layer's lightness map (0..1), and whether at full
+    /// (`overwrite`) rather than as much as the smudge length leaves
+    /// (Krita's paint thickness: overlay).
+    pub thickness: f32,
+    pub overwrite: bool,
 }
 
 impl Default for KritaSmudge {
@@ -194,6 +200,8 @@ impl Default for KritaSmudge {
             dulling: false,
             smear_alpha: true,
             radius: 0.0,
+            thickness: 1.0,
+            overwrite: false,
         }
     }
 }

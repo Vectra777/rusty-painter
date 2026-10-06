@@ -100,7 +100,7 @@ pub type WetTiles = Vec<((i32, i32), Option<Box<WetTile>>)>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct WetTile {
     pub water: Vec<f32>,
-    /// Suspended pigment, premultiplied (0..1 each).
+    /// Suspended pigment, linear-light premultiplied (0..1 each).
     pub pigment: Vec<[f32; 4]>,
     /// The paint under it, dry.
     pub dry: Vec<Color32>,
@@ -150,6 +150,30 @@ impl WetTile {
     }
 }
 
+/// A stored pixel as the compositor reads it: linear-light premultiplied
+/// colour (0..1 each). Pigment is kept the same way.
+pub(crate) fn linear(c: Color32) -> [f32; 4] {
+    crate::canvas::blend::LinearDecoder::new()
+        .decode(c)
+        .to_array()
+}
+
+/// Linear-light premultiplied colour back to a stored pixel (its colour
+/// never past its alpha).
+fn stored(v: [f32; 4]) -> Color32 {
+    let a = v[3].clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return Color32::TRANSPARENT;
+    }
+    let c = |x: f32| x.clamp(0.0, a);
+    crate::canvas::blend::LinearEncoder::new().encode(eframe::egui::Rgba::from_rgba_premultiplied(
+        c(v[0]),
+        c(v[1]),
+        c(v[2]),
+        a,
+    ))
+}
+
 /// A share `f` of suspended pigment `p` settles into `dry`, looking the
 /// same: what's left suspended, and the dry paint now (`p` over `dry` is
 /// what's left over the new dry paint).
@@ -160,31 +184,21 @@ fn settle_share(p: [f32; 4], f: f32, dry: Color32) -> ([f32; 4], Color32) {
     if f >= 1.0 {
         return ([0.0; 4], over(p, dry));
     }
-    let d = dry.to_array().map(|v| v as f32 / 255.0);
+    let d = linear(dry);
     let pa = p[3].min(1.0);
     let below = 1.0 - pa + pa * f;
     let new: [f32; 4] = std::array::from_fn(|k| (p[k] * f + d[k] * (1.0 - pa)) / below.max(1e-6));
-    let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
-    let a = byte(new[3]);
-    let c = |v: f32| byte(v).min(a);
-    (
-        p.map(|v| v * (1.0 - f)),
-        Color32::from_rgba_premultiplied(c(new[0]), c(new[1]), c(new[2]), a),
-    )
+    (p.map(|v| v * (1.0 - f)), stored(new))
 }
 
-/// `p` (premultiplied, 0..1) over `dry`.
+/// `p` (linear premultiplied, 0..1) over `dry`.
 fn over(p: [f32; 4], dry: Color32) -> Color32 {
     if p[3] <= 0.0 {
         return dry;
     }
-    let d = dry.to_array().map(|v| v as f32 / 255.0);
+    let d = linear(dry);
     let k = 1.0 - p[3].min(1.0);
-    let out: [f32; 4] = std::array::from_fn(|i| p[i] + d[i] * k);
-    let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
-    let a = byte(out[3]);
-    let c = |v: f32| byte(v).min(a);
-    Color32::from_rgba_premultiplied(c(out[0]), c(out[1]), c(out[2]), a)
+    stored(std::array::from_fn(|i| p[i] + d[i] * k))
 }
 
 /// A layer's wet paint.
@@ -230,8 +244,8 @@ impl WetLayer {
         }
     }
 
-    /// Lay a wet stroke on tile `key`: `coverage` of `colour` (premultiplied,
-    /// 0..1) over `before` (the tile's pixels before the stroke), keeping
+    /// Lay a wet stroke on tile `key`: `coverage` of `colour` (linear-light
+    /// premultiplied, 0..1) over `before` (the tile's pixels before the stroke), keeping
     /// their alpha on an `alpha_lock`ed layer. Returns the tile's pixels now.
     pub fn lay(
         &self,
@@ -265,7 +279,7 @@ impl WetLayer {
             // Water lifts some of the dry paint back into the wash (it looks
             // the same: the paint left, under what's lifted, under the wash).
             if lift > 0.0 {
-                let d = tile.dry[i].to_array().map(|v| v as f32 / 255.0);
+                let d = linear(tile.dry[i]);
                 let up = d.map(|v| v * lift * c);
                 let rest = 1.0 - up[3];
                 let left: [f32; 4] = if rest > 1e-4 {
@@ -273,14 +287,7 @@ impl WetLayer {
                 } else {
                     [0.0; 4]
                 };
-                let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
-                let a = byte(left[3]);
-                tile.dry[i] = Color32::from_rgba_premultiplied(
-                    byte(left[0]).min(a),
-                    byte(left[1]).min(a),
-                    byte(left[2]).min(a),
-                    a,
-                );
+                tile.dry[i] = stored(left);
                 let p = tile.pigment[i];
                 tile.pigment[i] = std::array::from_fn(|k| p[k] + up[k] * (1.0 - p[3]));
             }
@@ -687,7 +694,8 @@ mod tests {
         };
         wet.lay((0, 0), &red, &vec![1.0; S * S], |_| [0.0; 4], water, false);
         let t = wet.tile((0, 0)).unwrap();
-        assert!(t.pigment[0][0] > 0.3, "red lifted into the wash");
+        // (Half of red 200, linear: 0.58.)
+        assert!(t.pigment[0][0] > 0.25, "red lifted into the wash");
         assert_eq!(
             t.shown[0],
             Color32::from_rgb(200, 0, 0),
