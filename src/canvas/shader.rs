@@ -527,7 +527,7 @@ pub fn live_layout(canvas: &Canvas) -> LiveStatus {
         return LiveStatus::Unsupported("a shader layer is clipped");
     }
     // A border is drawn around the layer's pixels, on the CPU.
-    if shaders.iter().any(|&i| !layers[i].style.is_plain()) {
+    if shaders.iter().any(|&i| !layers[i].shown_style().is_plain()) {
         return LiveStatus::Unsupported("a shader layer has a border");
     }
     let top_level: Vec<usize> = (0..layers.len())

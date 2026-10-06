@@ -117,6 +117,10 @@ pub(crate) struct PlacedDab {
     pub flow: f32,
     /// A lightness-mapped tip's strength from the dab's inputs (1 = full).
     pub lightness: f32,
+    /// A mixing brush's smudge length and colour rate factors (its
+    /// inputs).
+    pub smudge: f32,
+    pub color_rate: f32,
 }
 
 /// Steps a dab's softness comes in (each a falloff of its own).
@@ -162,6 +166,8 @@ impl PlacedDab {
             soft: SOFT_LEVELS,
             flow: 1.0,
             lightness: 1.0,
+            smudge: 1.0,
+            color_rate: 1.0,
         }
     }
 

@@ -616,7 +616,7 @@ fn brush_settings_contents(
     changed |= color_source_section(ui, &mut brush.brush_options.color_source, textures);
     let lines = brush.brush_type.replaces_dabs();
     changed |= dynamics_sections(ui, &mut brush.dynamics, lines);
-    changed |= inputs_section(ui, &mut brush.inputs);
+    changed |= inputs_section(ui, &mut brush.inputs, &mut brush.input_combine);
     changed |= texture_section(ui, &mut brush.texture, textures);
     changed |= dual_section(ui, &mut brush.dual, loaded_tips);
     section(ui, "Colour mixing", false, |ui| {
@@ -1248,9 +1248,27 @@ fn dynamics_sections(
 fn inputs_section(
     ui: &mut egui::Ui,
     inputs: &mut Vec<crate::brush_engine::dynamics::InputMapping>,
+    combine: &mut Vec<(
+        crate::brush_engine::dynamics::DabSetting,
+        crate::brush_engine::dynamics::Combine,
+    )>,
 ) -> bool {
-    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    use crate::brush_engine::dynamics::{Combine, DabSetting, InputMapping, Sensor};
     let mut changed = false;
+    let mode_of = |combine: &[(DabSetting, Combine)], setting: DabSetting| {
+        (combine.iter())
+            .find(|(k, _)| *k == setting)
+            .map_or(Combine::Separately, |(_, c)| *c)
+    };
+    // Per input: whether a later one in a combined group (its amount is
+    // the group's first input's).
+    let follower: Vec<bool> = (0..inputs.len())
+        .map(|i| {
+            let setting = inputs[i].setting;
+            mode_of(combine, setting) != Combine::Separately
+                && inputs[..i].iter().any(|o| o.setting == setting)
+        })
+        .collect();
     section(ui, "Inputs", false, |ui| {
         ui.label(
             egui::RichText::new(
@@ -1286,18 +1304,27 @@ fn inputs_section(
                         remove = Some(i);
                     }
                 });
-                changed |= slider_row(
-                    ui,
-                    "Amount",
-                    percent_of_unit(egui::Slider::new(&mut m.amount, -1.0..=1.0)),
-                )
-                .on_hover_text(
-                    "Size, opacity and texture strength: above 0 a high input keeps them full \
-                     and a low one reduces them; below 0 the other way. Others: how far a full \
-                     input moves them (scatter up to a brush width, colour mix all the way to \
-                     the secondary colour).",
-                )
-                .changed();
+                if follower[i] {
+                    ui.label(
+                        egui::RichText::new("Amount: the first of its group's")
+                            .small()
+                            .color(TEXT_DIM),
+                    );
+                } else {
+                    let max = m.setting.max_amount();
+                    changed |= slider_row(
+                        ui,
+                        "Amount",
+                        percent_of_unit(egui::Slider::new(&mut m.amount, -max..=max)),
+                    )
+                    .on_hover_text(
+                        "Size, opacity and texture strength: above 0 a high input keeps them \
+                         full and a low one reduces them; below 0 the other way. Others: how far \
+                         a full input moves them (scatter up to five brush widths, colour mix \
+                         all the way to the secondary colour).",
+                    )
+                    .changed();
+                }
                 if m.setting.adds() {
                     changed |= ui
                         .checkbox(&mut m.both_ways, "Both ways")
@@ -1337,6 +1364,46 @@ fn inputs_section(
         if let Some(i) = remove {
             inputs.remove(i);
             changed = true;
+        }
+        // Settings driven by several inputs: how they come together.
+        let mut shared: Vec<DabSetting> = Vec::new();
+        for m in inputs.iter() {
+            let n = inputs.iter().filter(|o| o.setting == m.setting).count();
+            if n > 1 && !shared.contains(&m.setting) {
+                shared.push(m.setting);
+            }
+        }
+        if !shared.is_empty() {
+            ui.separator();
+            ui.label(egui::RichText::new("Several inputs on one setting").strong());
+        }
+        for setting in shared {
+            let mut mode = mode_of(combine, setting);
+            property_row(ui, setting.label(), |ui| {
+                egui::ComboBox::from_id_salt(("combine", setting.label()))
+                    .selected_text(mode.label())
+                    .show_ui(ui, |ui| {
+                        for c in Combine::ALL {
+                            ui.selectable_value(&mut mode, c, c.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Each on its own: every input works by itself (scaling settings \
+                         multiply, the others add). The rest, as Krita does: random inputs, \
+                         barrel rotation and tilt direction add up as offsets, stroke \
+                         direction is a fixed offset, and the other inputs multiply, add, or \
+                         give their highest, lowest, or highest less lowest; the result \
+                         drives the setting once, by the first input's amount.",
+                    );
+            });
+            if mode != mode_of(combine, setting) {
+                combine.retain(|(k, _)| *k != setting);
+                if mode != Combine::Separately {
+                    combine.push((setting, mode));
+                }
+                changed = true;
+            }
         }
         ui.separator();
         if ui.button("+ Add input").clicked() {

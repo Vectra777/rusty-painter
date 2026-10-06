@@ -154,6 +154,17 @@ pub struct DocumentState {
 }
 
 impl Layer {
+    /// Its style as it shows: the impasto light only while there are
+    /// heights to light (until then the layer composites, and its strokes
+    /// redraw, as a plain one's).
+    pub fn shown_style(&self) -> crate::canvas::layer_style::LayerStyle {
+        let mut style = self.style;
+        if self.height.as_deref().is_none_or(|h| h.is_empty()) {
+            style.impasto = None;
+        }
+        style
+    }
+
     /// Bytes of pixels this layer holds (for the undo history's budget).
     pub(crate) fn held_bytes(&self) -> usize {
         let tiles = self.tiles.lock().unwrap_or_else(|e| e.into_inner());
@@ -426,7 +437,7 @@ impl Canvas {
         self.layers
             .iter()
             .filter(|l| l.visible)
-            .map(|l| l.style.reach())
+            .map(|l| l.shown_style().reach())
             .max()
             .unwrap_or(0)
     }
@@ -440,7 +451,7 @@ impl Canvas {
                 && l.blend == LayerBlend::Normal
                 && !l.clipped
                 && l.adjustment.is_none()
-                && l.style.is_plain()
+                && l.shown_style().is_plain()
         })
     }
 

@@ -1206,3 +1206,18 @@ fn write_layer_region_keeps_the_empty_flag_right() {
     canvas.write_layer_region(1, (10, 11, 2, 1), &clear, None);
     assert!(empty(&canvas));
 }
+
+#[test]
+fn an_impasto_light_without_heights_leaves_the_stack_plain() {
+    // A layer that had impasto laid (its light stays on) but no thickness
+    // now: composited, and its strokes redrawn, as a plain layer.
+    let mut canvas = Canvas::new(2 * T, T, Color32::WHITE, T);
+    canvas.layers[1].style.impasto = Some(Default::default());
+    canvas.layers[1].height = Some(Default::default());
+    assert!(!canvas.needs_tree_compositing() && canvas.style_reach() == 0);
+    // Some thickness: lit, a pixel past each tile.
+    if let Some(h) = canvas.layers[1].height.as_deref() {
+        h.set_tile((0, 0), Some(vec![100; T * T]));
+    }
+    assert!(canvas.needs_tree_compositing() && canvas.style_reach() == 1);
+}

@@ -34,9 +34,11 @@ use std::sync::Arc;
 pub const EXTENSION: &str = "rpbrush";
 const FORMAT: &str = "rusty-painter-brushes";
 /// The newest version read and written: 3 has the spray, chalk, curve,
-/// grid, tangent normal and particle types (a file is written as 2 when it
-/// has none, so older builds still read it).
-const VERSION: u32 = 3;
+/// grid, tangent normal and particle types, 4 inputs that combine, drive
+/// smudge length or colour rate, or scatter past a brush width (a file is
+/// written as the oldest version that has what it holds, so older builds
+/// still read it).
+const VERSION: u32 = 4;
 const PRESETS_ENTRY: &str = "presets.json";
 /// Largest tip or texture side accepted from a file.
 const MAX_SIDE: usize = 8192;
@@ -238,8 +240,17 @@ struct StoredBrush {
     stabilizer_drag: f32,
     stabilizer_modes: crate::brush_engine::stabilizer::StabilizerModes,
     dynamics: BrushDynamics,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_inputs")]
     inputs: Vec<crate::brush_engine::dynamics::InputMapping>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "lenient_inputs"
+    )]
+    input_combine: Vec<(
+        crate::brush_engine::dynamics::DabSetting,
+        crate::brush_engine::dynamics::Combine,
+    )>,
     texture: Option<StoredBrushTexture>,
     /// A [`LayerBlend::key`].
     paint_blend: String,
@@ -266,6 +277,18 @@ struct StoredBrush {
 fn lenient_type<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BrushType, D::Error> {
     let value = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value(value).unwrap_or(BrushType::Soft))
+}
+
+/// A list, without the entries this version doesn't know (an input
+/// driving a setting from a newer one).
+fn lenient_inputs<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
+    let values = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
 }
 
 impl Default for StoredBrush {
@@ -339,6 +362,7 @@ impl StoredBrush {
             stabilizer_modes: b.stabilizer_modes,
             dynamics: b.dynamics,
             inputs: b.inputs.clone(),
+            input_combine: b.input_combine.clone(),
             texture: b.texture.as_ref().map(|t| StoredBrushTexture {
                 pattern: res.texture(&t.pattern),
                 mode: t.mode,
@@ -435,6 +459,7 @@ impl StoredBrush {
         b.stabilizer_modes = self.stabilizer_modes;
         b.dynamics = self.dynamics;
         b.inputs = self.inputs;
+        b.input_combine = self.input_combine;
         b.texture = match self.texture {
             None => None,
             Some(t) => Some(BrushTexture {
@@ -511,7 +536,7 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
             }
         })
         .collect();
-    let newer = presets.iter().any(|p| {
+    let engines = presets.iter().any(|p| {
         !matches!(
             p.brush.brush_type,
             BrushType::Soft
@@ -521,9 +546,24 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
                 | BrushType::Hatching
         )
     });
+    let combining = presets.iter().any(|p| {
+        use crate::brush_engine::dynamics::DabSetting;
+        let b = &p.brush;
+        !b.input_combine.is_empty()
+            || b.inputs.iter().any(|m| {
+                matches!(m.setting, DabSetting::SmudgeLength | DabSetting::ColorRate)
+                    || m.amount.abs() > 1.0
+            })
+    });
     let library = StoredLibrary {
         format: FORMAT.to_string(),
-        version: if newer { VERSION } else { 2 },
+        version: if combining {
+            4
+        } else if engines {
+            3
+        } else {
+            2
+        },
         presets: stored,
         tips: res
             .tips
@@ -738,6 +778,53 @@ mod tests {
         assert_eq!(b.brush_options.spacing, 25.0);
         assert_eq!(b.dynamics, BrushDynamics::default());
         assert!(b.texture.is_none());
+    }
+
+    #[test]
+    fn combined_inputs_survive_as_version_4_and_unknown_inputs_are_skipped() {
+        use crate::brush_engine::dynamics::{Combine, DabSetting, InputMapping, Sensor};
+        let written = |brush: Brush| {
+            let preset = BrushPreset {
+                name: "P".into(),
+                brush,
+                file: None,
+            };
+            let bytes = encode(&[preset]).unwrap();
+            let json = zip::read_entry(&bytes, PRESETS_ENTRY).unwrap().to_vec();
+            let library: StoredLibrary = serde_json::from_slice(&json).unwrap();
+            (library.version, decode(&bytes).unwrap()[0].brush.clone())
+        };
+        let mut brush = Brush::new(24.0, 20.0, Color32::BLACK, 25.0);
+        let input = |sensor, setting| InputMapping {
+            sensor,
+            setting,
+            ..Default::default()
+        };
+        brush.inputs = vec![
+            input(Sensor::Pressure, DabSetting::SmudgeLength),
+            input(Sensor::Speed, DabSetting::SmudgeLength),
+        ];
+        assert_eq!(written(brush.clone()).0, 4, "a new setting");
+        brush.inputs[0].setting = DabSetting::Size;
+        brush.inputs[1].setting = DabSetting::Size;
+        assert_eq!(written(brush.clone()).0, 2, "nothing new");
+        brush.input_combine = vec![(DabSetting::Size, Combine::Highest)];
+        let (v, back) = written(brush.clone());
+        assert_eq!(v, 4);
+        assert_eq!(back.input_combine, brush.input_combine);
+        assert_eq!(back.inputs, brush.inputs);
+        // From a newer version: an input on a setting this one doesn't
+        // know is left out, the rest kept.
+        let json = br#"{"format":"rusty-painter-brushes","version":4,
+            "presets":[{"name":"Future","brush":{"diameter":30.0,"inputs":[
+                {"sensor":"Pressure","setting":"Size"},
+                {"sensor":"Pressure","setting":"Teleport"}],
+                "input_combine":[["Size","Add"],["Size","Sideways"]]}}]}"#;
+        let mut zip = zip::ZipWriter::default();
+        zip.add(PRESETS_ENTRY, json).unwrap();
+        let future = &decode(&zip.finish().unwrap()).unwrap()[0].brush;
+        assert_eq!(future.inputs.len(), 1);
+        assert_eq!(future.input_combine, [(DabSetting::Size, Combine::Add)]);
     }
 
     #[test]

@@ -1293,14 +1293,16 @@ impl BlendSession {
                 mask
             }
         };
+        // A mixing brush's inputs scale its smudge length and colour rate.
+        let (by_length, by_rate) = placed.map_or((1.0, 1.0), |p| (p.dab.smudge, p.dab.color_rate));
         let stroke = &mut self.stroke;
         let mix = &stroke.mix;
         let by_pressure = |on: bool| if on { pressure.clamp(0.0, 1.0) } else { 1.0 };
-        let length = (mix.length * by_pressure(mix.pressure_length)).clamp(0.0, 1.0);
+        let length = (mix.length * by_pressure(mix.pressure_length) * by_length).clamp(0.0, 1.0);
         // Brush colour added per brush width travelled, whatever the
         // spacing: per dab, the share that compounds to it over one width.
         let steps_per_width = (100.0 / spacing.max(1.0)).max(1.0);
-        let rate = (mix.color_rate * by_pressure(mix.pressure_color)).clamp(0.0, 1.0);
+        let rate = (mix.color_rate * by_pressure(mix.pressure_color) * by_rate).clamp(0.0, 1.0);
         let color_rate = 1.0 - (1.0 - rate).powf(1.0 / steps_per_width);
         let paint_blend = mix.blend;
 
@@ -1594,8 +1596,9 @@ impl BlendSession {
         let Some(k) = m.krita else {
             return;
         };
-        let rate = m.smudge_length * if m.pressure_length { p } else { 1.0 };
-        let color_rate = m.color_rate * if m.pressure_color { p } else { 1.0 };
+        let by = |on: bool| if on { p } else { 1.0 };
+        let rate = m.smudge_length * by(m.pressure_length) * placed.dab.smudge;
+        let color_rate = m.color_rate * by(m.pressure_color) * placed.dab.color_rate;
         let smear = if k.dulling { 0.8 } else { 1.0 } * rate * opacity;
         let colour = color_rate * color_rate * opacity;
         let paint = to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b()));
@@ -2176,6 +2179,38 @@ mod mix_tests {
 
     fn painted(px: &[Color32], x: i32, y: i32) -> bool {
         px[(y * 128 + x) as usize] != Color32::WHITE
+    }
+
+    #[test]
+    fn a_mixing_brush_s_colour_rate_follows_its_inputs() {
+        use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+        // Its own colour at full rate, unless an input (pressure) eases
+        // it: lightly pressed, it lays down less of it.
+        let painted_at = |pressure: f32| {
+            let mut app = app(Some(Color32::WHITE));
+            pure_mixing(&mut app);
+            app.brush_state.brush.inputs = vec![InputMapping {
+                sensor: Sensor::Pressure,
+                setting: DabSetting::ColorRate,
+                ..Default::default()
+            }];
+            app.start_stroke_with_pressure(Vec2::new(10.0, 32.0), pressure);
+            for i in 1..=10 {
+                app.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), pressure);
+            }
+            app.finish_stroke();
+            app.settle_strokes();
+            let px = layer(&app);
+            // How far from white the middle of the line is.
+            let c = px[32 * 128 + 35];
+            765 - (c.r() as i32 + c.g() as i32 + c.b() as i32)
+        };
+        assert!(
+            painted_at(0.2) < painted_at(1.0),
+            "{} {}",
+            painted_at(0.2),
+            painted_at(1.0)
+        );
     }
 
     #[test]

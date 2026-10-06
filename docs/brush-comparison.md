@@ -32,7 +32,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 |---|---|---|---|---|
 | Pressure → size / opacity / flow | ✅ | ✅ | ✅ | ✅ |
 | Own pressure curve per setting | ✅ | ✅ | ⚠️ | ✅ size, opacity, flow, spacing |
-| Any input → any setting, with a curve | ✅ sensors | ⚠️ fixed pairs | ❌ | ✅ 14 inputs (incl. fade in dabs and perspective from the perspective assistants) → size, opacity, angle, squash, hue, saturation, value, texture strength, hardness, softness, mirror, scatter, secondary colour mix |
+| Any input → any setting, with a curve | ✅ sensors | ⚠️ fixed pairs | ❌ | ✅ 14 inputs (incl. fade in dabs and perspective from the perspective assistants) → size, opacity, angle, squash, hue, saturation, value, texture strength, hardness, softness, mirror, scatter, secondary colour mix, smudge length, colour rate; several inputs on one setting combine as Krita's do (multiply, add, highest, lowest, difference) |
 | Pen tilt / barrel rotation | ✅ | ✅ | ⚠️ barrel roll (Apple Pencil Pro) | ✅ tilt → size, opacity, tip angle; barrel rotation and an airbrush's wheel turn the tip or drive any setting (where the tablet reports them: Wayland, X11) |
 | Stroke speed | ✅ | ✅ | ✅ Dynamic tab | ✅ size and opacity |
 | Taper at the start / end of a stroke | ✅ fade | ✅ | ✅ Fade tab | ✅ size and/or opacity, no lag |

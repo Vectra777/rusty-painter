@@ -2868,3 +2868,85 @@ fn curve_and_particle_brushes_draw_their_own_repeatable_lines() {
         .sum::<usize>();
     assert!(below > above * 2, "{below} below, {above} above");
 }
+
+#[test]
+fn inputs_on_one_setting_combine_as_krita_combines_them() {
+    use crate::brush_engine::dynamics::{
+        Combine, DabSetting, DabVar, InputMapping, Sensor, SensorValues, apply_inputs,
+    };
+    let s = SensorValues {
+        pressure: 0.8,
+        speed: 0.25,
+        random_dab: 0.75,
+        ..Default::default()
+    };
+    let input = |sensor, setting, amount| InputMapping {
+        sensor,
+        setting,
+        amount,
+        ..Default::default()
+    };
+    let size = [
+        input(Sensor::Pressure, DabSetting::Size, 1.0),
+        input(Sensor::Speed, DabSetting::Size, 1.0),
+    ];
+    let scale = |inputs: &[InputMapping], how| {
+        let mut v = DabVar::default();
+        apply_inputs(inputs, &[(DabSetting::Size, how)], &mut v, &s);
+        v.scale
+    };
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-5;
+    // Each on its own (as before): size inputs multiply.
+    assert!(near(scale(&size, Combine::Separately), 0.2));
+    assert!(near(scale(&size, Combine::Multiply), 0.2));
+    assert!(near(scale(&size, Combine::Add), 1.0), "1.05, at most full");
+    assert!(near(scale(&size, Combine::Highest), 0.8));
+    assert!(near(scale(&size, Combine::Lowest), 0.25));
+    assert!(near(scale(&size, Combine::Difference), 0.55));
+    // Random is an offset (-1..1) whatever the mode: here +0.5, so the
+    // pressure is kept at three quarters.
+    let with_random = [
+        input(Sensor::Pressure, DabSetting::Size, 1.0),
+        input(Sensor::RandomDab, DabSetting::Size, 1.0),
+    ];
+    assert!(near(scale(&with_random, Combine::Add), 0.8 * 0.75));
+    // Rotation: the combined inputs swing it either way by the group's
+    // amount (the first input's), the offsets added.
+    let turn = |inputs: &[InputMapping], how| {
+        let mut v = DabVar::default();
+        apply_inputs(inputs, &[(DabSetting::Angle, how)], &mut v, &s);
+        v.turn / std::f32::consts::PI
+    };
+    let angle = [
+        input(Sensor::Pressure, DabSetting::Angle, 0.5),
+        input(Sensor::Speed, DabSetting::Angle, 0.9),
+    ];
+    assert!(near(
+        turn(&angle, Combine::Lowest),
+        0.5 * (2.0 * 0.25 - 1.0)
+    ));
+    let mut with_offset = angle.to_vec();
+    with_offset.push(input(Sensor::RandomDab, DabSetting::Angle, 0.5));
+    assert!(near(turn(&with_offset, Combine::Lowest), 0.0), "-0.5 + 0.5");
+    // Other settings are left alone.
+    let mut v = DabVar::default();
+    apply_inputs(&size, &[(DabSetting::Opacity, Combine::Add)], &mut v, &s);
+    assert!(near(v.scale, 0.2) && v.strength == 1.0);
+}
+
+#[test]
+fn scatter_reaches_five_brush_widths_and_mixing_settings_take_inputs() {
+    use crate::brush_engine::dynamics::{DabSetting, DabVar, SensorValues, apply_inputs};
+    let s = SensorValues {
+        pressure: 0.5,
+        ..Default::default()
+    };
+    let mut v = DabVar::default();
+    let inputs = [
+        map_pressure(DabSetting::Scatter, 4.0),
+        map_pressure(DabSetting::SmudgeLength, 1.0),
+        map_pressure(DabSetting::ColorRate, 1.0),
+    ];
+    apply_inputs(&inputs, &[], &mut v, &s);
+    assert_eq!((v.scatter, v.smudge, v.color_rate), (2.0, 0.5, 0.5));
+}

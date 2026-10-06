@@ -720,7 +720,7 @@ impl Canvas {
             return Some(self.shrunk_input(i, pixels, space));
         }
         // A fill layer or a bordered one: pixels made for this tile.
-        if !layer.style.is_plain() {
+        if !layer.shown_style().is_plain() {
             let data = self.styled_tile(i, tx, ty)?;
             return Some(match shrink {
                 Some(s) => {
@@ -815,7 +815,7 @@ impl Canvas {
         let ts = self.tile_size;
         // The paint's alpha around the tile, as far as the border reaches
         // (never past the next tiles).
-        let reach = (layer.style.reach() as usize).min(ts);
+        let reach = (layer.shown_style().reach() as usize).min(ts);
         let side = ts + 2 * reach;
         let mut alpha = vec![0u8; side * side];
         let mut any = false;

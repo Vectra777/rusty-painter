@@ -362,10 +362,14 @@ pub enum DabSetting {
     /// How strongly a lightness-mapped tip's picture lightens and darkens
     /// the colour (0: the plain colour).
     Lightness,
+    /// A mixing brush's smudge length and colour rate, each like size
+    /// scales the dab.
+    SmudgeLength,
+    ColorRate,
 }
 
 impl DabSetting {
-    pub const ALL: [DabSetting; 21] = [
+    pub const ALL: [DabSetting; 23] = [
         DabSetting::Size,
         DabSetting::Opacity,
         DabSetting::Angle,
@@ -387,6 +391,8 @@ impl DabSetting {
         DabSetting::Flow,
         DabSetting::Spacing,
         DabSetting::Lightness,
+        DabSetting::SmudgeLength,
+        DabSetting::ColorRate,
     ];
 
     pub fn label(self) -> &'static str {
@@ -412,6 +418,17 @@ impl DabSetting {
             DabSetting::Flow => "Flow",
             DabSetting::Spacing => "Spacing",
             DabSetting::Lightness => "Lightness strength",
+            DabSetting::SmudgeLength => "Smudge length",
+            DabSetting::ColorRate => "Colour rate",
+        }
+    }
+
+    /// The most a mapping's amount can be either way: scatter goes up to
+    /// five brush widths, the rest to their full range.
+    pub fn max_amount(self) -> f32 {
+        match self {
+            DabSetting::Scatter => 5.0,
+            _ => 1.0,
         }
     }
 
@@ -439,6 +456,137 @@ impl DabSetting {
                 | DabSetting::ColorMix
                 | DabSetting::Darken
         )
+    }
+}
+
+/// How the inputs driving one setting come together (Krita's curve
+/// modes). With any but `Separately`, as Krita reads an option's sensors:
+/// the random inputs, barrel rotation and tilt direction add (each -1..1,
+/// as offsets); stroke direction is a fixed offset; the rest come together
+/// this way; and the result drives the setting once, by the group's
+/// amount (its first input's).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Combine {
+    /// Each input on its own: scaling settings multiply, the others add.
+    #[default]
+    Separately,
+    Multiply,
+    Add,
+    Highest,
+    Lowest,
+    /// The highest less the lowest.
+    Difference,
+}
+
+impl Combine {
+    pub const ALL: [Combine; 6] = [
+        Combine::Separately,
+        Combine::Multiply,
+        Combine::Add,
+        Combine::Highest,
+        Combine::Lowest,
+        Combine::Difference,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Combine::Separately => "Each on its own",
+            Combine::Multiply => "Multiply",
+            Combine::Add => "Add",
+            Combine::Highest => "Highest",
+            Combine::Lowest => "Lowest",
+            Combine::Difference => "Difference",
+        }
+    }
+
+    /// `values` (each 0..1) come together; `None` with none.
+    fn of(self, values: impl Iterator<Item = f32>) -> Option<f32> {
+        let mut out: Option<(f32, f32, f32, f32)> = None; // product, sum, max, min
+        for v in values {
+            out = Some(match out {
+                None => (v, v, v, v),
+                Some((p, s, hi, lo)) => (p * v, s + v, hi.max(v), lo.min(v)),
+            });
+        }
+        let (p, s, hi, lo) = out?;
+        Some(match self {
+            Combine::Separately | Combine::Multiply => p,
+            Combine::Add => s,
+            Combine::Highest => hi,
+            Combine::Lowest => lo,
+            Combine::Difference => hi - lo,
+        })
+    }
+}
+
+/// How an input counts in a combined group (see [`Combine`]).
+enum Part {
+    /// Combined with the group's other plain inputs (0..1).
+    Plain(f32),
+    /// Added up with the others like it (-1..1).
+    Offset(f32),
+    /// Stroke direction: a fixed offset (0..1).
+    Fixed(f32),
+}
+
+/// Apply `inputs` to `v` given the sensors: each on its own, or, for the
+/// settings `combine` names, together (see [`Combine`]).
+pub fn apply_inputs(
+    inputs: &[InputMapping],
+    combine: &[(DabSetting, Combine)],
+    v: &mut DabVar,
+    s: &SensorValues,
+) {
+    let mode = |setting: DabSetting| {
+        (combine.iter())
+            .find(|(k, _)| *k == setting)
+            .map_or(Combine::Separately, |(_, c)| *c)
+    };
+    for (i, m) in inputs.iter().enumerate() {
+        let how = mode(m.setting);
+        if how == Combine::Separately {
+            m.apply(v, s);
+            continue;
+        }
+        // The group, once, at its first input.
+        if inputs[..i].iter().any(|o| o.setting == m.setting) {
+            continue;
+        }
+        let group = inputs.iter().filter(|o| o.setting == m.setting);
+        let parts: Vec<Part> = group.map(|o| o.part(s)).collect();
+        let plain = how.of(parts.iter().filter_map(|p| match p {
+            Part::Plain(x) => Some(*x),
+            _ => None,
+        }));
+        let offsets: Vec<f32> = (parts.iter())
+            .filter_map(|p| match p {
+                Part::Offset(x) => Some(*x),
+                _ => None,
+            })
+            .collect();
+        let offset = (!offsets.is_empty()).then(|| offsets.iter().sum::<f32>());
+        let fixed: Vec<f32> = (parts.iter())
+            .filter_map(|p| match p {
+                Part::Fixed(x) => Some(*x),
+                _ => None,
+            })
+            .collect();
+        if m.setting == DabSetting::Angle {
+            // Rotation-like: the plain inputs as a swing either way, the
+            // offsets added, the stroke direction on top (at full).
+            let swing = plain.map_or(0.0, |x| 2.0 * x - 1.0) + offset.unwrap_or(0.0);
+            v.turn += m.amount.clamp(-1.0, 1.0) * swing * std::f32::consts::PI;
+            for f in fixed {
+                v.turn += (2.0 * f - 1.0) * std::f32::consts::PI;
+            }
+        } else {
+            // Size-like: the plain inputs, scaled by the offsets (as a
+            // share, -1..1 to 0..1) and the direction.
+            let x = plain.unwrap_or(1.0)
+                * offset.map_or(1.0, |o| (o + 1.0) * 0.5)
+                * fixed.iter().product::<f32>();
+            m.apply_input(v, x.clamp(0.0, 1.0));
+        }
     }
 }
 
@@ -541,10 +689,27 @@ impl InputMapping {
         self.curve.eval(raw.clamp(0.0, 1.0)).clamp(0.0, 1.0)
     }
 
+    /// How this input counts in a combined group (see [`Combine`]).
+    fn part(&self, s: &SensorValues) -> Part {
+        let x = self.input(s);
+        match self.sensor {
+            Sensor::RandomDab | Sensor::RandomStroke | Sensor::Rotation | Sensor::TiltDirection => {
+                Part::Offset(2.0 * x - 1.0)
+            }
+            Sensor::Direction => Part::Fixed(x),
+            _ => Part::Plain(x),
+        }
+    }
+
     /// Apply this mapping to `v` given the sensors.
     pub fn apply(&self, v: &mut DabVar, s: &SensorValues) {
-        let x = self.input(s);
-        let a = self.amount.clamp(-1.0, 1.0);
+        self.apply_input(v, self.input(s));
+    }
+
+    /// Apply this mapping to `v` as if its input (after its curve) read `x`.
+    pub fn apply_input(&self, v: &mut DabVar, x: f32) {
+        let max = self.setting.max_amount();
+        let a = self.amount.clamp(-max, max);
         // Both ways: an added setting moves by -a..a over the input.
         let added = if self.both_ways { 2.0 * x - 1.0 } else { x };
         // Size and opacity scale: full at one end of the input, reduced
@@ -576,6 +741,8 @@ impl InputMapping {
             DabSetting::Flow => v.flow *= factor.max(0.0),
             DabSetting::Spacing => v.spacing *= factor.max(0.05),
             DabSetting::Lightness => v.lightness *= factor.max(0.0),
+            DabSetting::SmudgeLength => v.smudge *= factor.max(0.0),
+            DabSetting::ColorRate => v.color_rate *= factor.max(0.0),
         }
     }
 }
@@ -625,6 +792,9 @@ pub struct DabVar {
     pub flow: f32,
     pub spacing: f32,
     pub lightness: f32,
+    /// A mixing brush's smudge length and colour rate factors.
+    pub smudge: f32,
+    pub color_rate: f32,
     /// A colour (sRGB 0..1) in place of the brush colour (a random colour
     /// source).
     pub base: Option<[f32; 3]>,
@@ -654,6 +824,8 @@ impl Default for DabVar {
             flow: 1.0,
             spacing: 1.0,
             lightness: 1.0,
+            smudge: 1.0,
+            color_rate: 1.0,
             base: None,
         }
     }

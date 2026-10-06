@@ -1379,9 +1379,12 @@ impl StrokeState {
         }
         if !brush.inputs.is_empty() {
             let sensors = self.sensors(dab, pressure);
-            for mapping in &brush.inputs {
-                mapping.apply(&mut v, &sensors);
-            }
+            crate::brush_engine::dynamics::apply_inputs(
+                &brush.inputs,
+                &brush.input_combine,
+                &mut v,
+                &sensors,
+            );
         }
         if brush.brush_type == BrushType::TangentNormal {
             let n = brush.engines.normal;
@@ -1417,13 +1420,16 @@ impl StrokeState {
         let sensors = self.sensors(&at, pressure);
         self.dabs = dabs;
         let mut v = DabVar::default();
-        for m in brush
-            .inputs
-            .iter()
+        let spacing: Vec<_> = (brush.inputs.iter())
             .filter(|m| m.setting == DabSetting::Spacing)
-        {
-            m.apply(&mut v, &sensors);
-        }
+            .cloned()
+            .collect();
+        crate::brush_engine::dynamics::apply_inputs(
+            &spacing,
+            &brush.input_combine,
+            &mut v,
+            &sensors,
+        );
         v.spacing
     }
 

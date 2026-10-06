@@ -14,7 +14,7 @@
 use super::{Imported, Reader, base64_decode, gimp};
 use crate::brush_engine::brush::{Brush, BrushPreset, BrushType};
 use crate::brush_engine::brush_options::PixelBrushShape;
-use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+use crate::brush_engine::dynamics::{Combine, DabSetting, InputMapping, Sensor};
 use crate::brush_engine::hardness::{CurvePoint, Softening, SoftnessCurve, sampled};
 use crate::brush_engine::tip::TipMask;
 use eframe::egui::Color32;
@@ -148,6 +148,18 @@ fn read_kpp(
         curve: curve_of(k, id),
         length: param(k).and_then(|xml| sensor_length(xml, id)),
     };
+    // How an option's sensors (by its `…Sensor` key) come together, when
+    // it has several: its `…curveMode`. Then every one of them is an
+    // input, combined as Krita combines them.
+    let combine_of = |k: &str| -> Option<Combine> {
+        (sensors(k).len() > 1).then(|| match param(&format!("{}curveMode", prefix(k))) {
+            Some("1") => Combine::Add,
+            Some("2") => Combine::Highest,
+            Some("3") => Combine::Lowest,
+            Some("4") => Combine::Difference,
+            _ => Combine::Multiply,
+        })
+    };
 
     // A MyPaint-engine preset keeps the MyPaint brush itself inside,
     // with the size, hardness and opacity its own settings show.
@@ -232,6 +244,32 @@ fn read_kpp(
                 pressure_length: yes("PressureSmudgeRate") && by_pressure("SmudgeRateSensor"),
                 pressure_color: yes("PressureColorRate") && by_pressure("ColorRateSensor"),
             });
+            // Any sensor but pressure alone: all of them as inputs (and
+            // together as the preset combines them).
+            for (option, setting) in [
+                ("SmudgeRate", DabSetting::SmudgeLength),
+                ("ColorRate", DabSetting::ColorRate),
+            ] {
+                let key = format!("{option}Sensor");
+                let ids = sensors(&key);
+                if !yes(&format!("Pressure{option}")) || ids.is_empty() || ids == ["pressure"] {
+                    continue;
+                }
+                if let Some(m) = b.mixing.as_mut() {
+                    match setting {
+                        DabSetting::SmudgeLength => m.pressure_length = false,
+                        _ => m.pressure_color = false,
+                    }
+                }
+                for id in &ids {
+                    if !map_sensor(&mut b.inputs, id, setting, false, read(&key, id)) {
+                        notes.push(unmapped(&name, option_name(option), id));
+                    }
+                }
+                if let Some(c) = combine_of(&key) {
+                    b.input_combine.push((setting, c));
+                }
+            }
         }
         "hairybrush" => b.brush_type = BrushType::Bristle,
         "sketchbrush" => {
@@ -461,31 +499,6 @@ fn read_kpp(
             if skipped.len() > 1 { "s" } else { "" }
         ));
     }
-    // Several sensors on one option: the preset multiplies what they read, or
-    // (its `…curveMode`) adds them, takes the most, the least or the
-    // difference; inputs here multiply.
-    let mut combined: Vec<(&str, &str)> = params
-        .iter()
-        .filter_map(|(k, v)| {
-            let option = k.strip_suffix("curveMode")?;
-            let how = match v.trim() {
-                "1" => "adding",
-                "2" => "taking the highest of",
-                "3" => "taking the lowest of",
-                "4" => "taking the difference of",
-                _ => return None,
-            };
-            (yes(&format!("Pressure{option}")) && sensors(&format!("{option}Sensor")).len() > 1)
-                .then_some((option, how))
-        })
-        .collect();
-    combined.sort_unstable();
-    for (option, how) in combined {
-        notes.push(format!(
-            "{name}: its {} combines its sensors by {how} them, here by multiplying",
-            option_name(option)
-        ));
-    }
     // The painting mode: 1 build up, 2 wash (the stroke never past its
     // opacity, however its dabs overlap).
     if param("PaintOpAction") == Some("2") {
@@ -508,13 +521,17 @@ fn read_kpp(
             "Opacity" => (&mut o.pressure_opacity, &mut o.pressure_curves.opacity),
             _ => (&mut o.pressure_flow, &mut o.pressure_curves.flow),
         };
+        let combined = combine_of(&key);
         for id in sensors(&key) {
-            if id == "pressure" {
+            if id == "pressure" && combined.is_none() {
                 *on = true;
                 *curve = curve_of(&key, "pressure");
             } else if !map_sensor(&mut b.inputs, &id, setting, false, read(&key, &id)) {
                 notes.push(unmapped(&name, option, &id));
             }
+        }
+        if let Some(c) = combined {
+            b.input_combine.push((setting, c));
         }
         // Its strength scales the size (opacity's and flow's are their
         // values, read above).
@@ -540,31 +557,25 @@ fn read_kpp(
     if yes("PressureScatter") {
         let widths = strength("Scatter").clamp(0.0, 5.0);
         let ids = sensors("ScatterSensor");
-        match &ids[..] {
-            [] => b.jitter = widths * 100.0,
-            // One sensor: as much scatter as it reads (the inputs add, a
-            // brush width each at most).
-            [id] if krita_sensor(id).is_some() => {
-                let mut left = widths;
-                while left > 1e-3 {
-                    map_sensor(
-                        &mut b.inputs,
-                        id,
-                        DabSetting::Scatter,
-                        false,
-                        read("ScatterSensor", id),
-                    );
-                    b.inputs.last_mut().expect("just added").amount = left.min(1.0);
-                    left -= 1.0;
-                }
+        if ids.is_empty() {
+            b.jitter = widths * 100.0;
+        }
+        // As much scatter as its sensors read, together.
+        for id in &ids {
+            if map_sensor(
+                &mut b.inputs,
+                id,
+                DabSetting::Scatter,
+                false,
+                read("ScatterSensor", id),
+            ) {
+                b.inputs.last_mut().expect("just added").amount = widths;
+            } else {
+                notes.push(unmapped(&name, "scatter", id));
             }
-            _ => {
-                b.jitter = widths * 100.0;
-                notes.push(format!(
-                    "{name}: its scatter follows {}, here it's always full",
-                    ids.join(" and ")
-                ));
-            }
+        }
+        if let Some(c) = combine_of("ScatterSensor") {
+            b.input_combine.push((DabSetting::Scatter, c));
         }
     }
     // Pressure spacing, its strength spacing the dabs to begin with.
@@ -574,9 +585,14 @@ fn read_kpp(
         if let Some(coeff) = &mut o.auto_spacing {
             *coeff = (*coeff * strength("Spacing")).clamp(0.01, 10.0);
         }
-        // Pressure through its curve, any other sensor as an input.
+        // Pressure through its curve, any other sensor as an input (all
+        // of them, when they combine).
+        let combined = combine_of("SpacingSensor");
+        if let Some(c) = combined {
+            b.input_combine.push((DabSetting::Spacing, c));
+        }
         for id in sensors("SpacingSensor") {
-            if id == "pressure" {
+            if id == "pressure" && combined.is_none() {
                 let o = &mut b.brush_options;
                 o.pressure_spacing = true;
                 o.pressure_curves.spacing = curve_of("SpacingSensor", "pressure");
@@ -602,13 +618,19 @@ fn read_kpp(
     // randomness.
     if yes("PressureRotation") {
         let swing = strength("Rotation").clamp(0.0, 1.0);
+        // Its sensors together: all but the stroke direction (a fixed
+        // offset either way) are inputs, combined as Krita combines them.
+        let combined = combine_of("RotationSensor");
+        if let Some(c) = combined {
+            b.input_combine.push((DabSetting::Angle, c));
+        }
         for id in sensors("RotationSensor") {
             let tip = &mut b.dynamics.tip;
             match id.as_str() {
                 "drawingangle" => tip.follow_stroke = true,
-                "fuzzy" | "fuzzystroke" => tip.random_angle = 180.0 * swing,
-                "ascension" => tip.follow_tilt = true,
-                "rotation" => tip.follow_barrel = true,
+                "fuzzy" | "fuzzystroke" if combined.is_none() => tip.random_angle = 180.0 * swing,
+                "ascension" if combined.is_none() => tip.follow_tilt = true,
+                "rotation" if combined.is_none() => tip.follow_barrel = true,
                 other => {
                     let read = read("RotationSensor", other);
                     if map_sensor(&mut b.inputs, other, DabSetting::Angle, false, read) {
@@ -739,6 +761,31 @@ fn read_kpp(
             } else {
                 notes.push(unmapped(&name, "darken", &id));
             }
+        }
+    }
+    // The other options whose sensors each became an input: together, as
+    // the preset combines them.
+    for (key, setting) in [
+        ("RatioSensor", DabSetting::Squash),
+        ("SoftnessSensor", DabSetting::Softness),
+        ("SharpnessSensor", DabSetting::Sharpness),
+        ("LightnessStrengthSensor", DabSetting::Lightness),
+        ("MirrorSensor", DabSetting::Mirror),
+        ("hSensor", DabSetting::Hue),
+        ("sSensor", DabSetting::Saturation),
+        ("vSensor", DabSetting::Value),
+        ("DarkenSensor", DabSetting::Darken),
+        ("GradientSensor", DabSetting::ColorMix),
+        ("DensitySensor", DabSetting::SketchDensity),
+        ("Line widthSensor", DabSetting::SketchWidth),
+        ("Offset scaleSensor", DabSetting::SketchOffset),
+    ] {
+        let mapped = b.inputs.iter().filter(|m| m.setting == setting).count();
+        if mapped > 1
+            && !b.input_combine.iter().any(|(k, _)| *k == setting)
+            && let Some(c) = combine_of(key)
+        {
+            b.input_combine.push((setting, c));
         }
     }
     // The colour source: a gradient is the brush colour to the secondary
@@ -887,19 +934,19 @@ fn read_kpp(
                             soft: yes("Texture/Pattern/UseSoftTexturing"),
                         }),
                 });
-                // Its strength by pressure.
-                if yes("PressureTexture/Strength/")
-                    && sensors("Texture/Strength/Sensor")
-                        .iter()
-                        .any(|id| id == "pressure")
-                {
-                    map_sensor(
-                        &mut b.inputs,
-                        "pressure",
-                        DabSetting::TextureStrength,
-                        false,
-                        read("Texture/Strength/Sensor", "pressure"),
-                    );
+                // Its strength by its sensors.
+                if yes("PressureTexture/Strength/") {
+                    let key = "Texture/Strength/Sensor";
+                    for id in sensors(key) {
+                        let read = read(key, &id);
+                        if !map_sensor(&mut b.inputs, &id, DabSetting::TextureStrength, false, read)
+                        {
+                            notes.push(unmapped(&name, "texture strength", &id));
+                        }
+                    }
+                    if let Some(c) = combine_of(key) {
+                        b.input_combine.push((DabSetting::TextureStrength, c));
+                    }
                 }
             }
             None => notes.push(format!("{name}: its texture {base} is missing")),
@@ -2080,6 +2127,79 @@ mod tests {
     }
 
     #[test]
+    fn several_sensors_on_an_option_come_together_as_the_preset_says() {
+        // Like Pesi's watercolours: rotation adding randomness, speed and
+        // the stroke direction; scatter adding speed and pressure; the
+        // smudge length adding randomness and pressure.
+        let list = |ids: &[&str]| {
+            let children: String = ids
+                .iter()
+                .map(|id| format!(r#"<ChildSensor id="{id}"/>"#))
+                .collect();
+            format!(r#"<!DOCTYPE params><params id="sensorslist">{children}</params>"#)
+        };
+        let rotation = list(&["fuzzy", "speed", "drawingangle"]);
+        let scatter = list(&["speed", "pressure"]);
+        let smudge = list(&["fuzzy", "pressure"]);
+        let brush = with_params(
+            "colorsmudge",
+            &[
+                ("PressureRotation", "true"),
+                ("RotationValue", "0.3"),
+                ("RotationSensor", &rotation),
+                ("RotationcurveMode", "1"),
+                ("PressureScatter", "true"),
+                ("ScatterValue", "0.5"),
+                ("ScatterSensor", &scatter),
+                ("ScattercurveMode", "1"),
+                ("PressureSmudgeRate", "true"),
+                ("SmudgeRateValue", "1"),
+                ("SmudgeRateSensor", &smudge),
+                ("SmudgeRatecurveMode", "1"),
+            ],
+        );
+        let imported = import_kpp(&brush, "file").unwrap();
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+        let b = &imported.presets[0].brush;
+        for setting in [
+            DabSetting::Angle,
+            DabSetting::Scatter,
+            DabSetting::SmudgeLength,
+        ] {
+            assert!(
+                b.input_combine.contains(&(setting, Combine::Add)),
+                "{setting:?}: {:?}",
+                b.input_combine
+            );
+        }
+        let sensors = |setting| {
+            (b.inputs.iter())
+                .filter(|m| m.setting == setting)
+                .map(|m| (m.sensor, m.amount))
+                .collect::<Vec<_>>()
+        };
+        // The stroke direction a fixed offset (following the stroke), the
+        // rest swinging it by the option's strength.
+        assert!(b.dynamics.tip.follow_stroke && b.dynamics.tip.random_angle == 0.0);
+        assert_eq!(
+            sensors(DabSetting::Angle),
+            [(Sensor::RandomDab, 0.3), (Sensor::Speed, 0.3)]
+        );
+        assert_eq!(
+            sensors(DabSetting::Scatter),
+            [(Sensor::Speed, 0.5), (Sensor::Pressure, 0.5)]
+        );
+        assert_eq!(
+            sensors(DabSetting::SmudgeLength),
+            [(Sensor::RandomDab, 1.0), (Sensor::Pressure, 1.0)]
+        );
+        assert!(
+            !b.mixing.unwrap().pressure_length,
+            "pressure is an input here"
+        );
+    }
+
+    #[test]
     fn option_strengths_scale_what_their_sensors_read() {
         let brush = with_params(
             "paintbrush",
@@ -2123,12 +2243,22 @@ mod tests {
         assert_eq!((scatter, b.jitter), (1.5, 0.0));
         // Spacing 8% (the tip's), doubled.
         assert_eq!(b.brush_options.spacing, 16.0);
-        // Opacity takes the higher of its sensors in the preset: said so.
+        // Opacity takes the higher of its sensors: both of them inputs,
+        // combined so (nothing left to say about it).
         assert!(
-            imported.notes.iter().any(|n| n.contains("highest")),
-            "{:?}",
-            imported.notes
+            b.input_combine
+                .contains(&(DabSetting::Opacity, Combine::Highest))
         );
+        let opacity: Vec<Sensor> = (b.inputs.iter())
+            .filter(|m| m.setting == DabSetting::Opacity)
+            .map(|m| m.sensor)
+            .collect();
+        assert_eq!(opacity, [Sensor::Pressure, Sensor::Speed]);
+        assert!(
+            !b.brush_options.pressure_opacity,
+            "pressure is an input here"
+        );
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
     }
 
     #[test]

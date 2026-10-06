@@ -241,6 +241,13 @@ pub struct Brush {
     pub dynamics: crate::brush_engine::dynamics::BrushDynamics,
     /// Inputs driving dab settings, each through its own curve.
     pub inputs: Vec<crate::brush_engine::dynamics::InputMapping>,
+    /// How the inputs driving a setting come together, for the settings
+    /// whose inputs don't each work on their own (see
+    /// [`crate::brush_engine::dynamics::Combine`]).
+    pub input_combine: Vec<(
+        crate::brush_engine::dynamics::DabSetting,
+        crate::brush_engine::dynamics::Combine,
+    )>,
     /// Paper grain taking paint away from each dab; `None` for none.
     pub texture: Option<crate::brush_engine::texture::BrushTexture>,
     /// How the paint blends onto the layer (multiply, screen, add…), like a
@@ -1171,6 +1178,7 @@ impl Brush {
             is_changed: false,
             dynamics: Default::default(),
             inputs: Vec::new(),
+            input_combine: Vec::new(),
             texture: None,
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
@@ -1207,6 +1215,7 @@ impl Brush {
             is_changed: false,
             dynamics: Default::default(),
             inputs: Vec::new(),
+            input_combine: Vec::new(),
             texture: None,
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
@@ -1368,6 +1377,8 @@ impl Brush {
                 dab.soft = crate::brush_engine::dab::soft_level(var.softness);
                 dab.flow = var.flow;
                 dab.lightness = var.lightness;
+                dab.smudge = var.smudge;
+                dab.color_rate = var.color_rate;
                 if colored {
                     let own = var.base.map_or(self.brush_options.color, |c| {
                         let [r, g, b] = c.map(|v| (v * 255.0).round() as u8);
