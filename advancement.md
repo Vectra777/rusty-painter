@@ -21,8 +21,6 @@ Dynamics: the biggest structural gap
 
 Paint behaviour
 
-- Real paint simulation (R, Corel Painter, ArtRage). A wet layer with fluid flow: watercolour, and drips with the tablet's tilt. Paint dries over time, and you can re-wet it. Rebelle andFresco sell on this. Your watercolour edges are the static version.
-- Impasto / paint thickness (K "paint thickness", ArtRage, R). A height map painted along wit time.
 - Smudge variants:
   - Krita's smearing vs dulling modes.
   - Smudging from all layers rather than just this one.
@@ -32,10 +30,7 @@ Paint behaviour
 
 Engines you don't have (K has about 20)
 
-- Spray engine: particle distributions (gaussian, uniform, clustered), particle shapes and rotation, fill density. Yours is up to 16 dabs per step with position jitter.
-- Tangent normal: paints normal maps from tilt. Useful for game art.
 - Shape / "Experiment" engine: fills the shape your stroke encloses as you draw it.
-- Particle, Curve, Grid and Chalk engines: more niche, lower priority.
 - Vector brushes (C): strokes stay editable after drawing. You can change their width afterwards, move control points, simplify them, and use a vector eraser that erases up to the next intersection. This is Clip
   Studio's killer feature for line art, and a large project.
 
@@ -56,11 +51,9 @@ Tips and textures
 Stroke help
 
 - QuickShape (P): hold at the end of a stroke and it snaps to a line, ellipse, arc or polygon that you can then edit. Very popular.
-- Post-correction (C) / curve fitting: smooths the stroke after the pen lifts.
 - Pulled-string / lazy-mouse mode (PS, SAI, K): the line trails the pen with a dead zone.
 - Motion filtering (P): removes jitter without adding lag.
 - Speed-based stabiliser (C): more smoothing when you draw slowly.
-- Global pressure calibration from a test stroke (C, P, K). You have curves per setting, but
 
 Brush management and UX
 
