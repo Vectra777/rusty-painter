@@ -53,6 +53,20 @@ struct StoredLibrary {
 struct StoredPreset {
     name: String,
     brush: StoredBrush,
+    /// The library's tags for it (since files of version 2; older files and
+    /// older builds go without).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    favourite: bool,
+}
+
+/// What the brush library keeps about a preset (not part of its settings),
+/// carried in exported files so they arrive tagged and starred.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PresetMeta {
+    pub tags: Vec<String>,
+    pub favourite: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -457,12 +471,24 @@ pub fn same_settings(a: &Brush, b: &Brush) -> bool {
 
 /// `presets` as the bytes of a `.rpbrush` file.
 pub fn encode(presets: &[BrushPreset]) -> Result<Vec<u8>, String> {
+    encode_with_meta(presets, &[])
+}
+
+/// `presets` as the bytes of a `.rpbrush` file, each with its tags and star
+/// from `meta` (by position; missing ones have none).
+pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<Vec<u8>, String> {
     let mut res = Resources::default();
     let stored = presets
         .iter()
-        .map(|p| StoredPreset {
-            name: p.name.clone(),
-            brush: StoredBrush::from_brush(&p.brush, &mut res),
+        .enumerate()
+        .map(|(i, p)| {
+            let meta = meta.get(i).cloned().unwrap_or_default();
+            StoredPreset {
+                name: p.name.clone(),
+                brush: StoredBrush::from_brush(&p.brush, &mut res),
+                tags: meta.tags,
+                favourite: meta.favourite,
+            }
         })
         .collect();
     let library = StoredLibrary {
@@ -532,6 +558,14 @@ pub fn encode(presets: &[BrushPreset]) -> Result<Vec<u8>, String> {
 /// The presets in a `.rpbrush` file. Tips and textures identical to the
 /// built-in ones are shared with them.
 pub fn decode(bytes: &[u8]) -> Result<Vec<BrushPreset>, String> {
+    Ok(decode_with_meta(bytes)?
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect())
+}
+
+/// [`decode`], with each preset's tags and star.
+pub fn decode_with_meta(bytes: &[u8]) -> Result<Vec<(BrushPreset, PresetMeta)>, String> {
     if !bytes.starts_with(zip::SIGNATURE) {
         return Err("Not a brush preset file".into());
     }
@@ -629,11 +663,16 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<BrushPreset>, String> {
         .presets
         .into_iter()
         .map(|p| {
-            Ok(BrushPreset {
+            let preset = BrushPreset {
                 name: p.name,
                 brush: p.brush.into_brush(&res)?,
                 file: None,
-            })
+            };
+            let meta = PresetMeta {
+                tags: p.tags,
+                favourite: p.favourite,
+            };
+            Ok((preset, meta))
         })
         .collect()
 }
@@ -669,6 +708,32 @@ mod tests {
         assert_eq!(b.brush_options.spacing, 25.0);
         assert_eq!(b.dynamics, BrushDynamics::default());
         assert!(b.texture.is_none());
+    }
+
+    #[test]
+    fn tags_and_stars_travel_with_the_presets() {
+        let preset = |name: &str| BrushPreset {
+            name: name.into(),
+            brush: Brush::new(24.0, 20.0, Color32::BLACK, 25.0),
+            file: None,
+        };
+        let meta = PresetMeta {
+            tags: vec!["Comics".into(), "Ink".into()],
+            favourite: true,
+        };
+        let bytes =
+            encode_with_meta(&[preset("A"), preset("B")], std::slice::from_ref(&meta)).unwrap();
+        let back = decode_with_meta(&bytes).unwrap();
+        assert_eq!(back[0].1, meta);
+        assert_eq!(back[1].1, PresetMeta::default(), "missing meta is none");
+        // Plain encode writes neither (older builds see the file they knew).
+        let json = zip::read_entry(&encode(&[preset("A")]).unwrap(), PRESETS_ENTRY)
+            .unwrap()
+            .to_vec();
+        let json = String::from_utf8(json).unwrap();
+        assert!(!json.contains("\"tags\"") && !json.contains("favourite"));
+        // Tags aren't settings: the brush compares equal either way.
+        assert!(same_settings(&back[0].0.brush, &back[1].0.brush));
     }
 
     #[test]

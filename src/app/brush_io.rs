@@ -552,6 +552,7 @@ impl PainterApp {
     fn add_imported_brushes(&mut self, name: &str, brushes: ImportedBrushes) {
         let ImportedBrushes {
             presets,
+            meta,
             notes,
             is_preset_file,
             errors,
@@ -561,7 +562,7 @@ impl PainterApp {
         }
         let count = presets.len();
         let app = crate::app::brush_library::source_app(name);
-        for preset in presets {
+        for (i, preset) in presets.into_iter().enumerate() {
             let taken = self
                 .brush_state
                 .presets
@@ -580,11 +581,19 @@ impl PainterApp {
                     self.add_user_preset(preset);
                 }
             }
-            // Tagged so they can be found again: "Imported", and the app.
+            // The tags and star it was exported with, then tagged so it can
+            // be found again: "Imported", and the app.
             let name = self.brush_state.presets.last().map(|p| p.name.clone());
+            let meta = meta.get(i).cloned().unwrap_or_default();
             if let Some(name) = name {
                 self.edit_library(|lib| {
                     lib.tags.remove(&name);
+                    for tag in &meta.tags {
+                        lib.add_tag(&name, tag);
+                    }
+                    if meta.favourite && !lib.is_favourite(&name) {
+                        lib.toggle_favourite(&name);
+                    }
                     lib.add_tag(&name, "Imported");
                     if let Some(app) = app {
                         lib.add_tag(&name, app);
@@ -616,21 +625,43 @@ impl PainterApp {
 /// Save the presets at `indices` as one `.rpbrush` file, where the user
 /// picks.
 pub(crate) fn export_presets_dialog(app: &mut PainterApp, indices: &[usize], name: &str) {
+    match export_presets_bytes(app, indices) {
+        Some(Ok(bytes)) => {
+            let ext = preset_file::EXTENSION;
+            let file = format!("{}.{ext}", preset_file::file_stem(name));
+            app.pick_save(&file, ext, "application/octet-stream", bytes);
+        }
+        Some(Err(err)) => app.report(err),
+        None => {}
+    }
+}
+
+/// The `.rpbrush` file of the presets at `indices` (`None`: none of them).
+pub(crate) fn export_presets_bytes(
+    app: &PainterApp,
+    indices: &[usize],
+) -> Option<Result<Vec<u8>, String>> {
     let presets: Vec<BrushPreset> = indices
         .iter()
         .filter_map(|&i| app.brush_state.presets.get(i).cloned())
         .collect();
     if presets.is_empty() {
-        return;
+        return None;
     }
-    match preset_file::encode(&presets) {
-        Ok(bytes) => {
-            let ext = preset_file::EXTENSION;
-            let file = format!("{}.{ext}", preset_file::file_stem(name));
-            app.pick_save(&file, ext, "application/octet-stream", bytes);
-        }
-        Err(err) => app.report(err),
-    }
+    // Their tags and stars go with them ("Imported" is added again on the
+    // other side).
+    let lib = &app.brush_state.library.file;
+    let meta: Vec<preset_file::PresetMeta> = presets
+        .iter()
+        .map(|p| preset_file::PresetMeta {
+            tags: (lib.tags(&p.name).iter())
+                .filter(|t| *t != "Imported")
+                .cloned()
+                .collect(),
+            favourite: lib.is_favourite(&p.name),
+        })
+        .collect();
+    Some(preset_file::encode_with_meta(&presets, &meta))
 }
 
 pub(crate) fn import_presets_dialog(app: &mut PainterApp) {
@@ -640,6 +671,8 @@ pub(crate) fn import_presets_dialog(app: &mut PainterApp) {
 /// Brushes read from a file.
 struct ImportedBrushes {
     presets: Vec<BrushPreset>,
+    /// Each preset's tags and star, from a `.rpbrush` (empty otherwise).
+    meta: Vec<preset_file::PresetMeta>,
     /// What was approximated (another app's brushes).
     notes: Vec<String>,
     is_preset_file: bool,
@@ -652,14 +685,16 @@ fn read_brushes(name: &str, bytes: &[u8]) -> Result<ImportedBrushes, String> {
     let is_preset_file = std::path::Path::new(name)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case(preset_file::EXTENSION));
-    let (presets, notes) = if is_preset_file {
-        (preset_file::decode(bytes)?, Vec::new())
+    let (presets, meta, notes) = if is_preset_file {
+        let (presets, meta) = preset_file::decode_with_meta(bytes)?.into_iter().unzip();
+        (presets, meta, Vec::new())
     } else {
         let imported = crate::brush_engine::import::import(name, bytes)?;
-        (imported.presets, imported.notes)
+        (imported.presets, Vec::new(), imported.notes)
     };
     Ok(ImportedBrushes {
         presets,
+        meta,
         notes,
         is_preset_file,
         errors: Vec::new(),

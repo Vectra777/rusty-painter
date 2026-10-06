@@ -217,7 +217,8 @@ below.
 
 - [ ] Pressure calibration from a test stroke.
 - [ ] Post-correction while drawing, not only when the pen lifts.
-- [ ] Tags and favourites carried in exported `.rpbrush` files.
+- [x] Tags and favourites carried in exported `.rpbrush` files (an
+  imported file arrives tagged and starred, then tagged "Imported").
 - [x] **Vector layers** (Layer → New Vector Layer): lines kept as points,
   smoothed, erased whole or in part, thickened, thinned or recoloured
   afterwards. Not yet: moving a line's points by hand, or erasing up to

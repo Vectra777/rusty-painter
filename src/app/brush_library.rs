@@ -695,6 +695,34 @@ mod tests {
     }
 
     #[test]
+    fn exported_tags_and_stars_arrive_with_the_brushes() {
+        use crate::brush_engine::preset_file::{PresetMeta, decode_with_meta, encode_with_meta};
+        let dir = std::env::temp_dir().join(format!("rp-import-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let canvas = crate::canvas::Canvas::new(64, 64, Color32::WHITE, 64);
+        let mut app = crate::project::tests::test_app_pub(canvas);
+        app.brush_state.brushes_path = dir.join("brushes");
+        app.brush_state.presets.clear();
+        let meta = PresetMeta {
+            tags: vec!["Comics".into()],
+            favourite: true,
+        };
+        let bytes = encode_with_meta(&presets(&["Mine", "Other"]), &[meta]).unwrap();
+        app.import_brushes_bytes("set.rpbrush", &bytes).unwrap();
+        let lib = &app.brush_state.library.file;
+        assert_eq!(lib.tags("Mine"), ["Comics", "Imported"]);
+        assert!(lib.is_favourite("Mine"));
+        assert_eq!(lib.tags("Other"), ["Imported"]);
+        assert!(!lib.is_favourite("Other"));
+        // Exporting writes them back, without "Imported".
+        let bytes = crate::app::brush_io::export_presets_bytes(&app, &[0]).unwrap();
+        let back = decode_with_meta(&bytes.unwrap()).unwrap();
+        assert_eq!(back[0].1.tags, ["Comics"]);
+        assert!(back[0].1.favourite);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_right_click_opens_the_palette_and_a_drag_does_not() {
         let canvas = crate::canvas::Canvas::new(64, 64, Color32::WHITE, 64);
         let mut app = crate::project::tests::test_app_pub(canvas);
