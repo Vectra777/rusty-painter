@@ -348,6 +348,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     if delete && app.workspace.select.magnetic.is_some() {
         app.magnetic_undo_anchor();
         repaint = true;
+    } else if delete
+        && matches!(app.active_tool, crate::app::tools::Tool::VectorEdit)
+        && app.line_edit_delete()
+    {
+        repaint = true;
     } else if delete && app.workspace.shapes.session.is_some() {
         app.shape_undo_point();
         repaint = true;

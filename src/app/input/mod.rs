@@ -179,6 +179,7 @@ fn handle_pen_drag(
         Tool::Shape(_) => app.shape_move(raw, shape_mods(ctx)),
         Tool::Gradient => app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift)),
         Tool::Text => app.text_drag(raw),
+        Tool::VectorEdit => app.line_edit_drag(raw),
     }
 }
 
@@ -347,7 +348,7 @@ fn handle_primary_press(
     // other tools need a press on the canvas itself.
     let brush = matches!(
         app.active_tool,
-        Tool::Brush | Tool::Shape(_) | Tool::Gradient | Tool::Text
+        Tool::Brush | Tool::Shape(_) | Tool::Gradient | Tool::Text | Tool::VectorEdit
     );
     if app.viewport.is_panning || !over {
         return;
@@ -405,6 +406,10 @@ fn handle_primary_press(
         Tool::Shape(kind) => app.shape_press(kind, raw),
         Tool::Gradient => app.gradient_press(raw),
         Tool::Text => app.text_press(raw),
+        Tool::VectorEdit => {
+            let m = response.ctx.input(|i| i.modifiers);
+            app.line_edit_press(raw, m.shift, m.alt);
+        }
     }
 }
 
@@ -426,6 +431,7 @@ fn handle_primary_release(app: &mut PainterApp) {
         Tool::Shape(_) => app.shape_release(),
         Tool::Gradient => app.gradient_release(),
         Tool::Text => app.text_release(),
+        Tool::VectorEdit => app.line_edit_release(),
     }
 }
 
@@ -511,6 +517,12 @@ fn handle_pointer_move(
                 app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift));
                 ctx.request_repaint();
             }
+        } else if matches!(app.active_tool, Tool::VectorEdit) {
+            if app.viewport.is_primary_down {
+                let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+                app.line_edit_drag(raw);
+                ctx.request_repaint();
+            }
         } else if matches!(app.active_tool, Tool::Text) {
             if app.viewport.is_primary_down {
                 let raw = app.tool_snap(
@@ -565,7 +577,7 @@ fn handle_tool_move(
             transform::transform_drag(app, pos, keep_aspect);
             ctx.request_repaint();
         }
-        Tool::Shape(_) | Tool::Gradient | Tool::Text => {}
+        Tool::Shape(_) | Tool::Gradient | Tool::Text | Tool::VectorEdit => {}
     }
 }
 

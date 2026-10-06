@@ -39,6 +39,13 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Smudge | Tool::Blur => blend_options(app, ui),
         Tool::Shape(kind) => shape_options(app, ui, kind),
         Tool::Gradient => gradient_options(app, ui, true),
+        Tool::VectorEdit => {
+            tool_title(ui, "Edit Lines");
+            if ui.button("Back to brush").clicked() {
+                app.active_tool = Tool::Brush;
+            }
+            "Click a line; drag a handle to bend it, Shift+drag to widen, Alt+drag to move it, Delete removes a handle"
+        }
         Tool::Text => {
             tool_title(ui, "Text");
             crate::ui::text_dialog::text_controls(app, ui);
@@ -138,12 +145,16 @@ fn brush_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                 &[
                     (VectorErase::WholeLine, "Whole line"),
                     (VectorErase::Touched, "Touched part"),
+                    (VectorErase::ToCrossing, "To crossings"),
                 ],
                 true,
             );
         } else {
             ui.label(RichText::new("Vector layer").small().color(ACCENT))
                 .on_hover_text("Lines stay editable: Layer → Vector");
+            if ui.small_button("Edit lines").clicked() {
+                app.active_tool = Tool::VectorEdit;
+            }
         }
     }
 

@@ -513,8 +513,39 @@ fn bench_text(c: &mut Criterion) {
     group.finish();
 }
 
+/// Vector layers: erasing a line up to where the others cross it, among
+/// 500 hand-drawn-like lines (wavy, 60 points each) over 4096 px.
+fn bench_vector(c: &mut Criterion) {
+    use rusty_painter::canvas::vector::VectorStroke;
+    let lines: Vec<VectorStroke> = (0..500)
+        .map(|i| {
+            let (x0, y0) = ((i * 397 % 3600) as f32, (i * 211 % 3600) as f32);
+            let angle = i as f32 * 0.7;
+            let (dx, dy) = (angle.cos(), angle.sin());
+            VectorStroke {
+                points: (0..60)
+                    .map(|k| {
+                        let t = k as f32 * 8.0;
+                        let wave = (k as f32 * 0.5).sin() * 6.0;
+                        [x0 + dx * t - dy * wave, y0 + dy * t + dx * wave, 4.0]
+                    })
+                    .collect(),
+                colour: [0; 3],
+                opacity: 1.0,
+            }
+        })
+        .collect();
+    let target = &lines[250];
+    let others: Vec<&VectorStroke> = lines.iter().filter(|l| !std::ptr::eq(*l, target)).collect();
+    let hit = Vec2::new(target.points[30][0], target.points[30][1]);
+    c.bench_function("vector_erase_to_crossings_500_lines", |b| {
+        b.iter(|| black_box(target.cut_to_crossings(hit, &others)).len())
+    });
+}
+
 criterion_group!(
     tools,
+    bench_vector,
     bench_symmetry,
     bench_shapes,
     bench_selection,

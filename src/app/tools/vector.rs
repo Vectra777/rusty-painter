@@ -22,6 +22,9 @@ pub enum VectorErase {
     WholeLine,
     /// Only the part of the line under it.
     Touched,
+    /// The stretch of the line it touches, up to where other lines (or the
+    /// line itself) cross it (Clip Studio's "up to intersection").
+    ToCrossing,
 }
 
 #[derive(Default)]
@@ -35,7 +38,42 @@ pub struct VectorState {
     /// The Line Width dialog: the layer, and its lines when it opened (the
     /// width applies to those, so dragging back and forth is exact).
     pub width_editing: Option<(LayerId, Box<VectorLayer>, f32)>,
+    /// Edit Lines: the line picked, and a drag of it going on.
+    pub line_edit: Option<LineEdit>,
 }
+
+/// The line Edit Lines has picked.
+pub struct LineEdit {
+    layer: LayerId,
+    /// Which line (index in the layer's).
+    line: usize,
+    /// The point of the handle pressed last (Delete takes it out).
+    point: Option<usize>,
+    drag: Option<LineDrag>,
+}
+
+struct LineDrag {
+    start: Vec2,
+    /// The line as the drag found it, and its handles then.
+    original: VectorStroke,
+    handles: Vec<usize>,
+    mode: DragMode,
+}
+
+#[derive(Clone, Copy)]
+enum DragMode {
+    /// Move handle `n` (an index into the handles), the line bending.
+    Bend(usize),
+    /// Widen or thin the line around handle `n`.
+    Widen(usize),
+    /// Move the whole line.
+    Move,
+}
+
+/// How far (screen points) a press may be from a handle or line to take it.
+const HANDLE_HIT: f32 = 12.0;
+/// Handle drawn radius (screen points).
+const HANDLE_RADIUS: f32 = 4.5;
 
 struct VectorSession {
     layer: LayerId,
@@ -250,7 +288,7 @@ impl PainterApp {
     /// Erase along `from`→`to` with the eraser's size.
     fn vector_erase_at(&mut self, idx: usize, from: Vec2, to: Vec2) {
         let radius = (self.brush_state.brush.brush_options.diameter * 0.5).max(0.5);
-        let whole = self.workspace.vector.erase == VectorErase::WholeLine;
+        let mode = self.workspace.vector.erase;
         let steps = ((to - from).length() / (radius * 0.5)).ceil().max(1.0) as usize;
         let spots: Vec<Vec2> = (0..=steps)
             .map(|i| from + (to - from) * (i as f32 / steps as f32))
@@ -260,7 +298,7 @@ impl PainterApp {
         };
         let mut changed = Vec::new();
         let mut kept = Vec::with_capacity(v.strokes.len());
-        for s in &v.strokes {
+        for (n, s) in v.strokes.iter().enumerate() {
             let b = s.bounds();
             let near = spots.iter().any(|c| {
                 c.x + radius >= b[0] as f32
@@ -273,13 +311,30 @@ impl PainterApp {
                 continue;
             }
             changed.push(b);
-            if !whole {
-                let mut pieces = vec![s.clone()];
-                for &c in &spots {
-                    pieces = pieces.iter().flat_map(|p| p.cut(c, radius)).collect();
+            let mut pieces = vec![s.clone()];
+            match mode {
+                VectorErase::WholeLine => continue,
+                VectorErase::Touched => {
+                    for &c in &spots {
+                        pieces = pieces.iter().flat_map(|p| p.cut(c, radius)).collect();
+                    }
                 }
-                kept.extend(pieces);
+                VectorErase::ToCrossing => {
+                    let others: Vec<&VectorStroke> = (v.strokes.iter().enumerate())
+                        .filter(|&(m, _)| m != n)
+                        .map(|(_, o)| o)
+                        .collect();
+                    for &c in &spots {
+                        pieces = (pieces.iter())
+                            .flat_map(|p| match p.touches(c, radius) {
+                                true => p.cut_to_crossings(c, &others),
+                                false => vec![p.clone()],
+                            })
+                            .collect();
+                    }
+                }
             }
+            kept.extend(pieces);
         }
         let Some(region) = vector::union(changed) else {
             return;
@@ -729,6 +784,242 @@ fn region_snapshots(
     out
 }
 
+impl PainterApp {
+    /// The line Edit Lines has picked, if it's still there: its layer index
+    /// and the line.
+    fn picked_line(&self) -> Option<(usize, &VectorStroke)> {
+        let edit = self.workspace.vector.line_edit.as_ref()?;
+        let idx = self.canvas.layer_index_of(edit.layer)?;
+        let line = self.canvas.layers[idx]
+            .vector
+            .as_ref()?
+            .strokes
+            .get(edit.line)?;
+        Some((idx, line))
+    }
+
+    /// Where a line's handles are at this zoom: its points that keep its
+    /// shape to within a pixel and a half on screen.
+    fn line_handles(&self, line: &VectorStroke) -> Vec<usize> {
+        vector::simplify_indices(&line.points, 1.5 / self.viewport.zoom.max(0.01))
+    }
+
+    /// Edit Lines pressed at `pos`: a handle of the picked line starts
+    /// bending it (Shift: widening it), Alt on the line moves it all, and
+    /// anywhere else picks the line there (or none).
+    pub(crate) fn line_edit_press(&mut self, pos: Vec2, shift: bool, alt: bool) {
+        let idx = self.canvas.active_layer_idx;
+        if !self.is_vector_layer(idx) {
+            self.workspace.vector.line_edit = None;
+            return;
+        }
+        let hit = HANDLE_HIT / self.viewport.zoom.max(0.01);
+        let picked = self
+            .picked_line()
+            .filter(|(i, _)| *i == idx)
+            .map(|(_, l)| l.clone());
+        if let Some(line) = picked {
+            let handles = self.line_handles(&line);
+            let near = (handles.iter().enumerate())
+                .map(|(n, &k)| {
+                    (
+                        n,
+                        (Vec2::new(line.points[k][0], line.points[k][1]) - pos).length(),
+                    )
+                })
+                .filter(|&(_, d)| d <= hit)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            let mode = match near {
+                Some((n, _)) if shift => Some(DragMode::Widen(n)),
+                Some((n, _)) => Some(DragMode::Bend(n)),
+                None if alt && line.touches(pos, hit) => Some(DragMode::Move),
+                None => None,
+            };
+            if let Some(mode) = mode {
+                // (Before the session: finishing a stroke would take it.)
+                self.release_canvas();
+                self.mark_action();
+                let layer = &self.canvas.layers[idx];
+                self.workspace.vector.session = Some(VectorSession {
+                    layer: layer.id,
+                    before: layer.vector.clone().unwrap_or_default(),
+                    changed: None,
+                    drawing: None,
+                    last: pos,
+                });
+                if let Some(edit) = self.workspace.vector.line_edit.as_mut() {
+                    if let DragMode::Bend(n) | DragMode::Widen(n) = mode {
+                        edit.point = Some(handles[n]);
+                    }
+                    edit.drag = Some(LineDrag {
+                        start: pos,
+                        original: line,
+                        handles,
+                        mode,
+                    });
+                }
+                return;
+            }
+        }
+        let layer = &self.canvas.layers[idx];
+        let strokes = layer.vector.as_ref().map_or(&[][..], |v| &v.strokes[..]);
+        self.workspace.vector.line_edit = vector::pick(strokes, pos, hit).map(|line| LineEdit {
+            layer: layer.id,
+            line,
+            point: None,
+            drag: None,
+        });
+    }
+
+    /// The Edit Lines drag went on to `pos`.
+    pub(crate) fn line_edit_drag(&mut self, pos: Vec2) {
+        let Some(edit) = self.workspace.vector.line_edit.as_ref() else {
+            return;
+        };
+        let Some(drag) = edit.drag.as_ref() else {
+            return;
+        };
+        let Some(idx) = self.canvas.layer_index_of(edit.layer) else {
+            return;
+        };
+        let delta = pos - drag.start;
+        let original = &drag.original;
+        let points = match drag.mode {
+            DragMode::Bend(n) => vector::bend(&original.points, &drag.handles, n, delta, 0.0),
+            // Up widens, down thins.
+            DragMode::Widen(n) => {
+                vector::bend(&original.points, &drag.handles, n, Vec2::ZERO, -delta.y)
+            }
+            DragMode::Move => (original.points.iter())
+                .map(|&[x, y, w]| [x + delta.x, y + delta.y, w])
+                .collect(),
+        };
+        let line = edit.line;
+        let Some(old) = self.picked_line().map(|(_, l)| l.bounds()) else {
+            return;
+        };
+        let mut new = None;
+        self.edit_vector(idx, |v| {
+            if let Some(s) = v.strokes.get_mut(line) {
+                s.points = points;
+                new = Some(s.bounds());
+            }
+        });
+        if let Some(region) = vector::union([old].into_iter().chain(new)) {
+            self.redraw_vector(idx, region);
+        }
+    }
+
+    /// The Edit Lines drag ended: one undo step.
+    pub(crate) fn line_edit_release(&mut self) {
+        if let Some(edit) = self.workspace.vector.line_edit.as_mut() {
+            edit.drag = None;
+        }
+        if let Some(session) = self.workspace.vector.session.take() {
+            self.push_vector_step(session, "Edit line");
+        }
+    }
+
+    /// Delete with Edit Lines: the handle pressed last goes, the line
+    /// running straight past it. Returns whether there was one.
+    pub(crate) fn line_edit_delete(&mut self) -> bool {
+        let Some((idx, line)) = self.picked_line() else {
+            return false;
+        };
+        let Some(point) = self
+            .workspace
+            .vector
+            .line_edit
+            .as_ref()
+            .and_then(|e| e.point)
+        else {
+            return false;
+        };
+        let handles = self.line_handles(line);
+        let Some(h) = handles.iter().position(|&k| k == point) else {
+            return false;
+        };
+        let points = vector::remove_handle(&line.points, &handles, h);
+        let old = line.bounds();
+        self.release_canvas();
+        self.mark_action();
+        let layer = &self.canvas.layers[idx];
+        self.workspace.vector.session = Some(VectorSession {
+            layer: layer.id,
+            before: layer.vector.clone().unwrap_or_default(),
+            changed: None,
+            drawing: None,
+            last: Vec2::ZERO,
+        });
+        let Some(edit) = self.workspace.vector.line_edit.as_mut() else {
+            return false;
+        };
+        edit.point = None;
+        let n = edit.line;
+        let mut new = None;
+        self.edit_vector(idx, |v| {
+            // Too few points left to be a line: it goes.
+            if points.len() < 2 {
+                v.strokes.remove(n);
+            } else {
+                v.strokes[n].points = points;
+                new = Some(v.strokes[n].bounds());
+            }
+        });
+        if new.is_none() {
+            self.workspace.vector.line_edit = None;
+        }
+        if let Some(region) = vector::union([old].into_iter().chain(new)) {
+            self.redraw_vector(idx, region);
+        }
+        if let Some(session) = self.workspace.vector.session.take() {
+            self.push_vector_step(session, "Edit line");
+        }
+        true
+    }
+}
+
+/// Edit Lines over the canvas: the picked line's path and its handles.
+pub(crate) fn draw_line_edit(
+    app: &PainterApp,
+    painter: &eframe::egui::Painter,
+    map: &crate::app::view::render::ScreenMap,
+) {
+    use eframe::egui::Stroke;
+    if !matches!(app.active_tool, crate::app::tools::Tool::VectorEdit) {
+        return;
+    }
+    let Some((_, line)) = app.picked_line() else {
+        return;
+    };
+    let accent = crate::ui::style::ACCENT;
+    let path: Vec<_> = (line.smoothed().iter())
+        .map(|&[x, y, _]| map.to_screen(Vec2::new(x, y)))
+        .collect();
+    painter.add(eframe::egui::Shape::line(
+        path.clone(),
+        Stroke::new(3.0_f32, Color32::from_black_alpha(120)),
+    ));
+    painter.add(eframe::egui::Shape::line(path, Stroke::new(1.0_f32, accent)));
+    let point = app
+        .workspace
+        .vector
+        .line_edit
+        .as_ref()
+        .and_then(|e| e.point);
+    for k in app.line_handles(line) {
+        let [x, y, _] = line.points[k];
+        let p = map.to_screen(Vec2::new(x, y));
+        painter.circle_filled(p, HANDLE_RADIUS + 1.5, Color32::BLACK);
+        let fill = if point == Some(k) {
+            accent
+        } else {
+            Color32::WHITE
+        };
+        painter.circle_filled(p, HANDLE_RADIUS, fill);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,6 +1213,132 @@ mod tests {
         assert_eq!(strokes(&app), 2);
         assert_eq!(px(&app, 60, 20), Color32::BLACK);
         assert_eq!(px(&app, 60, 60), Color32::BLACK);
+    }
+
+    #[test]
+    fn the_eraser_takes_a_line_out_up_to_where_others_cross_it() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 50.0), Vec2::new(118.0, 50.0));
+        line(&mut app, Vec2::new(40.0, 10.0), Vec2::new(40.0, 90.0));
+        line(&mut app, Vec2::new(80.0, 10.0), Vec2::new(80.0, 90.0));
+        let all = |app: &PainterApp| -> Vec<Color32> {
+            (0..96)
+                .flat_map(|y| (0..128).map(move |x| (x, y)))
+                .map(|(x, y)| px(app, x, y))
+                .collect()
+        };
+        let before = all(&app);
+        app.set_brush_tool(true);
+        app.brush_state.brush.brush_options.diameter = 6.0;
+        app.workspace.vector.erase = VectorErase::ToCrossing;
+        line(&mut app, Vec2::new(60.0, 48.0), Vec2::new(60.0, 52.0));
+        assert_eq!(strokes(&app), 4, "the line in two, and both crossing ones");
+        assert_eq!(
+            px(&app, 60, 50),
+            Color32::TRANSPARENT,
+            "between the crossings"
+        );
+        assert_eq!(px(&app, 50, 50), Color32::TRANSPARENT);
+        assert_eq!(
+            px(&app, 20, 50),
+            Color32::BLACK,
+            "before the first crossing"
+        );
+        assert_eq!(px(&app, 100, 50), Color32::BLACK, "after the second");
+        assert_eq!(px(&app, 40, 50), Color32::BLACK, "the crossing lines stay");
+        assert_eq!(px(&app, 80, 30), Color32::BLACK);
+        // One undo step brings back exactly what was there.
+        app.apply_history(false);
+        assert_eq!(strokes(&app), 3);
+        assert!(all(&app) == before);
+    }
+
+    #[test]
+    fn edit_lines_bends_widens_and_moves_a_line_as_one_step_each() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 30.0), Vec2::new(110.0, 30.0));
+        line(&mut app, Vec2::new(60.0, 70.0), Vec2::new(60.0, 90.0));
+        // A straight line keeps just its ends as points: add one to bend at.
+        let idx = app.canvas.active_layer_idx;
+        app.edit_vector(idx, |v| {
+            v.strokes[0].points = (0..=10)
+                .map(|i| [10.0 + i as f32 * 10.0, 30.0, 6.0])
+                .collect();
+        });
+        app.redraw_vector(idx, [0, 0, 128, 96]);
+        let all = |app: &PainterApp| -> Vec<Color32> {
+            (0..96)
+                .flat_map(|y| (0..128).map(move |x| (x, y)))
+                .map(|(x, y)| px(app, x, y))
+                .collect()
+        };
+        let before = all(&app);
+        let pushes = app.layer_state.history.push_count();
+        app.active_tool = crate::app::tools::Tool::VectorEdit;
+        app.viewport.zoom = 1.0;
+        // Picking: a press on the line, nothing else changes.
+        app.line_edit_press(Vec2::new(30.0, 31.0), false, false);
+        assert_eq!(app.picked_line().map(|(_, l)| l.points.len()), Some(11));
+        // Its middle stays a point at this zoom only when it's a handle:
+        // bend from the handle nearest the middle.
+        let handles = app.line_handles(app.picked_line().unwrap().1);
+        let mid = handles[handles.len() / 2];
+        let at = app.picked_line().unwrap().1.points[mid];
+        let at = Vec2::new(at[0], at[1]);
+        app.line_edit_press(at, false, false);
+        app.line_edit_drag(at + Vec2::new(0.0, 20.0));
+        app.line_edit_release();
+        assert_eq!(
+            px(&app, at.x as i32, 50),
+            Color32::BLACK,
+            "bent down to there"
+        );
+        assert_eq!(px(&app, at.x as i32, 30), Color32::TRANSPARENT);
+        assert_eq!(px(&app, 60, 80), Color32::BLACK, "the other line stays");
+        assert_eq!(app.layer_state.history.push_count(), pushes + 1);
+        // Alt-drag moves it all; undo twice is exactly as it was.
+        app.line_edit_press(Vec2::new(12.0, 30.0), false, true);
+        app.line_edit_drag(Vec2::new(12.0, 40.0));
+        app.line_edit_release();
+        assert_eq!(px(&app, 12, 40), Color32::BLACK);
+        app.apply_history(false);
+        app.apply_history(false);
+        assert!(all(&app) == before);
+    }
+
+    #[test]
+    fn edit_lines_widens_near_the_handle_and_delete_takes_it_out() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 30.0), Vec2::new(110.0, 30.0));
+        let idx = app.canvas.active_layer_idx;
+        app.edit_vector(idx, |v| {
+            v.strokes[0].points = (0..=10)
+                .map(|i| [10.0 + i as f32 * 10.0, 30.0 + (i % 2) as f32 * 8.0, 4.0])
+                .collect();
+        });
+        app.redraw_vector(idx, [0, 0, 128, 96]);
+        app.active_tool = crate::app::tools::Tool::VectorEdit;
+        app.viewport.zoom = 1.0;
+        app.line_edit_press(Vec2::new(10.0, 30.0), false, false);
+        let first = app.picked_line().unwrap().1.points[0];
+        // Shift on the first handle widens there only.
+        app.line_edit_press(Vec2::new(first[0], first[1]), true, false);
+        app.line_edit_drag(Vec2::new(first[0], first[1] - 10.0));
+        app.line_edit_release();
+        let widths: Vec<f32> = app
+            .picked_line()
+            .unwrap()
+            .1
+            .points
+            .iter()
+            .map(|p| p[2])
+            .collect();
+        assert_eq!(widths[0], 14.0);
+        assert_eq!(widths[10], 4.0, "far from it, as it was");
+        // The handle pressed last goes with Delete.
+        let n = widths.len();
+        assert!(app.line_edit_delete());
+        assert!(app.picked_line().unwrap().1.points.len() < n);
     }
 
     #[test]

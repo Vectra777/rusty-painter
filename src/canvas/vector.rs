@@ -141,6 +141,167 @@ impl VectorStroke {
     }
 }
 
+impl VectorStroke {
+    /// The line with the stretch the eraser at `c` is on taken out, up to
+    /// where the line crosses one of `others` or itself, or to its ends
+    /// (Clip Studio's "up to intersection"): the pieces left.
+    pub fn cut_to_crossings(&self, c: Vec2, others: &[&VectorStroke]) -> Vec<VectorStroke> {
+        let path = self.path();
+        if path.len() < 2 {
+            return Vec::new();
+        }
+        // Distance along the line to each point.
+        let mut along = Vec::with_capacity(path.len());
+        let mut total = 0.0;
+        along.push(0.0);
+        for w in path.windows(2) {
+            total += (xy(w[1]) - xy(w[0])).length();
+            along.push(total);
+        }
+        // Where along it the eraser is: its nearest point.
+        let hit = path
+            .windows(2)
+            .enumerate()
+            .map(|(i, w)| {
+                let (d, t) = segment_distance(c, w[0], w[1]);
+                (d, along[i] + (along[i + 1] - along[i]) * t)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(0.0, |(_, s)| s);
+        let mut before: Option<f32> = None;
+        let mut after: Option<f32> = None;
+        for s in crossings(&path, &along, others) {
+            if s < hit {
+                before = Some(before.map_or(s, |b: f32| b.max(s)));
+            } else if s > hit {
+                after = Some(after.map_or(s, |a: f32| a.min(s)));
+            }
+        }
+        let piece = |from: f32, to: f32| VectorStroke {
+            points: simplify(&stretch(&path, &along, from, to), 0.2),
+            colour: self.colour,
+            opacity: self.opacity,
+        };
+        let mut pieces = Vec::new();
+        if let Some(b) = before.filter(|&b| b > 0.0) {
+            pieces.push(piece(0.0, b));
+        }
+        if let Some(a) = after.filter(|&a| a < total) {
+            pieces.push(piece(a, total));
+        }
+        pieces
+    }
+}
+
+/// Grid cell side (pixels) for finding segments that might cross.
+const CROSS_CELL: f32 = 32.0;
+
+/// Where (distance along `path`, whose points are `along` that far) the
+/// path crosses one of `others` or itself, unsorted, maybe repeated.
+fn crossings(path: &[[f32; 3]], along: &[f32], others: &[&VectorStroke]) -> Vec<f32> {
+    let cells = |a: [f32; 3], b: [f32; 3]| {
+        let cell = |v: f32| (v / CROSS_CELL).floor() as i32;
+        let (x0, x1) = (cell(a[0].min(b[0])), cell(a[0].max(b[0])));
+        let (y0, y1) = (cell(a[1].min(b[1])), cell(a[1].max(b[1])));
+        (y0..=y1).flat_map(move |y| (x0..=x1).map(move |x| (x, y)))
+    };
+    // Every other segment that could cross: the other lines' (near this one
+    // only), then this line's own (for where it loops over itself).
+    let b = bounds_of(path);
+    let mut segments: Vec<([f32; 3], [f32; 3], Option<usize>)> = Vec::new();
+    for other in others {
+        let ob = other.bounds();
+        if ob[0] > b[2] || ob[2] < b[0] || ob[1] > b[3] || ob[3] < b[1] {
+            continue;
+        }
+        let p = other.path();
+        segments.extend(p.windows(2).map(|w| (w[0], w[1], None)));
+    }
+    segments.extend(
+        path.windows(2)
+            .enumerate()
+            .map(|(i, w)| (w[0], w[1], Some(i))),
+    );
+    let mut grid: rustc_hash::FxHashMap<(i32, i32), Vec<usize>> = Default::default();
+    for (n, &(a, b, _)) in segments.iter().enumerate() {
+        for key in cells(a, b) {
+            grid.entry(key).or_default().push(n);
+        }
+    }
+    let mut found = Vec::new();
+    for (i, w) in path.windows(2).enumerate() {
+        for key in cells(w[0], w[1]) {
+            for &n in grid.get(&key).into_iter().flatten() {
+                let (c, d, own) = segments[n];
+                // Its own neighbouring segments share a point, not a crossing.
+                if own.is_some_and(|j| j.abs_diff(i) <= 1) {
+                    continue;
+                }
+                if let Some((t, _)) = segment_cross(xy(w[0]), xy(w[1]), xy(c), xy(d)) {
+                    found.push(along[i] + (along[i + 1] - along[i]) * t);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Where segments `a`→`b` and `c`→`d` cross: how far along each (0..=1).
+/// Parallel ones (overlapping or not) don't cross.
+pub(crate) fn segment_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Option<(f32, f32)> {
+    let (r, s) = (b - a, d - c);
+    let denom = r.x * s.y - r.y * s.x;
+    if denom.abs() < 1e-9 {
+        return None;
+    }
+    let q = c - a;
+    let t = (q.x * s.y - q.y * s.x) / denom;
+    let u = (q.x * r.y - q.y * r.x) / denom;
+    const EPS: f32 = 1e-5;
+    ((-EPS..=1.0 + EPS).contains(&t) && (-EPS..=1.0 + EPS).contains(&u))
+        .then(|| (t.clamp(0.0, 1.0), u.clamp(0.0, 1.0)))
+}
+
+/// The part of `path` (its points `along` that far) from `from` to `to`
+/// along it, the ends interpolated (width too).
+fn stretch(path: &[[f32; 3]], along: &[f32], from: f32, to: f32) -> Vec<[f32; 3]> {
+    let at = |s: f32| {
+        let i = along.partition_point(|&a| a <= s).clamp(1, path.len() - 1);
+        let (a, b) = (path[i - 1], path[i]);
+        let len = along[i] - along[i - 1];
+        let t = if len > 1e-9 {
+            ((s - along[i - 1]) / len).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t)
+    };
+    let mut out = vec![at(from)];
+    out.extend(
+        (path.iter().zip(along))
+            .filter(|&(_, &s)| s > from && s < to)
+            .map(|(p, _)| *p),
+    );
+    out.push(at(to));
+    out
+}
+
+fn xy(p: [f32; 3]) -> Vec2 {
+    Vec2::new(p[0], p[1])
+}
+
+/// `[x0, y0, x1, y1]` around the points (x, y only).
+fn bounds_of(points: &[[f32; 3]]) -> [i32; 4] {
+    let mut b = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+    for &[x, y, _] in points {
+        b[0] = b[0].min(x.floor() as i32);
+        b[1] = b[1].min(y.floor() as i32);
+        b[2] = b[2].max(x.ceil() as i32);
+        b[3] = b[3].max(y.ceil() as i32);
+    }
+    b
+}
+
 /// Distance from `p` to the segment `a`→`b` (x, y of each), and where along
 /// it (0..=1) the nearest point is.
 fn segment_distance(p: Vec2, a: [f32; 3], b: [f32; 3]) -> (f32, f32) {
@@ -160,8 +321,16 @@ fn segment_distance(p: Vec2, a: [f32; 3], b: [f32; 3]) -> (f32, f32) {
 /// `tolerance` pixels (Ramer–Douglas–Peucker): a hand-drawn line keeps
 /// its shape in far fewer points.
 pub fn simplify(points: &[[f32; 3]], tolerance: f32) -> Vec<[f32; 3]> {
+    simplify_indices(points, tolerance)
+        .into_iter()
+        .map(|i| points[i])
+        .collect()
+}
+
+/// Which points [`simplify`] keeps, in order.
+pub fn simplify_indices(points: &[[f32; 3]], tolerance: f32) -> Vec<usize> {
     if points.len() < 3 {
-        return points.to_vec();
+        return (0..points.len()).collect();
     }
     let mut keep = vec![false; points.len()];
     keep[0] = true;
@@ -186,11 +355,71 @@ pub fn simplify(points: &[[f32; 3]], tolerance: f32) -> Vec<[f32; 3]> {
             stack.push((at, j));
         }
     }
-    points
-        .iter()
-        .zip(keep)
-        .filter_map(|(p, k)| k.then_some(*p))
+    (0..points.len()).filter(|&i| keep[i]).collect()
+}
+
+/// The topmost of `strokes` within `tolerance` of `p`.
+pub fn pick(strokes: &[VectorStroke], p: Vec2, tolerance: f32) -> Option<usize> {
+    (0..strokes.len())
+        .rev()
+        .find(|&i| strokes[i].touches(p, tolerance))
+}
+
+/// `points` with the one at `handles[h]` moved by `delta` and widened by
+/// `widen`, the points between it and the handles either side following
+/// less the further they are (a smooth falloff along the line), so the line
+/// bends and keeps its detail. `handles` are point indices, in order.
+pub fn bend(
+    points: &[[f32; 3]],
+    handles: &[usize],
+    h: usize,
+    delta: Vec2,
+    widen: f32,
+) -> Vec<[f32; 3]> {
+    let at = handles[h];
+    let from = if h > 0 { handles[h - 1] } else { at };
+    let to = handles.get(h + 1).copied().unwrap_or(at);
+    let mut along = vec![0.0; points.len()];
+    for k in 1..points.len() {
+        along[k] = along[k - 1] + (xy(points[k]) - xy(points[k - 1])).length();
+    }
+    let weight = |k: usize| -> f32 {
+        let (near, far) = match k.cmp(&at) {
+            std::cmp::Ordering::Equal => return 1.0,
+            std::cmp::Ordering::Less if k > from => (along[at] - along[k], along[at] - along[from]),
+            std::cmp::Ordering::Greater if k < to => (along[k] - along[at], along[to] - along[at]),
+            _ => return 0.0,
+        };
+        let t = 1.0 - (near / far.max(1e-6)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    (points.iter().enumerate())
+        .map(|(k, &[x, y, w])| {
+            let f = weight(k);
+            [
+                x + delta.x * f,
+                y + delta.y * f,
+                (w + widen * f).clamp(0.0, MAX_WIDTH),
+            ]
+        })
         .collect()
+}
+
+/// `points` without the handle `handles[h]`: the line runs straight (then
+/// smoothed) from the handle before it to the one after. An end handle
+/// takes the line back to its neighbour.
+pub fn remove_handle(points: &[[f32; 3]], handles: &[usize], h: usize) -> Vec<[f32; 3]> {
+    let at = handles[h];
+    let (from, to) = match (h.checked_sub(1).map(|p| handles[p]), handles.get(h + 1)) {
+        (Some(from), Some(&to)) => (from + 1, to),
+        // An end: everything up to (or from) the next handle goes.
+        (None, Some(&to)) => (0, to),
+        (Some(from), None) => (from + 1, points.len()),
+        (None, None) => (at, at + 1),
+    };
+    let mut out = points[..from].to_vec();
+    out.extend_from_slice(&points[to..]);
+    out
 }
 
 /// `strokes` drawn over transparent, for the canvas pixels
@@ -300,6 +529,116 @@ mod tests {
             colour: [0, 0, 0],
             opacity: 1.0,
         }
+    }
+
+    #[test]
+    fn segments_cross_only_within_both() {
+        let v = Vec2::new;
+        let x = segment_cross(v(0.0, 0.0), v(10.0, 10.0), v(0.0, 10.0), v(10.0, 0.0));
+        assert_eq!(x, Some((0.5, 0.5)));
+        // Lines that would cross further on.
+        assert_eq!(
+            segment_cross(v(0.0, 0.0), v(4.0, 4.0), v(0.0, 10.0), v(10.0, 0.0)),
+            None
+        );
+        // Touching at an end counts; parallel and collinear ones don't cross.
+        assert!(segment_cross(v(0.0, 5.0), v(5.0, 5.0), v(5.0, 0.0), v(5.0, 10.0)).is_some());
+        assert_eq!(
+            segment_cross(v(0.0, 0.0), v(10.0, 0.0), v(0.0, 1.0), v(10.0, 1.0)),
+            None
+        );
+        assert_eq!(
+            segment_cross(v(0.0, 0.0), v(10.0, 0.0), v(5.0, 0.0), v(15.0, 0.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn erasing_to_crossings_takes_out_only_the_stretch_between_them() {
+        let across = line(&[[0.0, 50.0, 2.0], [100.0, 50.0, 2.0]]);
+        let down = line(&[[30.0, 0.0, 2.0], [30.0, 100.0, 2.0]]);
+        let down2 = line(&[[70.0, 0.0, 2.0], [70.0, 100.0, 2.0]]);
+        let others = [&down, &down2];
+        let ends = |s: &VectorStroke| {
+            let (a, b) = (s.points[0], s.points[s.points.len() - 1]);
+            (a[0].round(), b[0].round())
+        };
+        // Between the two crossings: what's either side stays.
+        let pieces = across.cut_to_crossings(Vec2::new(50.0, 50.0), &others);
+        assert_eq!(
+            pieces.iter().map(ends).collect::<Vec<_>>(),
+            [(0.0, 30.0), (70.0, 100.0)]
+        );
+        // Past the last one: to the line's end.
+        let pieces = across.cut_to_crossings(Vec2::new(90.0, 50.0), &others);
+        assert_eq!(pieces.iter().map(ends).collect::<Vec<_>>(), [(0.0, 70.0)]);
+        // Nothing crossing: the whole line goes.
+        assert!(
+            across
+                .cut_to_crossings(Vec2::new(50.0, 50.0), &[])
+                .is_empty()
+        );
+        // A line ending on another (a T) counts as crossing it.
+        let stem = line(&[[50.0, 50.0, 2.0], [50.0, 100.0, 2.0]]);
+        let pieces = across.cut_to_crossings(Vec2::new(20.0, 50.0), &[&stem]);
+        assert_eq!(pieces.iter().map(ends).collect::<Vec<_>>(), [(50.0, 100.0)]);
+    }
+
+    #[test]
+    fn a_loop_is_cut_where_it_crosses_itself() {
+        // Right, down, left, then up through the first stretch: a loop with
+        // a tail at each end.
+        let s = line(&[
+            [0.0, 10.0, 2.0],
+            [40.0, 10.0, 2.0],
+            [40.0, 30.0, 2.0],
+            [20.0, 30.0, 2.0],
+            [20.0, 0.0, 2.0],
+        ]);
+        let s = VectorStroke {
+            points: s.path(),
+            ..s
+        };
+        // Erasing on the loop's far side keeps both tails.
+        let pieces = s.cut_to_crossings(Vec2::new(40.0, 20.0), &[]);
+        assert_eq!(pieces.len(), 2);
+        let first_end = pieces[0].points.last().unwrap();
+        assert!((first_end[0] - 20.0).abs() < 1.5 && (first_end[1] - 10.0).abs() < 1.5);
+    }
+
+    #[test]
+    fn bending_moves_the_handle_and_fades_to_its_neighbours() {
+        let points: Vec<[f32; 3]> = (0..=20).map(|i| [i as f32 * 5.0, 0.0, 2.0]).collect();
+        let handles = [0, 10, 20];
+        let bent = bend(&points, &handles, 1, Vec2::new(0.0, 10.0), 0.0);
+        assert_eq!(bent[10][1], 10.0, "the handle moves all the way");
+        assert_eq!((bent[0][1], bent[20][1]), (0.0, 0.0), "the neighbours stay");
+        assert!(bent[5][1] > 0.0 && bent[5][1] < 10.0);
+        assert!(
+            bent[9][1] > bent[5][1] && bent[5][1] > bent[2][1],
+            "it fades"
+        );
+        // Widening, the same way; an end handle bends only its side.
+        let wide = bend(&points, &handles, 0, Vec2::ZERO, 4.0);
+        assert_eq!(wide[0][2], 6.0);
+        assert!(wide[5][2] > 2.0 && wide[5][2] < 6.0);
+        assert_eq!(wide[10][2], 2.0);
+    }
+
+    #[test]
+    fn picking_finds_the_topmost_line_and_removing_a_handle_straightens() {
+        let a = line(&[[0.0, 10.0, 2.0], [100.0, 10.0, 2.0]]);
+        let b = line(&[[50.0, 0.0, 2.0], [50.0, 100.0, 2.0]]);
+        let strokes = [a, b];
+        assert_eq!(pick(&strokes, Vec2::new(50.0, 10.0), 3.0), Some(1));
+        assert_eq!(pick(&strokes, Vec2::new(10.0, 12.0), 3.0), Some(0));
+        assert_eq!(pick(&strokes, Vec2::new(10.0, 50.0), 3.0), None);
+        let points: Vec<[f32; 3]> = (0..=10).map(|i| [i as f32, (i % 2) as f32, 2.0]).collect();
+        let handles = [0, 5, 10];
+        let out = remove_handle(&points, &handles, 1);
+        assert_eq!(out, [points[0], points[10]]);
+        assert_eq!(remove_handle(&points, &handles, 0), points[5..].to_vec());
+        assert_eq!(simplify_indices(&points[..3], 0.1), [0, 1, 2]);
     }
 
     #[test]

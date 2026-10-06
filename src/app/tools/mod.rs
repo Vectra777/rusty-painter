@@ -48,6 +48,8 @@ pub enum Tool {
     Gradient,
     /// Type text onto a new layer.
     Text,
+    /// Move a vector line's points, widen it there, or move it whole.
+    VectorEdit,
 }
 
 impl Tool {
@@ -68,6 +70,7 @@ impl Tool {
             Tool::Shape(_) => "Shape",
             Tool::Gradient => "Gradient",
             Tool::Text => "Text",
+            Tool::VectorEdit => "Edit line",
         }
     }
 }

@@ -143,7 +143,7 @@ impl PainterApp {
                 kind,
                 SelectionType::Rectangle | SelectionType::Circle | SelectionType::Polygon
             ),
-            Tool::Shape(_) | Tool::Gradient | Tool::Text => true,
+            Tool::Shape(_) | Tool::Gradient | Tool::Text | Tool::VectorEdit => true,
             _ => false,
         }
     }

@@ -221,9 +221,10 @@ below.
 - [x] Tags and favourites carried in exported `.rpbrush` files (an
   imported file arrives tagged and starred, then tagged "Imported").
 - [x] **Vector layers** (Layer → New Vector Layer): lines kept as points,
-  smoothed, erased whole or in part, thickened, thinned or recoloured
-  afterwards. Not yet: moving a line's points by hand, or erasing up to
-  where lines cross.
+  smoothed, erased whole, in part or up to where other lines cross them,
+  thickened, thinned or recoloured afterwards. Edit Lines (Layer → Vector)
+  bends a line from its handles (the line follows smoothly), widens it
+  around one (Shift), moves it whole (Alt) or takes a handle out (Delete).
 - [ ] Bigger: a spray/particle engine, wet paint simulation and impasto.
 
 ### Quality rules for every feature
