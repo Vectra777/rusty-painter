@@ -419,6 +419,35 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     })
     .response
     .on_disabled_hover_text("For layers painted with impasto (Brush → Impasto)");
+    ui.menu_button("Wet Paint", |ui| {
+        let wet = app
+            .canvas
+            .layers
+            .get(active)
+            .and_then(|l| l.wet.as_ref())
+            .is_some_and(|w| !w.is_empty());
+        if ui
+            .add_enabled_ui(wet, |ui| menu_item(ui, "Dry Paint Now", None))
+            .inner
+        {
+            app.dry_wet_paint(active);
+        }
+        // Which way drips run: 0° down the canvas.
+        let [x, y] = app.workspace.wet_gravity;
+        let mut angle = x.atan2(y).to_degrees();
+        if ui
+            .add(
+                egui::Slider::new(&mut angle, -180.0..=180.0)
+                    .suffix("°")
+                    .text("Drips run"),
+            )
+            .on_hover_text("Which way pooled wet paint runs: 0° straight down the canvas.")
+            .changed()
+        {
+            let (s, c) = angle.to_radians().sin_cos();
+            app.workspace.wet_gravity = [s, c];
+        }
+    });
     if menu_item(
         ui,
         "Duplicate Layer",

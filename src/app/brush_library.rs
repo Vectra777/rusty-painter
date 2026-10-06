@@ -271,6 +271,7 @@ pub fn default_tags(name: &str) -> &'static [&'static str] {
         "Swirl Curves" => &["Sketching", "Effects"],
         "Mosaic Grid" => &["Effects"],
         "Normal Map" => &["3D"],
+        "Watercolour Wash" | "Wet Round" | "Water (Re-wet)" | "Drippy Ink" => &["Painting", "Wet"],
         _ => &[],
     }
 }

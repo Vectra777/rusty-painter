@@ -249,7 +249,18 @@ below.
   undo with the stroke, save with the project and turn, flip, crop and
   resize with the image; the transform tool bakes them into the paint
   first (Layer → Impasto → Bake, one undo step).
-- [ ] Bigger: wet paint simulation.
+- [x] **Wet paint** (Brush → Wet paint): when the pen lifts the stroke is
+  water and pigment over the dry paint; between strokes the water spreads
+  (creeping onto dry paper slowly), carries pigment to the drying edges
+  (they darken), runs downhill where it pools (Layer → Wet Paint: which
+  way) and dries, the pigment settling where it is. A brush of water alone
+  wets dry paint again and lifts some of it. One undo takes back the
+  stroke and what it spread to (while it's the last step); anything that
+  edits wet pixels dries them as they are; Layer → Wet Paint → Dry Paint
+  Now. Nothing wet is saved: a document keeps what it shows. Built-in:
+  Watercolour Wash, Wet Round, Water (Re-wet), Drippy Ink. Not yet: paint
+  flowing while the pen is still down, drips following a tablet's or
+  phone's tilt.
 
 ### Quality rules for every feature
 

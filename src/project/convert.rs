@@ -635,6 +635,15 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                     .collect(),
                 inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
             },
+            // Wet paint isn't saved (it's as it shows, dry): what it carries,
+            // or nothing.
+            LayerHistoryOp::Wet { inner, .. } => match inner.as_deref() {
+                Some(op) => Self::from(op),
+                None => Self::Vector {
+                    layers: Vec::new(),
+                    inner: None,
+                },
+            },
             LayerHistoryOp::Height {
                 layer,
                 tiles,

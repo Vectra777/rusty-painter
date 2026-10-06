@@ -89,6 +89,9 @@ pub struct Layer {
     pub vector: Option<Box<crate::canvas::vector::VectorLayer>>,
     /// Impasto: how thick its paint is (lit by its style's impasto light).
     pub height: Option<Box<crate::canvas::impasto::HeightMap>>,
+    /// Wet paint still drying on it (kept only while the app runs: copies
+    /// and saved documents have it as it shows, dry).
+    pub wet: Option<std::sync::Arc<crate::canvas::wet::WetLayer>>,
     /// A shader layer: its pixels are this shader's output (the tiles
     /// hold its last baked frame).
     pub shader: Option<Box<crate::canvas::shader::ShaderLayer>>,
@@ -185,6 +188,7 @@ impl Layer {
             text: self.text.clone(),
             vector: self.vector.clone(),
             height: self.height.clone(),
+            wet: None,
             shader: self.shader.clone(),
             position_locked: self.position_locked,
             draft: self.draft,
@@ -224,6 +228,7 @@ impl Layer {
             text: None,
             vector: None,
             height: None,
+            wet: None,
             shader: None,
             position_locked: false,
             draft: false,
@@ -310,6 +315,7 @@ impl Layer {
             text: snapshot.text,
             vector: snapshot.vector,
             height: snapshot.height,
+            wet: None,
             shader: snapshot.shader,
             position_locked: snapshot.position_locked,
             draft: snapshot.draft,

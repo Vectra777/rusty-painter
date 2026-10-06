@@ -727,6 +727,71 @@ fn brush_settings_contents(
             .changed();
         }
     });
+    section(ui, "Wet paint", false, |ui| {
+        use crate::canvas::wet::WetPaint;
+        let mut on = brush.wet.is_some();
+        if ui
+            .checkbox(&mut on, "Wet")
+            .on_hover_text(
+                "When the pen lifts, the stroke is water and pigment: it spreads, gathers at \
+                 its edges, runs where it pools, and dries (Layer → Wet Paint → Dry Now).",
+            )
+            .changed()
+        {
+            brush.wet = on.then(WetPaint::default);
+            changed = true;
+        }
+        if let Some(w) = brush.wet.as_mut() {
+            changed |= slider_row(
+                ui,
+                "Water",
+                crate::ui::widgets::reset(&mut w.water, |v| unit(v, 1.5)),
+            )
+            .changed();
+            changed |= slider_row(
+                ui,
+                "Pigment",
+                crate::ui::widgets::reset(&mut w.pigment, |v| unit(v, 1.0)),
+            )
+            .on_hover_text("0: water alone, which wets and lifts the paint there.")
+            .changed();
+            changed |= slider_row(
+                ui,
+                "Drying",
+                crate::ui::widgets::reset(&mut w.drying, |v| {
+                    egui::Slider::new(v, 0.5..=60.0)
+                        .logarithmic(true)
+                        .suffix(" s")
+                }),
+            )
+            .changed();
+            changed |= slider_row(
+                ui,
+                "Flow",
+                crate::ui::widgets::reset(&mut w.flow, |v| unit(v, 1.0)),
+            )
+            .changed();
+            changed |= slider_row(
+                ui,
+                "Edge darkening",
+                crate::ui::widgets::reset(&mut w.edge_darkening, |v| unit(v, 1.0)),
+            )
+            .changed();
+            changed |= slider_row(
+                ui,
+                "Lift",
+                crate::ui::widgets::reset(&mut w.lift, |v| unit(v, 1.0)),
+            )
+            .changed();
+            changed |= slider_row(
+                ui,
+                "Drips",
+                crate::ui::widgets::reset(&mut w.drips, |v| unit(v, 1.0)),
+            )
+            .on_hover_text("How readily pooled water runs downhill (Layer → Wet Paint: which way).")
+            .changed();
+        }
+    });
     section(ui, "Impasto", false, |ui| {
         use crate::canvas::impasto::{Impasto, ImpastoMode};
         let mut on = brush.impasto.is_some();
@@ -1331,6 +1396,11 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
         .changed();
     });
     changed
+}
+
+/// A share, 0 to `max`, as a percentage.
+fn unit(v: &mut f32, max: f32) -> egui::Slider<'_> {
+    percent_of_unit(egui::Slider::new(v, 0.0..=max))
 }
 
 /// A slider row with a reset (double-click), for the engines' settings.

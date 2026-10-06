@@ -195,6 +195,15 @@ pub enum LayerHistoryOp {
         map: Option<Option<Box<crate::canvas::impasto::HeightMap>>>,
         inner: Option<Box<LayerHistoryOp>>,
     },
+    /// Wet paint ([`crate::canvas::storage::Layer::wet`]) of the tiles a
+    /// step changed, as they are on the other side of it (`None`: dry).
+    /// Not saved with the document (nor is wet paint). `inner` as for
+    /// `Text`.
+    Wet {
+        layer: LayerId,
+        tiles: crate::canvas::wet::WetTiles,
+        inner: Option<Box<LayerHistoryOp>>,
+    },
     /// Layers were merged: the entries on the other side of this step,
     /// swapped in place by undo and redo (see [`Canvas::swap_layers`]).
     Replaced(std::sync::Arc<std::sync::Mutex<crate::canvas::storage::LayerSwap>>),
@@ -208,7 +217,8 @@ impl LayerHistoryOp {
         while let Some(
             LayerHistoryOp::Text { inner, .. }
             | LayerHistoryOp::Vector { inner, .. }
-            | LayerHistoryOp::Height { inner, .. },
+            | LayerHistoryOp::Height { inner, .. }
+            | LayerHistoryOp::Wet { inner, .. },
         ) = op
         {
             op = inner.as_deref();
@@ -295,6 +305,11 @@ fn snapshot_bytes(action: &UndoAction) -> usize {
                     .map_or(0, |m| m.bytes());
                 inner.as_deref()
             }
+            LayerHistoryOp::Wet { tiles, inner, .. } => {
+                // Water, pigment and two copies of pixels a pixel.
+                kept += tiles.iter().filter(|(_, t)| t.is_some()).count() * 4096 * 28;
+                inner.as_deref()
+            }
             LayerHistoryOp::Text { inner, .. } => inner.as_deref(),
             _ => None,
         };
@@ -358,6 +373,7 @@ fn describe(action: &UndoAction) -> Option<&'static str> {
         }
         Some(LayerHistoryOp::Vector { .. }) => "Vector",
         Some(LayerHistoryOp::Height { .. }) => "Impasto",
+        Some(LayerHistoryOp::Wet { .. }) => "Wet paint",
         None if action.transform.is_some() => "Transform",
         None if action.tiles.is_empty() && action.selection.is_some() => "Selection",
         None => return None,
@@ -439,6 +455,16 @@ impl History {
     /// How many actions have been pushed (see [`History::push_action`]).
     pub fn push_count(&self) -> u64 {
         self.pushed
+    }
+
+    /// The step on top, if it's still the `count`-th pushed (nothing pushed
+    /// or undone since): for adding to it what it goes on doing (wet paint
+    /// spreading).
+    pub fn top_if(&mut self, count: u64) -> Option<&mut UndoAction> {
+        if self.pushed != count || !self.redo_stack.is_empty() {
+            return None;
+        }
+        self.undo_stack.last_mut()
     }
 
     /// Forget everything that could be redone (e.g. a cancelled stroke that
@@ -562,6 +588,19 @@ impl History {
                     for (id, vector) in layers {
                         if let Some(idx) = canvas.layer_index_of(*id) {
                             std::mem::swap(&mut canvas.layers[idx].vector, vector);
+                        }
+                    }
+                    op = inner.as_deref_mut();
+                }
+                Some(LayerHistoryOp::Wet {
+                    layer,
+                    tiles,
+                    inner,
+                }) => {
+                    if let Some(idx) = canvas.layer_index_of(*layer) {
+                        let wet = canvas.layers[idx].wet.get_or_insert_with(Default::default);
+                        for (key, t) in tiles {
+                            *t = wet.set_tile(*key, t.take().map(|t| *t)).map(Box::new);
                         }
                     }
                     op = inner.as_deref_mut();
@@ -694,7 +733,8 @@ impl History {
             Some(
                 LayerHistoryOp::Text { .. }
                 | LayerHistoryOp::Vector { .. }
-                | LayerHistoryOp::Height { .. },
+                | LayerHistoryOp::Height { .. }
+                | LayerHistoryOp::Wet { .. },
             )
             | None => None,
         }
@@ -846,7 +886,8 @@ impl History {
             Some(
                 LayerHistoryOp::Text { .. }
                 | LayerHistoryOp::Vector { .. }
-                | LayerHistoryOp::Height { .. },
+                | LayerHistoryOp::Height { .. }
+                | LayerHistoryOp::Wet { .. },
             )
             | None => None,
         }

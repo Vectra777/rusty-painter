@@ -1248,6 +1248,10 @@ impl StrokeState {
         if brush.wet_edge > 0.0 {
             context.wet_edges(brush);
         }
+        // Wet paint: the stroke becomes water and pigment, drying from now.
+        if brush.wet.is_some() {
+            brush.lay_wet(context.canvas, context.stroke_tiles, context.undo_action);
+        }
     }
 
     /// Smooth the pen's lean with this sample's (by time; see [`LEAN_SMOOTHING`]).

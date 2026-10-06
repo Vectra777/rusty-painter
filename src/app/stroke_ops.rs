@@ -39,6 +39,106 @@ impl PainterApp {
         layer.style.impasto.get_or_insert_with(Default::default);
     }
 
+    /// Wet paint dries on (between strokes): each layer's, by the time
+    /// passed, in steps of [`crate::canvas::wet::STEP`] (at most four a
+    /// frame). Returns whether any is still wet (to keep the frames coming).
+    pub(crate) fn wet_tick(&mut self) -> bool {
+        let wet: Vec<(usize, std::sync::Arc<crate::canvas::wet::WetLayer>)> =
+            (self.canvas.layers.iter())
+                .enumerate()
+                .filter_map(|(i, l)| l.wet.clone().filter(|w| !w.is_empty()).map(|w| (i, w)))
+                .collect();
+        if wet.is_empty() {
+            self.workspace.wet_clock = None;
+            return false;
+        }
+        // Not while painting (a stroke lays its own paint first).
+        if self.brush_state.is_drawing || self.stroke_worker.is_busy() {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        let last = self.workspace.wet_clock.unwrap_or(now);
+        let steps = ((now - last).as_secs_f64() / crate::canvas::wet::STEP) as usize;
+        if steps == 0 {
+            self.workspace.wet_clock.get_or_insert(now);
+            return true;
+        }
+        self.workspace.wet_clock = Some(now);
+        self.wet_steps(&wet, steps.min(4));
+        true
+    }
+
+    /// `steps` steps of drying for the layers `wet`.
+    pub(crate) fn wet_steps(
+        &mut self,
+        wet: &[(usize, std::sync::Arc<crate::canvas::wet::WetLayer>)],
+        steps: usize,
+    ) {
+        let ts = self.canvas.tile_size();
+        let (cols, rows) = (
+            self.canvas.width().div_ceil(ts) as i32,
+            self.canvas.height().div_ceil(ts) as i32,
+        );
+        let gravity = Vec2::from(self.workspace.wet_gravity);
+        for (idx, layer) in wet {
+            let canvas = &self.canvas;
+            let stepped = layer.step(steps, ts, gravity, |(tx, ty)| {
+                ((0..cols).contains(&tx) && (0..rows).contains(&ty)).then(|| {
+                    canvas
+                        .get_layer_tile_data(*idx, tx, ty)
+                        .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
+                })
+            });
+            let id = self.canvas.layers[*idx].id;
+            // Where it spread to, into the step that laid it (while that's
+            // still the last).
+            if !stepped.fresh.is_empty()
+                && let Some(count) = self.workspace.wet_step
+                && let Some(action) = self.layer_state.history.top_if(count)
+            {
+                for (key, before) in &stepped.fresh {
+                    crate::canvas::wet::record_undo(action, id, *key, None);
+                    // (Once: wet, dry and wet again, it was first as it was.)
+                    let known =
+                        (action.tiles.iter()).any(|t| (t.tx, t.ty) == *key && t.layer_id == id);
+                    if known {
+                        continue;
+                    }
+                    action.tiles.push(crate::canvas::history::TileSnapshot {
+                        tx: key.0,
+                        ty: key.1,
+                        layer_id: id,
+                        x0: 0,
+                        y0: 0,
+                        width: ts,
+                        height: ts,
+                        data: before.clone().into(),
+                    });
+                }
+            }
+            for ((tx, ty), pixels) in stepped.shown {
+                self.canvas.set_layer_tile_data(*idx, tx, ty, pixels);
+                let (x, y) = (tx * ts as i32, ty * ts as i32);
+                self.mark_rect_damage([x, y, x + ts as i32, y + ts as i32]);
+            }
+        }
+        self.layer_state.thumbnails_dirty = true;
+    }
+
+    /// Layer → Dry Paint Now: the active layer's wet paint settles where it
+    /// is (it looks the same).
+    pub(crate) fn dry_wet_paint(&mut self, idx: usize) {
+        let Some(wet) = self.canvas.layers.get(idx).and_then(|l| l.wet.clone()) else {
+            return;
+        };
+        self.release_canvas();
+        for ((tx, ty), pixels) in wet.dry_now() {
+            self.canvas.set_layer_tile_data(idx, tx, ty, pixels);
+        }
+        self.workspace.wet_step = None;
+        self.mark_all_tiles_dirty();
+    }
+
     /// Layer `idx`'s impasto made plain paint: its pixels lit as they show,
     /// its heights put aside (one undo step brings them back). For what
     /// moves its pixels (the transform tool), which the heights wouldn't
@@ -115,6 +215,12 @@ impl PainterApp {
         self.rasterise_vector_for_stroke();
         if self.brush_state.brush.impasto.is_some() {
             self.ensure_impasto(self.canvas.active_layer_idx);
+        }
+        if self.brush_state.brush.wet.is_some() {
+            let idx = self.canvas.active_layer_idx;
+            if self.canvas.layers.get(idx).is_some_and(|l| l.wet.is_none()) {
+                self.canvas_mut().layers[idx].wet = Some(Default::default());
+            }
         }
         self.mark_action();
         let erasing = self.brush_state.brush.brush_options.blend_mode == BlendMode::Eraser;
@@ -271,7 +377,11 @@ impl PainterApp {
                     self.settle_action_mark(finished.seq - 1);
                     self.attach_stroke_rasterised(&mut finished.undo);
                     self.attach_vector_rasterised(&mut finished.undo);
+                    let wet = has_wet(finished.undo.layer_action.as_ref());
                     self.layer_state.history.push_action(finished.undo);
+                    if wet {
+                        self.workspace.wet_step = Some(self.layer_state.history.push_count());
+                    }
                 }
                 Finished::Task(result) => self.apply_task_result(result),
             }
@@ -301,6 +411,18 @@ impl PainterApp {
     pub(crate) fn canvas_mut(&mut self) -> &mut Canvas {
         self.release_canvas();
         exclusive(&mut self.canvas)
+    }
+}
+
+/// Whether a step lays wet paint (however its ops nest).
+fn has_wet(op: Option<&crate::canvas::history::LayerHistoryOp>) -> bool {
+    use crate::canvas::history::LayerHistoryOp as Op;
+    match op {
+        Some(Op::Wet { .. }) => true,
+        Some(Op::Text { inner, .. } | Op::Vector { inner, .. } | Op::Height { inner, .. }) => {
+            has_wet(inner.as_deref())
+        }
+        _ => false,
     }
 }
 
@@ -448,6 +570,63 @@ mod tests {
             "heights under the turned paint"
         );
         assert!(differ < 64 * 128 / 4);
+    }
+
+    #[test]
+    fn wet_paint_spreads_dries_saves_as_shown_and_undoes_exactly() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        let brush = &mut app.brush_state.brush;
+        brush.brush_options.color = Color32::from_rgb(30, 60, 200);
+        brush.brush_options.diameter = 10.0;
+        brush.brush_options.hardness = 100.0;
+        brush.wet = Some(crate::canvas::wet::WetPaint {
+            drying: 2.0,
+            ..Default::default()
+        });
+        let before = app.canvas.flatten().pixels;
+        // Up to the tile's edge: it spreads into the next tile too.
+        app.start_stroke_with_pressure(Vec2::new(30.0, 32.0), 1.0);
+        app.add_stroke_point(Vec2::new(62.0, 32.0), 1.0);
+        app.finish_stroke();
+        app.settle_strokes();
+        let wet = app.canvas.layers[1].wet.clone().unwrap();
+        assert!(!wet.is_empty(), "wet after the stroke");
+        let at =
+            |app: &crate::PainterApp, x: usize, y: usize| app.canvas.flatten().pixels[y * 128 + x];
+        assert_eq!(at(&app, 45, 38), Color32::WHITE, "not past the stroke yet");
+        app.wet_steps(&[(1, wet.clone())], 15);
+        assert!(at(&app, 45, 38) != Color32::WHITE, "it bled outward");
+        assert!(at(&app, 68, 32) != Color32::WHITE, "and into the next tile");
+        // Saved while wet: as it shows.
+        let shown = app.canvas.flatten().pixels;
+        let bytes = crate::project::encode_project(&app).unwrap();
+        assert_eq!(
+            crate::project::decode_project(&bytes)
+                .unwrap()
+                .canvas
+                .flatten()
+                .pixels,
+            shown
+        );
+        // Dries through.
+        for _ in 0..40 {
+            app.wet_steps(&[(1, wet.clone())], 4);
+        }
+        assert!(wet.is_empty(), "dry");
+        // One undo: the stroke and everything it spread to, gone.
+        app.apply_history(false);
+        let after = app.canvas.flatten().pixels;
+        let diff: Vec<usize> = (0..after.len())
+            .filter(|&i| after[i] != before[i])
+            .collect();
+        assert!(
+            diff.is_empty(),
+            "{} differ, first at {:?}: {:?}",
+            diff.len(),
+            diff.first().map(|i| (i % 128, i / 128)),
+            diff.first().map(|&i| after[i])
+        );
     }
 
     #[test]

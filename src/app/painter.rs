@@ -252,6 +252,9 @@ impl eframe::App for PainterApp {
                 if self.shader_tick(ctx, pointer) {
                     needs_repaint = true;
                 }
+                if self.wet_tick() {
+                    needs_repaint = true;
+                }
                 // Composite and paint after input, so this frame's dabs and any
                 // pan/zoom show up in this frame.
                 let (uploads, more_tiles) =
@@ -698,7 +701,8 @@ impl PainterApp {
                 Some(
                     LayerHistoryOp::Text { .. }
                     | LayerHistoryOp::Vector { .. }
-                    | LayerHistoryOp::Height { .. },
+                    | LayerHistoryOp::Height { .. }
+                    | LayerHistoryOp::Wet { .. },
                 )
                 | None => {}
             }

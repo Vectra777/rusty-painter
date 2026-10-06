@@ -252,6 +252,7 @@ struct StoredBrush {
     hatching: crate::brush_engine::hatching::Hatching,
     engines: crate::brush_engine::engines::Engines,
     impasto: Option<crate::canvas::impasto::Impasto>,
+    wet: Option<crate::canvas::wet::WetPaint>,
     sharpness: f32,
     sharpness_softness: f32,
     mixing: Option<crate::brush_engine::brush_options::Mixing>,
@@ -357,6 +358,7 @@ impl StoredBrush {
             hatching: b.hatching,
             engines: b.engines,
             impasto: b.impasto,
+            wet: b.wet,
             sharpness: b.sharpness,
             sharpness_softness: b.sharpness_softness,
             mixing: b.mixing,
@@ -459,6 +461,7 @@ impl StoredBrush {
         b.hatching = self.hatching;
         b.engines = self.engines;
         b.impasto = self.impasto;
+        b.wet = self.wet;
         b.sharpness = self.sharpness.clamp(0.0, 1.0);
         b.sharpness_softness = self.sharpness_softness.clamp(0.0, 1.0);
         b.mixing = self.mixing;

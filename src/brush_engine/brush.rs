@@ -268,6 +268,10 @@ pub struct Brush {
     /// Impasto: the paint's thickness laid down with it (on the layer's
     /// heights); `None` for flat paint.
     pub impasto: Option<crate::canvas::impasto::Impasto>,
+    /// Wet paint: laid down as water and pigment that spread, gather at
+    /// their edges and dry (see [`crate::canvas::wet`]); `None` for paint
+    /// that's dry at once.
+    pub wet: Option<crate::canvas::wet::WetPaint>,
     /// Hard edges: tip coverage below this share
     /// (0..1) is dropped and the rest painted at full strength (0 = off).
     pub sharpness: f32,
@@ -1013,6 +1017,54 @@ impl Brush {
         self.dynamics.is_active() || !self.inputs.is_empty()
     }
 
+    /// Wet paint, when the pen lifts: what the stroke covered becomes water
+    /// and pigment over the paint that was there (on a layer that takes wet
+    /// paint), noted in `undo_action` as it was.
+    pub(crate) fn lay_wet(
+        &self,
+        canvas: &Canvas,
+        stroke_tiles: &mut StrokeTiles,
+        undo_action: &mut UndoAction,
+    ) {
+        let Some(paint) = self.wet else {
+            return;
+        };
+        let Some(layer) = canvas.layers.get(canvas.active_layer_idx) else {
+            return;
+        };
+        let Some(wet) = layer.wet.as_deref() else {
+            return;
+        };
+        let o = &self.brush_options;
+        // (A brush whose dabs vary in colour lays its own colour wet.)
+        let colour = o.color.to_array().map(|v| v as f32 / 255.0);
+        let opacity = o.opacity.clamp(0.0, 1.0)
+            * if o.blend_mode == BlendMode::Eraser {
+                0.0
+            } else {
+                1.0
+            };
+        let side = canvas.tile_size();
+        for (&key, buffer) in &stroke_tiles.buffers {
+            let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let k = (key.0 as i32, key.1 as i32);
+            crate::canvas::wet::record_undo(undo_action, layer.id, k, wet.tile(k));
+            let coverage: Vec<f32> = buffer.coverage.iter().map(|c| c * opacity).collect();
+            let shown = wet.lay(k, &buffer.original, &coverage, |_| colour, paint);
+            if let Some(tile) = canvas.lock_tile(key.0, key.1) {
+                let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(data) = tile.data.as_mut()
+                    && data.len() == shown.len()
+                {
+                    data.copy_from_slice(&shown);
+                    tile.is_empty = shown.iter().all(|&p| p == Color32::TRANSPARENT);
+                }
+            }
+            buffer.damage = Some([0, 0, side, side]);
+            stroke_tiles.dirty.insert(key);
+        }
+    }
+
     /// What this brush does to the paint's thickness on `canvas`'s active
     /// layer: its impasto, or an eraser's taking it away; `None` on a layer
     /// without heights.
@@ -1124,6 +1176,7 @@ impl Brush {
             hatching: Default::default(),
             engines: Default::default(),
             impasto: None,
+            wet: None,
             sharpness: 0.0,
             sharpness_softness: 0.0,
             mixing: None,
@@ -1159,6 +1212,7 @@ impl Brush {
             hatching: Default::default(),
             engines: Default::default(),
             impasto: None,
+            wet: None,
             sharpness: 0.0,
             sharpness_softness: 0.0,
             mixing: None,

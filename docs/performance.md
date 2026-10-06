@@ -118,6 +118,10 @@ bucket fill and colour select at 4096² take 0.15–0.22 s.
 
 ## Known costs left
 
+- **Wet paint** dries in steps of 1/30 s between strokes (at most four
+  a frame): one step over 64 wet tiles takes about 4 ms (`wet_step_64_tiles`).
+  A wet tile holds about 100 KB (water, pigment, the dry paint and what it
+  shows) until it dries.
 - **Impasto**: a stroke laying heights costs about a fifth more than
   the same brush flat; a lit layer composites through the general path,
   about twice a plain layer's time where its paint slopes (576 tiles:

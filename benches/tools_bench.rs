@@ -543,8 +543,51 @@ fn bench_vector(c: &mut Criterion) {
     });
 }
 
+/// Wet paint: one step of drying over 64 wet tiles (an 8×8 wash).
+fn bench_wet(c: &mut Criterion) {
+    use rusty_painter::canvas::wet::{WetLayer, WetPaint};
+    let wet = WetLayer::default();
+    let before = vec![Color32::WHITE; 64 * 64];
+    let coverage: Vec<f32> = (0..64 * 64)
+        .map(|i| 0.5 + 0.5 * ((i % 7) as f32 / 7.0))
+        .collect();
+    for ty in 0..8 {
+        for tx in 0..8 {
+            wet.lay(
+                (tx, ty),
+                &before,
+                &coverage,
+                |_| [0.1, 0.2, 0.6, 0.7],
+                WetPaint::default(),
+            );
+        }
+    }
+    let shown: std::collections::HashMap<(i32, i32), Vec<Color32>> = (0..8)
+        .flat_map(|ty| (0..8).map(move |tx| (tx, ty)))
+        .map(|k| (k, wet.tile(k).unwrap().shown))
+        .collect();
+    c.bench_function("wet_step_64_tiles", |b| {
+        b.iter_batched(
+            || {
+                let copy = WetLayer::default();
+                for &k in shown.keys() {
+                    copy.set_tile(k, wet.tile(k));
+                }
+                copy
+            },
+            |copy| {
+                copy.step(1, 64, Vec2::new(0.0, 1.0), |k| shown.get(&k).cloned())
+                    .shown
+                    .len()
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+}
+
 criterion_group!(
     tools,
+    bench_wet,
     bench_vector,
     bench_symmetry,
     bench_shapes,

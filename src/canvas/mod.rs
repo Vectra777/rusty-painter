@@ -21,5 +21,6 @@ pub mod shader;
 pub mod storage;
 pub mod text;
 pub mod vector;
+pub mod wet;
 
 pub use storage::Canvas;
