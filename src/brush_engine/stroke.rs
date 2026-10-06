@@ -75,6 +75,20 @@ pub struct StrokeTiles {
     pub(crate) wash_average: Option<f32>,
     /// Where [`Self::rewind`] goes back to, while one is kept.
     checkpoint: Option<Box<Checkpoint>>,
+    /// When set, the stroke's dabs are handed back here (placed, varied,
+    /// with their strength) rather than painted: a mixing brush lays each
+    /// down itself.
+    pub(crate) collect: Option<Vec<CollectedDab>>,
+}
+
+/// A dab as the brush would paint it, for a stroke that lays its dabs down
+/// itself (see [`StrokeTiles::collect`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CollectedDab {
+    pub dab: crate::brush_engine::dab::PlacedDab,
+    /// Its whole strength: the brush's opacity, flow and colour alpha as
+    /// they were (pressure on them too), times the dab's own.
+    pub strength: f32,
 }
 
 /// A tile's stroke buffer and pixels, saved.
@@ -122,6 +136,15 @@ impl StrokeTiles {
         self.mask_tiles.clear();
         self.wash_average = None;
         self.checkpoint = None;
+    }
+
+    /// Tiles that paint nothing: the stroke's dabs are handed back (see
+    /// [`Self::collect`]).
+    pub(crate) fn collecting() -> Self {
+        Self {
+            collect: Some(Vec::new()),
+            ..Default::default()
+        }
     }
 
     /// Remember how the stroke's tiles are now, to [`Self::rewind`] to

@@ -2,7 +2,7 @@
 pub mod bristle;
 pub mod brush;
 pub mod brush_options;
-mod dab;
+pub(crate) mod dab;
 pub mod dual;
 pub mod dynamics;
 #[cfg(test)]

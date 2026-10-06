@@ -187,8 +187,6 @@ struct SmudgeMix {
     color_rate: f32,
     pressure_length: bool,
     pressure_color: bool,
-    /// A mixing brush's image tip (the Smudge tool's dabs are round).
-    tip: Option<std::sync::Arc<crate::brush_engine::tip::TipMask>>,
     /// How a mixing brush's paint goes onto the layer.
     blend: crate::canvas::blend_modes::LayerBlend,
     /// The stroke is the Brush tool's (ended with the brush's strokes).
@@ -227,6 +225,33 @@ pub struct BlendSession {
     /// Canvas rectangles painted since the worker last collected them.
     damage: Vec<[i32; 4]>,
     stroke: BlendStroke,
+    /// Smudging (the Smudge tool, a mixing brush): where its dabs go.
+    dabber: Option<Box<Dabber>>,
+}
+
+/// The dabs of a smudge, placed and varied as the brush's own strokes'
+/// are (spacing, stabiliser, dynamics, inputs, scatter, tip, angle), each
+/// then mixed into the layer in turn.
+struct Dabber {
+    stroke: crate::brush_engine::stroke::StrokeState,
+    /// Collects the dabs (nothing is painted through it).
+    tiles: crate::brush_engine::stroke::StrokeTiles,
+    undo: UndoAction,
+    /// The brush that places them: the stroke's, without what a smudge
+    /// can't do (an end taper drawn again, a dual tip's mask, wet edges).
+    brush: crate::brush_engine::brush::Brush,
+    seed: u64,
+    /// The last sample's pressure (the smudge length and colour rate).
+    pressure: f32,
+    /// Post-correction: the samples so far, to smudge again along the
+    /// smoothed path when the pen lifts.
+    samples: Option<Vec<crate::brush_engine::stroke_worker::PenSample>>,
+}
+
+/// A dab placed by the brush, for one smudge dab.
+struct Placed {
+    dab: crate::brush_engine::dab::PlacedDab,
+    strength: f32,
 }
 
 struct BlendStroke {
@@ -392,6 +417,28 @@ fn wrap_pieces(start: i32, len: usize, size: i32) -> Vec<(i32, usize, usize)> {
         offset += run;
     }
     out
+}
+
+/// A patch row's pieces on the canvas, as [`wrap_pieces`] gives them with
+/// wrap-around, else just the part on the canvas.
+fn wrap_pieces_or_clip(start: i32, len: usize, size: i32, wrap: bool) -> Vec<(i32, usize, usize)> {
+    if wrap {
+        return wrap_pieces(start, len, size);
+    }
+    let (from, to) = (start.max(0), (start + len as i32).min(size));
+    if from >= to {
+        return Vec::new();
+    }
+    vec![(from, (from - start) as usize, (to - from) as usize)]
+}
+
+/// Canvas row `y` (round with wrap-around); `None` off the canvas.
+fn canvas_row(y: i32, size: i32, wrap: bool) -> Option<usize> {
+    if wrap {
+        Some(y.rem_euclid(size) as usize)
+    } else {
+        (0..size).contains(&y).then_some(y as usize)
+    }
 }
 
 /// `px` (a `side`×`side` patch) at `p` (texel centres at +0.5), bilinear;
@@ -621,7 +668,6 @@ impl PainterApp {
             color_rate: b.color_rate,
             pressure_length: false,
             pressure_color: false,
-            tip: None,
             blend: crate::canvas::blend_modes::LayerBlend::Normal,
             from_brush: false,
             krita: None,
@@ -636,16 +682,11 @@ impl PainterApp {
         let Some(m) = brush.mixing else {
             return;
         };
-        let tip = match &brush.brush_options.pixel_shape {
-            crate::brush_engine::brush_options::PixelBrushShape::Custom(tip) => Some(tip.clone()),
-            _ => None,
-        };
         let mix = SmudgeMix {
             length: m.smudge_length,
             color_rate: m.color_rate,
             pressure_length: m.pressure_length,
             pressure_color: m.pressure_color,
-            tip,
             blend: brush.paint_blend,
             from_brush: true,
             krita: m.krita,
@@ -717,6 +758,32 @@ impl PainterApp {
         self.mark_action();
         let mut brush = self.brush_state.brush.clone();
         brush.second_color = self.brush_state.secondary_color;
+        let dabber = (kind == BlendKind::Smudge).then(|| {
+            let mut placing = brush.clone();
+            placing.dynamics.taper.end = 0.0;
+            placing.dual = None;
+            placing.wet_edge = 0.0;
+            let seed = rand::random();
+            let mut stroke = crate::brush_engine::stroke::StrokeState::with_seed(seed);
+            stroke.view_scale = self.viewport.zoom;
+            let correcting = placing.stabilizer_algorithm
+                == crate::brush_engine::brush::StabilizerAlgorithm::PostCorrection
+                && placing.stabilizer_modes.correction > 0.0;
+            Box::new(Dabber {
+                stroke,
+                tiles: crate::brush_engine::stroke::StrokeTiles::collecting(),
+                undo: UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                },
+                brush: placing,
+                seed,
+                pressure,
+                samples: correcting.then(Vec::new),
+            })
+        });
         let session = BlendSession {
             canvas: Arc::clone(&self.canvas),
             pool: Arc::clone(&self.workspace.pool),
@@ -730,6 +797,7 @@ impl PainterApp {
             wrap: self.workspace.wrap_around,
             idx,
             damage: Vec::new(),
+            dabber,
             stroke: BlendStroke {
                 kind,
                 dir: Vec2::ZERO,
@@ -776,9 +844,45 @@ impl PainterApp {
 impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
     /// The stroke's first dab, where it started.
     fn start(&mut self) {
-        if let Some(pos) = self.stroke.last {
-            let pool = Arc::clone(&self.pool);
-            pool.install(|| self.blend_mirrored(pos, self.stroke.last_pressure));
+        let Some(pos) = self.stroke.last else {
+            return;
+        };
+        let pressure = self.stroke.last_pressure;
+        if self.dabber.is_some() {
+            let dabs = self.place(|stroke, brush, context| {
+                stroke.add_sample(brush, pos, pressure, None, context)
+            });
+            return self.lay(dabs);
+        }
+        let pool = Arc::clone(&self.pool);
+        pool.install(|| self.blend_mirrored(pos, pressure));
+    }
+
+    fn sample(&mut self, s: crate::brush_engine::stroke_worker::PenSample) {
+        let Some(dabber) = self.dabber.as_mut() else {
+            return self.drag(s.pos, s.pressure);
+        };
+        dabber.pressure = s.pressure;
+        if let Some(samples) = dabber.samples.as_mut() {
+            samples.push(s);
+        }
+        let dabs = self.place(|stroke, brush, context| {
+            stroke.tilt = s.tilt;
+            stroke.barrel = s.barrel;
+            stroke.add_sample(brush, s.pos, s.pressure, Some(s.time), context)
+        });
+        self.stroke.last = Some(s.pos);
+        self.lay(dabs);
+    }
+
+    fn airbrush_rate(&self) -> f32 {
+        self.dabber.as_ref().map_or(0.0, |d| d.brush.airbrush_rate)
+    }
+
+    fn airbrush(&mut self, now: f64) {
+        if self.dabber.is_some() {
+            let dabs = self.place(|stroke, brush, context| stroke.airbrush(brush, now, context));
+            self.lay(dabs);
         }
     }
 
@@ -822,7 +926,12 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
 
     /// The stroke's undo step: the tiles as they were before it (none if
     /// it changed nothing).
-    fn finish(self: Box<Self>) -> Option<UndoAction> {
+    fn finish(mut self: Box<Self>) -> Option<UndoAction> {
+        if self.dabber.is_some() {
+            self.correct();
+            let dabs = self.place(|stroke, brush, context| stroke.finish(brush, context));
+            self.lay(dabs);
+        }
         if self.stroke.before.is_empty() {
             return None;
         }
@@ -865,6 +974,192 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
 }
 
 impl BlendSession {
+    /// Run `f` on the dab placer: the dabs it placed.
+    fn place(
+        &mut self,
+        f: impl FnOnce(
+            &mut crate::brush_engine::stroke::StrokeState,
+            &mut crate::brush_engine::brush::Brush,
+            &mut crate::brush_engine::stroke::StrokeContext<'_>,
+        ),
+    ) -> Vec<crate::brush_engine::stroke::CollectedDab> {
+        let Some(d) = self.dabber.as_mut() else {
+            return Vec::new();
+        };
+        let Dabber {
+            stroke,
+            tiles,
+            undo,
+            brush,
+            ..
+        } = &mut **d;
+        let mut context = crate::brush_engine::stroke::StrokeContext::new(
+            &self.pool,
+            &self.canvas,
+            None,
+            undo,
+            tiles,
+        );
+        f(stroke, brush, &mut context);
+        tiles.collect.replace(Vec::new()).unwrap_or_default()
+    }
+
+    /// Smudge with each of `dabs`, and their mirror copies, in turn.
+    fn lay(&mut self, dabs: Vec<crate::brush_engine::stroke::CollectedDab>) {
+        let pressure = self.dabber.as_ref().map_or(1.0, |d| d.pressure);
+        let pool = Arc::clone(&self.pool);
+        pool.install(|| {
+            for c in dabs {
+                let stroke = &self.stroke;
+                let positions = stroke.symmetry.positions(&stroke.copies, c.dab.center);
+                let turns: Vec<Option<[f32; 4]>> = (positions.iter())
+                    .map(|&(copy, _)| (copy > 0).then(|| stroke.copies[copy - 1].tip_orientation()))
+                    .collect();
+                let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
+                for ((copy, p), turn) in positions.into_iter().zip(turns) {
+                    let p = if self.wrap {
+                        Vec2::new(p.x.rem_euclid(w), p.y.rem_euclid(h))
+                    } else {
+                        p
+                    };
+                    let mut dab = c.dab;
+                    dab.center = p;
+                    if let Some(m) = turn {
+                        dab.orient = crate::brush_engine::dynamics::compose(dab.orient, m);
+                    }
+                    let placed = Placed {
+                        dab,
+                        strength: c.strength,
+                    };
+                    self.blend_dab(p, pressure, copy, Some(&placed));
+                }
+            }
+        });
+    }
+
+    /// Post-correction: put the layer back as it was and smudge the
+    /// stroke again along its path smoothed (the same undo step).
+    fn correct(&mut self) {
+        let Some(d) = self.dabber.as_mut() else {
+            return;
+        };
+        let Some(samples) = d.samples.take() else {
+            return;
+        };
+        if samples.len() < 3 {
+            return;
+        }
+        let points: Vec<Vec2> = samples.iter().map(|s| s.pos).collect();
+        let modes = d.brush.stabilizer_modes;
+        let smoothed = crate::brush_engine::stabilizer::smooth_path(
+            &points,
+            modes.correction,
+            d.stroke.view_scale,
+        );
+        let view_scale = d.stroke.view_scale;
+        d.stroke = crate::brush_engine::stroke::StrokeState::with_seed(d.seed);
+        d.stroke.view_scale = view_scale;
+        let ts = self.canvas.tile_size();
+        for (&(tx, ty), pixels) in &self.stroke.before {
+            let rect = (tx * ts as i32, ty * ts as i32, ts, ts);
+            self.canvas.write_layer_region(self.idx, rect, pixels, None);
+            self.damage
+                .push([rect.0, rect.1, rect.0 + ts as i32, rect.1 + ts as i32]);
+        }
+        self.stroke.carries.clear();
+        self.stroke.krita_last.clear();
+        self.stroke.random = 0x9e37_79b9;
+        for (s, pos) in samples.into_iter().zip(smoothed) {
+            if let Some(d) = self.dabber.as_mut() {
+                d.pressure = s.pressure;
+            }
+            let dabs = self.place(|stroke, brush, context| {
+                stroke.tilt = s.tilt;
+                stroke.barrel = s.barrel;
+                stroke.add_sample(brush, pos, s.pressure, Some(s.time), context)
+            });
+            self.lay(dabs);
+        }
+    }
+
+    /// A placed dab's tip (turned, squashed, any tip the brush has) with its
+    /// texture and the selection, over the `side`×`side` patch at `origin`:
+    /// how much of the result each pixel takes.
+    fn placed_mask(&self, placed: &Placed, (x0, y0): (i32, i32), side: usize) -> Vec<f32> {
+        let mut local = placed.dab;
+        // In the patch's own frame (the tip's rows take whole pixels).
+        local.center -= Vec2::new(x0 as f32, y0 as f32);
+        local.strength = 1.0;
+        let tip =
+            crate::brush_engine::brush::SoftTip::new(&self.brush, std::slice::from_ref(&local));
+        let strength = placed.strength.clamp(0.0, 1.0);
+        let texture = self.brush.texture.as_ref();
+        let grain = self.dabber.as_ref().map(|d| d.tiles.grain);
+        let placing = texture.is_some_and(|t| t.placement.is_active());
+        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let wrap = self.wrap;
+        let selection = self.selection.as_ref();
+        let mut mask = vec![0.0f32; side * side];
+        let round = tip.plain_round(&local);
+        let r = local.r.max(0.5);
+        for_rows(&self.pool, &mut mask, side, |ly, row| {
+            match round {
+                // The Gaussian falloff straight (no per-pixel tip work).
+                Some(hardness) => {
+                    let dy = ly as f32 + 0.5 - local.center.y;
+                    for (lx, v) in row.iter_mut().enumerate() {
+                        let dx = lx as f32 + 0.5 - local.center.x;
+                        let t = (dx * dx + dy * dy).sqrt() / r;
+                        *v = if t < 1.0 {
+                            crate::brush_engine::masks::gaussian_falloff(t, hardness)
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+                None => {
+                    tip.row(&local, ly, 0, row, 1.0);
+                }
+            }
+            let y = y0 + ly as i32;
+            if let Some(t) = texture {
+                // In canvas pixels (round the edges with wrap-around).
+                for (sx, dx, w) in wrap_pieces_or_clip(x0, side, cw, wrap) {
+                    let Some(ty) = canvas_row(y, ch, wrap) else {
+                        break;
+                    };
+                    let part = &mut row[dx..dx + w];
+                    match grain.filter(|_| placing) {
+                        Some(grain) => t.apply_row_placed(
+                            ty,
+                            sx as usize,
+                            part,
+                            placed.dab.texture,
+                            &grain,
+                            [placed.dab.center.x, placed.dab.center.y],
+                        ),
+                        None => t.apply_row_scaled(ty, sx as usize, part, placed.dab.texture),
+                    }
+                }
+            }
+            for v in row.iter_mut() {
+                *v *= strength;
+            }
+            if let Some(selection) = selection {
+                let mut sel = vec![0.0f32; side];
+                if let Some(ty) = canvas_row(y, ch, wrap) {
+                    for (sx, dx, w) in wrap_pieces_or_clip(x0, side, cw, wrap) {
+                        selection.row_coverage(ty, sx as usize, &mut sel[dx..dx + w]);
+                    }
+                }
+                for (v, s) in row.iter_mut().zip(&sel) {
+                    *v *= s;
+                }
+            }
+        });
+        mask
+    }
+
     fn blend_diameter(&self, pressure: f32) -> f32 {
         let o = &self.brush.brush_options;
         let k = if o.pressure_size {
@@ -888,17 +1183,20 @@ impl BlendSession {
             } else {
                 p
             };
-            self.blend_dab(p, pressure, copy);
+            self.blend_dab(p, pressure, copy, None);
         }
     }
 
-    /// One dab at `center`, for mirror copy `copy`.
-    fn blend_dab(&mut self, center: Vec2, pressure: f32, copy: usize) {
+    /// One dab at `center`, for mirror copy `copy`: as the brush placed
+    /// it (`placed`: a smudge), else round, the brush's size at `pressure`.
+    fn blend_dab(&mut self, center: Vec2, pressure: f32, copy: usize, placed: Option<&Placed>) {
         if self.stroke.mix.krita.is_some() {
-            self.krita_smudge_dab(center, pressure, copy);
+            if let Some(placed) = placed {
+                self.krita_smudge_dab(center, pressure, copy, placed);
+            }
             return;
         }
-        let diameter = self.blend_diameter(pressure);
+        let diameter = placed.map_or_else(|| self.blend_diameter(pressure), |p| p.dab.r * 2.0);
         let o = &self.brush.brush_options;
         let r = diameter * 0.5;
         let mut strength = o.flow / 100.0 * o.opacity;
@@ -910,9 +1208,74 @@ impl BlendSession {
         }
         let hardness = (o.hardness / 100.0).clamp(0.0, 1.0);
         let blur_size = self.blur_size;
-        // The brush colour as carried paint (linear, premultiplied, opaque).
-        let brush_paint = to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b()));
+        // The brush colour as carried paint (linear, premultiplied, opaque):
+        // the dab's own when its colour varies (inputs, colour source).
+        let brush_paint = match placed {
+            // (The dab's colour is in the document's blend space.)
+            Some(p) if self.brush.varies_color() => {
+                if self.canvas.blend_space == crate::canvas::blend_modes::BlendSpace::Linear {
+                    let [r, g, b] = p.dab.color;
+                    [r, g, b, 1.0]
+                } else {
+                    let [r, g, b] = p
+                        .dab
+                        .color
+                        .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
+                    to_f(Color32::from_rgb(r, g, b))
+                }
+            }
+            _ => to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b())),
+        };
         let spacing = o.spacing;
+        let idx = self.idx;
+        let alpha_lock = self.canvas.layers[idx].alpha_locked;
+        let rc = placed.map_or(r, |p| p.dab.reach).ceil() as i32;
+        let side = (2 * rc + 1) as usize;
+        let (x0, y0) = (center.x.floor() as i32 - rc, center.y.floor() as i32 - rc);
+        let pool = Arc::clone(&self.pool);
+        let codec = Codec::new();
+        let mask = match placed {
+            Some(p) => self.placed_mask(p, (x0, y0), side),
+            // A round tip, shaped like the brush's (hardness falloff),
+            // times the stroke strength and the selection. (A big dab's
+            // rows, and its other per-pixel work below, run in parallel.)
+            None => {
+                let mut mask = vec![0.0f32; side * side];
+                let selection = self.selection.as_ref();
+                let r_mask = r.max(0.5);
+                for_rows(&pool, &mut mask, side, |ly, mask_row| {
+                    let y = y0 + ly as i32;
+                    let mut row_sel = vec![1.0f32; side];
+                    if let Some(selection) = selection {
+                        if y < 0 {
+                            return;
+                        }
+                        let start = x0.max(0);
+                        row_sel.fill(0.0);
+                        let skip = (start - x0) as usize;
+                        if skip < side {
+                            selection.row_coverage(
+                                y as usize,
+                                start as usize,
+                                &mut row_sel[skip..],
+                            );
+                        }
+                    }
+                    let dy = y as f32 + 0.5 - center.y;
+                    for lx in 0..side {
+                        let dx = (x0 + lx as i32) as f32 + 0.5 - center.x;
+                        let t = (dx * dx + dy * dy).sqrt() / r_mask;
+                        if t < 1.0 {
+                            mask_row[lx] =
+                                crate::brush_engine::masks::gaussian_falloff(t, hardness)
+                                    * strength
+                                    * row_sel[lx];
+                        }
+                    }
+                });
+                mask
+            }
+        };
         let stroke = &mut self.stroke;
         let mix = &stroke.mix;
         let by_pressure = |on: bool| if on { pressure.clamp(0.0, 1.0) } else { 1.0 };
@@ -922,58 +1285,7 @@ impl BlendSession {
         let steps_per_width = (100.0 / spacing.max(1.0)).max(1.0);
         let rate = (mix.color_rate * by_pressure(mix.pressure_color)).clamp(0.0, 1.0);
         let color_rate = 1.0 - (1.0 - rate).powf(1.0 / steps_per_width);
-        let tip = mix.tip.clone();
         let paint_blend = mix.blend;
-        let idx = self.idx;
-        let alpha_lock = self.canvas.layers[idx].alpha_locked;
-        let rc = r.ceil() as i32;
-        let side = (2 * rc + 1) as usize;
-        let (x0, y0) = (center.x.floor() as i32 - rc, center.y.floor() as i32 - rc);
-
-        // The brush tip, shaped like the brush's (hardness falloff), times
-        // the stroke strength and the selection. (A big dab's rows, and its
-        // other per-pixel work below, run in parallel.)
-        let pool = Arc::clone(&self.pool);
-        let codec = Codec::new();
-        let mut mask = vec![0.0f32; side * side];
-        let tip_sampler = tip.as_ref().map(|t| t.sampler(r.max(0.5)));
-        let selection = self.selection.as_ref();
-        let r_mask = r.max(0.5);
-        for_rows(&pool, &mut mask, side, |ly, mask_row| {
-            let y = y0 + ly as i32;
-            let mut row_sel = vec![1.0f32; side];
-            if let Some(selection) = selection {
-                if y < 0 {
-                    return;
-                }
-                let start = x0.max(0);
-                row_sel.fill(0.0);
-                let skip = (start - x0) as usize;
-                if skip < side {
-                    selection.row_coverage(y as usize, start as usize, &mut row_sel[skip..]);
-                }
-            }
-            if let (Some(tip), Some(sampler)) = (&tip, &tip_sampler) {
-                // A mixing brush's image tip, upright.
-                let mut tip_row = vec![0.0f32; side];
-                let start = (x0 as f32 + 0.5 - center.x, y as f32 + 0.5 - center.y);
-                tip.row(sampler, start, (1.0, 0.0), &mut tip_row);
-                for lx in 0..side {
-                    mask_row[lx] = tip_row[lx] * strength * row_sel[lx];
-                }
-                return;
-            }
-            let dy = y as f32 + 0.5 - center.y;
-            for lx in 0..side {
-                let dx = (x0 + lx as i32) as f32 + 0.5 - center.x;
-                let t = (dx * dx + dy * dy).sqrt() / r_mask;
-                if t < 1.0 {
-                    mask_row[lx] = crate::brush_engine::masks::gaussian_falloff(t, hardness)
-                        * strength
-                        * row_sel[lx];
-                }
-            }
-        });
 
         let wrap = self.wrap;
         // The pixels as stored (kept exactly where the dab doesn't reach),
@@ -1251,17 +1563,14 @@ impl BlendSession {
     /// there), at the smudge rate × opacity; then the brush colour at the
     /// colour rate² × opacity (by the brush's blend mode); the result put
     /// down through the tip. The stroke's first dab only says where it is.
-    fn krita_smudge_dab(&mut self, center: Vec2, pressure: f32, copy: usize) {
-        use crate::brush_engine::brush_options::PixelBrushShape;
-        let diameter = self.blend_diameter(pressure);
+    fn krita_smudge_dab(&mut self, center: Vec2, pressure: f32, copy: usize, placed: &Placed) {
         let brush = &self.brush;
         let o = &brush.brush_options;
-        let r = diameter * 0.5;
+        let r = placed.dab.r;
         let p = pressure.clamp(0.0, 1.0);
-        let mut opacity = o.flow / 100.0 * o.opacity;
-        if o.pressure_opacity {
-            opacity *= o.pressure_curves.opacity(p);
-        }
+        // The dab's strength: opacity and flow, by pressure as the brush
+        // says, and its inputs.
+        let opacity = placed.strength.clamp(0.0, 1.0);
         let Some(m) = brush.mixing else {
             return;
         };
@@ -1275,123 +1584,28 @@ impl BlendSession {
         let paint = to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b()));
         // The colour tables looked up once, not once a pixel.
         let codec = Codec::new();
-        let hardness = (o.hardness / 100.0).clamp(0.0, 1.0);
-        let curve = (o.softness_selector == crate::brush_engine::hardness::SoftnessSelector::Curve)
-            .then(|| crate::brush_engine::hardness::CurveLut::new(&o.softness_curve));
-        let shape = o.pixel_shape.clone();
-        let texture = brush.texture.clone();
-        let tip_shape = brush.dynamics.tip;
         let paint_blend = brush.paint_blend;
         let wrap = self.wrap;
-        let stroke = &mut self.stroke;
         let idx = self.idx;
+        let stroke = &mut self.stroke;
         if stroke.krita_last.len() <= copy {
             stroke.krita_last.resize(copy + 1, None);
         }
         let Some(last) = stroke.krita_last[copy].replace(center) else {
             return;
         };
-        // The tip's turn: its angle, the stroke's direction, at random.
-        let mut angle = tip_shape.angle.to_radians();
-        if tip_shape.follow_stroke {
-            let dir = if copy == 0 {
-                stroke.dir
-            } else {
-                let s = &stroke.symmetry;
-                s.map(&stroke.copies[copy - 1], s.center + stroke.dir) - s.center
-            };
-            angle += crate::brush_engine::dynamics::direction(Vec2::ZERO, dir).unwrap_or(0.0);
-        }
-        if tip_shape.random_angle > 0.0 {
-            stroke.random ^= stroke.random << 13;
-            stroke.random ^= stroke.random >> 17;
-            stroke.random ^= stroke.random << 5;
-            let u = stroke.random as f32 / u32::MAX as f32;
-            angle += (u * 2.0 - 1.0) * tip_shape.random_angle.to_radians();
-        }
-        let orient = crate::brush_engine::dynamics::tip_orientation(angle, tip_shape.ratio);
-        let [oa, ob, oc, od] = orient;
         let alpha_lock = self.canvas.layers[idx].alpha_locked;
-        let reach = r * match &shape {
-            PixelBrushShape::Custom(tip) => tip.corner_reach(),
-            PixelBrushShape::Square => std::f32::consts::SQRT_2,
-            PixelBrushShape::Circle => 1.0,
-        };
-        let rc = reach.ceil() as i32;
+        let rc = placed.dab.reach.ceil() as i32;
         let side = (2 * rc + 1) as usize;
         let (x0, y0) = (center.x.floor() as i32 - rc, center.y.floor() as i32 - rc);
-
         // The tip (turned, textured, selected): how much of the result
-        // each pixel takes. Rows in parallel: a large tip is most of a
-        // dab's work.
-        let mut mask = vec![0.0f32; side * side];
-        let sampler = match &shape {
-            PixelBrushShape::Custom(tip) => Some(tip.sampler(r.max(0.5))),
-            _ => None,
+        // each pixel takes.
+        let shape = Placed {
+            dab: placed.dab,
+            strength: 1.0,
         };
-        let selection = self.selection.as_ref();
+        let mask = self.placed_mask(&shape, (x0, y0), side);
         let pool = Arc::clone(&self.pool);
-        let mask_row = |ly: usize, row: &mut [f32], row_sel: &mut Vec<f32>| {
-            let y = y0 + ly as i32;
-            let pdy = y as f32 + 0.5 - center.y;
-            let pdx0 = x0 as f32 + 0.5 - center.x;
-            match (&shape, &sampler) {
-                (PixelBrushShape::Custom(tip), Some(sampler)) => {
-                    tip.row(
-                        sampler,
-                        (oa * pdx0 + ob * pdy, oc * pdx0 + od * pdy),
-                        (oa, oc),
-                        row,
-                    );
-                }
-                _ => {
-                    for (lx, v) in row.iter_mut().enumerate() {
-                        let pdx = pdx0 + lx as f32;
-                        let (tx, ty) = (oa * pdx + ob * pdy, oc * pdx + od * pdy);
-                        let t = if matches!(shape, PixelBrushShape::Square) {
-                            tx.abs().max(ty.abs())
-                        } else {
-                            (tx * tx + ty * ty).sqrt()
-                        } / r.max(0.5);
-                        *v = if t >= 1.0 {
-                            0.0
-                        } else {
-                            match &curve {
-                                Some(c) => c.at(t),
-                                None => crate::brush_engine::masks::gaussian_falloff(t, hardness),
-                            }
-                        };
-                    }
-                }
-            }
-            if let Some(t) = &texture
-                && y >= 0
-            {
-                let skip = (-x0).max(0) as usize;
-                if skip < side {
-                    t.apply_row(y as usize, (x0 + skip as i32) as usize, &mut row[skip..]);
-                }
-            }
-            if let Some(selection) = selection {
-                row_sel.resize(side, 0.0);
-                row_sel.fill(0.0);
-                if y >= 0 {
-                    let start = x0.max(0);
-                    let skip = (start - x0) as usize;
-                    if skip < side {
-                        selection.row_coverage(y as usize, start as usize, &mut row_sel[skip..]);
-                    }
-                }
-                for (v, s) in row.iter_mut().zip(row_sel.iter()) {
-                    *v *= s;
-                }
-            }
-        };
-        pool.install(|| {
-            mask.par_chunks_mut(side)
-                .enumerate()
-                .for_each_init(Vec::new, |row_sel, (ly, row)| mask_row(ly, row, row_sel));
-        });
         // Each row's part under the tip: the rest is left as it is.
         let spans: Vec<(usize, usize)> = mask
             .chunks(side)
@@ -1921,6 +2135,192 @@ mod mix_tests {
         assert!(
             layer(&tool) == layer(&brush),
             "the same engine, the same pixels"
+        );
+    }
+
+    /// A mixing brush that lays down its own colour, nothing carried.
+    fn pure_mixing(app: &mut crate::PainterApp) {
+        use crate::brush_engine::brush_options::Mixing;
+        app.active_tool = crate::app::tools::Tool::Brush;
+        app.brush_state.brush.mixing = Some(Mixing {
+            smudge_length: 0.0,
+            color_rate: 1.0,
+            ..Default::default()
+        });
+    }
+
+    /// One dab at (60, 32) with the Brush tool.
+    fn dab(app: &mut crate::PainterApp) -> Vec<Color32> {
+        app.start_stroke_with_pressure(Vec2::new(60.0, 32.0), 1.0);
+        app.finish_stroke();
+        app.settle_strokes();
+        layer(app)
+    }
+
+    fn painted(px: &[Color32], x: i32, y: i32) -> bool {
+        px[(y * 128 + x) as usize] != Color32::WHITE
+    }
+
+    #[test]
+    fn a_mixing_brush_turns_and_squashes_its_tip() {
+        let extents = |angle: f32| {
+            let mut app = app(Some(Color32::WHITE));
+            pure_mixing(&mut app);
+            let tip = &mut app.brush_state.brush.dynamics.tip;
+            (tip.ratio, tip.angle) = (0.3, angle);
+            let px = dab(&mut app);
+            let across = (40..80).filter(|&x| painted(&px, x, 32)).count();
+            let down = (12..52).filter(|&y| painted(&px, 60, y)).count();
+            (across, down)
+        };
+        let (across, down) = extents(0.0);
+        let (turned_across, turned_down) = extents(90.0);
+        assert!(across != down, "squashed: {across} × {down}");
+        assert_eq!(
+            (turned_across, turned_down),
+            (down, across),
+            "turned a quarter"
+        );
+    }
+
+    #[test]
+    fn a_mixing_brush_takes_its_texture_and_its_hue_randomness() {
+        let full = |px: &[Color32]| {
+            px.iter()
+                .filter(|&&c| c == Color32::from_rgb(20, 40, 230))
+                .count()
+        };
+        let mut plain = app(Some(Color32::WHITE));
+        pure_mixing(&mut plain);
+        let plain_px = dab(&mut plain);
+        let mut textured = app(Some(Color32::WHITE));
+        pure_mixing(&mut textured);
+        let mut t = crate::brush_engine::texture::BrushTexture::new(
+            crate::brush_engine::texture::builtin()[1].clone(),
+        );
+        t.strength = 1.0;
+        textured.brush_state.brush.texture = Some(t);
+        let textured_px = dab(&mut textured);
+        assert!(
+            full(&textured_px) < full(&plain_px),
+            "the grain shows through"
+        );
+        assert!(textured_px.iter().any(|&c| c != Color32::WHITE));
+        // Hue randomness: the colour mixed in turns from the brush's.
+        let mut hued = app(Some(Color32::WHITE));
+        pure_mixing(&mut hued);
+        hued.brush_state.brush.dynamics.random.hue = 120.0;
+        hued.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
+        for i in 1..=20 {
+            hued.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), 1.0);
+        }
+        hued.finish_stroke();
+        hued.settle_strokes();
+        let px = layer(&hued);
+        assert!(
+            px.iter().any(|c| c.r() > 60 || c.g() > 80),
+            "some dab isn't the brush's blue"
+        );
+    }
+
+    #[test]
+    fn a_mixing_brush_scatters_within_its_jitter() {
+        let mut app = app(Some(Color32::WHITE));
+        pure_mixing(&mut app);
+        app.brush_state.brush.brush_options.diameter = 6.0;
+        // ±100% of the diameter.
+        app.brush_state.brush.jitter = 100.0;
+        app.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
+        for i in 1..=20 {
+            app.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), 1.0);
+        }
+        app.finish_stroke();
+        app.settle_strokes();
+        let px = layer(&app);
+        let off_line = (0..64)
+            .filter(|&y| (y - 32i32).abs() > 4)
+            .any(|y| (0..128).any(|x| painted(&px, x, y)));
+        assert!(off_line, "scattered off the line");
+        let far = (0..64)
+            .filter(|&y| (y - 32i32).abs() > 14)
+            .any(|y| (0..128).any(|x| painted(&px, x, y)));
+        assert!(!far, "but not past the jitter");
+    }
+
+    #[test]
+    fn a_mixing_brush_follows_its_stabiliser_and_post_correction_is_one_step() {
+        use crate::brush_engine::brush::StabilizerAlgorithm;
+        // A pulled string longer than the drag: the brush stays put.
+        let mut held = app(Some(Color32::WHITE));
+        pure_mixing(&mut held);
+        held.brush_state.brush.stabilizer_algorithm = StabilizerAlgorithm::String;
+        held.brush_state.brush.stabilizer_modes.string_length = 60.0;
+        held.brush_state.brush.stabilizer_modes.catch_up = false;
+        held.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
+        for i in 1..=8 {
+            held.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), 1.0);
+        }
+        held.finish_stroke();
+        held.settle_strokes();
+        let px = layer(&held);
+        assert!(painted(&px, 10, 32) && !painted(&px, 45, 32));
+        // Post-correction: a wobbly line comes out smoother, one undo step
+        // that takes it all back.
+        let wobbly = |app: &mut crate::PainterApp| {
+            app.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
+            for i in 1..=30 {
+                let y = 32.0 + if i % 2 == 0 { 5.0 } else { -5.0 };
+                app.add_stroke_point(Vec2::new(10.0 + i as f32 * 3.5, y), 1.0);
+            }
+            app.finish_stroke();
+            app.settle_strokes();
+        };
+        let mut raw = app(Some(Color32::WHITE));
+        pure_mixing(&mut raw);
+        raw.brush_state.brush.brush_options.diameter = 4.0;
+        wobbly(&mut raw);
+        let mut corrected = app(Some(Color32::WHITE));
+        pure_mixing(&mut corrected);
+        corrected.brush_state.brush.brush_options.diameter = 4.0;
+        corrected.brush_state.brush.stabilizer_algorithm = StabilizerAlgorithm::PostCorrection;
+        corrected.brush_state.brush.stabilizer_modes.correction = 1.0;
+        // (The smoothing's reach is on screen.)
+        corrected.viewport.zoom = 1.0;
+        let before = layer(&corrected);
+        let pushes = corrected.layer_state.history.push_count();
+        wobbly(&mut corrected);
+        // (In the middle: the ends stay where they were.)
+        let spread = |px: &[Color32]| {
+            (0..64)
+                .filter(|&y| (45..75).any(|x| painted(px, x, y)))
+                .count()
+        };
+        assert!(
+            spread(&layer(&corrected)) < spread(&layer(&raw)),
+            "less wobble"
+        );
+        assert_eq!(corrected.layer_state.history.push_count(), pushes + 1);
+        corrected.apply_history(false);
+        assert!(layer(&corrected) == before);
+    }
+
+    #[test]
+    fn a_mixing_airbrush_keeps_mixing_while_the_pen_rests() {
+        let rest = |rate: f32| {
+            let mut app = app(Some(Color32::WHITE));
+            pure_mixing(&mut app);
+            app.brush_state.brush.mixing.as_mut().unwrap().color_rate = 0.3;
+            app.brush_state.brush.airbrush_rate = rate;
+            app.start_stroke_with_pressure(Vec2::new(60.0, 32.0), 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            app.finish_stroke();
+            app.settle_strokes();
+            layer(&app)[32 * 128 + 60]
+        };
+        let (once, resting) = (rest(0.0), rest(80.0));
+        assert!(
+            resting.r() < once.r(),
+            "more of the blue: {once:?} → {resting:?}"
         );
     }
 

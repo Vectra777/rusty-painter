@@ -1613,6 +1613,20 @@ impl Brush {
             return;
         }
         let o = &self.brush_options;
+        if let Some(collect) = stroke_tiles.collect.as_mut() {
+            // Laid down by the caller: the stroke's own dabs (a tail is
+            // painted for good, a mask has no place there).
+            if target != Target::Mask {
+                let base = o.color.a() as f32 / 255.0 * (o.flow / 100.0) * o.opacity;
+                collect.extend(dabs.into_iter().map(|dab| {
+                    crate::brush_engine::stroke::CollectedDab {
+                        strength: base * dab.strength * dab.flow,
+                        dab,
+                    }
+                }));
+            }
+            return;
+        }
         let mut dabs = dabs;
         // Wash, as an alpha darken: each dab's opacity (pressure,
         // colour alpha, dynamics) and the stroke's running average of it,
@@ -1911,145 +1925,21 @@ impl Brush {
         strength: f32,
     ) {
         let o = &self.brush_options;
-        let hardness_val = (o.hardness / 100.0).clamp(0.0, 1.0);
-        let softness_selector = o.softness_selector;
-        let curve_lut = (softness_selector == SoftnessSelector::Curve)
-            .then(|| crate::brush_engine::hardness::CurveLut::new(&o.softness_curve));
-        // Softer dabs (a Softness input): a falloff for each level used.
+        let soft = SoftTip::new(self, ctx.dabs);
+        let (hardness_val, softness_selector, anti_aliasing) = (
+            soft.hardness_val,
+            soft.softness_selector,
+            soft.anti_aliasing,
+        );
+        let (custom, auto_on) = (soft.custom, soft.auto_on);
         let full = crate::brush_engine::dab::SOFT_LEVELS;
-        let soft_luts: Vec<Option<crate::brush_engine::hardness::CurveLut>> = if softness_selector
-            == SoftnessSelector::Curve
-            && ctx.dabs.iter().any(|d| d.soft < full)
-        {
-            let mut used = [false; crate::brush_engine::dab::SOFT_LEVELS as usize];
-            for d in ctx.dabs {
-                if let Some(u) = used.get_mut(d.soft as usize) {
-                    *u = true;
-                }
-            }
-            used.iter()
-                .enumerate()
-                .map(|(level, &used)| {
-                    used.then(|| {
-                        let s = level as f32 / full as f32;
-                        crate::brush_engine::hardness::CurveLut::new(
-                            &o.softening.falloff(&o.softness_curve, s),
-                        )
-                    })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let lut_for = |dab: &PlacedDab| {
-            soft_luts
-                .get(dab.soft as usize)
-                .and_then(Option::as_ref)
-                .or(curve_lut.as_ref())
-        };
         let pixel_shape = &o.pixel_shape;
-        let tips = o.tip_shapes();
-        let anti_aliasing = self.anti_aliasing;
-        let custom = matches!(pixel_shape, PixelBrushShape::Custom(_));
-        // Spikes, fades, density and randomness (round and square tips).
-        let auto = o.auto_tip;
-        let auto_on = auto.is_active() && !custom;
-        let grainy = auto_on && (auto.density < 1.0 || auto.randomness > 0.0);
-        let spikes = auto_on.then(|| auto.spikes()).flatten();
+        let tips = &soft.tips;
         let source_stamp = self.source_stamp(ctx);
 
         // Any tip, any dab: per pixel, in the tip's (turned, squashed) frame.
         let general = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
-            let pixel_shape = &tips[dab.tip as usize];
-            let r = dab.r;
-            let strength = (strength * dab.strength).min(1.0);
-            // A fade takes the Softness input (as Krita's does); otherwise
-            // the hardness does.
-            let fade = auto_on && auto.has_fade();
-            let hardness_val = (hardness_val + dab.hardness).clamp(0.0, 1.0)
-                * if fade { 1.0 } else { dab.softness() };
-            let ratio = if spikes.is_some() { dab.ratio() } else { 1.0 };
-            let fade_k = auto.fade_coeffs(dab.softness());
-            let inv_r = 1.0 / r;
-            let seed = dab.seed();
-            let softness_curve = lut_for(dab);
-            let turned = custom || !dab.upright();
-            let falloff = |t: f32| match softness_selector {
-                SoftnessSelector::Gaussian => super::masks::gaussian_falloff(t, hardness_val),
-                SoftnessSelector::Curve => softness_curve.map_or(1.0, |c| c.at(t)),
-            };
-            // A custom tip turns with its mirror copy; any tip with its
-            // dynamics.
-            let alpha_at = |pdx: f32, pdy: f32| {
-                let (pdx, pdy) = if turned {
-                    dab.tip_offset(pdx, pdy)
-                } else {
-                    (pdx, pdy)
-                };
-                match pixel_shape {
-                    // The mask's own edges are smooth already (sampled, not
-                    // clipped).
-                    PixelBrushShape::Custom(tip) if anti_aliasing => tip.sample(pdx, pdy, r),
-                    PixelBrushShape::Custom(tip) => tip.sample_nearest(pdx, pdy, r),
-                    shape => {
-                        let (pdx, pdy) = match &spikes {
-                            Some(spikes) => spikes.fold((pdx, pdy), ratio),
-                            None => (pdx, pdy),
-                        };
-                        let a = super::masks::auto_tip_alpha(
-                            (pdx, pdy),
-                            r,
-                            matches!(shape, PixelBrushShape::Square),
-                            softness_selector,
-                            falloff,
-                            anti_aliasing,
-                        );
-                        if fade && a > 0.0 {
-                            a * super::brush_options::AutoTip::fade_with(
-                                pdx * inv_r,
-                                pdy * inv_r,
-                                fade_k,
-                            )
-                        } else {
-                            a
-                        }
-                    }
-                }
-            };
-            // Small anti-aliased round and square tips: several samples a
-            // pixel, as Krita takes them.
-            let samples = if matches!(pixel_shape, PixelBrushShape::Custom(_)) {
-                1
-            } else {
-                super::masks::supersamples(r, anti_aliasing)
-            };
-            let offset = |s: usize| (s as f32 + 0.5) / samples as f32 - 0.5;
-            let pdy_canvas = gy as f32 + 0.5 - dab.center.y;
-            for (i, slot) in out.iter_mut().enumerate() {
-                let pdx_canvas = (x0 + i) as f32 + 0.5 - dab.center.x;
-                let alpha_factor = if samples == 1 {
-                    alpha_at(pdx_canvas, pdy_canvas)
-                } else {
-                    let mut sum = 0.0;
-                    for sy in 0..samples {
-                        for sx in 0..samples {
-                            sum += alpha_at(pdx_canvas + offset(sx), pdy_canvas + offset(sy));
-                        }
-                    }
-                    sum / (samples * samples) as f32
-                };
-                let alpha_factor = if grainy && alpha_factor > 0.0 {
-                    alpha_factor * auto.grain(seed, x0 + i, gy)
-                } else {
-                    alpha_factor
-                };
-                *slot = if alpha_factor <= 0.0 {
-                    0.0
-                } else {
-                    (strength * alpha_factor).clamp(0.0, 1.0)
-                };
-            }
-            nonzero_span(out)
+            soft.row(dab, gy, x0, out, strength)
         };
 
         // Smooth image tips: a whole row at a time, the mip levels chosen
@@ -2243,6 +2133,240 @@ impl Brush {
                 )
             }
         })
+    }
+}
+
+/// What painting any tip takes, worked out once for a batch of dabs (see
+/// [`SoftTip::row`]): soft round and square tips, auto tips, image tips.
+pub(crate) struct SoftTip<'a> {
+    hardness_val: f32,
+    softness_selector: SoftnessSelector,
+    curve_lut: Option<crate::brush_engine::hardness::CurveLut>,
+    /// Softer dabs (a Softness input): a falloff for each level used.
+    soft_luts: Vec<Option<crate::brush_engine::hardness::CurveLut>>,
+    tips: std::borrow::Cow<'a, [PixelBrushShape]>,
+    anti_aliasing: bool,
+    custom: bool,
+    auto: crate::brush_engine::brush_options::AutoTip,
+    auto_on: bool,
+    grainy: bool,
+    spikes: Option<crate::brush_engine::brush_options::Spikes>,
+}
+
+impl<'a> SoftTip<'a> {
+    /// For `brush`'s tips, painting `dabs`.
+    pub(crate) fn new(brush: &'a Brush, dabs: &[PlacedDab]) -> Self {
+        let o = &brush.brush_options;
+        let anti_aliasing_flag = brush.anti_aliasing;
+        let hardness_val = (o.hardness / 100.0).clamp(0.0, 1.0);
+        let softness_selector = o.softness_selector;
+        let curve_lut = (softness_selector == SoftnessSelector::Curve)
+            .then(|| crate::brush_engine::hardness::CurveLut::new(&o.softness_curve));
+        // Softer dabs (a Softness input): a falloff for each level used.
+        let full = crate::brush_engine::dab::SOFT_LEVELS;
+        let soft_luts: Vec<Option<crate::brush_engine::hardness::CurveLut>> =
+            if softness_selector == SoftnessSelector::Curve && dabs.iter().any(|d| d.soft < full) {
+                let mut used = [false; crate::brush_engine::dab::SOFT_LEVELS as usize];
+                for d in dabs {
+                    if let Some(u) = used.get_mut(d.soft as usize) {
+                        *u = true;
+                    }
+                }
+                used.iter()
+                    .enumerate()
+                    .map(|(level, &used)| {
+                        used.then(|| {
+                            let s = level as f32 / full as f32;
+                            crate::brush_engine::hardness::CurveLut::new(
+                                &o.softening.falloff(&o.softness_curve, s),
+                            )
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        let lut_for = |dab: &PlacedDab| {
+            soft_luts
+                .get(dab.soft as usize)
+                .and_then(Option::as_ref)
+                .or(curve_lut.as_ref())
+        };
+        let pixel_shape = &o.pixel_shape;
+        let tips = o.tip_shapes();
+        let anti_aliasing = anti_aliasing_flag;
+        let custom = matches!(pixel_shape, PixelBrushShape::Custom(_));
+        // Spikes, fades, density and randomness (round and square tips).
+        let auto = o.auto_tip;
+        let auto_on = auto.is_active() && !custom;
+        let grainy = auto_on && (auto.density < 1.0 || auto.randomness > 0.0);
+        let spikes = auto_on.then(|| auto.spikes()).flatten();
+
+        let _ = (pixel_shape, &lut_for);
+        Self {
+            hardness_val,
+            softness_selector,
+            curve_lut,
+            soft_luts,
+            tips,
+            anti_aliasing,
+            custom,
+            auto,
+            auto_on,
+            grainy,
+            spikes,
+        }
+    }
+
+    /// A plain round soft dab (a turn changes nothing, no squash, no auto
+    /// tip options, the Gaussian falloff): its hardness, for a caller that
+    /// works it out more cheaply itself.
+    pub(crate) fn plain_round(&self, dab: &PlacedDab) -> Option<f32> {
+        (matches!(self.tips[dab.tip as usize], PixelBrushShape::Circle)
+            && self.softness_selector == SoftnessSelector::Gaussian
+            && !self.auto_on
+            && dab.rigid
+            && dab.soft == crate::brush_engine::dab::SOFT_LEVELS)
+            .then(|| (self.hardness_val + dab.hardness).clamp(0.0, 1.0))
+    }
+
+    /// One row of `dab`'s coverage (times `strength`), from canvas pixel
+    /// `x0` on row `gy`, into `out`: any tip, in its turned and squashed
+    /// frame. Returns where it's not zero.
+    #[inline]
+    pub(crate) fn row(
+        &self,
+        dab: &PlacedDab,
+        gy: usize,
+        x0: usize,
+        out: &mut [f32],
+        strength: f32,
+    ) -> Range<usize> {
+        // A smooth image tip: the row at once, its mip level chosen once.
+        // (Painting takes its own path there: this is for other callers.)
+        if self.custom
+            && self.anti_aliasing
+            && let PixelBrushShape::Custom(tip) = &self.tips[dab.tip as usize]
+        {
+            let sampler = tip.sampler(dab.r);
+            let strength = (strength * dab.strength).min(1.0);
+            let pdy = gy as f32 + 0.5 - dab.center.y;
+            let pdx = x0 as f32 + 0.5 - dab.center.x;
+            let [a, b, c, d] = dab.orient;
+            tip.row(
+                &sampler,
+                (a * pdx + b * pdy, c * pdx + d * pdy),
+                (a, c),
+                out,
+            );
+            for v in out.iter_mut() {
+                *v *= strength;
+            }
+            return nonzero_span(out);
+        }
+        let (hardness_val, softness_selector, anti_aliasing) = (
+            self.hardness_val,
+            self.softness_selector,
+            self.anti_aliasing,
+        );
+        let (auto, auto_on, grainy, custom) = (self.auto, self.auto_on, self.grainy, self.custom);
+        let spikes = &self.spikes;
+        let lut_for = |dab: &PlacedDab| {
+            self.soft_luts
+                .get(dab.soft as usize)
+                .and_then(Option::as_ref)
+                .or(self.curve_lut.as_ref())
+        };
+        let pixel_shape = &self.tips[dab.tip as usize];
+        let r = dab.r;
+        let strength = (strength * dab.strength).min(1.0);
+        // A fade takes the Softness input (as Krita's does); otherwise
+        // the hardness does.
+        let fade = auto_on && auto.has_fade();
+        let hardness_val =
+            (hardness_val + dab.hardness).clamp(0.0, 1.0) * if fade { 1.0 } else { dab.softness() };
+        let ratio = if spikes.is_some() { dab.ratio() } else { 1.0 };
+        let fade_k = auto.fade_coeffs(dab.softness());
+        let inv_r = 1.0 / r;
+        let seed = dab.seed();
+        let softness_curve = lut_for(dab);
+        let turned = custom || !dab.upright();
+        let falloff = |t: f32| match softness_selector {
+            SoftnessSelector::Gaussian => super::masks::gaussian_falloff(t, hardness_val),
+            SoftnessSelector::Curve => softness_curve.map_or(1.0, |c| c.at(t)),
+        };
+        // A custom tip turns with its mirror copy; any tip with its
+        // dynamics.
+        let alpha_at = |pdx: f32, pdy: f32| {
+            let (pdx, pdy) = if turned {
+                dab.tip_offset(pdx, pdy)
+            } else {
+                (pdx, pdy)
+            };
+            match pixel_shape {
+                // The mask's own edges are smooth already (sampled, not
+                // clipped).
+                PixelBrushShape::Custom(tip) if anti_aliasing => tip.sample(pdx, pdy, r),
+                PixelBrushShape::Custom(tip) => tip.sample_nearest(pdx, pdy, r),
+                shape => {
+                    let (pdx, pdy) = match &spikes {
+                        Some(spikes) => spikes.fold((pdx, pdy), ratio),
+                        None => (pdx, pdy),
+                    };
+                    let a = super::masks::auto_tip_alpha(
+                        (pdx, pdy),
+                        r,
+                        matches!(shape, PixelBrushShape::Square),
+                        softness_selector,
+                        falloff,
+                        anti_aliasing,
+                    );
+                    if fade && a > 0.0 {
+                        a * super::brush_options::AutoTip::fade_with(
+                            pdx * inv_r,
+                            pdy * inv_r,
+                            fade_k,
+                        )
+                    } else {
+                        a
+                    }
+                }
+            }
+        };
+        // Small anti-aliased round and square tips: several samples a
+        // pixel, as Krita takes them.
+        let samples = if matches!(pixel_shape, PixelBrushShape::Custom(_)) {
+            1
+        } else {
+            super::masks::supersamples(r, anti_aliasing)
+        };
+        let offset = |s: usize| (s as f32 + 0.5) / samples as f32 - 0.5;
+        let pdy_canvas = gy as f32 + 0.5 - dab.center.y;
+        for (i, slot) in out.iter_mut().enumerate() {
+            let pdx_canvas = (x0 + i) as f32 + 0.5 - dab.center.x;
+            let alpha_factor = if samples == 1 {
+                alpha_at(pdx_canvas, pdy_canvas)
+            } else {
+                let mut sum = 0.0;
+                for sy in 0..samples {
+                    for sx in 0..samples {
+                        sum += alpha_at(pdx_canvas + offset(sx), pdy_canvas + offset(sy));
+                    }
+                }
+                sum / (samples * samples) as f32
+            };
+            let alpha_factor = if grainy && alpha_factor > 0.0 {
+                alpha_factor * auto.grain(seed, x0 + i, gy)
+            } else {
+                alpha_factor
+            };
+            *slot = if alpha_factor <= 0.0 {
+                0.0
+            } else {
+                (strength * alpha_factor).clamp(0.0, 1.0)
+            };
+        }
+        nonzero_span(out)
     }
 }
 

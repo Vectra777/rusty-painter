@@ -150,6 +150,17 @@ pub fn set_mixing(app: &mut PainterApp, tip: bool, parallel: bool) {
     }
 }
 
+/// The brush's tip turned and squashed, and a paper texture on it.
+pub fn set_turned_textured(app: &mut PainterApp) {
+    let b = &mut app.brush_state.brush;
+    (b.dynamics.tip.angle, b.dynamics.tip.ratio) = (35.0, 0.5);
+    let mut t = crate::brush_engine::texture::BrushTexture::new(
+        crate::brush_engine::texture::builtin()[1].clone(),
+    );
+    t.strength = 0.8;
+    b.texture = Some(t);
+}
+
 /// A smudge (or blur) stroke through the stroke worker, waited for.
 pub fn blend_stroke(app: &mut PainterApp, path: &[(Vec2, f32)], smudge: bool) {
     app.set_blend_tool(smudge);

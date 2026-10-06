@@ -194,9 +194,12 @@ below.
   hard edges (a sharpness threshold), the tip following the pen's barrel
   rotation and Barrel rotation / Airbrush wheel inputs, colour dodge and
   hard mix textures, and the Parallel blend mode for layers and brushes.
-  Not yet: a mixing brush's tip doesn't turn, flip or take a texture; of
-  the brush's settings it uses size, hardness, spacing, opacity, flow and
-  pressure.
+  A smudge (the Smudge tool, any mixing brush) places its dabs as the
+  brush's own strokes do: spacing, stabiliser and post-correction, every
+  input and randomness, scatter, the tip (any shape, turned, squashed,
+  flipped), its texture, the colour source and the airbrush. Not for a
+  smudge: an end taper (it would have to be painted again), a dual tip and
+  watercolour edges.
 
 - [x] **Painting as Krita does, from its source.** Wash mode is Krita's
   alpha darken: each dab moves the stroke toward its own opacity and never

@@ -15,7 +15,7 @@ pub(super) struct TileRegion {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct DabBounds {
+pub(crate) struct DabBounds {
     pub start_x: usize,
     pub start_y: usize,
     pub end_x: usize,
@@ -67,7 +67,7 @@ pub(super) fn calc_dab_bounds(
 /// A dab position resolved against the canvas: clipped bounds plus the
 /// quantized placement the Gaussian mask kernel uses.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct PlacedDab {
+pub(crate) struct PlacedDab {
     pub center: Vec2,
     pub bounds: DabBounds,
     /// Mask origin in canvas pixels (`floor(center) - r_ceil`).

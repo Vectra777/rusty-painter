@@ -47,6 +47,18 @@ pub trait SequentialStroke: Send {
     fn start(&mut self);
     /// The pen moved to `pos`.
     fn drag(&mut self, pos: Vec2, pressure: f32);
+    /// A pen sample with all the pen gave (when, its lean and barrel); by
+    /// default only where it is and how hard.
+    fn sample(&mut self, sample: PenSample) {
+        self.drag(sample.pos, sample.pressure);
+    }
+    /// How often an airbrush dabs while the pen rests (a second; 0: it
+    /// doesn't).
+    fn airbrush_rate(&self) -> f32 {
+        0.0
+    }
+    /// The airbrush's timer, at `now` (seconds).
+    fn airbrush(&mut self, _now: f64) {}
     /// Canvas rectangles painted since the last call.
     fn take_damage(&mut self) -> Vec<[i32; 4]>;
     /// The canvas painted.
@@ -55,6 +67,17 @@ pub trait SequentialStroke: Send {
     fn layer_idx(&self) -> usize;
     /// The pen lifted: the stroke's undo record, if it changed anything.
     fn finish(self: Box<Self>) -> Option<UndoAction>;
+}
+
+/// A pen sample, as a sequential stroke gets it.
+#[derive(Clone, Copy, Debug)]
+pub struct PenSample {
+    pub pos: Vec2,
+    pub pressure: f32,
+    /// Seconds since the worker started.
+    pub time: f64,
+    pub tilt: Option<PenTilt>,
+    pub barrel: PenBarrel,
 }
 
 /// Canvas work queued behind the strokes (a filter, a merge, a fill): it
@@ -181,6 +204,7 @@ impl StrokeWorker {
                     let airbrush = session
                         .as_ref()
                         .map(|s| s.setup.brush.airbrush_rate)
+                        .or_else(|| sequential.as_ref().map(|s| s.airbrush_rate()))
                         .filter(|&rate| rate > 0.0);
                     let job = match airbrush {
                         None => match receiver.recv() {
@@ -199,6 +223,9 @@ impl StrokeWorker {
                                         std::panic::AssertUnwindSafe(|| {
                                             if let Some(session) = session.as_mut() {
                                                 session.airbrush(&thread_shared, now);
+                                            } else if let Some(stroke) = sequential.as_mut() {
+                                                stroke.airbrush(now);
+                                                hand_over_damage(stroke.as_mut(), &thread_shared);
                                             }
                                         }),
                                     );
@@ -432,8 +459,20 @@ fn run_job(
     // A sequential stroke takes the samples and the end while it runs.
     if let Some(stroke) = sequential.as_mut() {
         match job {
-            Job::Sample { pos, pressure, .. } => {
-                stroke.drag(pos, pressure);
+            Job::Sample {
+                pos,
+                pressure,
+                time,
+                tilt,
+                barrel,
+            } => {
+                stroke.sample(PenSample {
+                    pos,
+                    pressure,
+                    time,
+                    tilt,
+                    barrel,
+                });
                 hand_over_damage(stroke.as_mut(), shared);
                 return;
             }

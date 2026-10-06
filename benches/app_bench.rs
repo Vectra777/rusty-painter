@@ -124,6 +124,16 @@ fn painting(c: &mut Criterion) {
     );
     bench(
         &mut g,
+        "mixing_brush_turned_textured_60_samples_80px",
+        |a| {
+            b::set_brush(a, 80.0);
+            b::set_mixing(a, false, false);
+            b::set_turned_textured(a);
+        },
+        |a| b::stroke(a, &short, false),
+    );
+    bench(
+        &mut g,
         "deform_60_samples_80px",
         |a| {
             b::set_brush(a, 80.0);
