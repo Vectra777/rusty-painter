@@ -100,9 +100,6 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
                 app.content_aware_fill();
             }
         }),
-        Tool::Gradient => context_bar(ctx, area, |ui| {
-            crate::ui::tool_options::gradient_options(app, ui, true);
-        }),
         Tool::Shape(_) => context_bar(ctx, area, |ui| {
             crate::ui::shape_menu::shape_controls(app, ui, true);
             crate::ui::widgets::vdivider(ui);

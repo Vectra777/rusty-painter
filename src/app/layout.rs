@@ -525,6 +525,13 @@ fn brush_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
                 ui::tool_options::fill_options(app, ui, false);
             });
         }
+        // Touch mode's only place for them: tapping the active tool slides it in.
+        Tool::Gradient => {
+            panel_title(ui, "GRADIENT");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui::tool_options::gradient_options(app, ui, false);
+            });
+        }
         Tool::Liquify => {
             panel_title(ui, "LIQUIFY");
             egui::ScrollArea::vertical().show(ui, |ui| {
