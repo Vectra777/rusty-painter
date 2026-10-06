@@ -159,6 +159,9 @@ impl eframe::App for PainterApp {
                     .as_mut()
                     .map(|t| t.poll(ctx))
                     .unwrap_or_default();
+                if let Some(calibration) = &mut self.workspace.calibration {
+                    calibration.record(&pen);
+                }
                 self.viewport.touch.pen_active =
                     !pen.is_empty() || self.tablet.as_ref().is_some_and(|t| t.pen_active());
                 self.viewport.touch.pen_is_pointer =

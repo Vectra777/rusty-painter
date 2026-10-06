@@ -11,6 +11,7 @@
 //! - [`tools`]: one module per tool (selection, fill, gradient, shapes...).
 //! - [`view`]: drawing the canvas (GPU atlases) and the screen mapping.
 //! - [`frame_stats`]: how long each stage of a frame takes (the readout).
+//! - [`pressure_calibration`]: fitting the pen pressure curve to test strokes.
 //! - [`timelapse`]: recording the painting and exporting it as a video.
 //! - [`settings`]: preferences and tool options kept between sessions.
 //! - [`autosave`]: autosave and recovering unsaved work after a crash.
@@ -32,6 +33,7 @@ pub(crate) mod input;
 pub(crate) mod jobs;
 pub(crate) mod layout;
 pub(crate) mod painter;
+pub(crate) mod pressure_calibration;
 pub(crate) mod settings;
 pub(crate) mod shader_ops;
 pub(crate) mod state;

@@ -427,6 +427,8 @@ pub struct WorkspaceState {
     /// The pen's last raw pressure and what the curve made of it, for the
     /// live readout in Settings.
     pub last_pressure: Option<(f32, f32)>,
+    /// Test strokes for fitting the pressure curve, while that's open.
+    pub calibration: Option<crate::app::pressure_calibration::Calibration>,
     /// The brush (tool settings) panel is open.
     pub show_left_panel: bool,
     /// The colour and layers panels are open (they share the right side).
@@ -535,6 +537,7 @@ impl WorkspaceState {
                 ],
             },
             last_pressure: None,
+            calibration: None,
             // Closed: the canvas gets the screen; the rails open them.
             show_left_panel: false,
             show_color: false,

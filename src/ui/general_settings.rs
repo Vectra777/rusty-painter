@@ -120,6 +120,7 @@ fn touch_and_pen_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
                 .text(format!("{:.0}%", mapped * 100.0)),
         );
     });
+    calibration_pad(ui, ws);
     ui.label(
         egui::RichText::new(
             "What pressure controls (size, opacity, flow) is set per brush in the Brush panel.",
@@ -127,6 +128,61 @@ fn touch_and_pen_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
         .small()
         .color(crate::ui::style::TEXT_DIM),
     );
+}
+
+/// "Calibrate from test strokes": a pad to draw a few strokes on with the
+/// pen, then the pressure curve fitted to them.
+fn calibration_pad(ui: &mut egui::Ui, ws: &mut crate::app::state::WorkspaceState) {
+    use crate::app::pressure_calibration::{MIN_SAMPLES, fit_pressure_curve};
+    let Some(calibration) = &mut ws.calibration else {
+        if ui
+            .button("Calibrate from test strokes…")
+            .on_hover_text("Draw a few strokes and the curve is fitted to your hand.")
+            .clicked()
+        {
+            ws.calibration = Some(Default::default());
+        }
+        return;
+    };
+    ui.label("Draw a few strokes here with the pen, as you usually do, light to heavy:");
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().min(320.0), 110.0),
+        egui::Sense::hover(),
+    );
+    calibration.pad = Some(rect);
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    let ink = ui.visuals().strong_text_color();
+    for stroke in &calibration.strokes {
+        for w in stroke.windows(2) {
+            let width = 0.5 + 5.0 * (w[0].1 + w[1].1) / 2.0;
+            painter.line_segment([w[0].0, w[1].0], egui::Stroke::new(width, ink));
+        }
+    }
+    // Ask again while drawing: the pad shows the strokes as they come.
+    ui.ctx().request_repaint();
+    let fitted = fit_pressure_curve(&calibration.samples);
+    let count = calibration.samples.len();
+    let (mut apply, mut clear, mut cancel) = (false, false, false);
+    ui.horizontal(|ui| {
+        apply = ui
+            .add_enabled(fitted.is_some(), egui::Button::new("Apply"))
+            .on_disabled_hover_text(format!(
+                "Needs {MIN_SAMPLES} pen samples ({count} so far) with some range of pressure."
+            ))
+            .clicked();
+        clear = ui.button("Clear").clicked();
+        cancel = ui.button("Cancel").clicked();
+    });
+    if clear {
+        *calibration = Default::default();
+    }
+    if let Some(curve) = fitted.filter(|_| apply) {
+        ws.pressure_curve = curve;
+    }
+    if apply || cancel {
+        ws.calibration = None;
+    }
 }
 
 /// Modal window that captures focus for general settings.

@@ -215,7 +215,8 @@ below.
 
 ### Next
 
-- [ ] Pressure calibration from a test stroke.
+- [x] Pressure calibration from test strokes (Settings → Calibrate: the
+  pen pressure curve spreads what your hand presses over the full range).
 - [ ] Post-correction while drawing, not only when the pen lifts.
 - [x] Tags and favourites carried in exported `.rpbrush` files (an
   imported file arrives tagged and starred, then tagged "Imported").
