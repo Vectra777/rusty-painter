@@ -1811,6 +1811,7 @@ impl Brush {
         for region in regions {
             let key = (region.tx, region.ty);
             stroke_tiles.dirty.insert(key);
+            stroke_tiles.save_for_checkpoint(key, canvas);
             if stroke_tiles.buffers.contains_key(&key) {
                 continue;
             }

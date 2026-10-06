@@ -32,6 +32,10 @@ pub struct StabilizerModes {
     /// Post-correction: how much the path is smoothed when the pen lifts
     /// (0..=1).
     pub correction: f32,
+    /// Post-correction while drawing: the line is smoothed as it goes (the
+    /// stretch near the pen settles once it's past the smoothing's reach),
+    /// rather than all at once when the pen lifts. The same line either way.
+    pub correction_live: bool,
     /// Motion filter: how strongly slow movement is smoothed (0..=1).
     pub filter_strength: f32,
     /// Motion filter: how quickly the smoothing lets go as the pen speeds
@@ -45,6 +49,7 @@ impl Default for StabilizerModes {
             string_length: 40.0,
             catch_up: true,
             correction: 0.5,
+            correction_live: false,
             filter_strength: 0.5,
             filter_speed: 0.5,
         }
@@ -208,19 +213,17 @@ pub const MAX_CORRECTION: f32 = 24.0;
 /// (`view_scale`: canvas pixels → screen points). The ends stay where they
 /// are: the spread narrows near them.
 pub fn smooth_path(points: &[Vec2], strength: f32, view_scale: f32) -> Vec<Vec2> {
-    let sigma = strength.clamp(0.0, 1.0) * MAX_CORRECTION / view_scale.max(1e-6);
+    smooth_path_from(points, strength, view_scale, 0)
+}
+
+/// [`smooth_path`]'s points from index `from` on (the same values).
+pub fn smooth_path_from(points: &[Vec2], strength: f32, view_scale: f32, from: usize) -> Vec<Vec2> {
+    let sigma = correction_sigma(strength, view_scale);
     if points.len() < 3 || sigma <= 0.0 {
-        return points.to_vec();
+        return points[from.min(points.len())..].to_vec();
     }
-    let mut along = Vec::with_capacity(points.len());
-    let mut total = 0.0;
-    for (i, p) in points.iter().enumerate() {
-        if i > 0 {
-            total += (*p - points[i - 1]).length();
-        }
-        along.push(total);
-    }
-    (0..points.len())
+    let (along, total) = distances(points);
+    (from..points.len())
         .map(|i| {
             let s = along[i];
             let sigma = sigma.min(s.min(total - s) / 3.0);
@@ -248,9 +251,61 @@ pub fn smooth_path(points: &[Vec2], strength: f32, view_scale: f32) -> Vec<Vec2>
         .collect()
 }
 
+/// How many of `points` (from the first) [`smooth_path`] puts where it
+/// will whatever points come after them: those further back along the path
+/// than its widest reach. Post-correction can paint them while drawing.
+pub fn smooth_path_settled(points: &[Vec2], strength: f32, view_scale: f32) -> usize {
+    let sigma = correction_sigma(strength, view_scale);
+    if sigma <= 0.0 {
+        return points.len();
+    }
+    let (along, total) = distances(points);
+    // (Strictly: a point to come exactly at the reach would still count.)
+    along.partition_point(|&s| total - s > sigma * 3.0)
+}
+
+fn correction_sigma(strength: f32, view_scale: f32) -> f32 {
+    strength.clamp(0.0, 1.0) * MAX_CORRECTION / view_scale.max(1e-6)
+}
+
+/// Distance along `points` to each, and in all.
+fn distances(points: &[Vec2]) -> (Vec<f32>, f32) {
+    let mut along = Vec::with_capacity(points.len());
+    let mut total = 0.0;
+    for (i, p) in points.iter().enumerate() {
+        if i > 0 {
+            total += (*p - points[i - 1]).length();
+        }
+        along.push(total);
+    }
+    (along, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settled_points_are_smoothed_the_same_whatever_follows() {
+        let path: Vec<Vec2> = (0..200)
+            .map(|i| Vec2::new(i as f32 * 2.0, (i as f32 * 0.37).sin() * 9.0))
+            .collect();
+        let full = smooth_path(&path, 0.8, 1.5);
+        for n in [3, 10, 50, 120, 199] {
+            let part = &path[..n];
+            let settled = smooth_path_settled(part, 0.8, 1.5);
+            assert!(settled < n, "the end is never settled");
+            let early = smooth_path(part, 0.8, 1.5);
+            // Bit for bit: painting them early paints the same.
+            assert_eq!(early[..settled], full[..settled], "{n}");
+            assert_eq!(smooth_path_from(part, 0.8, 1.5, settled), early[settled..]);
+        }
+        assert!(
+            smooth_path_settled(&path, 0.8, 1.5) > 150,
+            "most of a long path"
+        );
+        assert_eq!(smooth_path_settled(&path, 0.0, 1.0), path.len(), "off");
+    }
 
     #[test]
     fn off_follows_the_input_exactly() {

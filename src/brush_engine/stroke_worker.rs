@@ -375,6 +375,34 @@ struct Session {
     /// the stroke was given, to paint it again along the smoothed path
     /// when the pen lifts.
     correction: Option<(Brush, Vec<Event>)>,
+    /// Post-correction while drawing: how far it's painted for good.
+    live: Option<LiveCorrection>,
+}
+
+/// Post-correction while drawing: the events painted along the smoothed
+/// path for good (those whose place can't change any more), and the stroke
+/// as it was then, the rest having been painted after it for now.
+#[derive(Default)]
+struct LiveCorrection {
+    /// How many of the events are painted for good.
+    committed: usize,
+    /// The stroke and its brush at the checkpoint (the tiles keep theirs).
+    saved: Option<(StrokeState, Brush)>,
+}
+
+/// Tests: the seed every stroke gets (0: a random one each).
+#[cfg(test)]
+static TEST_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn tests_seed() -> Option<u64> {
+    #[cfg(test)]
+    {
+        let seed = TEST_SEED.load(std::sync::atomic::Ordering::Relaxed);
+        if seed != 0 {
+            return Some(seed);
+        }
+    }
+    None
 }
 
 /// A pen sample as the worker got it.
@@ -434,7 +462,10 @@ fn run_job(
         }
         Job::Begin(setup) => {
             let copies = setup.symmetry.copies();
-            let seed = rand::random();
+            let seed = match tests_seed() {
+                Some(seed) => seed,
+                None => rand::random(),
+            };
             let mut stroke = StrokeState::with_seed(seed);
             stroke.view_scale = setup.view_scale;
             stroke.perspective = setup.perspective.clone();
@@ -442,11 +473,14 @@ fn run_job(
             let correction = (brush.stabilizer_algorithm == StabilizerAlgorithm::PostCorrection
                 && brush.stabilizer_modes.correction > 0.0)
                 .then(|| (brush.clone(), Vec::new()));
+            let live = (correction.is_some() && brush.stabilizer_modes.correction_live)
+                .then(LiveCorrection::default);
             *session = Some(Session {
                 copies,
                 seed,
                 last_sample: None,
                 correction,
+                live,
                 setup: *setup,
                 stroke,
                 undo: UndoAction {
@@ -479,6 +513,10 @@ fn run_job(
             if let Some((_, events)) = session.correction.as_mut() {
                 events.push(Event::Sample(sample));
             }
+            if session.live.is_some() {
+                session.correct_live(shared, false);
+                return;
+            }
             session.paint(shared, |stroke, brush, context| {
                 stroke.tilt = tilt;
                 stroke.barrel = barrel;
@@ -490,6 +528,9 @@ fn run_job(
             // The pen lifted: the end of the stroke (an end taper) first.
             if let Some(session) = session.as_mut() {
                 session.catch_up(shared);
+                if session.live.is_some() {
+                    session.correct_live(shared, true);
+                }
                 session.correct(shared);
                 session.paint(shared, |stroke, brush, context| {
                     stroke.finish(brush, context)
@@ -570,6 +611,9 @@ impl Session {
         if let Some((_, events)) = self.correction.as_mut() {
             events.push(Event::Airbrush(now));
         }
+        if self.live.is_some() {
+            return self.correct_live(shared, false);
+        }
         self.paint(shared, |stroke, brush, context| {
             stroke.airbrush(brush, now, context)
         });
@@ -638,6 +682,109 @@ impl Session {
                 }
             }
         });
+    }
+
+    /// Post-correction while drawing, after each event: what was painted
+    /// for now is taken back, the events whose smoothed place is now final
+    /// are painted for good, and the rest along the path smoothed as it
+    /// stands, for now (all for good when the pen has lifted, `last`).
+    /// Painted in the same order as [`Self::correct`] paints them, so the
+    /// line comes out the same.
+    fn correct_live(&mut self, shared: &Shared, last: bool) {
+        let (Some(live), Some((_, events))) = (self.live.as_mut(), self.correction.as_mut()) else {
+            return;
+        };
+        if let Some((stroke, brush)) = live.saved.take() {
+            self.tiles.rewind(&self.setup.canvas);
+            self.stroke = stroke;
+            self.setup.brush = brush;
+        }
+        let events = std::mem::take(events);
+        let points: Vec<Vec2> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Sample(s) => Some(s.pos),
+                Event::Airbrush(_) => None,
+            })
+            .collect();
+        let strength = self.setup.brush.stabilizer_modes.correction;
+        let scale = self.setup.view_scale;
+        let settled = if last {
+            points.len()
+        } else {
+            crate::brush_engine::stabilizer::smooth_path_settled(&points, strength, scale)
+        };
+        let committed = live.committed;
+        let first = (events[..committed].iter())
+            .filter(|e| matches!(e, Event::Sample(_)))
+            .count();
+        let smoothed =
+            crate::brush_engine::stabilizer::smooth_path_from(&points, strength, scale, first);
+        // The events from `committed` on, each with its smoothed place, and
+        // how many of them are final.
+        let mut place = smoothed.into_iter();
+        let rest: Vec<(Event, Option<Vec2>)> = events[committed..]
+            .iter()
+            .map(|&e| match e {
+                Event::Sample(s) => (e, Some(place.next().unwrap_or(s.pos))),
+                Event::Airbrush(_) => (e, None),
+            })
+            .collect();
+        // Final: up to (not including) the first sample not yet settled.
+        let mut fixed = 0;
+        let mut n_samples = first;
+        for (e, _) in &rest {
+            if let Event::Sample(_) = e {
+                if n_samples >= settled {
+                    break;
+                }
+                n_samples += 1;
+            }
+            fixed += 1;
+        }
+        let paint_events = |stroke: &mut StrokeState,
+                            brush: &mut Brush,
+                            context: &mut StrokeContext<'_>,
+                            events: &[(Event, Option<Vec2>)]| {
+            for &(event, pos) in events {
+                match event {
+                    Event::Sample(s) => {
+                        stroke.tilt = s.tilt;
+                        stroke.barrel = s.barrel;
+                        let pos = pos.unwrap_or(s.pos);
+                        stroke.add_sample(brush, pos, s.pressure, Some(s.time), context);
+                    }
+                    Event::Airbrush(now) => stroke.airbrush(brush, now, context),
+                }
+            }
+        };
+        let (now, later) = rest.split_at(fixed);
+        self.paint(shared, |stroke, brush, context| {
+            paint_events(stroke, brush, context, now)
+        });
+        if let Some(live) = self.live.as_mut() {
+            live.committed = committed + fixed;
+        }
+        // The rest for now, unless more is waiting (it would be taken back
+        // straight away: the pen outruns the painting).
+        let more_waiting = shared.lock().pending > 1;
+        if !later.is_empty() && !more_waiting {
+            let saved = (self.stroke.clone(), self.setup.brush.clone());
+            if let Some(live) = self.live.as_mut() {
+                live.saved = Some(saved);
+            }
+            self.tiles.checkpoint(&self.setup.canvas);
+            self.paint(shared, |stroke, brush, context| {
+                paint_events(stroke, brush, context, later)
+            });
+        }
+        if let Some((_, slot)) = self.correction.as_mut() {
+            *slot = events;
+        }
+        if last {
+            // Painted along the final path: nothing to correct after.
+            self.correction = None;
+        }
     }
 
     /// Run `f` on the stroke, then hand the tiles it painted to the UI.
@@ -779,6 +926,16 @@ mod tests {
         brush: Brush,
         samples: &[(Vec2, f32)],
     ) -> (Arc<Canvas>, Vec<FinishedStroke>) {
+        paint_on_worker_paced(brush, samples, false)
+    }
+
+    /// [`paint_on_worker`], each sample painted before the next is sent
+    /// (`paced`) as a pen slower than the painting gives them.
+    fn paint_on_worker_paced(
+        brush: Brush,
+        samples: &[(Vec2, f32)],
+        paced: bool,
+    ) -> (Arc<Canvas>, Vec<FinishedStroke>) {
         let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
         let canvas = Arc::new(Canvas::new(128, 128, Color32::TRANSPARENT, 64));
         let worker = StrokeWorker::new();
@@ -795,6 +952,9 @@ mod tests {
         });
         for &(pos, pressure) in samples {
             worker.sample(pos, pressure);
+            if paced {
+                worker.wait_idle();
+            }
         }
         worker.end();
         worker.wait_idle();
@@ -807,6 +967,75 @@ mod tests {
             })
             .collect();
         (canvas, strokes)
+    }
+
+    #[test]
+    fn post_correction_while_drawing_paints_the_same_line_as_at_pen_up() {
+        // Same random draws for every stroke here.
+        TEST_SEED.store(0x5eed, std::sync::atomic::Ordering::Relaxed);
+        // Shaky, and back over itself (the part painted for now must leave
+        // nothing behind).
+        let mut path: Vec<(Vec2, f32)> = samples()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (p, pressure))| (p + Vec2::new(0.0, (i % 2) as f32 * 6.0 - 3.0), pressure))
+            .collect();
+        let back: Vec<_> = path
+            .iter()
+            .rev()
+            .map(|&(p, pr)| (p + Vec2::new(0.0, 9.0), pr))
+            .collect();
+        path.extend(back);
+        let round = Brush::new(8.0, 80.0, Color32::from_rgb(200, 40, 40), 10.0);
+        let mut textured = Brush::new(24.0, 60.0, Color32::from_rgb(20, 90, 40), 12.0);
+        let mut t = crate::brush_engine::texture::BrushTexture::new(
+            crate::brush_engine::texture::builtin()[1].clone(),
+        );
+        t.strength = 1.0;
+        textured.texture = Some(t);
+        let mut random = Brush::new(14.0, 70.0, Color32::from_rgb(30, 30, 160), 20.0);
+        random.dynamics.random.size = 0.6;
+        random.dynamics.random.opacity = 0.5;
+        random.jitter = 0.4;
+        let mut wash = Brush::new(18.0, 50.0, Color32::from_rgb(120, 60, 10), 8.0);
+        wash.brush_options.painting_mode = crate::brush_engine::brush_options::PaintingMode::Wash;
+        for (name, mut brush) in [
+            ("round", round),
+            ("texture", textured),
+            ("random", random),
+            ("wash", wash),
+        ] {
+            brush.stabilizer_algorithm = StabilizerAlgorithm::PostCorrection;
+            brush.stabilizer_modes.correction = 0.7;
+            let (at_end, end_strokes) = paint_on_worker(brush.clone(), &path);
+            brush.stabilizer_modes.correction_live = true;
+            // Paced: the stretch near the pen is painted for now, and taken
+            // back, after every sample.
+            let (live, live_strokes) = paint_on_worker_paced(brush.clone(), &path, true);
+            assert!(tiles_of(&live) == tiles_of(&at_end), "{name}");
+            let (queued, _) = paint_on_worker(brush, &path);
+            assert!(tiles_of(&queued) == tiles_of(&at_end), "{name}, queued");
+            assert_eq!(live_strokes.len(), 1, "{name}: one undo step");
+            assert_eq!(end_strokes.len(), 1);
+            // Undo takes it all back: every tile it touched, blank.
+            let undo = &live_strokes[0].undo;
+            assert!(
+                undo.tiles.iter().all(|t| t
+                    .data
+                    .to_vec()
+                    .iter()
+                    .all(|&p| p == Color32::TRANSPARENT))
+            );
+            let touched = tiles_of(&live)
+                .iter()
+                .filter(|t| t.as_ref().is_some_and(|d| d.iter().any(|&p| p.a() > 0)))
+                .count();
+            let mut keys: Vec<_> = undo.tiles.iter().map(|t| (t.tx, t.ty)).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            assert!(keys.len() >= touched, "{name}");
+        }
+        TEST_SEED.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]

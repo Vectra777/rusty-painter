@@ -957,8 +957,71 @@ fn bench_auto_tip_strokes(c: &mut Criterion) {
     group.finish();
 }
 
+/// Post-correction on a 300-sample shaky stroke through the stroke worker
+/// (as the app paints): smoothing when the pen lifts against smoothing while
+/// drawing (the stretch near the pen painted for now, again each sample).
+fn bench_post_correction(c: &mut Criterion) {
+    use rusty_painter::brush_engine::brush::StabilizerAlgorithm;
+    use rusty_painter::brush_engine::stroke_worker::{StrokeSetup, StrokeWorker};
+    use std::sync::Arc;
+    let pool = Arc::new(ThreadPoolBuilder::new().num_threads(4).build().unwrap());
+    let path: Vec<(Vec2, f32)> = (0..300)
+        .map(|i| {
+            let t = i as f32 / 299.0;
+            let wobble = if i % 2 == 0 { 2.5 } else { -2.5 };
+            (
+                Vec2::new(40.0 + t * 900.0, 500.0 + (t * 9.0).sin() * 300.0 + wobble),
+                0.3 + 0.7 * t,
+            )
+        })
+        .collect();
+    let worker = StrokeWorker::new();
+    let mut group = c.benchmark_group("post_correction_300_samples");
+    // Paced: each sample painted before the next comes (a pen slower than
+    // the painting), so the stretch near the pen is painted for now each
+    // time: the worst case.
+    for (name, live, paced) in [
+        ("at_pen_up", false, false),
+        ("while_drawing", true, false),
+        ("at_pen_up_paced", false, true),
+        ("while_drawing_paced", true, true),
+    ] {
+        let mut brush = Brush::new(24.0, 80.0, Color32::BLACK, 10.0);
+        brush.stabilizer_algorithm = StabilizerAlgorithm::PostCorrection;
+        brush.stabilizer_modes.correction = 0.8;
+        brush.stabilizer_modes.correction_live = live;
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let canvas = Arc::new(Canvas::new(1024, 1024, Color32::WHITE, 64));
+                worker.begin(StrokeSetup {
+                    canvas,
+                    brush: brush.clone(),
+                    selection: None,
+                    pool: Arc::clone(&pool),
+                    layer_idx: 1,
+                    symmetry: Default::default(),
+                    view_scale: 1.0,
+                    perspective: Vec::new(),
+                    wrap: false,
+                });
+                for &(pos, pressure) in &path {
+                    worker.sample(pos, pressure);
+                    if paced {
+                        worker.wait_idle();
+                    }
+                }
+                worker.end();
+                worker.wait_idle();
+                worker.take_finished().0.len()
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_post_correction,
     bench_auto_tip_strokes,
     bench_soft_dab,
     bench_pressure_stroke,

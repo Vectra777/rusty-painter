@@ -217,7 +217,11 @@ below.
 
 - [x] Pressure calibration from test strokes (Settings → Calibrate: the
   pen pressure curve spreads what your hand presses over the full range).
-- [ ] Post-correction while drawing, not only when the pen lifts.
+- [x] Post-correction while drawing (Stabilizer → Post-correction → While
+  drawing): points are painted along the smoothed path once they're past
+  the smoothing's reach, the stretch near the pen painted for now and taken
+  back on the next sample. The same pixels as smoothing at pen-up (tested
+  on round, textured, random and wash brushes).
 - [x] Tags and favourites carried in exported `.rpbrush` files (an
   imported file arrives tagged and starred, then tagged "Imported").
 - [x] **Vector layers** (Layer → New Vector Layer): lines kept as points,

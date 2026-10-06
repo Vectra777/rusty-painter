@@ -25,6 +25,7 @@ use std::sync::Mutex;
 /// dabs only accumulate `coverage`, and the tile's pixels are re-resolved from
 /// `original` (the tile as it was when the stroke first touched it) plus the
 /// coverage. Pixels are never re-quantized to 8 bits between dabs.
+#[derive(Clone)]
 pub(crate) struct StrokeBuffer {
     pub original: Vec<Color32>,
     pub coverage: Vec<f32>,
@@ -72,6 +73,23 @@ pub struct StrokeTiles {
     /// Wash mode: the running average of the dabs' opacity so far (`None`
     /// before the first dab, which starts it).
     pub(crate) wash_average: Option<f32>,
+    /// Where [`Self::rewind`] goes back to, while one is kept.
+    checkpoint: Option<Box<Checkpoint>>,
+}
+
+/// A tile's stroke buffer and pixels, saved.
+type SavedTile = (StrokeBuffer, Vec<Color32>);
+
+/// The stroke's tiles as they were at a checkpoint: each tile painted
+/// since, saved the first time it was about to be (`None`: it had no
+/// buffer yet), and the rest of the stroke's tile state.
+struct Checkpoint {
+    saved: FxHashMap<(usize, usize), Option<SavedTile>>,
+    tail_tiles: [HashSet<(usize, usize)>; 2],
+    tail_newer: usize,
+    mask_tiles: HashSet<(usize, usize)>,
+    grain: crate::brush_engine::texture::StrokeGrain,
+    wash_average: Option<f32>,
 }
 
 impl StrokeTiles {
@@ -103,6 +121,97 @@ impl StrokeTiles {
         self.tail_newer = 0;
         self.mask_tiles.clear();
         self.wash_average = None;
+        self.checkpoint = None;
+    }
+
+    /// Remember how the stroke's tiles are now, to [`Self::rewind`] to
+    /// after painting on (tiles are saved as they're first painted since,
+    /// so this costs little until then).
+    pub(crate) fn checkpoint(&mut self, canvas: &Canvas) {
+        self.checkpoint = Some(Box::new(Checkpoint {
+            saved: FxHashMap::default(),
+            tail_tiles: self.tail_tiles.clone(),
+            tail_newer: self.tail_newer,
+            mask_tiles: self.mask_tiles.clone(),
+            grain: self.grain,
+            wash_average: self.wash_average,
+        }));
+        // The tail and the mask are redrawn without new dabs there: save
+        // their tiles now.
+        let keys: Vec<_> = (self.tail_tiles.iter().flatten())
+            .chain(&self.mask_tiles)
+            .copied()
+            .collect();
+        for key in keys {
+            self.save_for_checkpoint(key, canvas);
+        }
+    }
+
+    /// Before tile `key` is painted: save it for the checkpoint, the first
+    /// time since it was taken.
+    pub(crate) fn save_for_checkpoint(&mut self, key: (usize, usize), canvas: &Canvas) {
+        let Some(checkpoint) = self.checkpoint.as_mut() else {
+            return;
+        };
+        if checkpoint.saved.contains_key(&key) {
+            return;
+        }
+        let saved = self.buffers.get(&key).map(|buffer| {
+            let buffer = buffer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let pixels = (canvas.lock_tile(key.0, key.1))
+                .and_then(|t| t.lock().unwrap_or_else(|e| e.into_inner()).data.clone())
+                .unwrap_or_default();
+            (buffer, pixels)
+        });
+        checkpoint.saved.insert(key, saved);
+    }
+
+    /// Take back everything painted since the checkpoint (which goes): the
+    /// tiles get their pixels and buffers as they were then (one first
+    /// touched since starts over, keeping its undo snapshot).
+    pub(crate) fn rewind(&mut self, canvas: &Canvas) {
+        let Some(checkpoint) = self.checkpoint.take() else {
+            return;
+        };
+        let tile_size = canvas.tile_size();
+        for (key, saved) in checkpoint.saved {
+            let Some(buffer) = self.buffers.get(&key) else {
+                continue;
+            };
+            let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let pixels = match saved {
+                Some((was, pixels)) => {
+                    *buffer = was;
+                    pixels
+                }
+                None => {
+                    buffer.coverage.fill(0.0);
+                    buffer.tail = [None, None];
+                    buffer.tail_rect = [None, None];
+                    buffer.colors = None;
+                    buffer.tail_colors = [None, None];
+                    buffer.mask = None;
+                    buffer.mask_dirty = None;
+                    buffer.original.clone()
+                }
+            };
+            if let Some(tile) = canvas.lock_tile(key.0, key.1) {
+                let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(data) = tile.data.as_mut()
+                    && data.len() == pixels.len()
+                {
+                    data.copy_from_slice(&pixels);
+                    tile.is_empty = pixels.iter().all(|&p| p == Color32::TRANSPARENT);
+                }
+            }
+            buffer.damage = Some([0, 0, tile_size, tile_size]);
+            self.dirty.insert(key);
+        }
+        self.tail_tiles = checkpoint.tail_tiles;
+        self.tail_newer = checkpoint.tail_newer;
+        self.mask_tiles = checkpoint.mask_tiles;
+        self.grain = checkpoint.grain;
+        self.wash_average = checkpoint.wash_average;
     }
 }
 
@@ -399,6 +508,7 @@ struct RibbonPoint {
 }
 
 /// Tracks per-stroke state like the last position and spacing accumulator.
+#[derive(Clone)]
 pub struct StrokeState {
     pub last_pos: Option<Vec2>,
     stabilizer: Stabilizer,

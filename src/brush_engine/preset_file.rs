@@ -745,6 +745,7 @@ mod tests {
             string_length: 75.0,
             catch_up: false,
             correction: 0.2,
+            correction_live: true,
             filter_strength: 0.9,
             filter_speed: 0.1,
         };

@@ -819,6 +819,13 @@ fn brush_settings_contents(
                      painted again along it.",
                 )
                 .changed();
+                changed |= ui
+                    .checkbox(&mut modes.correction_live, "While drawing")
+                    .on_hover_text(
+                        "Smooth the line as it's drawn: the stretch near the pen settles \
+                         as you go on. The same line as smoothing at the end.",
+                    )
+                    .changed();
             }
             StabilizerAlgorithm::MotionFilter => {
                 changed |= slider_row(

@@ -1000,7 +1000,10 @@ pub(crate) fn draw_line_edit(
         path.clone(),
         Stroke::new(3.0_f32, Color32::from_black_alpha(120)),
     ));
-    painter.add(eframe::egui::Shape::line(path, Stroke::new(1.0_f32, accent)));
+    painter.add(eframe::egui::Shape::line(
+        path,
+        Stroke::new(1.0_f32, accent),
+    ));
     let point = app
         .workspace
         .vector
