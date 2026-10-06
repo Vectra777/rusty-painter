@@ -33,7 +33,10 @@ use std::sync::Arc;
 /// The file name extension.
 pub const EXTENSION: &str = "rpbrush";
 const FORMAT: &str = "rusty-painter-brushes";
-const VERSION: u32 = 2;
+/// The newest version read and written: 3 has the spray, chalk, curve,
+/// grid, tangent normal and particle types (a file is written as 2 when it
+/// has none, so older builds still read it).
+const VERSION: u32 = 3;
 const PRESETS_ENTRY: &str = "presets.json";
 /// Largest tip or texture side accepted from a file.
 const MAX_SIDE: usize = 8192;
@@ -199,6 +202,7 @@ enum StoredColorSource {
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct StoredBrush {
+    #[serde(deserialize_with = "lenient_type")]
     brush_type: BrushType,
     diameter: f32,
     hardness: f32,
@@ -246,12 +250,20 @@ struct StoredBrush {
     bristles: crate::brush_engine::bristle::Bristles,
     sketch: crate::brush_engine::sketch::Sketch,
     hatching: crate::brush_engine::hatching::Hatching,
+    engines: crate::brush_engine::engines::Engines,
     sharpness: f32,
     sharpness_softness: f32,
     mixing: Option<crate::brush_engine::brush_options::Mixing>,
     auto_spacing: Option<f32>,
     auto_tip: crate::brush_engine::brush_options::AutoTip,
     color_source: StoredColorSource,
+}
+
+/// A brush type, or Soft for one this version doesn't know (from a newer
+/// one, or written by hand).
+fn lenient_type<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BrushType, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or(BrushType::Soft))
 }
 
 impl Default for StoredBrush {
@@ -342,6 +354,7 @@ impl StoredBrush {
             bristles: b.bristles,
             sketch: b.sketch,
             hatching: b.hatching,
+            engines: b.engines,
             sharpness: b.sharpness,
             sharpness_softness: b.sharpness_softness,
             mixing: b.mixing,
@@ -442,6 +455,7 @@ impl StoredBrush {
         b.bristles = self.bristles;
         b.sketch = self.sketch;
         b.hatching = self.hatching;
+        b.engines = self.engines;
         b.sharpness = self.sharpness.clamp(0.0, 1.0);
         b.sharpness_softness = self.sharpness_softness.clamp(0.0, 1.0);
         b.mixing = self.mixing;
@@ -491,9 +505,19 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
             }
         })
         .collect();
+    let newer = presets.iter().any(|p| {
+        !matches!(
+            p.brush.brush_type,
+            BrushType::Soft
+                | BrushType::Pixel
+                | BrushType::Bristle
+                | BrushType::Sketch
+                | BrushType::Hatching
+        )
+    });
     let library = StoredLibrary {
         format: FORMAT.to_string(),
-        version: VERSION,
+        version: if newer { VERSION } else { 2 },
         presets: stored,
         tips: res
             .tips
@@ -708,6 +732,44 @@ mod tests {
         assert_eq!(b.brush_options.spacing, 25.0);
         assert_eq!(b.dynamics, BrushDynamics::default());
         assert!(b.texture.is_none());
+    }
+
+    #[test]
+    fn new_engines_are_written_as_version_3_and_unknown_types_read_as_soft() {
+        let version = |t: BrushType| {
+            let mut brush = Brush::new(24.0, 20.0, Color32::BLACK, 25.0);
+            brush.brush_type = t;
+            brush.engines.spray.amount = 77;
+            let preset = BrushPreset {
+                name: "P".into(),
+                brush,
+                file: None,
+            };
+            let bytes = encode(&[preset]).unwrap();
+            let json = zip::read_entry(&bytes, PRESETS_ENTRY).unwrap().to_vec();
+            let library: StoredLibrary = serde_json::from_slice(&json).unwrap();
+            (library.version, decode(&bytes).unwrap()[0].brush.clone())
+        };
+        assert_eq!(
+            version(BrushType::Sketch).0,
+            2,
+            "older builds still read it"
+        );
+        let (v, back) = version(BrushType::Spray);
+        assert_eq!(v, 3);
+        assert_eq!(
+            (back.brush_type, back.engines.spray.amount),
+            (BrushType::Spray, 77)
+        );
+        let json = br#"{"format":"rusty-painter-brushes","version":3,
+            "presets":[{"name":"Future","brush":{"brush_type":"Watercolour9000","diameter":30.0}}]}"#;
+        let mut zip = zip::ZipWriter::default();
+        zip.add(PRESETS_ENTRY, json).unwrap();
+        let future = &decode(&zip.finish().unwrap()).unwrap()[0].brush;
+        assert_eq!(
+            (future.brush_type, future.brush_options.diameter),
+            (BrushType::Soft, 30.0)
+        );
     }
 
     #[test]

@@ -113,9 +113,18 @@ pub(crate) fn trace(tip: &TipMask) -> Vec<[[f32; 2]; 2]> {
 /// The tip's outline, traced once per tip and kept.
 fn outline(ctx: &egui::Context, brush: &Brush) -> Outline {
     let shape = match brush.brush_type {
-        BrushType::Soft | BrushType::Pixel => &brush.brush_options.pixel_shape,
-        // Hairs and lines spread over the brush's size, whatever its tip.
-        BrushType::Bristle | BrushType::Sketch | BrushType::Hatching => &PixelBrushShape::Circle,
+        BrushType::Soft | BrushType::Pixel | BrushType::Chalk | BrushType::TangentNormal => {
+            &brush.brush_options.pixel_shape
+        }
+        // Hairs, particles and lines spread over the brush's size, whatever
+        // its tip.
+        BrushType::Bristle
+        | BrushType::Sketch
+        | BrushType::Hatching
+        | BrushType::Spray
+        | BrushType::Curve
+        | BrushType::Grid
+        | BrushType::Particle => &PixelBrushShape::Circle,
     };
     // A tip is known by its address and size (an address can be reused).
     let stamp = match shape {

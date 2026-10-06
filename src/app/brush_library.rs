@@ -266,6 +266,11 @@ pub fn default_tags(name: &str) -> &'static [&'static str] {
         "Glow" | "Stitches" | "Chain" | "Lace Ribbon" | "Striped Ribbon" => &["Effects"],
         "Eraser (Soft)" | "Eraser (Hard)" => &["Erasers"],
         "Pixel Art" => &["Pixel"],
+        "Spray Cloud" | "Particle Swarm" => &["Texture", "Effects"],
+        "Rough Chalk" => &["Sketching", "Texture"],
+        "Swirl Curves" => &["Sketching", "Effects"],
+        "Mosaic Grid" => &["Effects"],
+        "Normal Map" => &["3D"],
         _ => &[],
     }
 }

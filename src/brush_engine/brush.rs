@@ -44,6 +44,44 @@ pub enum BrushType {
     /// Parallel lines pinned to the canvas wherever it passes (see
     /// [`crate::brush_engine::hatching`]).
     Hatching,
+    /// Each dab a cloud of small particles (see
+    /// [`crate::brush_engine::engines::Spray`]).
+    Spray,
+    /// The tip broken up by a grain, filled more by pressing harder.
+    Chalk,
+    /// Curves swinging from points a while back to the pen.
+    Curve,
+    /// One shape in each cell of a grid it passes over.
+    Grid,
+    /// A normal map: the pen's tilt as the colour.
+    TangentNormal,
+    /// A swarm pulled along after the pen, each drawing its path.
+    Particle,
+}
+
+impl BrushType {
+    /// Every type, in the order the brush panel lists them.
+    pub const ALL: [BrushType; 11] = [
+        BrushType::Soft,
+        BrushType::Pixel,
+        BrushType::Bristle,
+        BrushType::Sketch,
+        BrushType::Hatching,
+        BrushType::Spray,
+        BrushType::Chalk,
+        BrushType::Curve,
+        BrushType::Grid,
+        BrushType::TangentNormal,
+        BrushType::Particle,
+    ];
+
+    /// Draws its own lines or shapes in place of the stroke's dabs.
+    pub fn replaces_dabs(self) -> bool {
+        matches!(
+            self,
+            BrushType::Curve | BrushType::Grid | BrushType::Particle
+        )
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -224,6 +262,9 @@ pub struct Brush {
     pub sketch: crate::brush_engine::sketch::Sketch,
     /// The lines of a [`BrushType::Hatching`] brush.
     pub hatching: crate::brush_engine::hatching::Hatching,
+    /// The settings of the spray, chalk, curve, grid, tangent normal and
+    /// particle types.
+    pub engines: crate::brush_engine::engines::Engines,
     /// Hard edges: tip coverage below this share
     /// (0..1) is dropped and the rest painted at full strength (0 = off).
     pub sharpness: f32,
@@ -281,6 +322,8 @@ struct BatchCtx<'a> {
     tip_colors: bool,
     /// A hatching brush: its lines, over every dab.
     hatch: Option<&'a crate::brush_engine::hatching::Hatching>,
+    /// A chalk brush: its grain, over every dab.
+    chalk: Option<&'a crate::brush_engine::engines::Chalk>,
     /// Hard edges: the brush's [`Brush::sharpness`] (0 = off) and its
     /// soft band.
     sharpness: f32,
@@ -444,7 +487,7 @@ fn paint_batch(
         // hatching, texture), read once per tile rather than per row.
         let sharpness = ctx.sharpness;
         let sharp = sharpness > 0.0;
-        let post_row = sharp || ctx.hatch.is_some() || ctx.texture.is_some();
+        let post_row = sharp || ctx.hatch.is_some() || ctx.chalk.is_some() || ctx.texture.is_some();
         // An imported texture (textures the shape before the strength) and
         // wash (alpha darken), likewise once per tile.
         let krita_texture = ctx.texture.is_some_and(|t| t.krita.is_some());
@@ -516,6 +559,14 @@ fn paint_batch(
                                 gy,
                                 overlap.min_x + first,
                                 dab.hatch,
+                                &mut alphas[span.clone()],
+                            );
+                        }
+                        if let Some(chalk) = ctx.chalk {
+                            chalk.apply_row(
+                                gy,
+                                overlap.min_x + first,
+                                dab.seed(),
                                 &mut alphas[span.clone()],
                             );
                         }
@@ -928,7 +979,8 @@ impl Brush {
     /// Whether the dabs' colours can differ (colour randomness, colour
     /// tips, inputs driving the colour).
     pub fn varies_color(&self) -> bool {
-        self.dynamics.random.has_color()
+        matches!(self.brush_type, BrushType::TangentNormal | BrushType::Grid)
+            || self.dynamics.random.has_color()
             || self.paints_tip_colors()
             || self.brush_options.color_source != ColorSource::Plain
             || self.inputs.iter().any(|m| m.setting.is_color())
@@ -939,10 +991,7 @@ impl Brush {
     pub fn varies_per_dab(&self) -> bool {
         self.has_dynamics()
             || self.brush_options.tip_count() > 1
-            || matches!(
-                self.brush_type,
-                BrushType::Bristle | BrushType::Sketch | BrushType::Hatching
-            )
+            || !matches!(self.brush_type, BrushType::Soft | BrushType::Pixel)
             || self.paints_tip_colors()
             || self.brush_options.color_source != ColorSource::Plain
     }
@@ -954,6 +1003,9 @@ impl Brush {
         let spread = match self.brush_type {
             BrushType::Bristle => self.bristles.spread.max(1.0) + self.bristles.thickness,
             BrushType::Sketch => self.sketch.reach,
+            BrushType::Curve => 6.0,
+            BrushType::Particle => 8.0,
+            BrushType::Grid => 1.0 + self.engines.grid.cell / self.brush_options.diameter.max(1.0),
             _ => 1.0,
         };
         self.brush_options.diameter * 1.5 * spread + 4.0
@@ -1017,6 +1069,7 @@ impl Brush {
             bristles: Default::default(),
             sketch: Default::default(),
             hatching: Default::default(),
+            engines: Default::default(),
             sharpness: 0.0,
             sharpness_softness: 0.0,
             mixing: None,
@@ -1050,6 +1103,7 @@ impl Brush {
             bristles: Default::default(),
             sketch: Default::default(),
             hatching: Default::default(),
+            engines: Default::default(),
             sharpness: 0.0,
             sharpness_softness: 0.0,
             mixing: None,
@@ -1147,6 +1201,9 @@ impl Brush {
         let (centers, vars, orients) = if self.brush_type == BrushType::Bristle {
             hair_dabs = self.hair_dabs(centers, vars, orients);
             (&hair_dabs.0[..], &hair_dabs.1[..], None)
+        } else if self.brush_type == BrushType::Spray {
+            hair_dabs = self.spray_dabs(centers, vars);
+            (&hair_dabs.0[..], &hair_dabs.1[..], None)
         } else {
             (centers, vars, orients)
         };
@@ -1226,6 +1283,33 @@ impl Brush {
             undo_action,
             stroke_tiles,
         );
+    }
+
+    /// A spray brush's dabs: each of `centers` (with its variation) as a
+    /// cloud of particles, the same for the same place.
+    fn spray_dabs(
+        &self,
+        centers: &[Vec2],
+        vars: &[crate::brush_engine::dynamics::DabVar],
+    ) -> (Vec<Vec2>, Vec<crate::brush_engine::dynamics::DabVar>) {
+        use crate::brush_engine::dynamics::{compose, tip_orientation};
+        let base_r = self.brush_options.diameter * 0.5;
+        let spray = &self.engines.spray;
+        let mut out = (Vec::new(), Vec::new());
+        for (i, &center) in centers.iter().enumerate() {
+            let var = vars.get(i % vars.len().max(1)).copied().unwrap_or_default();
+            let seed = center.x.to_bits() ^ center.y.to_bits().rotate_left(11) ^ i as u32;
+            for p in spray.particles(seed, base_r * var.scale) {
+                out.0.push(center + p.offset);
+                let mut v = var;
+                v.scale *= p.scale;
+                if p.angle != 0.0 {
+                    v.orient = compose(var.orient, tip_orientation(p.angle, 1.0));
+                }
+                out.1.push(v);
+            }
+        }
+        out
     }
 
     /// A bristle brush's dabs, one per hair of each of `centers` (with its
@@ -1558,6 +1642,7 @@ impl Brush {
             dual: self.dual.as_ref().map(|d| d.mode),
             tip_colors,
             hatch: (self.brush_type == BrushType::Hatching).then_some(&self.hatching),
+            chalk: (self.brush_type == BrushType::Chalk).then_some(&self.engines.chalk),
             sharpness: self.sharpness,
             sharpness_softness: self.sharpness_softness.clamp(0.0, 1.0),
             strength: 1.0,
@@ -1587,9 +1672,7 @@ impl Brush {
             stroke_tiles,
             |brush, ctx, buckets, work_pixels, strength| match brush.brush_type {
                 BrushType::Pixel => brush.paint_pixel(pool, ctx, buckets, work_pixels, strength),
-                BrushType::Soft | BrushType::Bristle | BrushType::Sketch | BrushType::Hatching => {
-                    brush.paint_soft(pool, ctx, buckets, work_pixels, strength)
-                }
+                _ => brush.paint_soft(pool, ctx, buckets, work_pixels, strength),
             },
         );
     }

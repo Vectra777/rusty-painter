@@ -591,8 +591,13 @@ pub struct StrokeState {
     next_tip: usize,
     /// A ribbon brush: the last point of its ribbon.
     ribbon_last: Option<RibbonPoint>,
-    /// A sketch brush: the stroke's points so far (the latest ones).
+    /// A sketch brush: the stroke's points so far (the latest ones); a
+    /// curve brush's too.
     sketch_points: Vec<Vec2>,
+    /// A grid brush: the cells painted so far (each only once).
+    grid_cells: rustc_hash::FxHashSet<(i32, i32)>,
+    /// A particle brush's swarm, once the stroke has begun.
+    swarm: Option<crate::brush_engine::engines::Swarm>,
     /// A dual brush's second tip: where its last dab went, and how far
     /// along the stroke the next one is.
     mask_last: Option<Vec2>,
@@ -654,6 +659,8 @@ impl StrokeState {
             next_tip: 0,
             mask_last: None,
             ribbon_last: None,
+            grid_cells: Default::default(),
+            swarm: None,
             sketch_points: Vec::new(),
             mask_until_next: 0.0,
             stroke_random: SmallRng::seed_from_u64(seed ^ 0x5eed).random(),
@@ -712,6 +719,9 @@ impl StrokeState {
         let dynamic = brush.has_dynamics();
         if dynamic {
             self.update_speed(raw_pos, time);
+        }
+        // (A tangent normal brush's colour is the lean.)
+        if dynamic || brush.brush_type == BrushType::TangentNormal {
             self.update_lean(time);
         }
         if self.last_pos.is_none()
@@ -879,6 +889,100 @@ impl StrokeState {
         }
     }
 
+    /// A curve, grid or particle brush: its own lines or shapes for these
+    /// dabs (in their place).
+    fn engine_dabs(&mut self, brush: &mut Brush, plans: &[Plan], context: &mut StrokeContext<'_>) {
+        use crate::brush_engine::engines::{hash01, quadratic};
+        let e = brush.engines;
+        let base_r = (brush.brush_options.diameter * 0.5).max(0.25);
+        let mut centers = Vec::new();
+        let mut vars = Vec::new();
+        // A line of round dabs `width` wide from `a` to `b`.
+        let mut line = |points: &[Vec2], width: f32, strength: f32| {
+            for &q in points {
+                centers.push(q);
+                vars.push(DabVar {
+                    scale: (width * 0.5).max(0.3) / base_r,
+                    strength,
+                    ..DabVar::default()
+                });
+            }
+        };
+        let straight = |a: Vec2, b: Vec2, step: f32| {
+            let n = ((b - a).length() / step).ceil().clamp(1.0, 4096.0) as usize;
+            (0..=n)
+                .map(|k| a + (b - a) * (k as f32 / n as f32))
+                .collect::<Vec<_>>()
+        };
+        match brush.brush_type {
+            BrushType::Curve => {
+                let c = e.curve;
+                // Dabs three quarters of a width apart still join smoothly.
+                let step = (c.line_width * 0.75).max(0.5);
+                for plan in plans {
+                    if self
+                        .sketch_points
+                        .last()
+                        .is_some_and(|&last| (plan.pos - last).length() < 4.0)
+                    {
+                        continue;
+                    }
+                    self.sketch_points.push(plan.pos);
+                    let strength = c.opacity.clamp(0.0, 1.0) * plan.var.strength;
+                    if let Some((a, m, b)) = c.curve(&self.sketch_points) {
+                        line(&quadratic(a, m, b, step), c.line_width, strength);
+                        if c.connection {
+                            line(&straight(a, b, step), c.line_width, strength);
+                        }
+                    }
+                }
+                if self.sketch_points.len() > 400 {
+                    let excess = self.sketch_points.len() - 200;
+                    self.sketch_points.drain(..excess);
+                }
+            }
+            BrushType::Grid => {
+                let g = e.grid;
+                for plan in plans {
+                    for cell in g.cells(plan.pos, base_r * plan.var.scale) {
+                        if !self.grid_cells.insert(cell) {
+                            continue;
+                        }
+                        let hue = (hash01(cell.0 as u32, cell.1 as u32) * 2.0 - 1.0) * g.hue_jitter;
+                        centers.push(g.center(cell));
+                        vars.push(DabVar {
+                            scale: g.radius() / base_r,
+                            strength: plan.var.strength,
+                            tip: plan.var.tip,
+                            hsv: [hue, 0.0, 0.0],
+                            ..DabVar::default()
+                        });
+                    }
+                }
+            }
+            BrushType::Particle => {
+                let p = e.particles;
+                let step = (p.line_width * 0.75).max(0.5);
+                for plan in plans {
+                    if self.swarm.is_none() {
+                        let seed = self.rng.random();
+                        self.swarm = Some(p.start(plan.pos, base_r, seed));
+                    }
+                    let Some(swarm) = self.swarm.as_mut() else {
+                        continue;
+                    };
+                    for (a, b) in p.step(swarm, plan.pos) {
+                        line(&straight(a, b, step), p.line_width, plan.var.strength);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if !centers.is_empty() {
+            context.dabs_varied(brush, &centers, &vars, Target::Stroke);
+        }
+    }
+
     /// A ribbon brush: the stretch from the last ribbon point through this
     /// sample's points, the picture repeating along it.
     fn paint_ribbon(
@@ -1025,6 +1129,13 @@ impl StrokeState {
                         }
                     })
                     .collect();
+                if brush.brush_type.replaces_dabs() {
+                    apply_pressure(brush, original, p);
+                    self.engine_dabs(brush, &plans, context);
+                    self.pending = pending;
+                    self.pending.clear();
+                    return;
+                }
                 let points: Vec<(Vec2, DabVar)> = if brush.brush_type == BrushType::Sketch {
                     plans.iter().map(|p| (p.pos, p.var)).collect()
                 } else {
@@ -1244,6 +1355,14 @@ impl StrokeState {
             for mapping in &brush.inputs {
                 mapping.apply(&mut v, &sensors);
             }
+        }
+        if brush.brush_type == BrushType::TangentNormal {
+            let n = brush.engines.normal;
+            let (lean, direction) = match self.tilt_at(dab.t) {
+                Some(tilt) => (tilt.lean, tilt.direction),
+                None => (n.mouse_lean(), dab.dir.unwrap_or(0.0)),
+            };
+            v.base = Some(n.color(lean, direction));
         }
         self.orient(brush, v, dab.dir, dab.t)
     }

@@ -232,7 +232,16 @@ below.
   thickened, thinned or recoloured afterwards. Edit Lines (Layer → Vector)
   bends a line from its handles (the line follows smoothly), widens it
   around one (Shift), moves it whole (Alt) or takes a handle out (Delete).
-- [ ] Bigger: a spray/particle engine, wet paint simulation and impasto.
+- [x] **More engines, after Krita's** (written from how they behave):
+  spray (particles of the brush's tip, even, in the middle or in clumps),
+  chalk (a grain that pressure fills in), curve (curves swinging from a
+  while back to the pen), grid (one shape per cell it passes), tangent
+  normal (a normal map from the pen's tilt, or the stroke's way with a
+  mouse) and particle (a swarm pulled after the pen, with weight, drag and
+  gravity). Krita presets of these engines import as them (approximated,
+  with a note). Files using them are version 3; unknown types in a newer
+  file read as Soft.
+- [ ] Bigger: wet paint simulation and impasto.
 
 ### Quality rules for every feature
 

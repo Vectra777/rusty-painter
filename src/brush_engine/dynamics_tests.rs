@@ -2724,3 +2724,147 @@ fn flow_spacing_and_tilt_inputs_drive_their_settings() {
     };
     assert!(line_alpha(true) > line_alpha(false) + 10);
 }
+
+/// A brush of engine `t`, 30 px.
+fn engine(t: crate::brush_engine::brush::BrushType) -> Brush {
+    let mut b = brush(BrushDynamics::default());
+    b.brush_type = t;
+    b.brush_options.diameter = 30.0;
+    b
+}
+
+fn covered(canvas: &Canvas) -> usize {
+    pixels(canvas).iter().filter(|&&a| a > 0).count()
+}
+
+#[test]
+fn spray_paints_a_repeatable_cloud_within_its_circle() {
+    use crate::brush_engine::brush::BrushType;
+    let mut spray = engine(BrushType::Spray);
+    let (a, _) = paint(&mut spray, &line(64.0, 1.0), 9, true);
+    let (b, _) = paint(&mut spray, &line(64.0, 1.0), 9, true);
+    assert!(pixels(&a) == pixels(&b), "the same stroke, the same cloud");
+    let mut soft = engine(BrushType::Soft);
+    let (solid, _) = paint(&mut soft, &line(64.0, 1.0), 9, true);
+    assert!(
+        covered(&a) > 0 && covered(&a) < covered(&solid),
+        "speckled, not solid"
+    );
+    // Nothing past the circle (and a particle's own size).
+    let far = (0..H).filter(|&y| (y as f32 - 64.0).abs() > 18.0);
+    assert!(
+        far.into_iter()
+            .all(|y| (0..W).all(|x| alpha(&a, x, y) == 0))
+    );
+}
+
+#[test]
+fn chalk_breaks_up_lighter_paint_more() {
+    use crate::brush_engine::brush::BrushType;
+    let count = |opacity: f32| {
+        let mut chalk = engine(BrushType::Chalk);
+        chalk.engines.chalk.grain = 1.0;
+        chalk.brush_options.spacing = 60.0;
+        chalk.brush_options.opacity = opacity;
+        let (c, _) = paint(&mut chalk, &line(64.0, 1.0), 1, true);
+        covered(&c)
+    };
+    let mut soft = engine(BrushType::Soft);
+    soft.brush_options.spacing = 60.0;
+    let (solid, _) = paint(&mut soft, &line(64.0, 1.0), 1, true);
+    assert!(count(1.0) < covered(&solid), "grainy");
+    assert!(count(0.3) < count(1.0), "lighter: more broken up");
+}
+
+#[test]
+fn a_grid_brush_paints_whole_cells_once() {
+    use crate::brush_engine::brush::BrushType;
+    let mut grid = engine(BrushType::Grid);
+    grid.brush_options.diameter = 10.0;
+    grid.brush_options.hardness = 100.0;
+    grid.engines.grid.cell = 16.0;
+    grid.engines.grid.scale = 0.8;
+    let forth = line(64.0, 1.0);
+    let (once, _) = paint(&mut grid, &forth, 1, true);
+    // Cells either side of the line, their middles painted, the gaps
+    // between them not.
+    assert!(alpha(&once, 40, 56) > 200 && alpha(&once, 40, 72) > 200);
+    assert_eq!(alpha(&once, 48, 56), 0, "between cells");
+    assert_eq!(alpha(&once, 40, 30), 0, "a cell the brush didn't reach");
+    // Over the same cells again: nothing more.
+    let mut back = forth.clone();
+    back.extend(forth.iter().rev().map(|&(p, t)| (p, t + 1.0)));
+    let (twice, _) = paint(&mut grid, &back, 1, true);
+    assert!(pixels(&twice) == pixels(&once));
+}
+
+#[test]
+fn tangent_normal_paints_the_lean_as_its_colour() {
+    use crate::brush_engine::brush::BrushType;
+    use crate::brush_engine::dynamics::PenTilt;
+    let normal_at = |tilt: Option<PenTilt>| {
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+        canvas.active_layer_idx = 1;
+        let mut b = engine(BrushType::TangentNormal);
+        b.brush_options.hardness = 100.0;
+        let (mut undo, mut tiles) = (empty_undo(), StrokeTiles::default());
+        let mut stroke = StrokeState::with_seed(1);
+        {
+            let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+            for &(p, t) in &line(64.0, 1.0) {
+                stroke.tilt = tilt;
+                stroke.add_sample(&mut b, p, 1.0, Some(t), &mut ctx);
+            }
+            stroke.finish(&mut b, &mut ctx);
+        }
+        let c = pixel(&canvas, 128, 64);
+        [c.r(), c.g(), c.b()]
+    };
+    let near = |got: [u8; 3], want: [u8; 3]| got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 3);
+    let up = normal_at(Some(PenTilt {
+        lean: 0.0,
+        direction: 0.0,
+    }));
+    assert!(near(up, [128, 128, 255]), "{up:?}");
+    let right = normal_at(Some(PenTilt {
+        lean: 0.8,
+        direction: 0.0,
+    }));
+    assert!(right[0] > 220 && right[2] < 220, "{right:?}");
+    // A mouse: leaning the way the stroke goes (right), at 45°.
+    let mouse = normal_at(None);
+    assert!(near(mouse, [218, 128, 218]), "{mouse:?}");
+}
+
+#[test]
+fn curve_and_particle_brushes_draw_their_own_repeatable_lines() {
+    use crate::brush_engine::brush::BrushType;
+    let wavy: Vec<(Vec2, f64)> = (0..=60)
+        .map(|i| {
+            let t = i as f32 / 60.0;
+            (
+                Vec2::new(20.0 + t * 216.0, 64.0 + (t * 12.0).sin() * 30.0),
+                t as f64,
+            )
+        })
+        .collect();
+    for t in [BrushType::Curve, BrushType::Particle] {
+        let mut b = engine(t);
+        let (a, _) = paint(&mut b, &wavy, 4, true);
+        let (again, _) = paint(&mut b, &wavy, 4, true);
+        assert!(covered(&a) > 100, "{t:?} paints");
+        assert!(pixels(&a) == pixels(&again), "{t:?} repeats");
+    }
+    // Gravity drags a particle swarm's lines below the pen's.
+    let mut heavy = engine(BrushType::Particle);
+    heavy.engines.particles.gravity = [0.0, 4.0];
+    let (c, _) = paint(&mut heavy, &line(40.0, 1.0), 4, true);
+    let below = (41..H)
+        .map(|y| (0..W).filter(|&x| alpha(&c, x, y) > 0).count())
+        .sum::<usize>();
+    let above = (0..40)
+        .map(|y| (0..W).filter(|&x| alpha(&c, x, y) > 0).count())
+        .sum::<usize>();
+    assert!(below > above * 2, "{below} below, {above} above");
+}

@@ -7,6 +7,7 @@ pub mod dual;
 pub mod dynamics;
 #[cfg(test)]
 mod dynamics_tests;
+pub mod engines;
 pub mod hardness;
 pub mod hatching;
 pub mod import;

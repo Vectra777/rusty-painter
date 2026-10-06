@@ -282,6 +282,87 @@ fn read_kpp(
                 "{name}: Krita's hatching came across with this app's hatching settings"
             ));
         }
+        "spraybrush" => {
+            b.brush_type = BrushType::Spray;
+            if let Some(d) = number("Spray/diameter") {
+                b.brush_options.diameter = d.clamp(1.0, 2000.0);
+            }
+            let sp = &mut b.engines.spray;
+            if let Some(n) = number("Spray/particleCount") {
+                sp.amount = (n.round() as u32).clamp(1, 500);
+            }
+            if yes("Spray/gaussianDistribution") {
+                sp.distribution = crate::brush_engine::engines::Distribution::Gaussian;
+            }
+            if let Some(w) = number("SprayShape/width") {
+                sp.particle_size = (w / b.brush_options.diameter.max(1.0)).clamp(0.01, 1.0);
+            }
+            sp.random_rotation = yes("SprayShape/randomRotation") || yes("Spray/randomRotation");
+            notes.push(format!("{name}: Krita's spray came across approximated"));
+        }
+        "chalkbrush" => {
+            b.brush_type = BrushType::Chalk;
+            if let Some(r) = number("Chalk/radius") {
+                b.brush_options.diameter = (r * 2.0).clamp(1.0, 2000.0);
+            }
+            notes.push(format!("{name}: Krita's chalk came across approximated"));
+        }
+        "curvebrush" => {
+            b.brush_type = BrushType::Curve;
+            let c = &mut b.engines.curve;
+            if let Some(w) = number("Curve/lineWidth") {
+                c.line_width = w.clamp(0.5, 50.0);
+            }
+            if let Some(h) = number("Curve/historySize") {
+                c.history = (h.round() as usize).clamp(3, 200);
+            }
+            if let Some(o) = number("Curve/curvesOpacity") {
+                c.opacity = o.clamp(0.0, 1.0);
+            }
+            c.connection = yes("Curve/paintConnectionLine");
+            notes.push(format!(
+                "{name}: Krita's curve brush came across approximated"
+            ));
+        }
+        "gridbrush" => {
+            b.brush_type = BrushType::Grid;
+            let g = &mut b.engines.grid;
+            if let Some(w) = number("Grid/gridWidth") {
+                g.cell = w.clamp(2.0, 500.0);
+            }
+            g.offset = [
+                number("Grid/horizontalOffset").unwrap_or(0.0),
+                number("Grid/verticalOffset").unwrap_or(0.0),
+            ];
+            if let Some(k) = number("Grid/scale") {
+                g.scale = k.clamp(0.05, 1.5);
+            }
+            notes.push(format!(
+                "{name}: Krita's grid came across approximated (square cells, no divisions)"
+            ));
+        }
+        "tangentnormal" => {
+            b.brush_type = BrushType::TangentNormal;
+            // Krita's channel choices: 3 is -X, 4 is -Y.
+            b.engines.normal.flip_x = param("Tangent/swizzleRed") == Some("3");
+            b.engines.normal.flip_y = param("Tangent/swizzleGreen") == Some("4");
+        }
+        "particlebrush" => {
+            b.brush_type = BrushType::Particle;
+            let pt = &mut b.engines.particles;
+            if let Some(n) = number("ParticleCount") {
+                pt.count = (n.round() as u32).clamp(1, 200);
+            }
+            if let Some(w) = number("ParticleWeight") {
+                pt.weight = w.clamp(0.0, 1.0);
+            }
+            if let Some(g) = number("ParticleGravity") {
+                pt.gravity = [0.0, g.clamp(-10.0, 10.0)];
+            }
+            notes.push(format!(
+                "{name}: Krita's particles came across approximated"
+            ));
+        }
         "deformbrush" | "filter" | "duplicate" => notes.push(format!(
             "{name}: Krita's {engine} engine is the Smudge and Blur tools' modes here (deform, \
              sharpen and adjust, clone); only its tip came across"
@@ -2116,11 +2197,70 @@ mod tests {
 
     #[test]
     fn other_engines_come_with_a_note_and_damage_is_refused() {
-        let spray = AUTO.replace("paintbrush", "spraybrush");
-        let imported = import_kpp(&kpp(&spray), "file").unwrap();
-        assert!(imported.notes[0].contains("spraybrush"));
+        let dyna = AUTO.replace("paintbrush", "dynabrush");
+        let imported = import_kpp(&kpp(&dyna), "file").unwrap();
+        assert!(imported.notes[0].contains("dynabrush"));
         assert!(import_kpp(b"not a png", "f").is_err());
         assert!(import_kpp(&kpp("<Preset><param>"), "f").is_err());
+    }
+
+    #[test]
+    fn krita_engines_come_across_as_this_apps() {
+        use crate::brush_engine::brush::BrushType;
+        let with = |engine: &str, params: &str| {
+            let xml = AUTO
+                .replace("paintbrush", engine)
+                .replace("</Preset>", &format!("{params}</Preset>"));
+            import_kpp(&kpp(&xml), "file")
+                .unwrap()
+                .presets
+                .remove(0)
+                .brush
+        };
+        let p = |k: &str, v: &str| {
+            format!(r#"<param type="string" name="{k}"><![CDATA[{v}]]></param>"#)
+        };
+        let spray = with(
+            "spraybrush",
+            &[
+                p("Spray/particleCount", "120"),
+                p("Spray/gaussianDistribution", "true"),
+            ]
+            .concat(),
+        );
+        assert_eq!(spray.brush_type, BrushType::Spray);
+        assert_eq!(spray.engines.spray.amount, 120);
+        assert_eq!(
+            spray.engines.spray.distribution,
+            crate::brush_engine::engines::Distribution::Gaussian
+        );
+        let chalk = with("chalkbrush", &p("Chalk/radius", "12"));
+        assert_eq!(
+            (chalk.brush_type, chalk.brush_options.diameter),
+            (BrushType::Chalk, 24.0)
+        );
+        let curve = with(
+            "curvebrush",
+            &[p("Curve/lineWidth", "3"), p("Curve/historySize", "40")].concat(),
+        );
+        assert_eq!(curve.brush_type, BrushType::Curve);
+        assert_eq!(
+            (curve.engines.curve.line_width, curve.engines.curve.history),
+            (3.0, 40)
+        );
+        let grid = with("gridbrush", &p("Grid/gridWidth", "24"));
+        assert_eq!(
+            (grid.brush_type, grid.engines.grid.cell),
+            (BrushType::Grid, 24.0)
+        );
+        let normal = with("tangentnormal", &p("Tangent/swizzleGreen", "4"));
+        assert_eq!(normal.brush_type, BrushType::TangentNormal);
+        assert!(normal.engines.normal.flip_y);
+        let particle = with("particlebrush", &p("ParticleCount", "60"));
+        assert_eq!(
+            (particle.brush_type, particle.engines.particles.count),
+            (BrushType::Particle, 60)
+        );
     }
 
     #[test]

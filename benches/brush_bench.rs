@@ -694,6 +694,37 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.wet_edge = 0.6;
         b
     }));
+    // The new engines, at their defaults.
+    for (name, t) in [
+        (
+            "engine_spray",
+            rusty_painter::brush_engine::brush::BrushType::Spray,
+        ),
+        (
+            "engine_chalk",
+            rusty_painter::brush_engine::brush::BrushType::Chalk,
+        ),
+        (
+            "engine_curve",
+            rusty_painter::brush_engine::brush::BrushType::Curve,
+        ),
+        (
+            "engine_grid",
+            rusty_painter::brush_engine::brush::BrushType::Grid,
+        ),
+        (
+            "engine_tangent_normal",
+            rusty_painter::brush_engine::brush::BrushType::TangentNormal,
+        ),
+        (
+            "engine_particle",
+            rusty_painter::brush_engine::brush::BrushType::Particle,
+        ),
+    ] {
+        let mut b = base();
+        b.brush_type = t;
+        cases.push((name, b));
+    }
     // A bristle brush: 30 hairs.
     cases.push(("bristle", {
         let mut b = base();

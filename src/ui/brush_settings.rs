@@ -144,17 +144,17 @@ fn brush_settings_contents(
             BrushType::Bristle => "Bristle",
             BrushType::Sketch => "Sketch",
             BrushType::Hatching => "Hatching",
+            BrushType::Spray => "Spray",
+            BrushType::Chalk => "Chalk",
+            BrushType::Curve => "Curve",
+            BrushType::Grid => "Grid",
+            BrushType::TangentNormal => "Tangent normal",
+            BrushType::Particle => "Particle",
         };
         egui::ComboBox::from_id_salt("brush_type")
             .selected_text(label(brush.brush_type))
             .show_ui(ui, |ui| {
-                for t in [
-                    BrushType::Soft,
-                    BrushType::Pixel,
-                    BrushType::Bristle,
-                    BrushType::Sketch,
-                    BrushType::Hatching,
-                ] {
+                for t in BrushType::ALL {
                     mask_changed |= ui
                         .selectable_value(&mut brush.brush_type, t, label(t))
                         .changed();
@@ -181,6 +181,30 @@ fn brush_settings_contents(
                 "Parallel lines pinned to the canvas wherever it passes; pressing harder \
                  cross-hatches."
             }
+            BrushType::Spray => {
+                "Each dab a cloud of small particles of the brush's tip, evenly, thicker in \
+                 the middle or in clumps."
+            }
+            BrushType::Chalk => {
+                "The tip broken up by a grain each dab lays differently; pressing harder \
+                 fills it in."
+            }
+            BrushType::Curve => {
+                "Curves swinging from where the stroke was a while back to the pen: loose, \
+                 looping lines."
+            }
+            BrushType::Grid => {
+                "One shape of the tip in each cell of a grid the brush passes over: mosaics, \
+                 halftone-like fills."
+            }
+            BrushType::TangentNormal => {
+                "Paints a normal map: the pen's tilt as the colour (red leaning right, green \
+                 up, blue upright). With a mouse, it leans the way the stroke goes."
+            }
+            BrushType::Particle => {
+                "A swarm the pen pulls along, each particle drawing its own path: lines that \
+                 swing and overshoot."
+            }
         })
         .small()
         .color(TEXT_DIM),
@@ -189,6 +213,12 @@ fn brush_settings_contents(
         BrushType::Bristle => changed |= bristle_section(ui, &mut brush.bristles),
         BrushType::Sketch => changed |= sketch_section(ui, &mut brush.sketch),
         BrushType::Hatching => changed |= hatching_section(ui, &mut brush.hatching),
+        BrushType::Spray => changed |= spray_section(ui, &mut brush.engines.spray),
+        BrushType::Chalk => changed |= chalk_section(ui, &mut brush.engines.chalk),
+        BrushType::Curve => changed |= curve_section(ui, &mut brush.engines.curve),
+        BrushType::Grid => changed |= grid_section(ui, &mut brush.engines.grid),
+        BrushType::TangentNormal => changed |= normal_section(ui, &mut brush.engines.normal),
+        BrushType::Particle => changed |= particle_section(ui, &mut brush.engines.particles),
         BrushType::Soft | BrushType::Pixel => {}
     }
     property_row(ui, "Painting", |ui| {
@@ -1264,6 +1294,153 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
              cross over).",
         )
         .changed();
+    });
+    changed
+}
+
+/// A slider row with a reset (double-click), for the engines' settings.
+fn engine_row<T: egui::emath::Numeric + Send + Sync + 'static>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut T,
+    slider: impl for<'b> FnOnce(&'b mut T) -> egui::Slider<'b>,
+) -> bool {
+    slider_row(ui, label, crate::ui::widgets::reset(value, slider)).changed()
+}
+
+fn px(v: &mut f32, range: std::ops::RangeInclusive<f32>) -> egui::Slider<'_> {
+    egui::Slider::new(v, range)
+        .logarithmic(true)
+        .max_decimals(1)
+        .suffix(" px")
+}
+
+/// A spray brush's particles.
+fn spray_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::engines::Spray) -> bool {
+    use crate::brush_engine::engines::Distribution;
+    let mut changed = false;
+    section(ui, "Spray", true, |ui| {
+        changed |= engine_row(ui, "Particles", &mut s.amount, |v| {
+            egui::Slider::new(v, 1..=500).logarithmic(true)
+        });
+        changed |= segmented(
+            ui,
+            &mut s.distribution,
+            &[
+                (Distribution::Uniform, "Even"),
+                (Distribution::Gaussian, "Middle"),
+                (Distribution::Clustered, "Clumps"),
+            ],
+            true,
+        );
+        changed |= engine_row(ui, "Particle size", &mut s.particle_size, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.01..=1.0).logarithmic(true))
+        });
+        changed |= engine_row(ui, "Size randomness", &mut s.size_random, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= ui
+            .checkbox(&mut s.random_rotation, "Turned at random")
+            .changed();
+    });
+    changed
+}
+
+/// A chalk brush's grain.
+fn chalk_section(ui: &mut egui::Ui, c: &mut crate::brush_engine::engines::Chalk) -> bool {
+    let mut changed = false;
+    section(ui, "Chalk", true, |ui| {
+        changed |= engine_row(ui, "Grain", &mut c.grain, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= engine_row(ui, "Grain size", &mut c.scale, |v| px(v, 0.5..=16.0));
+    });
+    changed
+}
+
+/// A curve brush's lines.
+fn curve_section(ui: &mut egui::Ui, c: &mut crate::brush_engine::engines::CurveLines) -> bool {
+    let mut changed = false;
+    section(ui, "Curves", true, |ui| {
+        changed |= engine_row(ui, "Reach back", &mut c.history, |v| {
+            egui::Slider::new(v, 3..=200)
+                .logarithmic(true)
+                .suffix(" points")
+        });
+        changed |= engine_row(ui, "Line width", &mut c.line_width, |v| px(v, 0.5..=50.0));
+        changed |= engine_row(ui, "Line opacity", &mut c.opacity, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= ui
+            .checkbox(&mut c.connection, "Straight lines too")
+            .changed();
+    });
+    changed
+}
+
+/// A grid brush's cells.
+fn grid_section(ui: &mut egui::Ui, g: &mut crate::brush_engine::engines::Grid) -> bool {
+    let mut changed = false;
+    section(ui, "Grid", true, |ui| {
+        changed |= engine_row(ui, "Cell size", &mut g.cell, |v| px(v, 2.0..=500.0));
+        changed |= engine_row(ui, "Shape size", &mut g.scale, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.05..=1.5))
+        });
+        changed |= engine_row(ui, "Offset x", &mut g.offset[0], |v| {
+            egui::Slider::new(v, 0.0..=500.0)
+                .max_decimals(0)
+                .suffix(" px")
+        });
+        changed |= engine_row(ui, "Offset y", &mut g.offset[1], |v| {
+            egui::Slider::new(v, 0.0..=500.0)
+                .max_decimals(0)
+                .suffix(" px")
+        });
+        changed |= engine_row(ui, "Hue randomness", &mut g.hue_jitter, |v| {
+            egui::Slider::new(v, 0.0..=180.0)
+                .max_decimals(0)
+                .suffix("°")
+        });
+    });
+    changed
+}
+
+/// A tangent normal brush's colours.
+fn normal_section(ui: &mut egui::Ui, n: &mut crate::brush_engine::engines::TangentNormal) -> bool {
+    let mut changed = false;
+    section(ui, "Normal map", true, |ui| {
+        changed |= ui.checkbox(&mut n.flip_x, "Flip red").changed();
+        changed |= ui.checkbox(&mut n.flip_y, "Flip green (DirectX)").changed();
+        changed |= engine_row(ui, "Mouse elevation", &mut n.elevation, |v| {
+            egui::Slider::new(v, 0.0..=90.0).max_decimals(0).suffix("°")
+        });
+    });
+    changed
+}
+
+/// A particle brush's swarm.
+fn particle_section(ui: &mut egui::Ui, p: &mut crate::brush_engine::engines::Particles) -> bool {
+    let mut changed = false;
+    section(ui, "Particles", true, |ui| {
+        changed |= engine_row(ui, "Count", &mut p.count, |v| {
+            egui::Slider::new(v, 1..=200).logarithmic(true)
+        });
+        changed |= engine_row(ui, "Pull", &mut p.weight, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= engine_row(ui, "Drag", &mut p.drag, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= engine_row(ui, "Gravity x", &mut p.gravity[0], |v| {
+            egui::Slider::new(v, -10.0..=10.0).max_decimals(1)
+        });
+        changed |= engine_row(ui, "Gravity y", &mut p.gravity[1], |v| {
+            egui::Slider::new(v, -10.0..=10.0).max_decimals(1)
+        });
+        changed |= engine_row(ui, "Line width", &mut p.line_width, |v| px(v, 0.5..=50.0));
+        changed |= engine_row(ui, "Spread", &mut p.spread, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=2.0))
+        });
     });
     changed
 }

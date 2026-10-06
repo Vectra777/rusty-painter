@@ -118,6 +118,12 @@ bucket fill and colour select at 4096² take 0.15–0.22 s.
 
 ## Known costs left
 
+- **Curve and particle brushes** draw many thin lines per sample: a
+  60-sample stroke of a 60 px brush takes about 40 ms (curve) and 50 ms
+  (particle, 30 of them), under a millisecond a sample on the stroke
+  worker; spray (40 particles a dab) about 25 ms. The grid, chalk and
+  tangent normal brushes cost about what a plain brush does.
+
 - **Documents with folders, masks, clipping, fill layers, borders or
   adjustment layers** composite through the general per-pixel path, which
   is still 2–3 times slower than the plain one. Flattening the whole
