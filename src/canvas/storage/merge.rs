@@ -48,6 +48,7 @@ impl Layer {
         layer.adjustment = None;
         layer.style = Default::default();
         layer.vector = None;
+        layer.height = None;
         layer.shader = None;
         layer
     }

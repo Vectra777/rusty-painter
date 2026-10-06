@@ -785,7 +785,34 @@ impl Canvas {
         if let Some(fill) = layer.style.fill {
             return Some(fill.tile(tx, ty, ts));
         }
-        let border = layer.style.border?;
+        let mut out = match layer.style.border {
+            Some(border) => self.bordered_tile(i, tx, ty, border)?,
+            None => {
+                let cell = layer_tile(layer, tx, ty)?;
+                let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.is_empty {
+                    return None;
+                }
+                guard.data.clone()?
+            }
+        };
+        // Impasto: the paint lit by its thickness.
+        if let (Some(light), Some(heights)) = (layer.style.impasto, layer.height.as_deref()) {
+            light.shade(&mut out, heights, tx, ty, ts);
+        }
+        Some(out)
+    }
+
+    /// A bordered layer's paint over its border, for tile `(tx, ty)`.
+    fn bordered_tile(
+        &self,
+        i: usize,
+        tx: i32,
+        ty: i32,
+        border: crate::canvas::layer_style::Border,
+    ) -> Option<Vec<Color32>> {
+        let layer = &self.layers[i];
+        let ts = self.tile_size;
         // The paint's alpha around the tile, as far as the border reaches
         // (never past the next tiles).
         let reach = (layer.style.reach() as usize).min(ts);

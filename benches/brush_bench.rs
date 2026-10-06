@@ -402,6 +402,20 @@ fn bench_composite_layer_features(c: &mut Criterion) {
             paint(&canvas, mi, (255, 255, 255));
             canvas
         }),
+        // The top layer's paint lit by its thickness (every tile sloped).
+        ("impasto_lit_layer", {
+            let (mut canvas, ti) = two_layers();
+            let heights = rusty_painter::canvas::impasto::HeightMap::default();
+            for &(tx, ty) in &tiles {
+                let h = (0..64 * 64)
+                    .map(|i| ((i * 97 + tx * 13) % 4000) as u16 * 8)
+                    .collect();
+                heights.set_tile((tx as i32, ty as i32), Some(h));
+            }
+            canvas.layers[ti].height = Some(Box::new(heights));
+            canvas.layers[ti].style.impasto = Some(Default::default());
+            canvas
+        }),
     ];
     let mut group = c.benchmark_group("composite_layer_features_576_tiles");
     for (name, canvas) in cases {
@@ -694,6 +708,13 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.wet_edge = 0.6;
         b
     }));
+    // Impasto (on a layer with heights), against the same brush flat
+    // ("plain").
+    cases.push(("impasto", {
+        let mut b = base();
+        b.impasto = Some(Default::default());
+        b
+    }));
     // The new engines, at their defaults.
     for (name, t) in [
         (
@@ -881,8 +902,12 @@ fn bench_feature_strokes(c: &mut Criterion) {
         b.paint_blend = rusty_painter::canvas::blend_modes::LayerBlend::Parallel;
         b
     }));
+    // (Impasto lays heights only on a layer that has them.)
+    let mut thick = Canvas::new(1024, 1024, Color32::WHITE, 64);
+    thick.layers[1].height = Some(Default::default());
     let mut group = c.benchmark_group("feature_stroke_60_samples");
     for (name, mut brush) in cases {
+        let canvas = if name == "impasto" { &thick } else { &canvas };
         group.bench_function(name, |b| {
             b.iter(|| {
                 let mut undo_action = UndoAction {
@@ -894,7 +919,7 @@ fn bench_feature_strokes(c: &mut Criterion) {
                 let mut stroke_tiles = StrokeTiles::default();
                 let mut stroke = StrokeState::with_seed(1);
                 let mut context =
-                    StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut stroke_tiles);
+                    StrokeContext::new(&pool, canvas, None, &mut undo_action, &mut stroke_tiles);
                 for &(pos, pressure, time) in &points {
                     stroke.add_sample(&mut brush, pos, pressure, Some(time), &mut context);
                     stroke.airbrush(&mut brush, time + 0.05, &mut context);

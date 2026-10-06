@@ -384,6 +384,41 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     })
     .response
     .on_disabled_hover_text("For vector layers (Layer → New Vector Layer)");
+    let lit = app
+        .canvas
+        .layers
+        .get(active)
+        .and_then(|l| l.style.impasto.filter(|_| l.height.is_some()));
+    ui.add_enabled_ui(lit.is_some(), |ui| {
+        ui.menu_button("Impasto", |ui| {
+            if let Some(mut light) = lit {
+                let mut changed = false;
+                for (label, value, range) in [
+                    ("Light from", &mut light.angle, 0.0..=360.0),
+                    ("Light height", &mut light.elevation, 5.0..=90.0),
+                ] {
+                    changed |= ui
+                        .add(egui::Slider::new(value, range).suffix("°").text(label))
+                        .changed();
+                }
+                changed |= ui
+                    .add(egui::Slider::new(&mut light.strength, 0.0..=2.0).text("Strength"))
+                    .changed();
+                changed |= ui
+                    .add(egui::Slider::new(&mut light.gloss, 0.0..=1.0).text("Gloss"))
+                    .changed();
+                if changed {
+                    app.canvas_mut().layers[active].style.impasto = Some(light);
+                    app.mark_all_tiles_dirty();
+                }
+            }
+            if menu_item(ui, "Bake Impasto", None) {
+                app.bake_impasto(active);
+            }
+        })
+    })
+    .response
+    .on_disabled_hover_text("For layers painted with impasto (Brush → Impasto)");
     if menu_item(
         ui,
         "Duplicate Layer",

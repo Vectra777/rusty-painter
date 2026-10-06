@@ -28,6 +28,9 @@ use std::sync::Mutex;
 #[derive(Clone)]
 pub(crate) struct StrokeBuffer {
     pub original: Vec<Color32>,
+    /// Impasto: the tile's heights before the stroke (`None` when it lays
+    /// none down).
+    pub heights: Option<Vec<u16>>,
     pub coverage: Vec<f32>,
     /// Selection coverage for this tile (0..=1 per pixel), computed on first
     /// use; the selection can't change during a stroke.
@@ -91,8 +94,16 @@ pub(crate) struct CollectedDab {
     pub strength: f32,
 }
 
-/// A tile's stroke buffer and pixels, saved.
-type SavedTile = (StrokeBuffer, Vec<Color32>);
+/// A tile's stroke buffer, pixels and impasto heights, saved.
+type SavedTile = (StrokeBuffer, Vec<Color32>, Option<Vec<u16>>);
+
+/// The impasto heights of the layer `canvas` paints on, if it has some.
+fn layer_heights(canvas: &Canvas) -> Option<&crate::canvas::impasto::HeightMap> {
+    canvas
+        .layers
+        .get(canvas.active_layer_idx)
+        .and_then(|l| l.height.as_deref())
+}
 
 /// The stroke's tiles as they were at a checkpoint: each tile painted
 /// since, saved the first time it was about to be (`None`: it had no
@@ -112,8 +123,12 @@ impl StrokeTiles {
     /// tile's undo snapshot, already taken), ready to paint the stroke anew.
     pub(crate) fn restart(&mut self, canvas: &Canvas) {
         let tile_size = canvas.tile_size();
+        let heights = layer_heights(canvas);
         for (&key, buffer) in &self.buffers {
             let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if let (Some(map), Some(before)) = (heights, &buffer.heights) {
+                map.set_tile((key.0 as i32, key.1 as i32), Some(before.clone()));
+            }
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(data) = tile.data.as_mut() {
@@ -184,7 +199,8 @@ impl StrokeTiles {
             let pixels = (canvas.lock_tile(key.0, key.1))
                 .and_then(|t| t.lock().unwrap_or_else(|e| e.into_inner()).data.clone())
                 .unwrap_or_default();
-            (buffer, pixels)
+            let heights = layer_heights(canvas).and_then(|m| m.tile((key.0 as i32, key.1 as i32)));
+            (buffer, pixels, heights)
         });
         checkpoint.saved.insert(key, saved);
     }
@@ -202,12 +218,19 @@ impl StrokeTiles {
                 continue;
             };
             let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let heights = layer_heights(canvas);
             let pixels = match saved {
-                Some((was, pixels)) => {
+                Some((was, pixels, h)) => {
                     *buffer = was;
+                    if let Some(map) = heights {
+                        map.set_tile((key.0 as i32, key.1 as i32), h);
+                    }
                     pixels
                 }
                 None => {
+                    if let (Some(map), Some(before)) = (heights, &buffer.heights) {
+                        map.set_tile((key.0 as i32, key.1 as i32), Some(before.clone()));
+                    }
                     buffer.coverage.fill(0.0);
                     buffer.tail = [None, None];
                     buffer.tail_rect = [None, None];

@@ -116,6 +116,7 @@ pub struct LayerMeta {
     pub style: crate::canvas::layer_style::LayerStyle,
     pub text: Option<Box<crate::canvas::text::TextLayer>>,
     pub vector: Option<Box<crate::canvas::vector::VectorLayer>>,
+    pub height: Option<Box<crate::canvas::impasto::HeightMap>>,
     pub shader: Option<Box<crate::canvas::shader::ShaderLayer>>,
     pub position_locked: bool,
     pub draft: bool,
@@ -183,6 +184,17 @@ pub enum LayerHistoryOp {
         layers: Vec<(LayerId, Option<Box<crate::canvas::vector::VectorLayer>>)>,
         inner: Option<Box<LayerHistoryOp>>,
     },
+    /// Impasto heights ([`crate::canvas::storage::Layer::height`]) of the
+    /// tiles a step changed, as they are on the other side of it (`None`:
+    /// flat); and, when the step added or took away the layer's heights
+    /// altogether, `map` (the whole map on the other side). `inner` as for
+    /// `Text`.
+    Height {
+        layer: LayerId,
+        tiles: crate::canvas::impasto::HeightTiles,
+        map: Option<Option<Box<crate::canvas::impasto::HeightMap>>>,
+        inner: Option<Box<LayerHistoryOp>>,
+    },
     /// Layers were merged: the entries on the other side of this step,
     /// swapped in place by undo and redo (see [`Canvas::swap_layers`]).
     Replaced(std::sync::Arc<std::sync::Mutex<crate::canvas::storage::LayerSwap>>),
@@ -193,8 +205,11 @@ impl LayerHistoryOp {
     /// or `Vector` op carries (however they're nested).
     pub fn structural(op: Option<&LayerHistoryOp>) -> Option<&LayerHistoryOp> {
         let mut op = op;
-        while let Some(LayerHistoryOp::Text { inner, .. } | LayerHistoryOp::Vector { inner, .. }) =
-            op
+        while let Some(
+            LayerHistoryOp::Text { inner, .. }
+            | LayerHistoryOp::Vector { inner, .. }
+            | LayerHistoryOp::Height { inner, .. },
+        ) = op
         {
             op = inner.as_deref();
         }
@@ -266,6 +281,20 @@ fn snapshot_bytes(action: &UndoAction) -> usize {
                     .sum::<usize>();
                 inner.as_deref()
             }
+            LayerHistoryOp::Height {
+                tiles, map, inner, ..
+            } => {
+                kept += tiles
+                    .iter()
+                    .filter_map(|(_, h)| h.as_ref())
+                    .map(|h| h.len() * 2)
+                    .sum::<usize>();
+                kept += map
+                    .as_ref()
+                    .and_then(|m| m.as_ref())
+                    .map_or(0, |m| m.bytes());
+                inner.as_deref()
+            }
             LayerHistoryOp::Text { inner, .. } => inner.as_deref(),
             _ => None,
         };
@@ -328,6 +357,7 @@ fn describe(action: &UndoAction) -> Option<&'static str> {
             "Text"
         }
         Some(LayerHistoryOp::Vector { .. }) => "Vector",
+        Some(LayerHistoryOp::Height { .. }) => "Impasto",
         None if action.transform.is_some() => "Transform",
         None if action.tiles.is_empty() && action.selection.is_some() => "Selection",
         None => return None,
@@ -536,6 +566,25 @@ impl History {
                     }
                     op = inner.as_deref_mut();
                 }
+                Some(LayerHistoryOp::Height {
+                    layer,
+                    tiles,
+                    map,
+                    inner,
+                }) => {
+                    if let Some(idx) = canvas.layer_index_of(*layer) {
+                        let l = &mut canvas.layers[idx];
+                        if let Some(map) = map {
+                            std::mem::swap(&mut l.height, map);
+                        }
+                        if let Some(heights) = l.height.as_deref() {
+                            for (key, h) in tiles {
+                                *h = heights.set_tile(*key, h.take());
+                            }
+                        }
+                    }
+                    op = inner.as_deref_mut();
+                }
                 _ => return,
             }
         }
@@ -642,7 +691,12 @@ impl History {
                 Some(op.clone())
             }
             // (Given the structural part: never a `Text` op.)
-            Some(LayerHistoryOp::Text { .. } | LayerHistoryOp::Vector { .. }) | None => None,
+            Some(
+                LayerHistoryOp::Text { .. }
+                | LayerHistoryOp::Vector { .. }
+                | LayerHistoryOp::Height { .. },
+            )
+            | None => None,
         }
     }
 
@@ -690,6 +744,7 @@ impl History {
                 style: Default::default(),
                 text: None,
                 vector: None,
+                height: None,
                 shader: None,
                 position_locked: false,
                 draft: false,
@@ -788,7 +843,12 @@ impl History {
                 Some(op.clone())
             }
             // (Given the structural part: never a `Text` op.)
-            Some(LayerHistoryOp::Text { .. } | LayerHistoryOp::Vector { .. }) | None => None,
+            Some(
+                LayerHistoryOp::Text { .. }
+                | LayerHistoryOp::Vector { .. }
+                | LayerHistoryOp::Height { .. },
+            )
+            | None => None,
         }
     }
 

@@ -24,6 +24,79 @@ pub struct PulledString {
 }
 
 impl PainterApp {
+    /// Layer `idx` has impasto heights (flat to start with, so nothing
+    /// shows until paint is laid thick) and a light on them.
+    pub(crate) fn ensure_impasto(&mut self, idx: usize) {
+        let has = self.canvas.layers.get(idx).is_none_or(|l| {
+            l.height.is_some() && l.style.impasto.is_some()
+                || l.kind != crate::canvas::storage::LayerKind::Paint
+        });
+        if has {
+            return;
+        }
+        let layer = &mut self.canvas_mut().layers[idx];
+        layer.height.get_or_insert_with(Default::default);
+        layer.style.impasto.get_or_insert_with(Default::default);
+    }
+
+    /// Layer `idx`'s impasto made plain paint: its pixels lit as they show,
+    /// its heights put aside (one undo step brings them back). For what
+    /// moves its pixels (the transform tool), which the heights wouldn't
+    /// follow. Returns whether it had any.
+    pub(crate) fn bake_impasto(&mut self, idx: usize) -> bool {
+        use crate::canvas::history::{LayerHistoryOp, TileSnapshot, UndoAction};
+        let Some(layer) = self.canvas.layers.get(idx) else {
+            return false;
+        };
+        let (Some(_), Some(light), id) = (layer.height.as_ref(), layer.style.impasto, layer.id)
+        else {
+            return false;
+        };
+        self.release_canvas();
+        let ts = self.canvas.tile_size();
+        let mut tiles = Vec::new();
+        for (tx, ty) in self.canvas.layer_tile_keys(idx) {
+            let Some(data) = self.canvas.get_layer_tile_data(idx, tx, ty) else {
+                continue;
+            };
+            let mut lit = data.clone();
+            if let Some(h) = self.canvas.layers[idx].height.as_deref() {
+                light.shade(&mut lit, h, tx, ty, ts);
+            }
+            if lit == data {
+                continue;
+            }
+            self.canvas.set_layer_tile_data(idx, tx, ty, lit);
+            tiles.push(TileSnapshot {
+                tx,
+                ty,
+                layer_id: id,
+                x0: 0,
+                y0: 0,
+                width: ts,
+                height: ts,
+                data: data.into(),
+            });
+        }
+        let map = crate::app::stroke_ops::exclusive(&mut self.canvas).layers[idx]
+            .height
+            .take();
+        self.layer_state.history.label_next("Bake impasto");
+        self.push_undo(UndoAction {
+            tiles,
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Height {
+                layer: id,
+                tiles: Vec::new(),
+                map: Some(map),
+                inner: None,
+            }),
+        });
+        self.mark_all_tiles_dirty();
+        true
+    }
+
     /// Start a stroke whose first dab uses `pressure` (a size factor).
     pub(crate) fn start_stroke_with_pressure(&mut self, pos: Vec2, pressure: f32) {
         if self.is_active_layer_locked() || self.is_active_layer_folder() {
@@ -40,6 +113,9 @@ impl PainterApp {
         }
         self.rasterise_text_for_stroke();
         self.rasterise_vector_for_stroke();
+        if self.brush_state.brush.impasto.is_some() {
+            self.ensure_impasto(self.canvas.active_layer_idx);
+        }
         self.mark_action();
         let erasing = self.brush_state.brush.brush_options.blend_mode == BlendMode::Eraser;
         if !erasing {
@@ -258,6 +334,121 @@ mod tests {
     use crate::brush_engine::brush::StabilizerAlgorithm;
     use crate::canvas::Canvas;
     use eframe::egui::{Color32, Vec2};
+
+    #[test]
+    fn an_impasto_stroke_lays_paint_thick_lit_and_undoes_and_saves_exactly() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        let brush = &mut app.brush_state.brush;
+        brush.brush_options.color = Color32::from_rgb(200, 120, 40);
+        brush.brush_options.diameter = 16.0;
+        brush.brush_options.hardness = 50.0;
+        let flat = {
+            let mut plain =
+                crate::project::tests::test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+            plain.canvas_mut().active_layer_idx = 1;
+            plain.brush_state.brush = app.brush_state.brush.clone();
+            plain.start_stroke_with_pressure(Vec2::new(20.0, 32.0), 1.0);
+            plain.add_stroke_point(Vec2::new(100.0, 32.0), 1.0);
+            plain.finish_stroke();
+            plain.release_canvas();
+            plain.canvas.flatten().pixels
+        };
+        let before = app.canvas.flatten().pixels;
+        let pushes = app.layer_state.history.push_count();
+        app.brush_state.brush.impasto = Some(crate::canvas::impasto::Impasto {
+            depth: 0.8,
+            ..Default::default()
+        });
+        app.start_stroke_with_pressure(Vec2::new(20.0, 32.0), 1.0);
+        app.add_stroke_point(Vec2::new(100.0, 32.0), 1.0);
+        app.finish_stroke();
+        app.release_canvas();
+        let heights = app.canvas.layers[1]
+            .height
+            .as_deref()
+            .expect("the layer got heights");
+        let tile = heights.tile((0, 0)).unwrap();
+        assert!(
+            tile[32 * 64 + 50] > tile[20 * 64 + 50],
+            "thick where it went"
+        );
+        let lit = app.canvas.flatten().pixels;
+        assert!(lit != flat, "the light shows the thickness");
+        assert_eq!(
+            lit[2 * 128 + 50],
+            flat[2 * 128 + 50],
+            "away from the paint, the same"
+        );
+        assert_eq!(app.layer_state.history.push_count(), pushes + 1, "one step");
+        // Saved and opened again: the heights come too.
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let loaded = crate::project::decode_project(&bytes).unwrap();
+        assert!(
+            loaded.canvas.layers[1].height.as_deref() == app.canvas.layers[1].height.as_deref()
+        );
+        assert_eq!(loaded.canvas.flatten().pixels, lit);
+        // Undone: the colour and the heights as they were.
+        app.apply_history(false);
+        assert_eq!(app.canvas.flatten().pixels, before);
+        assert!(
+            app.canvas.layers[1]
+                .height
+                .as_deref()
+                .is_none_or(|h| h.is_empty())
+        );
+        // Redone: back exactly.
+        app.apply_history(true);
+        assert_eq!(app.canvas.flatten().pixels, lit);
+    }
+
+    #[test]
+    fn impasto_bakes_into_paint_and_turns_with_the_image() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        let brush = &mut app.brush_state.brush;
+        brush.brush_options.diameter = 16.0;
+        brush.impasto = Some(crate::canvas::impasto::Impasto {
+            depth: 0.8,
+            ..Default::default()
+        });
+        app.start_stroke_with_pressure(Vec2::new(20.0, 20.0), 1.0);
+        app.add_stroke_point(Vec2::new(60.0, 20.0), 1.0);
+        app.finish_stroke();
+        app.release_canvas();
+        let lit = app.canvas.flatten().pixels;
+        // Baked: it looks the same, as plain paint; undone, the heights are back.
+        assert!(app.bake_impasto(1));
+        assert!(app.canvas.layers[1].height.is_none());
+        assert_eq!(app.canvas.flatten().pixels, lit);
+        app.apply_history(false);
+        assert!(app.canvas.layers[1].height.is_some());
+        assert_eq!(app.canvas.flatten().pixels, lit);
+        // Turned a quarter, the heights turn with the paint: the picture is
+        // the same picture turned.
+        app.apply_image_op(crate::canvas::geometry::ImageOp::RotateCw);
+        let turned = app.canvas.flatten();
+        let (w, h) = (turned.size[0], turned.size[1]);
+        assert_eq!((w, h), (64, 128));
+        let mut differ = 0;
+        for y in 0..64 {
+            for x in 0..128 {
+                // (x, y) goes to (h - 1 - y, x).
+                let was = lit[y * 128 + x];
+                let now = turned.pixels[x * w + (63 - y)];
+                differ += (was != now) as usize;
+            }
+        }
+        // The light comes from the same side of the screen, so slopes
+        // light differently once turned; the paint itself is where it was.
+        let painted = app.canvas.layers[1].height.as_deref().unwrap();
+        let tile = painted.tile((0, 0)).unwrap();
+        assert!(
+            tile[20 * 64 + (63 - 20)] > 0,
+            "heights under the turned paint"
+        );
+        assert!(differ < 64 * 128 / 4);
+    }
 
     #[test]
     fn a_stroke_mixes_in_the_secondary_colour() {

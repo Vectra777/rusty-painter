@@ -166,6 +166,49 @@ impl Canvas {
                 }),
                 _ => None,
             };
+            // Impasto heights move as the paint does (picked, not blended:
+            // a height is two bytes).
+            shell.height = shell.height.take().map(|map| {
+                let heights: Vec<Color32> = {
+                    let mut all = vec![0u16; w * h];
+                    for ((tx, ty), tile) in map.tiles() {
+                        for (y, row) in tile.chunks(ts).enumerate() {
+                            let gy = ty as usize * ts + y;
+                            let gx = tx as usize * ts;
+                            if gy >= h || gx >= w {
+                                continue;
+                            }
+                            let n = row.len().min(w - gx);
+                            all[gy * w + gx..gy * w + gx + n].copy_from_slice(&row[..n]);
+                        }
+                    }
+                    crate::canvas::impasto::to_pixels(&all)
+                };
+                let op = match op {
+                    ImageOp::Resize { w, h, .. } => ImageOp::Resize {
+                        w,
+                        h,
+                        smooth: false,
+                    },
+                    other => other,
+                };
+                let zero = crate::canvas::impasto::to_pixels(&[0])[0];
+                let moved = crate::canvas::impasto::from_pixels(&op.apply(&heights, w, h, zero));
+                let out = crate::canvas::impasto::HeightMap::default();
+                for ty in 0..nh.div_ceil(ts) {
+                    for tx in 0..nw.div_ceil(ts) {
+                        let mut tile = vec![0u16; ts * ts];
+                        for y in 0..ts.min(nh - ty * ts) {
+                            let gy = ty * ts + y;
+                            let n = ts.min(nw - tx * ts);
+                            tile[y * ts..y * ts + n]
+                                .copy_from_slice(&moved[gy * nw + tx * ts..gy * nw + tx * ts + n]);
+                        }
+                        out.set_tile((tx as i32, ty as i32), Some(tile));
+                    }
+                }
+                Box::new(out)
+            });
             // Vector lines likewise; a gradient fill's ends move with the
             // frame too.
             shell.vector = match op {

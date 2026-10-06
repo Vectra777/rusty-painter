@@ -19,19 +19,24 @@ pub struct LayerStyle {
     /// An outline around the layer's paint.
     #[serde(default)]
     pub border: Option<Border>,
+    /// The light on the paint's thickness (the layer's impasto heights).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impasto: Option<crate::canvas::impasto::ImpastoLight>,
 }
 
 impl LayerStyle {
     pub fn is_plain(&self) -> bool {
-        self.fill.is_none() && self.border.is_none()
+        self.fill.is_none() && self.border.is_none() && self.impasto.is_none()
     }
 
     /// How far (pixels) past its paint the layer shows: the border's width.
     pub fn reach(&self) -> i32 {
-        match (self.fill, self.border) {
+        let border = match (self.fill, self.border) {
             (None, Some(b)) => b.width.clamp(0.0, MAX_BORDER).ceil() as i32 + 1,
             _ => 0,
-        }
+        };
+        // Impasto's slopes read a pixel of the next tile.
+        border.max(self.impasto.is_some() as i32)
     }
 }
 
@@ -309,6 +314,7 @@ mod tests {
         let style = LayerStyle {
             fill: None,
             border: Some(Border::default()),
+            impasto: None,
         };
         let json = serde_json::to_string(&style).unwrap();
         assert_eq!(serde_json::from_str::<LayerStyle>(&json).unwrap(), style);

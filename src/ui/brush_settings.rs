@@ -727,6 +727,41 @@ fn brush_settings_contents(
             .changed();
         }
     });
+    section(ui, "Impasto", false, |ui| {
+        use crate::canvas::impasto::{Impasto, ImpastoMode};
+        let mut on = brush.impasto.is_some();
+        if ui
+            .checkbox(&mut on, "Paint thickness")
+            .on_hover_text(
+                "The paint has a thickness the layer's light shows (Layer → Impasto Light). \
+                 An eraser takes it away.",
+            )
+            .changed()
+        {
+            brush.impasto = on.then(Impasto::default);
+            changed = true;
+        }
+        if let Some(imp) = brush.impasto.as_mut() {
+            changed |= slider_row(
+                ui,
+                "Depth",
+                crate::ui::widgets::reset(&mut imp.depth, |v| {
+                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                }),
+            )
+            .changed();
+            changed |= segmented(
+                ui,
+                &mut imp.mode,
+                &[
+                    (ImpastoMode::Add, "Build up"),
+                    (ImpastoMode::Max, "Level"),
+                    (ImpastoMode::Flatten, "Flatten"),
+                ],
+                true,
+            );
+        }
+    });
 
     section(ui, "Pen pressure & tilt", true, |ui| {
         let o = &mut brush.brush_options;

@@ -12,6 +12,7 @@ pub mod filters;
 pub mod geometry;
 pub mod gradient;
 pub mod history;
+pub mod impasto;
 pub mod inpaint;
 pub mod layer_style;
 pub mod liquify;

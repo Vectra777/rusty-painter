@@ -118,6 +118,11 @@ bucket fill and colour select at 4096² take 0.15–0.22 s.
 
 ## Known costs left
 
+- **Impasto**: a stroke laying heights costs about a fifth more than
+  the same brush flat; a lit layer composites through the general path,
+  about twice a plain layer's time where its paint slopes (576 tiles:
+  19 ms against 10 ms). Heights are 2 bytes a pixel of painted tiles, and
+  a stroke's undo step holds the height tiles it touched.
 - **Curve and particle brushes** draw many thin lines per sample: a
   60-sample stroke of a 60 px brush takes about 40 ms (curve) and 50 ms
   (particle, 30 of them), under a millisecond a sample on the stroke

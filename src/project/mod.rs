@@ -578,6 +578,10 @@ struct StoredLayer {
     /// A shader layer's shader; absent in older files (and on other layers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shader: Option<crate::canvas::shader::ShaderLayer>,
+    /// Impasto heights, as pixels (see `canvas::impasto::to_pixels`);
+    /// absent in older files (and on layers without).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heights: Option<Vec<StoredTile>>,
     /// Layer flags; absent in older files.
     #[serde(default)]
     position_locked: bool,
@@ -611,6 +615,25 @@ impl StoredLayer {
             text: convert::StoredText::from_layer(layer.text.as_deref()),
             vector: layer.vector.as_deref().cloned(),
             shader: layer.shader.map(|s| *s),
+            heights: match &layer.height {
+                Some(map) => {
+                    let tiles = map.tiles();
+                    let raws: Vec<Vec<u8>> = (tiles.iter())
+                        .map(|(_, h)| colors_to_bytes(&crate::canvas::impasto::to_pixels(h)))
+                        .collect();
+                    let stored = push_blobs(blobs, &raws)?;
+                    Some(
+                        (tiles.iter().zip(stored))
+                            .map(|(((tx, ty), _), rgba_zstd)| StoredTile {
+                                tx: *tx,
+                                ty: *ty,
+                                rgba_zstd,
+                            })
+                            .collect(),
+                    )
+                }
+                None => None,
+            },
             position_locked: layer.position_locked,
             draft: layer.draft,
             reference: layer.reference,
@@ -662,6 +685,20 @@ impl StoredLayer {
             style: self.style,
             text: convert::StoredText::into_layer(self.text),
             vector: self.vector.map(Box::new),
+            height: match self.heights {
+                Some(tiles) => {
+                    let map = crate::canvas::impasto::HeightMap::default();
+                    for tile in tiles {
+                        let t = tile.into_snapshot(tile_size, blobs)?;
+                        map.set_tile(
+                            (t.tx, t.ty),
+                            Some(crate::canvas::impasto::from_pixels(&t.data)),
+                        );
+                    }
+                    Some(Box::new(map))
+                }
+                None => None,
+            },
             shader: self.shader.map(Box::new),
             position_locked: self.position_locked,
             draft: self.draft,
@@ -2010,6 +2047,13 @@ mod fuzz_tests {
         });
         app.canvas_mut().active_layer_idx = 1;
         app.add_mask_to_active();
+        // Impasto paint, and a stroke of it in the history.
+        app.brush_state.brush.impasto = Some(Default::default());
+        app.start_stroke_with_pressure(Vec2::new(10.0, 10.0), 1.0);
+        app.add_stroke_point(Vec2::new(60.0, 40.0), 1.0);
+        app.finish_stroke();
+        app.release_canvas();
+        app.brush_state.brush.impasto = None;
         app
     }
 
@@ -2763,6 +2807,7 @@ mod perf {
                         width,
                         ..Border::default()
                     }),
+                    impasto: None,
                 },
             );
             time(

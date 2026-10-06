@@ -72,6 +72,8 @@ fn lift_pixels(app: &mut PainterApp) -> bool {
     let Some(source_id) = app.canvas.layer_id_at(active) else {
         return false;
     };
+    // Its paint's thickness wouldn't move with it: lit as it shows first.
+    app.bake_impasto(active);
     app.release_canvas();
 
     let selection = app

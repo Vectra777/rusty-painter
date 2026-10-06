@@ -265,6 +265,9 @@ pub struct Brush {
     /// The settings of the spray, chalk, curve, grid, tangent normal and
     /// particle types.
     pub engines: crate::brush_engine::engines::Engines,
+    /// Impasto: the paint's thickness laid down with it (on the layer's
+    /// heights); `None` for flat paint.
+    pub impasto: Option<crate::canvas::impasto::Impasto>,
     /// Hard edges: tip coverage below this share
     /// (0..1) is dropped and the rest painted at full strength (0 = off).
     pub sharpness: f32,
@@ -324,6 +327,9 @@ struct BatchCtx<'a> {
     hatch: Option<&'a crate::brush_engine::hatching::Hatching>,
     /// A chalk brush: its grain, over every dab.
     chalk: Option<&'a crate::brush_engine::engines::Chalk>,
+    /// Paint thickness going down with the paint (and whether it's taken
+    /// away: an eraser), on a layer with impasto heights.
+    impasto: Option<(crate::canvas::impasto::Impasto, bool)>,
     /// Hard edges: the brush's [`Brush::sharpness`] (0 = off) and its
     /// soft band.
     sharpness: f32,
@@ -816,6 +822,28 @@ fn stroke_colors(
     }
 }
 
+/// Impasto: put a tile's newly laid heights (`rows`: where each starts in
+/// the tile, and its heights) on the layer's heights.
+fn write_heights(ctx: &BatchCtx<'_>, region: TileRegion, rows: Vec<(usize, Vec<u16>)>) {
+    if rows.is_empty() {
+        return;
+    }
+    let Some(map) = ctx
+        .canvas
+        .layers
+        .get(ctx.canvas.active_layer_idx)
+        .and_then(|l| l.height.as_deref())
+    else {
+        return;
+    };
+    let side = ctx.canvas.tile_size();
+    map.edit_tile((region.tx as i32, region.ty as i32), side, |tile| {
+        for (start, laid) in rows {
+            tile[start..start + laid.len()].copy_from_slice(&laid);
+        }
+    });
+}
+
 /// Re-resolve a tile's pixels on `spans` (per row, the columns `[min,
 /// max]`; `min > max` for none) from its original pixels and the stroke's
 /// coverage (with the tail's, if there is one), and record the damage.
@@ -854,6 +882,8 @@ fn resolve_spans_in(
     // The same for the whole tile: decided once, not per row.
     let has_tail = buffer.tail.iter().any(Option::is_some);
     let general = ctx.general && ctx.blend_mode == BlendMode::Normal;
+    // Impasto: the rows' heights, written to the layer's heights at once.
+    let mut height_rows: Vec<(usize, Vec<u16>)> = Vec::new();
     for (row, &(min_x, max_x)) in spans.iter().enumerate() {
         if min_x > max_x {
             continue;
@@ -886,6 +916,12 @@ fn resolve_spans_in(
             }
             None => coverage,
         };
+        if let (Some((impasto, erase)), Some(before)) = (ctx.impasto, &buffer.heights) {
+            let laid: Vec<u16> = (before[range.clone()].iter().zip(coverage))
+                .map(|(&h, &c)| impasto.height(h, c, erase))
+                .collect();
+            height_rows.push((range.start, laid));
+        }
         // Canvas position of the span, for the alpha dither.
         let origin = [(tile_x0 + min_x) as u32, (tile_y0 + row) as u32];
         if general {
@@ -957,6 +993,7 @@ fn resolve_spans_in(
             }
         }
     }
+    write_heights(ctx, region, height_rows);
 
     // Report exactly what changed, so the display redraws only that.
     let mut rect: Option<[usize; 4]> = None;
@@ -974,6 +1011,22 @@ impl Brush {
     /// Whether any dynamics are on (fixed ones or input mappings).
     pub fn has_dynamics(&self) -> bool {
         self.dynamics.is_active() || !self.inputs.is_empty()
+    }
+
+    /// What this brush does to the paint's thickness on `canvas`'s active
+    /// layer: its impasto, or an eraser's taking it away; `None` on a layer
+    /// without heights.
+    pub(crate) fn paints_heights(
+        &self,
+        canvas: &Canvas,
+    ) -> Option<(crate::canvas::impasto::Impasto, bool)> {
+        canvas
+            .layers
+            .get(canvas.active_layer_idx)?
+            .height
+            .as_ref()?;
+        let erase = self.brush_options.blend_mode == BlendMode::Eraser;
+        (erase || self.impasto.is_some()).then(|| (self.impasto.unwrap_or_default(), erase))
     }
 
     /// Whether the dabs' colours can differ (colour randomness, colour
@@ -1070,6 +1123,7 @@ impl Brush {
             sketch: Default::default(),
             hatching: Default::default(),
             engines: Default::default(),
+            impasto: None,
             sharpness: 0.0,
             sharpness_softness: 0.0,
             mixing: None,
@@ -1104,6 +1158,7 @@ impl Brush {
             sketch: Default::default(),
             hatching: Default::default(),
             engines: Default::default(),
+            impasto: None,
             sharpness: 0.0,
             sharpness_softness: 0.0,
             mixing: None,
@@ -1643,6 +1698,7 @@ impl Brush {
             tip_colors,
             hatch: (self.brush_type == BrushType::Hatching).then_some(&self.hatching),
             chalk: (self.brush_type == BrushType::Chalk).then_some(&self.engines.chalk),
+            impasto: self.paints_heights(canvas),
             sharpness: self.sharpness,
             sharpness_softness: self.sharpness_softness.clamp(0.0, 1.0),
             strength: 1.0,
@@ -1737,7 +1793,8 @@ impl Brush {
 
         let buckets = bucket_by_tile(&dabs);
         let regions: Vec<TileRegion> = buckets.iter().map(|(region, _)| *region).collect();
-        Self::snapshot_tiles(canvas, &regions, undo_action, stroke_tiles);
+        let heights = self.paints_heights(canvas).is_some();
+        Self::snapshot_tiles(canvas, &regions, undo_action, stroke_tiles, heights);
 
         // Build-up scales every dab by opacity; wash instead caps the whole
         // stroke at opacity when resolving, its dabs stamping their tip's
@@ -1898,7 +1955,13 @@ impl Brush {
         regions: &[TileRegion],
         undo_action: &mut UndoAction,
         stroke_tiles: &mut StrokeTiles,
+        heights: bool,
     ) {
+        let height_map = canvas
+            .layers
+            .get(canvas.active_layer_idx)
+            .and_then(|l| l.height.as_deref())
+            .filter(|_| heights);
         let layer_idx = canvas.active_layer_idx;
         let tile_size = canvas.tile_size();
         let Some(layer_id) = canvas.layer_id_at(layer_idx) else {
@@ -1929,9 +1992,23 @@ impl Brush {
                 height: tile_size,
                 data: data.clone().into(),
             });
+            // Impasto: the tile's heights as they were, for the stroke and
+            // its undo step.
+            let heights = height_map.map(|map| {
+                let tile_key = (region.tx as i32, region.ty as i32);
+                let before = map.tile(tile_key);
+                crate::canvas::impasto::record_undo(
+                    undo_action,
+                    layer_id,
+                    tile_key,
+                    before.clone(),
+                );
+                before.unwrap_or_else(|| vec![0; tile_size * tile_size])
+            });
             stroke_tiles.buffers.insert(
                 key,
                 Mutex::new(StrokeBuffer {
+                    heights,
                     original: data.clone(),
                     coverage: vec![0.0; tile_size * tile_size],
                     selection: None,

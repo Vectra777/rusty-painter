@@ -241,7 +241,15 @@ below.
   gravity). Krita presets of these engines import as them (approximated,
   with a note). Files using them are version 3; unknown types in a newer
   file read as Soft.
-- [ ] Bigger: wet paint simulation and impasto.
+- [x] **Impasto** (Brush → Impasto): the paint's thickness laid down with
+  it (built up, levelled or flattened; an eraser takes it away), kept as
+  16-bit heights beside the layer's colour, and lit by the layer's light
+  (Layer → Impasto: where it comes from, how high, strength, gloss) as the
+  layer is composited, so the screen, merging and export show it. Heights
+  undo with the stroke, save with the project and turn, flip, crop and
+  resize with the image; the transform tool bakes them into the paint
+  first (Layer → Impasto → Bake, one undo step).
+- [ ] Bigger: wet paint simulation.
 
 ### Quality rules for every feature
 

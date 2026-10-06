@@ -695,7 +695,12 @@ impl PainterApp {
                         .clone();
                     self.replace_layer_states(&out, &put);
                 }
-                Some(LayerHistoryOp::Text { .. } | LayerHistoryOp::Vector { .. }) | None => {}
+                Some(
+                    LayerHistoryOp::Text { .. }
+                    | LayerHistoryOp::Vector { .. }
+                    | LayerHistoryOp::Height { .. },
+                )
+                | None => {}
             }
 
             if layer_action.is_some() {

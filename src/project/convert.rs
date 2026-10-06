@@ -419,6 +419,9 @@ pub(super) struct StoredLayerMeta {
     text: Option<StoredText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     vector: Option<crate::canvas::vector::VectorLayer>,
+    /// Impasto heights, tile by tile; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heights: Option<Vec<(i32, i32, Vec<u16>)>>,
     shader: Option<crate::canvas::shader::ShaderLayer>,
     position_locked: bool,
     #[serde(default)]
@@ -443,6 +446,11 @@ impl From<&LayerMeta> for StoredLayerMeta {
             style: meta.style,
             text: StoredText::from_layer(meta.text.as_deref()),
             vector: meta.vector.as_deref().cloned(),
+            heights: meta.height.as_ref().map(|m| {
+                (m.tiles().into_iter())
+                    .map(|((tx, ty), h)| (tx, ty, h))
+                    .collect()
+            }),
             shader: meta.shader.as_deref().cloned(),
             position_locked: meta.position_locked,
             draft: meta.draft,
@@ -471,6 +479,13 @@ impl StoredLayerMeta {
             style: self.style,
             text: StoredText::into_layer(self.text),
             vector: self.vector.map(Box::new),
+            height: self.heights.map(|tiles| {
+                let map = crate::canvas::impasto::HeightMap::default();
+                for (tx, ty, h) in tiles {
+                    map.set_tile((tx, ty), Some(h));
+                }
+                Box::new(map)
+            }),
             shader: self.shader.map(Box::new),
             position_locked: self.position_locked,
             draft: self.draft,
@@ -530,6 +545,16 @@ pub(super) enum StoredLayerHistoryOp {
     /// own layer change.
     Vector {
         layers: Vec<(u64, Option<crate::canvas::vector::VectorLayer>)>,
+        #[serde(default)]
+        inner: Option<Box<StoredLayerHistoryOp>>,
+    },
+    /// Impasto heights on the other side of the step (tiles, and the whole
+    /// map when the step added or took it away), then its layer change.
+    Height {
+        layer: u64,
+        tiles: crate::canvas::impasto::HeightTiles,
+        #[serde(default)]
+        map: Option<Option<crate::canvas::impasto::MapTiles>>,
         #[serde(default)]
         inner: Option<Box<StoredLayerHistoryOp>>,
     },
@@ -610,6 +635,17 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                     .collect(),
                 inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
             },
+            LayerHistoryOp::Height {
+                layer,
+                tiles,
+                map,
+                inner,
+            } => Self::Height {
+                layer: layer.0,
+                tiles: tiles.clone(),
+                map: map.as_ref().map(|m| m.as_ref().map(|m| m.tiles())),
+                inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
+            },
         }
     }
 }
@@ -681,6 +717,25 @@ impl StoredLayerHistoryOp {
                     .into_iter()
                     .map(|(id, v)| (LayerId(id), v.map(Box::new)))
                     .collect(),
+                inner: inner.map(|op| Box::new(op.into_op())),
+            },
+            Self::Height {
+                layer,
+                tiles,
+                map,
+                inner,
+            } => LayerHistoryOp::Height {
+                layer: LayerId(layer),
+                tiles,
+                map: map.map(|m| {
+                    m.map(|tiles| {
+                        let map = crate::canvas::impasto::HeightMap::default();
+                        for (key, h) in tiles {
+                            map.set_tile(key, Some(h));
+                        }
+                        Box::new(map)
+                    })
+                }),
                 inner: inner.map(|op| Box::new(op.into_op())),
             },
         }
