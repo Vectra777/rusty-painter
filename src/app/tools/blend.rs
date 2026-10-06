@@ -246,6 +246,9 @@ struct Dabber {
     /// Post-correction: the samples so far, to smudge again along the
     /// smoothed path when the pen lifts.
     samples: Option<Vec<crate::brush_engine::stroke_worker::PenSample>>,
+    /// Where the pen went down, and its pressure (the stroke's first dab,
+    /// smudged again too).
+    first: (Vec2, f32),
 }
 
 /// A dab placed by the brush, for one smudge dab.
@@ -782,6 +785,7 @@ impl PainterApp {
                 seed,
                 pressure,
                 samples: correcting.then(Vec::new),
+                first: (pos, pressure),
             })
         });
         let session = BlendSession {
@@ -1049,7 +1053,10 @@ impl BlendSession {
         if samples.len() < 3 {
             return;
         }
-        let points: Vec<Vec2> = samples.iter().map(|s| s.pos).collect();
+        let (first, first_pressure) = d.first;
+        let points: Vec<Vec2> = std::iter::once(first)
+            .chain(samples.iter().map(|s| s.pos))
+            .collect();
         let modes = d.brush.stabilizer_modes;
         let smoothed = crate::brush_engine::stabilizer::smooth_path(
             &points,
@@ -1069,6 +1076,16 @@ impl BlendSession {
         self.stroke.carries.clear();
         self.stroke.krita_last.clear();
         self.stroke.random = 0x9e37_79b9;
+        // The first dab, as `start` placed it, then the rest.
+        let mut smoothed = smoothed.into_iter();
+        let start = smoothed.next().unwrap_or(first);
+        if let Some(d) = self.dabber.as_mut() {
+            d.pressure = first_pressure;
+        }
+        let dabs = self.place(|stroke, brush, context| {
+            stroke.add_sample(brush, start, first_pressure, None, context)
+        });
+        self.lay(dabs);
         for (s, pos) in samples.into_iter().zip(smoothed) {
             if let Some(d) = self.dabber.as_mut() {
                 d.pressure = s.pressure;
@@ -2300,6 +2317,8 @@ mod mix_tests {
             "less wobble"
         );
         assert_eq!(corrected.layer_state.history.push_count(), pushes + 1);
+        // (It starts where the pen went down, as without it.)
+        assert!(painted(&layer(&corrected), 10, 32), "the first dab");
         corrected.apply_history(false);
         assert!(layer(&corrected) == before);
     }

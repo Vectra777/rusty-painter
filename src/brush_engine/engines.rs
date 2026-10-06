@@ -93,10 +93,14 @@ impl Spray {
             let (s, c) = (v * TAU).sin_cos();
             Vec2::new(c, s) * (r * u.sqrt())
         };
-        let gauss = |u: f32, v: f32, sigma: f32| {
-            let m = (-2.0 * u.max(1e-6).ln()).sqrt() * sigma;
+        // A bell curve of `sigma` cut off at `reach` (sampled within it,
+        // not moved onto its edge: that would ring the circle).
+        let gauss = |u: f32, v: f32, sigma: f32, reach: f32| {
+            let sigma = sigma.max(1e-6);
+            let inside = 1.0 - (-reach * reach / (2.0 * sigma * sigma)).exp();
+            let m = (-2.0 * (1.0 - u * inside).max(1e-12).ln()).sqrt() * sigma;
             let (s, c) = (v * TAU).sin_cos();
-            Vec2::new(c, s) * m
+            Vec2::new(c, s) * m.min(reach)
         };
         let clusters: Vec<Vec2> = match self.distribution {
             Distribution::Clustered => (0..(n / 8).max(1))
@@ -104,18 +108,15 @@ impl Spray {
                 .collect(),
             _ => Vec::new(),
         };
-        let clamp = |p: Vec2| {
-            let l = p.length();
-            if l > radius { p * (radius / l) } else { p }
-        };
         (0..n)
             .map(|i| {
                 let (u, v) = (next(), next());
                 let offset = match self.distribution {
                     Distribution::Uniform => disc(u, v, radius),
-                    Distribution::Gaussian => clamp(gauss(u, v, radius / 2.5)),
+                    Distribution::Gaussian => gauss(u, v, radius / 2.5, radius),
                     Distribution::Clustered => {
-                        clamp(clusters[i as usize % clusters.len()] + gauss(u, v, radius / 6.0))
+                        let c = clusters[i as usize % clusters.len()];
+                        c + gauss(u, v, radius / 6.0, radius - c.length())
                     }
                 };
                 let size = self.particle_size.max(0.01)
@@ -477,6 +478,18 @@ mod tests {
             mean(Distribution::Gaussian) < mean(Distribution::Uniform) * 0.8,
             "denser in the middle"
         );
+        // None piled up on the edge (as if pushed in from past it).
+        for d in [Distribution::Gaussian, Distribution::Clustered] {
+            let s = Spray {
+                amount: 500,
+                distribution: d,
+                ..Default::default()
+            };
+            let rim = (s.particles(9, 20.0).iter())
+                .filter(|p| p.offset.length() > 19.9)
+                .count();
+            assert!(rim <= 2, "{d:?}: {rim} on the rim");
+        }
     }
 
     #[test]

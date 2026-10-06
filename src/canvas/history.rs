@@ -307,7 +307,9 @@ fn snapshot_bytes(action: &UndoAction) -> usize {
             }
             LayerHistoryOp::Wet { tiles, inner, .. } => {
                 // Water, pigment and two copies of pixels a pixel.
-                kept += tiles.iter().filter(|(_, t)| t.is_some()).count() * 4096 * 28;
+                kept += (tiles.iter().filter_map(|(_, t)| t.as_ref()))
+                    .map(|t| t.water.len() * 28)
+                    .sum::<usize>();
                 inner.as_deref()
             }
             LayerHistoryOp::Text { inner, .. } => inner.as_deref(),
@@ -457,13 +459,15 @@ impl History {
         self.pushed
     }
 
-    /// The step on top, if it's still the `count`-th pushed (nothing pushed
-    /// or undone since): for adding to it what it goes on doing (wet paint
-    /// spreading).
-    pub fn top_if(&mut self, count: u64) -> Option<&mut UndoAction> {
-        if self.pushed != count || !self.redo_stack.is_empty() {
-            return None;
-        }
+    /// Which step is on top: it changes with every push, undo and redo
+    /// (and back with the opposite one).
+    pub fn top_token(&self) -> (u64, usize) {
+        (self.pushed, self.undo_stack.len())
+    }
+
+    /// The step on top, for adding to it what goes on happening after it
+    /// (wet paint drying), so undoing it puts that back too.
+    pub fn top_mut(&mut self) -> Option<&mut UndoAction> {
         self.undo_stack.last_mut()
     }
 

@@ -614,7 +614,8 @@ fn brush_settings_contents(
     });
 
     changed |= color_source_section(ui, &mut brush.brush_options.color_source, textures);
-    changed |= dynamics_sections(ui, &mut brush.dynamics);
+    let lines = brush.brush_type.replaces_dabs();
+    changed |= dynamics_sections(ui, &mut brush.dynamics, lines);
     changed |= inputs_section(ui, &mut brush.inputs);
     changed |= texture_section(ui, &mut brush.texture, textures);
     changed |= dual_section(ui, &mut brush.dual, loaded_tips);
@@ -1034,11 +1035,13 @@ fn brush_settings_contents(
     (changed, mask_changed)
 }
 
-/// Tip shape, tapers and speed, and randomness. Returns whether anything
+/// Tip shape, tapers and speed, and randomness (`lines`: a brush that
+/// draws its own lines, which have no end taper). Returns whether anything
 /// changed.
 fn dynamics_sections(
     ui: &mut egui::Ui,
     d: &mut crate::brush_engine::dynamics::BrushDynamics,
+    lines: bool,
 ) -> bool {
     let mut changed = false;
     section(ui, "Tip shape", false, |ui| {
@@ -1119,20 +1122,28 @@ fn dynamics_sections(
         )
         .on_hover_text("Length over which the stroke's start grows to full.")
         .changed();
-        changed |= slider_row(
-            ui,
-            "Taper out",
-            crate::ui::widgets::reset(&mut t.end, |v| {
-                egui::Slider::new(v, 0.0..=400.0)
-                    .max_decimals(0)
-                    .suffix(" px")
-            }),
-        )
-        .on_hover_text(
-            "Length over which the stroke's end thins out when the pen lifts. The line \
-             follows the pen while drawing and thins as you let go.",
-        )
-        .changed();
+        changed |= ui
+            .add_enabled_ui(!lines, |ui| {
+                slider_row(
+                    ui,
+                    "Taper out",
+                    crate::ui::widgets::reset(&mut t.end, |v| {
+                        egui::Slider::new(v, 0.0..=400.0)
+                            .max_decimals(0)
+                            .suffix(" px")
+                    }),
+                )
+                .on_hover_text(
+                    "Length over which the stroke's end thins out when the pen lifts. The \
+                     line follows the pen while drawing and thins as you let go.",
+                )
+                .on_disabled_hover_text(
+                    "Curve, grid and particle brushes draw their own lines: they have no \
+                     end taper.",
+                )
+                .changed()
+            })
+            .inner;
         if t.start > 0.0 || t.end > 0.0 {
             property_row(ui, "Tapers", |ui| {
                 changed |= ui.toggle_value(&mut t.size, "Size").changed();

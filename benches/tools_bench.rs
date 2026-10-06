@@ -559,6 +559,7 @@ fn bench_wet(c: &mut Criterion) {
                 &coverage,
                 |_| [0.1, 0.2, 0.6, 0.7],
                 WetPaint::default(),
+                false,
             );
         }
     }
@@ -576,7 +577,7 @@ fn bench_wet(c: &mut Criterion) {
                 copy
             },
             |copy| {
-                copy.step(1, 64, Vec2::new(0.0, 1.0), |k| shown.get(&k).cloned())
+                copy.step(1, 64, Vec2::new(0.0, 1.0), true, |k| shown.get(&k).cloned())
                     .shown
                     .len()
             },

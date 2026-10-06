@@ -1036,21 +1036,27 @@ impl Brush {
             return;
         };
         let o = &self.brush_options;
+        // An eraser's stroke stays as it erased (the wet paint under it
+        // dries as it is).
+        if o.blend_mode == BlendMode::Eraser {
+            return;
+        }
         // (A brush whose dabs vary in colour lays its own colour wet.)
         let colour = o.color.to_array().map(|v| v as f32 / 255.0);
-        let opacity = o.opacity.clamp(0.0, 1.0)
-            * if o.blend_mode == BlendMode::Eraser {
-                0.0
-            } else {
-                1.0
-            };
         let side = canvas.tile_size();
         for (&key, buffer) in &stroke_tiles.buffers {
             let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
             let k = (key.0 as i32, key.1 as i32);
             crate::canvas::wet::record_undo(undo_action, layer.id, k, wet.tile(k));
-            let coverage: Vec<f32> = buffer.coverage.iter().map(|c| c * opacity).collect();
-            let shown = wet.lay(k, &buffer.original, &coverage, |_| colour, paint);
+            // (The coverage has the stroke's opacity in it already.)
+            let shown = wet.lay(
+                k,
+                &buffer.original,
+                &buffer.coverage,
+                |_| colour,
+                paint,
+                layer.alpha_locked,
+            );
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(data) = tile.data.as_mut()

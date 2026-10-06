@@ -278,6 +278,19 @@ fn read_kpp(
         }
         "hatchingbrush" => {
             b.brush_type = BrushType::Hatching;
+            let h = &mut b.hatching;
+            // (Krita's angle turns clockwise on screen, this app's the
+            // other way.)
+            if let Some(a) = number("Hatching/angle") {
+                h.angle = -a;
+            }
+            if let Some(v) = number("Hatching/separation") {
+                h.separation = v.clamp(1.0, 500.0);
+            }
+            if let Some(v) = number("Hatching/thickness") {
+                h.thickness = v.clamp(0.5, 100.0);
+            }
+            h.crosshatch = param("Hatching/bool_nocrosshatching") == Some("false");
             notes.push(format!(
                 "{name}: Krita's hatching came across with this app's hatching settings"
             ));
@@ -291,13 +304,26 @@ fn read_kpp(
             if let Some(n) = number("Spray/particleCount") {
                 sp.amount = (n.round() as u32).clamp(1, 500);
             }
-            if yes("Spray/gaussianDistribution") {
-                sp.distribution = crate::brush_engine::engines::Distribution::Gaussian;
-            }
+            use crate::brush_engine::engines::Distribution;
+            // (Older presets only say whether it's Gaussian.)
+            sp.distribution = match param("Spray/radialDistributionType") {
+                Some("gaussian") => Distribution::Gaussian,
+                Some("clusterBased") => Distribution::Clustered,
+                Some(_) => Distribution::Uniform,
+                None if yes("Spray/gaussianDistribution") => Distribution::Gaussian,
+                None => Distribution::Uniform,
+            };
+            // Its particles' size: pixels, or a percentage of the spray's
+            // size when proportional.
             if let Some(w) = number("SprayShape/width") {
-                sp.particle_size = (w / b.brush_options.diameter.max(1.0)).clamp(0.01, 1.0);
+                sp.particle_size = if yes("SprayShape/proportional") {
+                    w / 100.0
+                } else {
+                    w / b.brush_options.diameter.max(1.0)
+                }
+                .clamp(0.01, 1.0);
             }
-            sp.random_rotation = yes("SprayShape/randomRotation") || yes("Spray/randomRotation");
+            sp.random_rotation = yes("SprayShape/randomRotation");
             notes.push(format!("{name}: Krita's spray came across approximated"));
         }
         "chalkbrush" => {
@@ -313,13 +339,13 @@ fn read_kpp(
             if let Some(w) = number("Curve/lineWidth") {
                 c.line_width = w.clamp(0.5, 50.0);
             }
-            if let Some(h) = number("Curve/historySize") {
+            if let Some(h) = number("Curve/strokeHistorySize") {
                 c.history = (h.round() as usize).clamp(3, 200);
             }
             if let Some(o) = number("Curve/curvesOpacity") {
                 c.opacity = o.clamp(0.0, 1.0);
             }
-            c.connection = yes("Curve/paintConnectionLine");
+            c.connection = yes("Curve/makeConnection");
             notes.push(format!(
                 "{name}: Krita's curve brush came across approximated"
             ));
@@ -327,37 +353,41 @@ fn read_kpp(
         "gridbrush" => {
             b.brush_type = BrushType::Grid;
             let g = &mut b.engines.grid;
+            // Krita's scale scales the whole grid; each shape fills its
+            // cell but for the border either side.
+            let scale = number("Grid/scale").unwrap_or(1.0).max(0.01);
             if let Some(w) = number("Grid/gridWidth") {
-                g.cell = w.clamp(2.0, 500.0);
+                g.cell = (w * scale).clamp(2.0, 500.0);
             }
             g.offset = [
                 number("Grid/horizontalOffset").unwrap_or(0.0),
                 number("Grid/verticalOffset").unwrap_or(0.0),
             ];
-            if let Some(k) = number("Grid/scale") {
-                g.scale = k.clamp(0.05, 1.5);
-            }
+            let border = number("Grid/verticalBorder").unwrap_or(0.0).max(0.0);
+            g.scale = (1.0 - 2.0 * border / g.cell).clamp(0.05, 1.0);
             notes.push(format!(
                 "{name}: Krita's grid came across approximated (square cells, no divisions)"
             ));
         }
         "tangentnormal" => {
             b.brush_type = BrushType::TangentNormal;
-            // Krita's channel choices: 3 is -X, 4 is -Y.
-            b.engines.normal.flip_x = param("Tangent/swizzleRed") == Some("3");
-            b.engines.normal.flip_y = param("Tangent/swizzleGreen") == Some("4");
+            // Krita's channel choices: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z.
+            b.engines.normal.flip_x = param("Tangent/swizzleRed") == Some("1");
+            b.engines.normal.flip_y = param("Tangent/swizzleGreen") == Some("3");
         }
         "particlebrush" => {
             b.brush_type = BrushType::Particle;
             let pt = &mut b.engines.particles;
-            if let Some(n) = number("ParticleCount") {
+            if let Some(n) = number("Particle/count") {
                 pt.count = (n.round() as u32).clamp(1, 200);
             }
-            if let Some(w) = number("ParticleWeight") {
-                pt.weight = w.clamp(0.0, 1.0);
+            // Krita's weight is each particle's opacity, and its gravity
+            // the share of their speed they keep each step.
+            if let Some(w) = number("Particle/weight") {
+                b.brush_options.opacity = w.clamp(0.0, 1.0);
             }
-            if let Some(g) = number("ParticleGravity") {
-                pt.gravity = [0.0, g.clamp(-10.0, 10.0)];
+            if let Some(g) = number("Particle/gravity") {
+                pt.drag = (1.0 - g).clamp(0.0, 1.0);
             }
             notes.push(format!(
                 "{name}: Krita's particles came across approximated"
@@ -2241,22 +2271,59 @@ mod tests {
         );
         let curve = with(
             "curvebrush",
-            &[p("Curve/lineWidth", "3"), p("Curve/historySize", "40")].concat(),
+            &[
+                p("Curve/lineWidth", "3"),
+                p("Curve/strokeHistorySize", "40"),
+                p("Curve/makeConnection", "true"),
+            ]
+            .concat(),
         );
         assert_eq!(curve.brush_type, BrushType::Curve);
         assert_eq!(
             (curve.engines.curve.line_width, curve.engines.curve.history),
             (3.0, 40)
         );
-        let grid = with("gridbrush", &p("Grid/gridWidth", "24"));
+        assert!(curve.engines.curve.connection);
+        let grid = with(
+            "gridbrush",
+            &[
+                p("Grid/gridWidth", "24"),
+                p("Grid/scale", "2"),
+                p("Grid/verticalBorder", "12"),
+            ]
+            .concat(),
+        );
         assert_eq!(
             (grid.brush_type, grid.engines.grid.cell),
-            (BrushType::Grid, 24.0)
+            (BrushType::Grid, 48.0)
         );
-        let normal = with("tangentnormal", &p("Tangent/swizzleGreen", "4"));
+        assert_eq!(grid.engines.grid.scale, 0.5, "the border either side");
+        let hatch = with(
+            "hatchingbrush",
+            &[
+                p("Hatching/angle", "30"),
+                p("Hatching/separation", "8"),
+                p("Hatching/bool_nocrosshatching", "false"),
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            (
+                hatch.hatching.angle,
+                hatch.hatching.separation,
+                hatch.hatching.crosshatch
+            ),
+            (-30.0, 8.0, true)
+        );
+        let normal = with("tangentnormal", &p("Tangent/swizzleGreen", "3"));
         assert_eq!(normal.brush_type, BrushType::TangentNormal);
         assert!(normal.engines.normal.flip_y);
-        let particle = with("particlebrush", &p("ParticleCount", "60"));
+        let particle = with(
+            "particlebrush",
+            &[p("Particle/count", "60"), p("Particle/gravity", "0.9")].concat(),
+        );
+        assert!((particle.engines.particles.drag - 0.1).abs() < 1e-6);
+        assert_eq!(particle.engines.particles.gravity, [0.0, 0.0], "no fall");
         assert_eq!(
             (particle.brush_type, particle.engines.particles.count),
             (BrushType::Particle, 60)

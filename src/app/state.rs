@@ -428,11 +428,13 @@ pub struct WorkspaceState {
     /// live readout in Settings.
     pub last_pressure: Option<(f32, f32)>,
     /// Wet paint: which way is down (canvas pixels: its direction), the
-    /// time it last dried for, and the history step it's still part of
-    /// (its count: what it spreads into is added to that step).
+    /// time it last dried for, the history step on top that has taken it
+    /// in (see `History::top_token`), and how long a step of drying took
+    /// last (seconds).
     pub wet_gravity: [f32; 2],
     pub wet_clock: Option<std::time::Instant>,
-    pub wet_step: Option<u64>,
+    pub wet_step: Option<(u64, usize)>,
+    pub wet_step_secs: f64,
     /// Test strokes for fitting the pressure curve, while that's open.
     pub calibration: Option<crate::app::pressure_calibration::Calibration>,
     /// The brush (tool settings) panel is open.
@@ -547,6 +549,7 @@ impl WorkspaceState {
             wet_gravity: [0.0, 1.0],
             wet_clock: None,
             wet_step: None,
+            wet_step_secs: 0.0,
             // Closed: the canvas gets the screen; the rails open them.
             show_left_panel: false,
             show_color: false,

@@ -119,7 +119,10 @@ bucket fill and colour select at 4096² take 0.15–0.22 s.
 ## Known costs left
 
 - **Wet paint** dries in steps of 1/30 s between strokes (at most four
-  a frame): one step over 64 wet tiles takes about 4 ms (`wet_step_64_tiles`).
+  a frame, as many as fit 8 ms by the last step's time, at least one: a
+  big wash dries slower rather than holding up the frames more): one step
+  over 64 wet tiles takes about 5 ms (`wet_step_64_tiles`). It runs on the
+  UI thread, so a wash of a thousand tiles still costs a frame about 80 ms.
   A wet tile holds about 100 KB (water, pigment, the dry paint and what it
   shows) until it dries.
 - **Impasto**: a stroke laying heights costs about a fifth more than

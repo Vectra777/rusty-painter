@@ -65,23 +65,32 @@ pub fn record_undo(
     before: Option<WetTile>,
 ) {
     use crate::canvas::history::LayerHistoryOp;
-    match &mut undo.layer_action {
-        Some(LayerHistoryOp::Wet {
-            layer: l, tiles, ..
-        }) if *l == layer => {
-            if !tiles.iter().any(|(k, _)| *k == key) {
-                tiles.push((key, before.map(Box::new)));
+    // This layer's op, wherever it's nested (one per layer: undo and redo
+    // swap them in the same order, so a tile twice would come back wrong).
+    let mut op = undo.layer_action.as_mut();
+    while let Some(o) = op {
+        match o {
+            LayerHistoryOp::Wet {
+                layer: l, tiles, ..
+            } if *l == layer => {
+                if !tiles.iter().any(|(k, _)| *k == key) {
+                    tiles.push((key, before.map(Box::new)));
+                }
+                return;
             }
-        }
-        other => {
-            let inner = other.take().map(Box::new);
-            *other = Some(LayerHistoryOp::Wet {
-                layer,
-                tiles: vec![(key, before.map(Box::new))],
-                inner,
-            });
+            LayerHistoryOp::Wet { inner, .. }
+            | LayerHistoryOp::Text { inner, .. }
+            | LayerHistoryOp::Vector { inner, .. }
+            | LayerHistoryOp::Height { inner, .. } => op = inner.as_deref_mut(),
+            _ => break,
         }
     }
+    let inner = undo.layer_action.take().map(Box::new);
+    undo.layer_action = Some(LayerHistoryOp::Wet {
+        layer,
+        tiles: vec![(key, before.map(Box::new))],
+        inner,
+    });
 }
 
 /// Wet tiles as a step changes them (`None`: dry).
@@ -99,33 +108,44 @@ pub struct WetTile {
     pub shown: Vec<Color32>,
     /// How the paint on it behaves (the last brush's).
     pub paint: WetPaint,
+    /// On an alpha-locked layer: each pixel's alpha, which it keeps.
+    pub alpha: Option<Vec<u8>>,
 }
 
 impl WetTile {
-    fn new(dry: Vec<Color32>, paint: WetPaint) -> Self {
+    fn new(dry: Vec<Color32>, paint: WetPaint, alpha_lock: bool) -> Self {
         let n = dry.len();
         Self {
             water: vec![0.0; n],
             pigment: vec![[0.0; 4]; n],
+            alpha: alpha_lock.then(|| dry.iter().map(|c| c.a()).collect()),
             shown: dry.clone(),
             dry,
             paint,
         }
     }
 
+    /// Pixel `i` showing `c`: with its alpha kept, on an alpha-locked layer.
+    fn locked(&self, i: usize, c: Color32) -> Color32 {
+        match &self.alpha {
+            Some(a) => crate::canvas::blend::with_alpha_of(c, a[i]),
+            None => c,
+        }
+    }
+
     /// The pigment over the dry paint.
     fn show(&self) -> Vec<Color32> {
-        (self.dry.iter().zip(&self.pigment))
-            .map(|(&d, p)| over(*p, d))
+        (self.dry.iter().zip(&self.pigment).enumerate())
+            .map(|(i, (&d, p))| self.locked(i, over(*p, d)))
             .collect()
     }
 
     /// Everything still suspended settles where it is.
     fn settle(&mut self) {
-        for (d, p) in self.dry.iter_mut().zip(&mut self.pigment) {
-            *d = over(*p, *d);
-            *p = [0.0; 4];
+        for i in 0..self.dry.len() {
+            self.dry[i] = self.locked(i, over(self.pigment[i], self.dry[i]));
         }
+        self.pigment.fill([0.0; 4]);
         self.water.fill(0.0);
     }
 }
@@ -191,6 +211,11 @@ impl WetLayer {
         self.lock().is_empty()
     }
 
+    /// The wet tiles.
+    pub fn keys(&self) -> Vec<(i32, i32)> {
+        self.lock().keys().copied().collect()
+    }
+
     /// Tile `key` as it is (for undo).
     pub fn tile(&self, key: (i32, i32)) -> Option<WetTile> {
         self.lock().get(&key).cloned()
@@ -206,8 +231,8 @@ impl WetLayer {
     }
 
     /// Lay a wet stroke on tile `key`: `coverage` of `colour` (premultiplied,
-    /// 0..1) over `before` (the tile's pixels before the stroke). Returns
-    /// the tile's pixels now.
+    /// 0..1) over `before` (the tile's pixels before the stroke), keeping
+    /// their alpha on an `alpha_lock`ed layer. Returns the tile's pixels now.
     pub fn lay(
         &self,
         key: (i32, i32),
@@ -215,12 +240,21 @@ impl WetLayer {
         coverage: &[f32],
         colour: impl Fn(usize) -> [f32; 4],
         paint: WetPaint,
+        alpha_lock: bool,
     ) -> Vec<Color32> {
         let mut tiles = self.lock();
-        let tile = tiles
-            .entry(key)
-            .or_insert_with(|| WetTile::new(before.to_vec(), paint));
+        let fresh = || WetTile::new(before.to_vec(), paint, alpha_lock);
+        // Edited since it was last shown (a stroke of dry paint, a fill):
+        // that dries as it is, and the stroke goes on top of it.
+        let tile = (tiles.entry(key))
+            .and_modify(|t| {
+                if t.shown != before {
+                    *t = fresh();
+                }
+            })
+            .or_insert_with(fresh);
         tile.paint = paint;
+        tile.alpha = alpha_lock.then(|| before.iter().map(|c| c.a()).collect());
         let load = paint.pigment.clamp(0.0, 1.0);
         let lift = paint.lift.clamp(0.0, 1.0);
         for (i, &c) in coverage.iter().enumerate() {
@@ -263,20 +297,26 @@ impl WetLayer {
 
     /// The paint goes on drying for `steps` steps of [`STEP`]. `pixels`
     /// gives a tile's pixels as the layer holds them (to start wetting a
-    /// dry one, and to notice one edited meanwhile); `side` is the tiles'
-    /// side; `gravity` which way is down (canvas pixels, any length: its
-    /// direction).
+    /// dry one, and to notice one edited meanwhile; `None` off the canvas);
+    /// `side` is the tiles' side; `gravity` which way is down (canvas
+    /// pixels, any length: its direction). Water reaches tiles that aren't
+    /// wet only when it may `spread` (when that can be undone).
     pub fn step(
         &self,
         steps: usize,
         side: usize,
         gravity: Vec2,
+        spread: bool,
         pixels: impl Fn((i32, i32)) -> Option<Vec<Color32>> + Sync,
     ) -> Stepped {
         let mut out = Stepped::default();
         let mut tiles = self.lock();
-        // Edited since it was last shown (a filter, a transform): dry as it is.
-        tiles.retain(|&key, t| pixels(key).is_none_or(|p| p == t.shown));
+        // Edited since it was last shown (a filter, a transform): dry as it
+        // is. Off the canvas now (cropped): gone.
+        tiles.retain(|&key, t| pixels(key).is_some_and(|p| p == t.shown));
+        // Tiles dried through in an earlier step of these: their pixels
+        // (the layer doesn't have them yet).
+        let mut settled: FxHashMap<(i32, i32), Vec<Color32>> = Default::default();
         let g = if gravity.length_sq() > 0.0 {
             gravity.normalized()
         } else {
@@ -287,8 +327,12 @@ impl WetLayer {
             if tiles.is_empty() {
                 break;
             }
-            // Water at a tile's edge spills into the dry tile next to it.
-            let mut spill: Vec<((i32, i32), WetPaint)> = Vec::new();
+            // Water at a tile's edge feeds the tile next to it: spills into
+            // it when that's dry, and keeps it from drying through while
+            // it's fed (or it would be made anew each step, and the water
+            // could never cross).
+            let mut fed: rustc_hash::FxHashSet<(i32, i32)> = Default::default();
+            let mut spill: Vec<((i32, i32), WetPaint, bool)> = Vec::new();
             for (&(tx, ty), t) in tiles.iter() {
                 let edge = |x: usize, y: usize| t.water[y * side + x] > DRY;
                 let sides = [
@@ -299,16 +343,20 @@ impl WetLayer {
                 ];
                 for ((dx, dy), wet) in sides {
                     let key = (tx + dx, ty + dy);
-                    if wet && !tiles.contains_key(&key) && !spill.iter().any(|(k, _)| *k == key) {
-                        spill.push((key, t.paint));
+                    if wet && fed.insert(key) && spread && !tiles.contains_key(&key) {
+                        spill.push((key, t.paint, t.alpha.is_some()));
                     }
                 }
             }
-            for (key, paint) in spill {
+            for (key, paint, alpha_lock) in spill {
                 // (Off the canvas there are no pixels: it stays dry.)
-                if let Some(before) = pixels(key) {
-                    out.fresh.push((key, before.clone()));
-                    tiles.insert(key, WetTile::new(before, paint));
+                if let Some(before) = settled.remove(&key).or_else(|| pixels(key)) {
+                    // (As it was first: dried and wet again, it's been
+                    // noted.)
+                    if !out.fresh.iter().any(|(k, _)| *k == key) {
+                        out.fresh.push((key, before.clone()));
+                    }
+                    tiles.insert(key, WetTile::new(before, paint, alpha_lock));
                 }
             }
             let old = &*tiles;
@@ -320,19 +368,20 @@ impl WetLayer {
                 changed.insert(key);
                 tiles.insert(key, t);
             }
-            // Dry through: settled, and wet no longer.
+            // Dry through: settled, and wet no longer (nor fed).
             let dried: Vec<(i32, i32)> = (tiles.iter())
-                .filter(|(_, t)| t.water.iter().all(|&w| w <= DRY))
+                .filter(|(k, t)| !fed.contains(k) && t.water.iter().all(|&w| w <= DRY))
                 .map(|(&k, _)| k)
                 .collect();
             for key in dried {
                 if let Some(mut t) = tiles.remove(&key) {
                     t.settle();
-                    out.shown.push((key, t.dry));
+                    settled.insert(key, t.dry);
                     changed.remove(&key);
                 }
             }
         }
+        out.shown.extend(settled);
         // What each changed tile shows now (worked out across the cores).
         let shown: Vec<((i32, i32), Vec<Color32>)> = changed
             .into_par_iter()
@@ -380,17 +429,8 @@ fn step_tile(
         pad_w[dst..dst + side].copy_from_slice(&t.water[src..src + side]);
         pad_p[dst..dst + side].copy_from_slice(&t.pigment[src..src + side]);
     }
-    let border = [
-        (-1, 0),
-        (1, 0),
-        (0, -1),
-        (0, 1),
-        (-1, -1),
-        (1, -1),
-        (-1, 1),
-        (1, 1),
-    ];
-    for (dx, dy) in border {
+    // (Only the sides: the corners are never read.)
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
         let Some(n) = tiles.get(&(key.0 + dx, key.1 + dy)) else {
             continue;
         };
@@ -517,7 +557,14 @@ mod tests {
         let coverage: Vec<f32> = (0..S * S)
             .map(|i| ((4..12).contains(&(i % S)) && (4..12).contains(&(i / S))) as u8 as f32)
             .collect();
-        wet.lay((0, 0), &white(), &coverage, |_| [0.0, 0.0, 0.8, 0.8], paint);
+        wet.lay(
+            (0, 0),
+            &white(),
+            &coverage,
+            |_| [0.0, 0.0, 0.8, 0.8],
+            paint,
+            false,
+        );
         wet
     }
 
@@ -538,7 +585,7 @@ mod tests {
                 pixels(key)
             }
         };
-        let s = wet.step(1, S, Vec2::ZERO, layer);
+        let s = wet.step(1, S, Vec2::ZERO, true, layer);
         assert!(s.shown.iter().any(|(k, _)| *k == (0, 0)));
         let t = wet.tile((0, 0)).unwrap();
         assert!(
@@ -555,7 +602,7 @@ mod tests {
                     pixels(key)
                 }
             };
-            let s = wet.step(1, S, Vec2::ZERO, at);
+            let s = wet.step(1, S, Vec2::ZERO, true, at);
             if let Some((_, p)) = s.shown.iter().find(|(k, _)| *k == (0, 0)) {
                 last = p.clone();
             }
@@ -592,7 +639,7 @@ mod tests {
                 None
             }
         };
-        wet.step(3, S, Vec2::ZERO, at);
+        wet.step(3, S, Vec2::ZERO, true, at);
         let after = total(&wet);
         // (Some reaches past the tile, off the canvas here, and rounding.)
         assert!(
@@ -618,7 +665,7 @@ mod tests {
                 pixels(key)
             }
         };
-        wet.step(20, S, Vec2::new(0.0, 1.0), at);
+        wet.step(20, S, Vec2::new(0.0, 1.0), true, at);
         let t = wet.tile((0, 0)).unwrap();
         let row = |y: usize| (4..12).map(|x| t.water[y * S + x]).sum::<f32>();
         assert!(
@@ -638,7 +685,7 @@ mod tests {
             lift: 0.5,
             ..Default::default()
         };
-        wet.lay((0, 0), &red, &vec![1.0; S * S], |_| [0.0; 4], water);
+        wet.lay((0, 0), &red, &vec![1.0; S * S], |_| [0.0; 4], water, false);
         let t = wet.tile((0, 0)).unwrap();
         assert!(t.pigment[0][0] > 0.3, "red lifted into the wash");
         assert_eq!(
@@ -647,7 +694,7 @@ mod tests {
             "looks the same at first"
         );
         // Edited meanwhile: no longer wet, left as it is.
-        let s = wet.step(1, S, Vec2::ZERO, |_| Some(white()));
+        let s = wet.step(1, S, Vec2::ZERO, true, |_| Some(white()));
         assert!(wet.is_empty() && s.shown.is_empty());
     }
 }
