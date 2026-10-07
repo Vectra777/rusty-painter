@@ -76,13 +76,19 @@ fn lift_pixels(app: &mut PainterApp) -> bool {
     app.bake_impasto(active);
     app.release_canvas();
 
+    // (On a moved layer: the selection carried onto its pixels.)
+    let layer_selection = app.layer_selection();
     let selection = app
         .selection_manager
         .has_selection()
-        .then_some(&app.selection_manager);
+        .then_some(&layer_selection);
     let Some(idx) = exclusive(&mut app.canvas).float_pixels(selection) else {
         return false;
     };
+    // A moved layer: what was lifted and what's left both show moved.
+    if app.canvas.pose_motions() {
+        app.mark_all_tiles_dirty();
+    }
     let buffer = app.canvas.capture_layer_pixels(idx);
 
     // The source as it was: the float lifted disjoint pixels, so putting
@@ -823,11 +829,12 @@ pub(crate) fn draw_float_overlay(
         return;
     }
     let params = info.params();
+    // (On a moved layer, where it shows.)
     painter.add(egui::Shape::mesh(overlay_mesh(
         overlay.texture.id(),
         overlay.area,
         &params,
-        &|p| map.to_screen(p),
+        &|p| map.to_screen(app.to_canvas_space(p)),
     )));
 }
 

@@ -78,7 +78,7 @@ pub(crate) fn view_toggles(app: &mut PainterApp, ui: &mut egui::Ui) {
         Icon::Flip,
         size,
         flipped,
-        "Flip the view horizontally (H) — the picture itself is unchanged",
+        "Flip the view horizontally (H); the picture itself is unchanged",
     )
     .clicked()
     {

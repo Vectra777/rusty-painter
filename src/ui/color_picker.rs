@@ -397,7 +397,7 @@ fn swatch_row(ui: &mut egui::Ui, brush_state: &mut BrushState) -> Option<Color32
         let swap_clicked = swap.on_hover_text("Swap colors (X)").clicked();
         let secondary_clicked =
             color_swatch(ui, brush_state.secondary_color, egui::vec2(28.0, 22.0))
-                .on_hover_text("Secondary color — click to swap")
+                .on_hover_text("Secondary color: click to swap")
                 .clicked();
         if swap_clicked || secondary_clicked {
             std::mem::swap(

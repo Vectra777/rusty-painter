@@ -166,6 +166,10 @@ impl PainterApp {
         painter: &egui::Painter,
         map: &crate::app::view::render::ScreenMap,
     ) {
+        // On a moved layer the box is on its own pixels, drawn where they show.
+        let world = (self.canvas.layers.get(self.canvas.active_layer_idx))
+            .filter(|l| l.is_posed())
+            .map(|_| self.canvas.world_motion(self.canvas.active_layer_idx).0);
         let crate::app::tools::Tool::Transform(ref mut info) = self.active_tool else {
             return;
         };
@@ -184,7 +188,13 @@ impl PainterApp {
         let Some(quad) = info.quad() else {
             return;
         };
-        let to_screen = |p: Vec2| map.to_screen(p);
+        let to_screen = |p: Vec2| {
+            let p = world.map_or(p, |w| {
+                let [x, y] = w.apply([p.x, p.y]);
+                Vec2::new(x, y)
+            });
+            map.to_screen(p)
+        };
         let pts: Vec<egui::Pos2> = quad.iter().map(|&p| to_screen(p)).collect();
 
         // Black under white reads on any artwork.

@@ -556,7 +556,16 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                             ui.spacing_mut().interact_size.y = 16.0;
                         }
                         ui.spacing_mut().slider_width = (width - 44.0).max(40.0);
+                        let before = *opacity;
                         let response = ui.add(crate::ui::widgets::reset(&mut *opacity, |v| percent_of_unit(egui::Slider::new(v, 0.0..=1.0))));
+                        // A right-click opens the row's menu; it doesn't set the opacity.
+                        let secondary = ui.input(|i| {
+                            i.pointer.button_down(egui::PointerButton::Secondary)
+                                || i.pointer.button_released(egui::PointerButton::Secondary)
+                        });
+                        if secondary {
+                            *opacity = before;
+                        }
                         opacity_released =
                             response.drag_stopped() || (response.changed() && !response.dragged());
                     });
@@ -586,6 +595,17 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     app.layer_state.layer_dragging = Some(i);
                 }
 
+                // A right-click anywhere on the row opens its menu, its
+                // thumbnail, toggles and slider included (they take clicks
+                // of their own).
+                let mut row_response = row_response;
+                if !row_response.secondary_clicked()
+                    && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
+                    && ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| row.contains(p))
+                {
+                    row_response.clicked = true;
+                    row_response.hovered = true;
+                }
                 row_response.context_menu(|ui| {
                     if ui.button("Rename").clicked() {
                         active_idx = i;

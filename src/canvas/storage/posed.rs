@@ -87,6 +87,21 @@ impl Canvas {
         super::layer_tile(self.layers.get(idx)?, tx, ty)
     }
 
+    /// The tiles layer `i` shows on: where its moved copy is, or its own.
+    pub fn shown_tile_keys(&self, i: usize) -> Vec<(i32, i32)> {
+        let Some(layer) = self.layers.get(i) else {
+            return Vec::new();
+        };
+        let posed = layer.posed.lock().unwrap_or_else(|e| e.into_inner());
+        match posed.as_ref() {
+            Some(p) => p.map.keys().copied().collect(),
+            None => {
+                drop(posed);
+                self.layer_tile_keys(i)
+            }
+        }
+    }
+
     /// A copy (sharing tiles) whose layers hold their pixels as they show
     /// at the frame showing, moved and with their look, and no keys: what
     /// merging or a layered export works from. `None` if no layer is

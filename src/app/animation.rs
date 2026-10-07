@@ -93,6 +93,8 @@ impl PainterApp {
                 .unwrap_or_else(|_| Err("The export stopped".into()));
             self.export_state.message = Some(result.unwrap_or_else(|e| e));
         }
+        // Keys a drag changed since the last frame show now.
+        self.show_motion_changes();
         self.playback_cache_tick(ctx);
         let state = &mut self.workspace.animation;
         if !state.playing {

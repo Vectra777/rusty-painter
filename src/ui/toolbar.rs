@@ -195,7 +195,7 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         icon,
         size,
         select_active,
-        "Selection (M / L) — click for types and modes",
+        "Selection (M / L): click for types and modes",
     );
     if response.clicked() {
         if !select_active {
@@ -207,7 +207,13 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     separator(ui, size);
 
     let transform_active = matches!(app.active_tool, Tool::Transform(_));
-    if tool_button(ui, app, Icon::Transform, transform_active, "Transform (V)") {
+    if tool_button(
+        ui,
+        app,
+        Icon::Transform,
+        transform_active,
+        "Transform (V): move, scale, turn or distort the drawing itself (the same on every frame)",
+    ) {
         app.set_transform_tool();
     }
     let animate_active = matches!(app.active_tool, Tool::Animate);
@@ -216,7 +222,7 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         app,
         Icon::Motion,
         animate_active,
-        "Animate (A): move, scale and turn the layer, keyed at this frame",
+        "Animate (A): move the layer over time. Each drag sets a key at this frame; between keys the layer moves by itself. (Transform, V, changes the drawing itself.)",
     ) {
         app.active_tool = Tool::Animate;
         app.workspace.animation.show_timeline = true;
@@ -270,7 +276,7 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         crate::ui::shape_menu::icon_for(kind),
         size,
         shape_active,
-        "Shapes (U): line, rectangle, ellipse, polygon — click again for options",
+        "Shapes (U): line, rectangle, ellipse, polygon; click again for options",
     );
     if response.clicked() {
         if shape_active {
@@ -382,7 +388,7 @@ fn color_pair(app: &mut PainterApp, ui: &mut egui::Ui, width: f32) {
     // On a touch screen the brush color opens/closes the colour panel.
     if touch {
         if primary_resp
-            .on_hover_text("Brush color — tap to show/hide the colour panel")
+            .on_hover_text("Brush color: tap to show/hide the colour panel")
             .clicked()
         {
             app.workspace.show_color = !app.workspace.show_color;
@@ -392,7 +398,7 @@ fn color_pair(app: &mut PainterApp, ui: &mut egui::Ui, width: f32) {
     }
     let swap_clicked = swap_resp.on_hover_text("Swap colors (X)").clicked();
     let secondary_clicked = secondary_resp
-        .on_hover_text("Secondary color — click to swap (X)")
+        .on_hover_text("Secondary color: click to swap (X)")
         .clicked();
     if swap_clicked || secondary_clicked {
         app.swap_colors();

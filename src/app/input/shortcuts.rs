@@ -190,7 +190,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     let on = |a: Action| actions.contains(&a);
     // Esc isn't a shortcut to change: it cancels what's in progress.
-    let escape = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    // (An open right-click menu takes Esc to close.)
+    let escape = !ctx.is_context_menu_open()
+        && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
 
     let redo = on(Action::Redo);
     let undo = !redo && on(Action::Undo);
@@ -405,8 +407,13 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         repaint = true;
     } else if delete && app.layer_state.floating_layer_idx.is_none() {
         // Delete (or Backspace, the Mac delete key) erases the selected
-        // pixels; a floating transform is left alone.
-        app.delete_selection_contents();
+        // pixels, or with nothing selected deletes the selected layer; a
+        // floating transform is left alone.
+        if app.selection_manager.has_selection() {
+            app.delete_selection_contents();
+        } else {
+            app.delete_selected_layer();
+        }
         repaint = true;
     }
     if ruler {

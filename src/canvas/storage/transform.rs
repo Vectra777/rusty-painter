@@ -884,6 +884,8 @@ impl Canvas {
             ts,
         );
         new_layer.parent = self.layers[active_idx].parent;
+        // A moved layer's lifted pixels show where it shows.
+        new_layer.motion = self.layers[active_idx].motion.clone();
         {
             let mut tiles = new_layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             for (key, data) in floated {

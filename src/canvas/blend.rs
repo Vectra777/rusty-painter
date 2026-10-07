@@ -788,7 +788,7 @@ fn map4<T: Copy, U>(arr: [T; 4], mut f: impl FnMut(T) -> U) -> [U; 4] {
 /// unrolled array literal rather than `std::array::from_fn`: the latter goes
 /// through `core::array::try_from_fn`'s `Try`/`NeverShortCircuit` machinery,
 /// which showed up as the dominant cost (>60% inclusive) once this hot path
-/// was profiled at scale — a manual literal has no such indirection to inline.
+/// was profiled at scale; a manual literal has no such indirection to inline.
 #[inline]
 fn pack_colors_x4(luts: Luts, r: [f32; 4], g: [f32; 4], b: [f32; 4], a: [f32; 4]) -> [Color32; 4] {
     [

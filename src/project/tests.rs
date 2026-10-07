@@ -1045,3 +1045,86 @@ fn an_8_bit_document_saves_no_depth() {
         crate::canvas::storage::Depth::U8
     );
 }
+
+#[test]
+fn delete_with_nothing_selected_deletes_the_layer_and_undo_brings_it_back() {
+    let canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
+    canvas.set_layer_tile_data(1, 0, 0, vec![Color32::RED; TILE_SIZE * TILE_SIZE]);
+    let mut app = test_app(canvas, vec![History::new(), History::new()]);
+    app.canvas_mut().active_layer_idx = 1;
+    let id = app.canvas.layers[1].id;
+    app.delete_selected_layer();
+    assert!(app.canvas.layer_index_of(id).is_none(), "deleted");
+    app.apply_history(false);
+    let back = app.canvas.layer_index_of(id).expect("back");
+    assert_eq!(
+        app.canvas.get_layer_tile_data(back, 0, 0).unwrap()[0],
+        Color32::RED
+    );
+    // The background stays.
+    app.canvas_mut().active_layer_idx = 0;
+    let before = app.canvas.layers.len();
+    app.delete_selected_layer();
+    assert_eq!(app.canvas.layers.len(), before);
+    // A drawing selected: its whole animated layer goes.
+    app.canvas_mut().active_layer_idx = back;
+    app.animate_active_layer();
+    let track = app.active_track().unwrap();
+    app.delete_selected_layer();
+    assert!(app.canvas.layer_index_of(track).is_none());
+    assert_eq!(app.canvas.layers.len(), 1);
+}
+
+/// What the canvas shows at `(x, y)`.
+fn shown_at(app: &PainterApp, x: usize, y: usize) -> Color32 {
+    let mut img = eframe::egui::ColorImage::new([1, 1], Color32::TRANSPARENT);
+    app.canvas
+        .write_region_to_color_image(x, y, 1, 1, &mut img, 1);
+    img.pixels[0]
+}
+
+#[test]
+fn transforming_a_moved_layer_shows_it_once_where_it_shows() {
+    use crate::app::tools::transform;
+    use crate::canvas::motion::Prop;
+    let mut app = app_with_red_square(); // red on 64..128
+    app.motion_step(1, |m| m.set(Prop::Position, 0, [64.0, 0.0]));
+    let red = Color32::from_rgb(255, 0, 0);
+    assert_eq!(shown_at(&app, 160, 96), red, "shown moved");
+    // The pointer goes through the layer's motion, as the input does.
+    let on_layer = |app: &PainterApp, x: f32, y: f32| app.to_layer_space(Vec2::new(x, y));
+    let p = on_layer(&app, 160.0, 96.0);
+    transform::transform_press(&mut app, p);
+    assert!(app.layer_state.floating_layer_idx.is_some());
+    assert_eq!(shown_at(&app, 160, 96), red, "the lifted pixels show moved");
+    assert_eq!(shown_at(&app, 96, 96), Color32::WHITE, "and only there");
+    let p = on_layer(&app, 192.0, 96.0);
+    transform::transform_drag(&mut app, p, false);
+    transform::flush_transform_preview(&mut app);
+    transform::transform_release(&mut app);
+    transform::commit_floating_layer(&mut app);
+    assert_eq!(app.canvas.layers.len(), 2);
+    assert_eq!(shown_at(&app, 200, 96), red, "moved 32 further");
+    assert_eq!(shown_at(&app, 140, 96), Color32::WHITE);
+    assert_eq!(shown_at(&app, 96, 96), Color32::WHITE);
+}
+
+#[test]
+fn a_drawing_off_the_canvas_turns_about_its_middle_and_drags_to_a_key() {
+    use crate::canvas::motion::Prop;
+    let canvas = Canvas::new(256, 256, Color32::WHITE, TILE_SIZE);
+    // Painted partly off the canvas, above and left of it.
+    canvas.set_layer_tile_data(1, -1, -1, vec![Color32::RED; TILE_SIZE * TILE_SIZE]);
+    canvas.set_layer_tile_data(1, 0, 0, vec![Color32::RED; TILE_SIZE * TILE_SIZE]);
+    let mut app = test_app(canvas, vec![History::new(), History::new()]);
+    app.canvas_mut().active_layer_idx = 1;
+    let pivot = app.motion_value(1, Prop::Anchor);
+    let ts = TILE_SIZE as f32;
+    assert_eq!(pivot, [0.0, 0.0], "between (-{ts}, -{ts}) and ({ts}, {ts})");
+    app.active_tool = crate::app::tools::Tool::Animate;
+    app.animate_press(Vec2::new(10.0, 10.0), false);
+    app.animate_drag(Vec2::new(40.0, 25.0), false);
+    app.animate_release();
+    assert_eq!(app.motion_value(1, Prop::Position), [30.0, 15.0]);
+    assert_eq!(app.motion_value(1, Prop::Anchor), [0.0, 0.0]);
+}

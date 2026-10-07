@@ -53,7 +53,7 @@ impl PainterApp {
     pub(crate) fn animate_handles(&self) -> Option<(usize, Handles)> {
         let target = self.motion_target(self.canvas.active_layer_idx)?;
         let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
-        let [x0, y0, x1, y1] = self.canvas.content_rect(target).unwrap_or([0.0, 0.0, w, h]);
+        let [x0, y0, x1, y1] = self.content_rect_cached(target).unwrap_or([0.0, 0.0, w, h]);
         let (world, _) = self.canvas.world_motion(target);
         let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(|p| v(world.apply(p)));
         let anchor_local = (self.canvas.layers[target].motion.as_ref())
@@ -120,7 +120,7 @@ impl PainterApp {
     fn layer_anchor(&self, i: usize) -> [f32; 2] {
         match self.canvas.layers[i].motion.as_ref() {
             Some(m) => m.value(Prop::Anchor, self.canvas.time as f32),
-            None => match self.canvas.content_rect(i) {
+            None => match self.content_rect_cached(i) {
                 Some([x0, y0, x1, y1]) => [(x0 + x1) / 2.0, (y0 + y1) / 2.0],
                 None => [
                     self.canvas.width() as f32 / 2.0,
@@ -361,4 +361,42 @@ mod tests {
             .value(Prop::Rotation, 4.0)[0];
         assert!((turn - 90.0).abs() < 1e-3, "{turn}");
     }
+}
+
+/// Times an Animate drag on a 4K canvas (run with `--release --ignored`).
+#[cfg(test)]
+#[test]
+#[ignore = "timing"]
+fn animate_drag_timings() {
+    use crate::canvas::Canvas;
+    let ts = crate::app::document::TILE_SIZE;
+    let canvas = Canvas::new(3840, 2160, Color32::WHITE, ts);
+    for ty in 8..24 {
+        for tx in 20..36 {
+            canvas.set_layer_tile_data(1, tx, ty, vec![Color32::RED; ts * ts]);
+        }
+    }
+    let mut app = crate::project::tests::test_app_pub(canvas);
+    app.canvas_mut().active_layer_idx = 1;
+    app.active_tool = crate::app::tools::Tool::Animate;
+    app.animate_press(Vec2::new(1800.0, 1000.0), false);
+    let mut events = std::time::Duration::ZERO;
+    let mut frames = std::time::Duration::ZERO;
+    for k in 0..30 {
+        let start = std::time::Instant::now();
+        for e in 0..4 {
+            let x = 1800.0 + (k * 4 + e) as f32 * 3.0;
+            app.animate_drag(Vec2::new(x, 1000.0), false);
+        }
+        events += start.elapsed();
+        let start = std::time::Instant::now();
+        app.show_motion_changes();
+        frames += start.elapsed();
+    }
+    app.animate_release();
+    eprintln!(
+        "per event: {:?}, per frame: {:?}",
+        events / 120,
+        frames / 30
+    );
 }

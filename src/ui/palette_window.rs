@@ -53,7 +53,7 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
                     ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
                     for c in &extracted {
                         let [r, g, b, _] = c.to_srgba_unmultiplied();
-                        let tip = format!("#{r:02X}{g:02X}{b:02X} — click to paint with it");
+                        let tip = format!("#{r:02X}{g:02X}{b:02X}: click to paint with it");
                         if color_swatch(ui, *c, egui::vec2(swatch, swatch)).on_hover_text(tip).clicked() {
                             app.brush_state.brush.brush_options.color = *c;
                             app.brush_state.brush_preview.dirty = true;

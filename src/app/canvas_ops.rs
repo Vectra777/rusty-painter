@@ -21,7 +21,7 @@ impl PainterApp {
     /// than by the type system, so any code path that resizes/reorders
     /// `canvas.layers` without going through the paired helpers here would
     /// otherwise corrupt data silently (wrong undo history applied to the
-    /// wrong layer, etc). Cheap (length checks only) — safe to call after
+    /// wrong layer, etc). Cheap (length checks only): safe to call after
     /// every mutation, and compiled out entirely in release builds.
     fn debug_assert_layer_state_in_sync(&self) {
         let layer_count = self.canvas.layers.len();
@@ -417,7 +417,7 @@ impl PainterApp {
     }
 
     /// [`Self::mark_tiles_in_bounds_dirty`] for `bounds` on the canvas only.
-    fn mark_bounds_dirty(&mut self, bounds: egui::Rect) {
+    pub(crate) fn mark_bounds_dirty(&mut self, bounds: egui::Rect) {
         if bounds.is_negative() {
             return;
         }
@@ -900,6 +900,28 @@ impl PainterApp {
 
     /// Delete a layer with undo, together with its mask, or a folder with
     /// everything inside it.
+    /// Delete the selected layer (with undo): a drawing's whole animated
+    /// layer, as the layers panel shows it. Not the background.
+    pub(crate) fn delete_selected_layer(&mut self) {
+        let active = self.canvas.active_layer_idx;
+        let Some(layer) = self.canvas.layers.get(active) else {
+            return;
+        };
+        let idx = match (layer.anim, layer.parent) {
+            (Some(crate::canvas::storage::Anim::Frame(_)), Some(track)) => {
+                self.canvas.layer_index_of(track).unwrap_or(active)
+            }
+            _ => active,
+        };
+        if idx == 0 {
+            self.report("The background can't be deleted".to_string());
+            return;
+        }
+        self.remove_layer(idx);
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+    }
+
     pub(crate) fn remove_layer(&mut self, idx: usize) {
         self.quick_mask_leave();
         let len = self.canvas.layers.len();

@@ -569,7 +569,7 @@ impl History {
 
     /// Undo the latest action, returning tile coordinates that changed and
     /// (if this action also touched the layer list itself) the structural
-    /// change that was applied — the caller must mirror it onto its own
+    /// change that was applied. The caller must mirror it onto its own
     /// per-layer side-car state (undo-history vec, render caches, UI
     /// colors), which `History` has no access to from here.
     pub fn undo(
@@ -704,7 +704,7 @@ impl History {
 
     /// Structural change applied AFTER the tile-snapshot swap. Returns the
     /// action to expose to the caller, with `index` corrected to the
-    /// position actually touched in `canvas.layers` — the recorded `index`
+    /// position actually touched in `canvas.layers`: the recorded `index`
     /// can be stale by the time this specific action reaches the top of the
     /// stack (other layers may have been added/removed/reordered elsewhere
     /// in the meantime), and the caller uses this `index` to mirror the
@@ -724,7 +724,7 @@ impl History {
                 active_after,
             }) => {
                 // The layer being un-added is one we ourselves added and
-                // never removed since, so it's guaranteed to still exist —
+                // never removed since, so it's guaranteed to still exist:
                 // resolve its actual current position rather than trusting
                 // the possibly-stale recorded one.
                 let removed_index = canvas.layer_index_of(*id);
@@ -814,7 +814,7 @@ impl History {
             // defaults `Canvas::add_layer` itself uses. Any content the
             // layer had is restored separately, in order, by whatever
             // pixel-edit redo entries sit above this one in the SAME
-            // per-layer stack — reaching this entry at all requires the
+            // per-layer stack; reaching this entry at all requires the
             // whole stack to have been undone down to here first, so the
             // layer is guaranteed to have been empty at this point in its
             // history (opacity/visibility toggles aren't undo-tracked
@@ -863,7 +863,7 @@ impl History {
             }) => {
                 // Re-applying a removal: the layer was re-inserted by this
                 // same redo (via prepare_for_redo would be for Added, not
-                // here — Removed's re-insertion happened on the matching
+                // here; Removed's re-insertion happened on the matching
                 // undo, so this layer has existed continuously since; still
                 // resolve fresh rather than trust the original index).
                 // Resolve every current position first, then remove from the
@@ -1039,7 +1039,7 @@ impl History {
                 // The tile may have gone from empty to painted or back: keep
                 // its flag true to its pixels. (Left stale, a tile emptied by
                 // e.g. liquify and then restored by undo stayed flagged empty,
-                // so it drew — and every tool read it — as a transparent hole.)
+                // so it drew (and every tool read it) as a transparent hole.)
                 tile.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
 
                 // Store current region for redo/undo swap

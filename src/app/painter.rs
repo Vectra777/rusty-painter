@@ -680,7 +680,7 @@ impl PainterApp {
             };
 
             // A structural change (layer added/removed/moved) also needs the
-            // per-layer side-car state (UI colors) mirrored to match —
+            // per-layer side-car state (UI colors) mirrored to match:
             // `History` only has `&mut Canvas`, so it can't reach those.
             use crate::canvas::history::LayerHistoryOp;
             match &layer_action {

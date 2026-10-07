@@ -195,7 +195,8 @@ fn on_layer(app: &PainterApp, p: Vec2) -> Vec2 {
         | Tool::Smudge
         | Tool::Blur
         | Tool::Shape(_)
-        | Tool::Gradient => app.to_layer_space(p),
+        | Tool::Gradient
+        | Tool::Transform(_) => app.to_layer_space(p),
         _ => p,
     }
 }

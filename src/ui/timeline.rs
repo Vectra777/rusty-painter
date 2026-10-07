@@ -204,7 +204,9 @@ fn layer_rows(app: &PainterApp, view: &TimelineView, s: Sizes) -> Vec<Row> {
         let canvas = &app.canvas;
         for idx in (1..canvas.layers.len()).rev() {
             let layer = &canvas.layers[idx];
+            // (Not a transform's floating pixels: they go back on apply.)
             if layer.parent != parent
+                || app.layer_state.floating_layer_idx == Some(idx)
                 || matches!(layer.kind, LayerKind::Mask { .. })
                 || matches!(layer.anim, Some(Anim::Frame(_)))
             {
@@ -1982,7 +1984,7 @@ fn paint_still(
     let label = match kind {
         Kind::Folder => "Folder",
         Kind::Rig => "Rig",
-        _ => "Same every frame — double-click a frame to draw frames here",
+        _ => "Same every frame: double-click a frame to draw frames here",
     };
     p.text(
         pos2(start + 8.0, span.center().y),
@@ -2343,7 +2345,7 @@ pub fn timeline_keys(app: &mut PainterApp, ctx: &egui::Context) -> bool {
             app.delete_frames(sel);
             return true;
         }
-        if pressed(ctx, Modifiers::NONE, Key::Escape) {
+        if !ctx.is_context_menu_open() && pressed(ctx, Modifiers::NONE, Key::Escape) {
             app.workspace.animation.view.sel = None;
             return true;
         }

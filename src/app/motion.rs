@@ -16,6 +16,21 @@ pub struct MotionEditState {
     pub in_gesture: bool,
     /// The Animate tool's drag.
     pub drag: Option<crate::app::tools::animate::AnimateDrag>,
+    /// Keys changed since the layers were last shown moved (a drag's
+    /// changes are shown once a frame, not once an event).
+    pub pending: bool,
+    /// The box around a layer's paint, the last time it was measured (a
+    /// measure reads every pixel): for this layer, document and frame.
+    pub content: std::cell::RefCell<Option<ContentCache>>,
+}
+
+/// A layer's measured box, and what it was measured for.
+#[derive(Clone, Copy)]
+pub struct ContentCache {
+    layer: LayerId,
+    version: (u64, usize, usize),
+    time: u32,
+    rect: Option<[f32; 4]>,
 }
 
 impl PainterApp {
@@ -122,6 +137,12 @@ impl PainterApp {
     /// The layer motion keys go on for layer `i`: a drawing's animated
     /// layer (its drawings move together), else the layer itself.
     pub(crate) fn motion_target(&self, i: usize) -> Option<usize> {
+        // A transform's floating pixels: the layer they were lifted from.
+        if self.layer_state.floating_layer_idx == Some(i)
+            && let Some(session) = &self.layer_state.float_session
+        {
+            return self.canvas.layer_index_of(session.source_id);
+        }
         let layer = self.canvas.layers.get(i)?;
         match (layer.anim, layer.kind) {
             (Some(Anim::Frame(_)), _) => layer.parent.and_then(|p| self.canvas.layer_index_of(p)),
@@ -144,21 +165,78 @@ impl PainterApp {
             self.document_step(|_| true);
         }
         self.release_canvas();
-        let anchor = self.default_anchor(i);
+        // (Measured only for a layer without motion: it reads every pixel.)
+        let anchor = (self.canvas.layers[i].motion.is_none()).then(|| self.default_anchor(i));
         let canvas = crate::app::stroke_ops::exclusive(&mut self.canvas);
         let motion = canvas.layers[i]
             .motion
-            .get_or_insert_with(|| Box::new(Motion::new(anchor)));
+            .get_or_insert_with(|| Box::new(Motion::new(anchor.unwrap_or_default())));
         edit(motion);
-        canvas.pose_motions();
         self.workspace.animation.edits += 1;
-        self.mark_all_tiles_dirty();
+        self.workspace.motion.pending = true;
         self.mark_unsaved();
     }
 
-    /// The gesture ended: the next change is a new undo step.
+    /// The gesture ended: the next change is a new undo step (and what
+    /// changed shows now).
     pub(crate) fn motion_edit_done(&mut self) {
         self.workspace.motion.in_gesture = false;
+        self.show_motion_changes();
+    }
+
+    /// Show the layers as their changed keys move them: only those whose
+    /// pose changed are made again, and only the canvas they left and
+    /// cover now is drawn again. (Once a frame during a drag.)
+    pub(crate) fn show_motion_changes(&mut self) {
+        if !std::mem::take(&mut self.workspace.motion.pending) {
+            return;
+        }
+        let moving: Vec<usize> = (0..self.canvas.layers.len())
+            .filter(|&i| self.canvas.layers[i].motion.is_some() || self.canvas.layers[i].is_posed())
+            .collect();
+        let before: Vec<(i32, i32)> = moving
+            .iter()
+            .flat_map(|&i| self.canvas.shown_tile_keys(i))
+            .collect();
+        self.canvas.pose_for_time();
+        let after: Vec<(i32, i32)> = moving
+            .iter()
+            .flat_map(|&i| self.canvas.shown_tile_keys(i))
+            .collect();
+        let ts = self.canvas.tile_size() as f32;
+        let mut keys: Vec<(i32, i32)> = before.into_iter().chain(after).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        for (tx, ty) in keys {
+            let min = eframe::egui::pos2(tx as f32 * ts, ty as f32 * ts);
+            self.mark_bounds_dirty(eframe::egui::Rect::from_min_size(
+                min,
+                eframe::egui::vec2(ts, ts),
+            ));
+        }
+    }
+
+    /// The box around what layer `i` shows (its own pixels), measured
+    /// again only when the document or the frame changed.
+    pub(crate) fn content_rect_cached(&self, i: usize) -> Option<[f32; 4]> {
+        let layer = self.canvas.layers.get(i)?.id;
+        let (version, time) = (self.doc_version(), self.canvas.time);
+        let mut cache = self.workspace.motion.content.borrow_mut();
+        if let Some(c) = *cache
+            && c.layer == layer
+            && c.version == version
+            && c.time == time
+        {
+            return c.rect;
+        }
+        let rect = self.canvas.content_rect(i);
+        *cache = Some(ContentCache {
+            layer,
+            version,
+            time,
+            rect,
+        });
+        rect
     }
 
     /// One whole motion change as its own undo step.
@@ -170,7 +248,7 @@ impl PainterApp {
 
     /// The middle of what layer `i` shows (or of the canvas).
     fn default_anchor(&self, i: usize) -> [f32; 2] {
-        match self.canvas.content_rect(i) {
+        match self.content_rect_cached(i) {
             Some([x0, y0, x1, y1]) => [(x0 + x1) / 2.0, (y0 + y1) / 2.0],
             None => [
                 self.canvas.width() as f32 / 2.0,

@@ -537,7 +537,7 @@ pub const ACTIONS: &[ActionInfo] = &[
     info(
         Action::DeletePixels,
         "delete",
-        "Delete the selected pixels (a lasso or shape: its last point)",
+        "Delete the selected pixels, or the selected layer when nothing is selected (a lasso or shape: its last point)",
         "Selection",
         &[b!(NONE, Delete), b!(NONE, Backspace)],
     ),
@@ -715,11 +715,11 @@ impl Keymap {
         self.bindings(action).first().map(|b| b.label(ctx))
     }
 
-    /// All keys of `action`, as printed on this keyboard, or "—".
+    /// All keys of `action`, as printed on this keyboard, or "None".
     pub fn labels(&self, ctx: &egui::Context, action: Action) -> String {
         let keys = self.bindings(action);
         if keys.is_empty() {
-            return "—".into();
+            return "None".into();
         }
         keys.iter()
             .map(|b| b.label(ctx))

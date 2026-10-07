@@ -110,7 +110,7 @@ fn undo_added_resolves_current_position_after_intervening_removal() {
     // canvas: [Background(id0), Layer1(id1)]
 
     let layer2_id = canvas.add_layer();
-    // canvas: [Background, Layer1, Layer2] — Layer2 added at index 2.
+    // canvas: [Background, Layer1, Layer2]; Layer2 added at index 2.
     let mut layer2_history = History::new();
     layer2_history.push_action(UndoAction {
         tiles: Vec::new(),
@@ -126,7 +126,7 @@ fn undo_added_resolves_current_position_after_intervening_removal() {
     });
 
     // Some other layer (Layer1, index 1) gets removed afterward,
-    // shifting Layer2 down to index 1 — without touching Layer2's own
+    // shifting Layer2 down to index 1, without touching Layer2's own
     // history stack at all.
     canvas.layers.remove(1);
     canvas.active_layer_idx = 1;
@@ -137,7 +137,7 @@ fn undo_added_resolves_current_position_after_intervening_removal() {
     let mut tool = Tool::Brush;
     let (_, layer_action) = layer2_history.undo(&mut canvas, &mut selection, &mut tool);
 
-    // Layer2 must be gone — removed by resolving its current position
+    // Layer2 must be gone, removed by resolving its current position
     // (1), not the stale recorded index (2), which would be out of
     // bounds for the now-2-layer canvas and silently no-op instead.
     assert_eq!(canvas.layer_index_of(layer2_id), None);

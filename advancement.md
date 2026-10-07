@@ -64,7 +64,6 @@ Animation to-do, from what Toon Boom Harmony (TB), TVPaint (TV), Moho (M), After
 
 Known limits of what's in:
 
-- [ ] The Transform tool on a moved layer transforms its pixels as painted (where it is before it moves), not where it shows.
 - [ ] Liquify and filter-dialog live previews on a moved layer show when the drag ends, not during it.
 - [ ] Brush size and dab angle on a turned or scaled layer aren't turned or scaled with it.
 - [ ] Effects on a folder are applied to each of its layers in turn (a blur doesn't blend across them).

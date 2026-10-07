@@ -634,7 +634,10 @@ impl Canvas {
                 }
             }
             if x0 <= x1 && x0 != usize::MAX {
-                let (ox, oy) = ((tx as usize * ts) as f32, (ty as usize * ts) as f32);
+                let (ox, oy) = (
+                    (tx as i64 * ts as i64) as f32,
+                    (ty as i64 * ts as i64) as f32,
+                );
                 let tile = [
                     ox + x0 as f32,
                     oy + y0 as f32,

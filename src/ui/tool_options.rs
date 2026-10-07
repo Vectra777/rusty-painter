@@ -49,7 +49,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Animate => {
             tool_title(ui, "Animate");
             crate::ui::motion_panel::motion_fields(app, ui, false);
-            "Drag to move, a corner to scale, the round handle to turn, Alt+drag to move the pivot (Shift snaps); keyed at this frame"
+            "Moves the layer over time: a drag keys it at this frame, and it travels between keys (Transform, V, changes the drawing itself). Corner: scale, round handle: turn, Alt+drag: pivot, Shift: snap"
         }
         Tool::Text => {
             tool_title(ui, "Text");
