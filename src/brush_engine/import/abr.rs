@@ -89,8 +89,12 @@ fn read_sample(r: &mut Reader<'_>) -> Result<Arc<TipMask>, String> {
     let (top, left, bottom, right) = (r.i32_be()?, r.i32_be()?, r.i32_be()?, r.i32_be()?);
     let depth = r.u16_be()?;
     let compression = r.u8()?;
-    let (w, h) = (right - left, bottom - top);
-    if w <= 0 || h <= 0 || w > MAX_SIDE || h > MAX_SIDE {
+    // In i64: crafted bounds far apart would overflow i32.
+    let (w, h) = (
+        i64::from(right) - i64::from(left),
+        i64::from(bottom) - i64::from(top),
+    );
+    if w <= 0 || h <= 0 || w > i64::from(MAX_SIDE) || h > i64::from(MAX_SIDE) {
         return Err("A Photoshop brush tip has a bad size".into());
     }
     let (w, h) = (w as usize, h as usize);
@@ -608,6 +612,18 @@ mod tests {
             let _ = import(&good[..cut], "cut");
         }
         assert!(import(&[0, 99], "bad").is_err());
+    }
+
+    /// Bounds whose difference overflows i32 (found by `fuzz_abr`).
+    #[test]
+    fn a_tip_with_bounds_too_far_apart_is_refused() {
+        let mut bytes = Vec::new();
+        for v in [i32::MIN, i32::MIN, i32::MAX, i32::MAX] {
+            bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.push(0);
+        assert!(read_sample(&mut Reader::new(&bytes)).is_err());
     }
 
     #[test]

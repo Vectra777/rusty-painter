@@ -723,16 +723,8 @@ impl egui_wgpu::CallbackTrait for CanvasPaint {
 mod tests {
     use super::*;
 
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
-        eprintln!("GPU test adapter: {:?}", adapter.get_info());
-        let descriptor = wgpu::DeviceDescriptor {
-            required_limits: adapter.limits(),
-            ..Default::default()
-        };
-        pollster::block_on(adapter.request_device(&descriptor, None)).ok()
+    fn gpu() -> Option<std::sync::MutexGuard<'static, (wgpu::Device, wgpu::Queue)>> {
+        crate::app::view::test_gpu()
     }
 
     fn read_texture(
@@ -821,12 +813,13 @@ mod tests {
 
     #[test]
     fn mips_are_linear_box_filtered_and_display_matches_the_tile() {
-        let Some((device, queue)) = gpu() else {
+        let Some(lock) = gpu() else {
             eprintln!("no GPU adapter available; skipping");
             return;
         };
-        let mut canvas = GpuCanvas::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-        canvas.ensure_atlases(&device, 0, 1);
+        let (device, queue) = &*lock;
+        let mut canvas = GpuCanvas::new(device, wgpu::TextureFormat::Rgba8Unorm);
+        canvas.ensure_atlases(device, 0, 1);
 
         let size = TILE_SIZE as u32;
         let pixels: Vec<u8> = (0..size * size)
@@ -842,7 +835,7 @@ mod tests {
             .collect();
         let mut encoder = device.create_command_encoder(&Default::default());
         canvas.upload(
-            &device,
+            device,
             &mut encoder,
             &[TileUpload {
                 atlas: 0,
@@ -861,7 +854,7 @@ mod tests {
         let mut previous_size = size;
         for level in 1..MIP_LEVELS {
             let level_size = size >> level;
-            let got = read_texture(&device, &queue, texture, level, level_size, level_size);
+            let got = read_texture(device, queue, texture, level, level_size, level_size);
             let at = |x: u32, y: u32| {
                 let i = ((y * previous_size + x) * 4) as usize;
                 [
@@ -900,7 +893,7 @@ mod tests {
         });
         let uv = size as f32 / ATLAS_TEXTURE_SIZE as f32;
         canvas.prepare_quads(
-            &device,
+            device,
             &[AtlasQuad {
                 atlas: 0,
                 corners: [[-1.0, 1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]],
@@ -929,7 +922,7 @@ mod tests {
             canvas.paint(&mut pass);
         }
         queue.submit([encoder.finish()]);
-        let shown = read_texture(&device, &queue, &target, 0, size, size);
+        let shown = read_texture(device, queue, &target, 0, size, size);
         assert_close(&shown, &pixels, "1:1 display");
     }
 
@@ -943,12 +936,13 @@ mod tests {
 
     #[test]
     fn preview_level_uploads_land_exactly_and_regenerate_coarser_levels() {
-        let Some((device, queue)) = gpu() else {
+        let Some(lock) = gpu() else {
             eprintln!("no GPU adapter available; skipping");
             return;
         };
-        let mut canvas = GpuCanvas::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-        canvas.ensure_atlases(&device, 0, 1);
+        let (device, queue) = &*lock;
+        let mut canvas = GpuCanvas::new(device, wgpu::TextureFormat::Rgba8Unorm);
+        canvas.ensure_atlases(device, 0, 1);
         // A 16x16 block at level 2 (a 64 px tile at 1/4 scale), placed at an
         // odd-looking but aligned spot.
         let pixels: Vec<u8> = (0..16 * 16)
@@ -956,7 +950,7 @@ mod tests {
             .collect();
         let mut encoder = device.create_command_encoder(&Default::default());
         canvas.upload(
-            &device,
+            device,
             &mut encoder,
             &[TileUpload {
                 atlas: 0,
@@ -970,8 +964,8 @@ mod tests {
         );
         queue.submit([encoder.finish()]);
         let texture = &canvas.atlases[0].texture;
-        assert_eq!(read_texture(&device, &queue, texture, 2, 16, 16), pixels);
-        let level3 = read_texture(&device, &queue, texture, 3, 8, 8);
+        assert_eq!(read_texture(device, queue, texture, 2, 16, 16), pixels);
+        let level3 = read_texture(device, queue, texture, 3, 8, 8);
         let at = |x: usize, y: usize| {
             let i = (y * 16 + x) * 4;
             [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
@@ -1030,12 +1024,13 @@ mod tests {
 
     #[test]
     fn uploads_split_across_small_staging_buffers_land_intact() {
-        let Some((device, queue)) = gpu() else {
+        let Some(lock) = gpu() else {
             eprintln!("no GPU adapter available; skipping");
             return;
         };
-        let mut canvas = GpuCanvas::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-        canvas.ensure_atlases(&device, 0, 1);
+        let (device, queue) = &*lock;
+        let mut canvas = GpuCanvas::new(device, wgpu::TextureFormat::Rgba8Unorm);
+        canvas.ensure_atlases(device, 0, 1);
         let tile = |x: u32, shade: u8| TileUpload {
             atlas: 0,
             level: 0,
@@ -1050,9 +1045,9 @@ mod tests {
         let uploads = vec![tile(0, 10), tile(64, 20), tile(128, 30)];
         let mut encoder = device.create_command_encoder(&Default::default());
         // One 64x64 tile (16 KiB) per staging buffer.
-        canvas.copy_uploads_chunked(&device, &mut encoder, &uploads, 20 << 10);
+        canvas.copy_uploads_chunked(device, &mut encoder, &uploads, 20 << 10);
         queue.submit([encoder.finish()]);
-        let got = read_texture(&device, &queue, &canvas.atlases[0].texture, 0, 192, 64);
+        let got = read_texture(device, queue, &canvas.atlases[0].texture, 0, 192, 64);
         for (n, upload) in uploads.iter().enumerate() {
             for row in 0..64usize {
                 let got_row = &got[(row * 192 + n * 64) * 4..(row * 192 + n * 64 + 64) * 4];
@@ -1079,10 +1074,11 @@ mod tests {
         use crate::canvas::storage::LayerKind;
         use eframe::egui::Color32;
 
-        let Some((device, queue)) = gpu() else {
+        let Some(lock) = gpu() else {
             eprintln!("no GPU adapter available; skipping");
             return;
         };
+        let (device, queue) = &*lock;
         let (w, h) = (96usize, 80usize);
         let mut canvas = crate::canvas::Canvas::new(w, h, Color32::WHITE, 64);
         canvas.blend_space = space;
@@ -1125,7 +1121,7 @@ mod tests {
         let program = std::sync::Arc::new(shader::compile(source).unwrap());
         let id = canvas.layers[2].id;
 
-        let mut gpu = GpuCanvas::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let mut gpu = GpuCanvas::new(device, wgpu::TextureFormat::Rgba8UnormSrgb);
         let resolution = [w as f32, h as f32, 1.0, 0.0];
 
         // CPU reference: the shader baked into its layer, then flattened.
@@ -1136,7 +1132,7 @@ mod tests {
         };
         let baked = gpu
             .shaders
-            .bake(&device, &queue, id, &program, frame, w, h, &below.pixels)
+            .bake(device, queue, id, &program, frame, w, h, &below.pixels)
             .unwrap();
         for ty in 0..2 {
             for tx in 0..2 {
@@ -1159,7 +1155,7 @@ mod tests {
         let LiveStatus::Live(layout) = shader::live_layout(&canvas) else {
             panic!("expected a live layout");
         };
-        gpu.ensure_atlases(&device, 1, layout.runs.len());
+        gpu.ensure_atlases(device, 1, layout.runs.len());
         let uploads: Vec<TileUpload> = layout
             .runs
             .iter()
@@ -1224,12 +1220,12 @@ mod tests {
             },
         };
         let mut encoder = device.create_command_encoder(&Default::default());
-        gpu.upload(&device, &mut encoder, &uploads);
-        gpu.prepare_quads(&device, &quads);
-        gpu.compose(&device, &mut encoder, Some(&plan));
+        gpu.upload(device, &mut encoder, &uploads);
+        gpu.prepare_quads(device, &quads);
+        gpu.compose(device, &mut encoder, Some(&plan));
         queue.submit([encoder.finish()]);
         let texture = gpu.shaders.result_texture().expect("a composite");
-        let actual = read_texture(&device, &queue, texture, 0, w as u32, h as u32);
+        let actual = read_texture(device, queue, texture, 0, w as u32, h as u32);
         // Stored the way the atlases are (sRGB bytes) for a linear
         // document; as the stored values themselves for a gamma one.
         let expected: Vec<u8> = expected.pixels.iter().flat_map(|p| p.to_array()).collect();

@@ -124,6 +124,106 @@ fn every_step_undoes_and_redoes_exactly() {
     }
 }
 
+/// Random steps (gradients, deletions, moves, layers added, removed and
+/// reordered) with undo and redo among them, seeded so a failure repeats:
+/// undo and redo always land exactly on the document as it was at that
+/// step, and a new step after an undo drops what could have been redone.
+#[test]
+fn random_steps_undo_and_redo_to_exactly_where_they_were() {
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    let point =
+        |rng: &mut StdRng| Vec2::new(rng.random_range(0.0..256.0), rng.random_range(0.0..128.0));
+    for seed in 0..6 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut app = app();
+        let mut states = vec![snapshot(&app)];
+        let mut at = 0;
+        for round in 0..40 {
+            let undos = app.layer_state.history.labels().0.len();
+            let layers = app.canvas.layers.len();
+            let layer = rng.random_range(1..layers);
+            let what = rng.random_range(0..9);
+            match what {
+                0 if at > 0 => {
+                    app.apply_history(false);
+                    at -= 1;
+                    assert_eq!(
+                        snapshot(&app),
+                        states[at],
+                        "seed {seed}, round {round}: undo"
+                    );
+                    continue;
+                }
+                1 if at + 1 < states.len() => {
+                    app.apply_history(true);
+                    at += 1;
+                    assert_eq!(
+                        snapshot(&app),
+                        states[at],
+                        "seed {seed}, round {round}: redo"
+                    );
+                    continue;
+                }
+                0 | 1 => continue,
+                2 | 3 => {
+                    app.canvas_mut().active_layer_idx = layer;
+                    if rng.random_bool(0.5) {
+                        let (a, b) = (point(&mut rng), point(&mut rng));
+                        select_rect(&mut app, a.x, a.y, b.x, b.y);
+                    } else {
+                        app.selection_manager.clear_selection();
+                    }
+                    let (a, b) = (point(&mut rng), point(&mut rng));
+                    gradient(&mut app, a, b);
+                }
+                4 => app.add_layer_and_select(),
+                5 if layers > 2 => app.remove_layer(layer),
+                6 => {
+                    app.selection_manager.clear_selection();
+                    app.move_layer(layer, rng.random_range(1..layers), None);
+                }
+                7 => {
+                    app.canvas_mut().active_layer_idx = layer;
+                    let (a, b) = (point(&mut rng), point(&mut rng));
+                    select_rect(&mut app, a.x, a.y, b.x, b.y);
+                    app.delete_selection_contents();
+                }
+                _ => {
+                    app.canvas_mut().active_layer_idx = layer;
+                    let (a, b) = (point(&mut rng), point(&mut rng));
+                    select_rect(&mut app, a.x, a.y, b.x, b.y);
+                    let by =
+                        Vec2::new(rng.random_range(-60.0..60.0), rng.random_range(-40.0..40.0));
+                    move_selection(&mut app, (a + b) / 2.0, by);
+                }
+            }
+            app.selection_manager.clear_selection();
+            let now = snapshot(&app);
+            if app.layer_state.history.labels().0.len() > undos {
+                states.truncate(at + 1);
+                states.push(now);
+                at += 1;
+            } else {
+                assert_eq!(
+                    now, states[at],
+                    "seed {seed}, round {round}: step {what} left no undo step but changed the document"
+                );
+            }
+        }
+        // All the way back, then forward again.
+        while at > 0 {
+            app.apply_history(false);
+            at -= 1;
+            assert_eq!(snapshot(&app), states[at], "seed {seed}: unwinding to {at}");
+        }
+        while at + 1 < states.len() {
+            app.apply_history(true);
+            at += 1;
+            assert_eq!(snapshot(&app), states[at], "seed {seed}: replaying to {at}");
+        }
+    }
+}
+
 #[test]
 fn undo_takes_back_the_last_change_whichever_layer_is_selected() {
     let mut app = app();

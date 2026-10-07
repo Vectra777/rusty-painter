@@ -1229,15 +1229,8 @@ mod tests {
     use crate::canvas::blend_modes::composite;
     use eframe::egui::Rgba;
 
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
-        let descriptor = wgpu::DeviceDescriptor {
-            required_limits: adapter.limits(),
-            ..Default::default()
-        };
-        pollster::block_on(adapter.request_device(&descriptor, None)).ok()
+    fn gpu() -> Option<std::sync::MutexGuard<'static, (wgpu::Device, wgpu::Queue)>> {
+        crate::app::view::test_gpu()
     }
 
     fn shader_gpu(device: &wgpu::Device) -> ShaderGpu {
@@ -1261,11 +1254,12 @@ mod tests {
 
     #[test]
     fn a_baked_shader_is_its_colour_everywhere() {
-        let Some((device, queue)) = gpu() else {
+        let Some(lock) = gpu() else {
             eprintln!("no GPU adapter available; skipping");
             return;
         };
-        let mut gpu = shader_gpu(&device);
+        let (device, queue) = &*lock;
+        let mut gpu = shader_gpu(device);
         let program = crate::canvas::shader::compile(
             "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0, 0.5, 0.0, 0.5); }",
         )
@@ -1274,8 +1268,8 @@ mod tests {
         let below = vec![Color32::TRANSPARENT; w * h];
         let pixels = gpu
             .bake(
-                &device,
-                &queue,
+                device,
+                queue,
                 LayerId(1),
                 &program,
                 FrameUniforms::default(),
@@ -1294,11 +1288,12 @@ mod tests {
 
     #[test]
     fn channel_zero_reads_the_layers_below_at_the_same_pixel() {
-        let Some((device, queue)) = gpu() else {
+        let Some(lock) = gpu() else {
             eprintln!("no GPU adapter available; skipping");
             return;
         };
-        let mut gpu = shader_gpu(&device);
+        let (device, queue) = &*lock;
+        let mut gpu = shader_gpu(device);
         let program = crate::canvas::shader::compile(
             "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p / iResolution.xy); }",
         )
@@ -1312,8 +1307,8 @@ mod tests {
             .collect();
         let pixels = gpu
             .bake(
-                &device,
-                &queue,
+                device,
+                queue,
                 LayerId(1),
                 &program,
                 FrameUniforms::default(),
@@ -1495,11 +1490,12 @@ mod tests {
 
     #[test]
     fn gpu_blend_modes_match_the_cpu_compositor() {
-        let Some((device, queue)) = gpu() else {
+        let Some(lock) = gpu() else {
             eprintln!("no GPU adapter available; skipping");
             return;
         };
-        let gpu = shader_gpu(&device);
+        let (device, queue) = &*lock;
+        let gpu = shader_gpu(device);
         let values = [0.0f32, 0.1, 0.35, 0.5, 0.8, 1.0];
         let mut pairs = Vec::new();
         for (i, &a) in values.iter().enumerate() {
@@ -1525,7 +1521,7 @@ mod tests {
             if mode == LayerBlend::Dissolve {
                 continue;
             }
-            let out = gpu_blend(&device, &queue, &gpu, mode, &pairs);
+            let out = gpu_blend(device, queue, &gpu, mode, &pairs);
             for ((src, dst), got) in pairs.iter().zip(out) {
                 let want = composite(mode, *src, *dst, 0.0).to_array();
                 for (g, w) in got.iter().zip(want) {

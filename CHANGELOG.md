@@ -41,6 +41,14 @@
 - One editor window per shader layer: syntax colouring, errors at their line as you type, play/pause, speed, templates, and Bake.
 - Export, merging and saving use the current frame; the shader, its time and speed are saved with the project.
 
+### Fixed
+- A Photoshop brush file with a tip whose bounds are far apart is refused instead of crashing a debug build (or reading a wrong size in a release one).
+
+### Development
+- `cargo test` runs about five times faster (10 s → 2 s): tests build at opt-level 1, and the GPU tests share one device instead of making one each.
+- A randomized history test: seeded runs of gradients, deletions, moves and layer changes with undo and redo among them, each landing exactly where it was.
+- The biggest files are split: the brush (types and placing dabs / painting them into tiles), the Blend tools, documents, history, filters, the canvas renderer and Krita import keep their tests in files of their own, and the brush dynamics tests are grouped by subject.
+
 ### Fixed (from the `windows` branch)
 - Windows: the pen landed away from the pointer on displays scaled above 100% (Windows Ink positions are physical pixels).
 - A pen stroke starts where the pen touched even when the tablet reports the position before the touch.
