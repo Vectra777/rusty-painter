@@ -57,6 +57,12 @@
 - Pictures are imported converted from the profile they carry to the document's; Photoshop and Krita documents open with theirs.
 - Colour harmonies in the colour panel: complementary, split complementary, analogous, triadic and tetradic hues shown on the wheel and as swatches to pick.
 
+### Krita's engines, closer
+- Spray: density mode (particles by the share of the area they cover), the spray area's aspect and turn, jitter moving the whole cloud, and each particle's own random hue, saturation, value and opacity and mix with the secondary colour; Krita presets bring them.
+- Grid: cells taller or wider than square, divisions (also by pressure), a random border, and cells repainted by every dab; Krita presets bring them.
+- Particle: each particle answering the pen's pull at its own rate, several steps per dab, dots instead of lines; Krita particle presets start them all at the pen as Krita does.
+- Bristle: hairs from an image tip's pixels, shear, density, random offset, light pressure lifting hairs off, and colour fading as the hairs run dry; Krita bristle presets bring their settings.
+
 ### Fixed
 - A Photoshop brush file with a tip whose bounds are far apart is refused instead of crashing a debug build (or reading a wrong size in a release one).
 

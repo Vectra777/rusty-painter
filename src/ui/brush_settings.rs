@@ -1548,6 +1548,53 @@ fn spray_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::engines::Spray)
         changed |= ui
             .checkbox(&mut s.random_rotation, "Turned at random")
             .changed();
+        let mut density = s.coverage > 0.0;
+        if ui
+            .checkbox(&mut density, "By coverage")
+            .on_hover_text(
+                "As many particles as cover this much of the area: bigger sprays get more.",
+            )
+            .changed()
+        {
+            s.coverage = if density { 0.3 } else { 0.0 };
+            changed = true;
+        }
+        if density {
+            changed |= engine_row(ui, "Coverage", &mut s.coverage, |v| {
+                percent_of_unit(egui::Slider::new(v, 0.001..=1.0).logarithmic(true))
+            });
+        }
+        changed |= engine_row(ui, "Aspect", &mut s.aspect, |v| {
+            egui::Slider::new(v, 0.1..=10.0)
+                .logarithmic(true)
+                .max_decimals(2)
+        });
+        changed |= engine_row(ui, "Area turn", &mut s.rotation, |v| {
+            egui::Slider::new(v, -180.0..=180.0)
+                .max_decimals(0)
+                .suffix("°")
+        });
+        changed |= engine_row(ui, "Jitter", &mut s.jitter, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=2.0))
+        });
+        ui.label("Each particle's colour");
+        changed |= engine_row(ui, "Hue", &mut s.random_hsv[0], |v| {
+            egui::Slider::new(v, 0.0..=180.0)
+                .max_decimals(0)
+                .suffix("°")
+        });
+        changed |= engine_row(ui, "Saturation", &mut s.random_hsv[1], |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= engine_row(ui, "Value", &mut s.random_hsv[2], |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= ui
+            .checkbox(&mut s.random_opacity, "Random opacity")
+            .changed();
+        changed |= ui
+            .checkbox(&mut s.mix_secondary, "Mixed with the secondary colour")
+            .changed();
     });
     changed
 }
@@ -1607,6 +1654,31 @@ fn grid_section(ui: &mut egui::Ui, g: &mut crate::brush_engine::engines::Grid) -
                 .max_decimals(0)
                 .suffix("°")
         });
+        changed |= engine_row(ui, "Cell height", &mut g.cell_height, |v| {
+            egui::Slider::new(v, 0.0..=500.0)
+                .max_decimals(0)
+                .suffix(" px")
+                .custom_formatter(|v, _| {
+                    if v <= 0.0 {
+                        "square".into()
+                    } else {
+                        format!("{v:.0} px")
+                    }
+                })
+        });
+        changed |= engine_row(ui, "Divisions", &mut g.divisions, |v| {
+            egui::Slider::new(v, 1..=16)
+        });
+        changed |= ui
+            .checkbox(&mut g.divide_by_pressure, "Divided by pressure")
+            .changed();
+        changed |= engine_row(ui, "Random border", &mut g.random_border, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= ui
+            .checkbox(&mut g.repaint, "Repaint cells")
+            .on_hover_text("Every dab over a cell paints it again, building it up.")
+            .changed();
     });
     changed
 }
@@ -1647,6 +1719,13 @@ fn particle_section(ui: &mut egui::Ui, p: &mut crate::brush_engine::engines::Par
         changed |= engine_row(ui, "Spread", &mut p.spread, |v| {
             percent_of_unit(egui::Slider::new(v, 0.0..=2.0))
         });
+        changed |= engine_row(ui, "Pull variation", &mut p.weight_spread, |v| {
+            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+        });
+        changed |= engine_row(ui, "Steps per dab", &mut p.iterations, |v| {
+            egui::Slider::new(v, 1..=30)
+        });
+        changed |= ui.checkbox(&mut p.dots, "Dots, not lines").changed();
     });
     changed
 }
@@ -1750,6 +1829,47 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
         )
         .on_hover_text("How much the hairs differ in thickness and strength.")
         .changed();
+        changed |= ui
+            .checkbox(&mut b.from_tip, "Hairs from the tip")
+            .on_hover_text("An image tip's painted pixels are the hairs, as in Krita.")
+            .changed();
+        for (label, value, range, hint) in [
+            (
+                "Shear",
+                &mut b.shear,
+                -1.0..=1.0,
+                "Hairs lean along the stroke, more the further across.",
+            ),
+            (
+                "Density",
+                &mut b.density,
+                0.0..=1.0,
+                "The share of the hairs that paint.",
+            ),
+            (
+                "Random offset",
+                &mut b.random_offset,
+                0.0..=1.0,
+                "Each hair wanders across the stroke.",
+            ),
+            (
+                "Pressure cut",
+                &mut b.pressure_cut,
+                0.0..=1.0,
+                "Light pressure lifts the longer hairs off the canvas.",
+            ),
+        ] {
+            changed |= slider_row(
+                ui,
+                label,
+                crate::ui::widgets::reset(value, |v| percent_of_unit(egui::Slider::new(v, range))),
+            )
+            .on_hover_text(hint)
+            .changed();
+        }
+        changed |= ui
+            .checkbox(&mut b.deplete_saturation, "Colour fades as it dries")
+            .changed();
     });
     changed
 }

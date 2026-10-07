@@ -796,6 +796,12 @@ impl Brush {
                 if p.angle != 0.0 {
                     v.orient = compose(var.orient, tip_orientation(p.angle, 1.0));
                 }
+                // Each particle's own colour and opacity.
+                for k in 0..3 {
+                    v.hsv[k] += p.hsv[k];
+                }
+                v.strength *= p.opacity;
+                v.mix = v.mix.max(p.mix);
                 out.1.push(v);
             }
         }
@@ -812,7 +818,12 @@ impl Brush {
     ) -> (Vec<Vec2>, Vec<crate::brush_engine::dynamics::DabVar>) {
         use crate::brush_engine::dynamics::{DabVar, IDENTITY, compose};
         let b = &self.bristles;
-        let hairs = b.hairs();
+        let hairs = match &self.brush_options.pixel_shape {
+            PixelBrushShape::Custom(tip) if b.from_tip => {
+                b.hairs_from_mask(tip.width, tip.height, &tip.pixels)
+            }
+            _ => b.hairs(),
+        };
         let base_r = (self.brush_options.diameter / 2.0).max(0.25);
         let mut out_centers = Vec::with_capacity(centers.len() * hairs.len());
         let mut out_vars = Vec::with_capacity(out_centers.capacity());
@@ -833,17 +844,24 @@ impl Brush {
             let spread = base_r * var.scale * b.spread;
             for hair in &hairs {
                 let ink = b.ink_left(hair, var.along);
-                if ink <= 0.0 {
+                if ink <= 0.0 || !b.touches(hair, var.pressure) {
                     continue;
                 }
-                let (tx, ty) = (hair.offset.x * spread, hair.offset.y * spread);
+                let at = b.place(hair, var.along);
+                let (tx, ty) = (at.x * spread, at.y * spread);
                 let offset = Vec2::new(inv[0] * tx + inv[1] * ty, inv[2] * tx + inv[3] * ty);
                 out_centers.push(center + offset);
                 let hair_r = (b.thickness * 0.5 * hair.thickness).max(0.3);
+                let mut hsv = var.hsv;
+                if b.deplete_saturation {
+                    // Running dry, the colour fades to grey with the paint.
+                    hsv[1] -= 1.0 - ink;
+                }
                 out_vars.push(DabVar {
                     scale: hair_r / base_r,
                     strength: var.strength * hair.strength * ink,
                     orient: IDENTITY,
+                    hsv,
                     ..var
                 });
             }

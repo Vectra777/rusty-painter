@@ -349,6 +349,7 @@ fn bristle_brush(ink: f32) -> Brush {
         spread: 1.0,
         ink,
         variation: 0.0,
+        ..Default::default()
     };
     b
 }

@@ -525,3 +525,57 @@ fn scatter_reaches_five_brush_widths_and_mixing_settings_take_inputs() {
     apply_inputs(&inputs, &[], &mut v, &s);
     assert_eq!((v.scatter, v.smudge, v.color_rate), (2.0, 0.5, 0.5));
 }
+
+#[test]
+fn a_grid_that_repaints_builds_its_cells_up() {
+    use crate::brush_engine::brush::BrushType;
+    let mut grid = engine(BrushType::Grid);
+    grid.brush_options.diameter = 10.0;
+    grid.brush_options.hardness = 100.0;
+    grid.brush_options.opacity = 0.3;
+    grid.engines.grid.cell = 16.0;
+    let (once, _) = paint(&mut grid, &line(64.0, 1.0), 1, true);
+    grid.engines.grid.repaint = true;
+    let (built, _) = paint(&mut grid, &line(64.0, 1.0), 1, true);
+    assert!(alpha(&built, 40, 56) > alpha(&once, 40, 56) + 20);
+    // Tall cells: the shapes reach further up and down than across.
+    grid.engines.grid.repaint = false;
+    grid.engines.grid.cell_height = 48.0;
+    grid.brush_options.opacity = 1.0;
+    let (tall, _) = paint(&mut grid, &line(64.0, 1.0), 1, true);
+    let column = |x| (0..H).filter(|&y| alpha(&tall, x, y) > 0).count();
+    let row = |y| (0..W).filter(|&x| alpha(&tall, x, y) > 0).count();
+    assert!(column(40) > 30, "tall shapes: {}", column(40));
+    assert!(row(72) > 100, "still along the whole line: {}", row(72));
+}
+
+#[test]
+fn light_pressure_lifts_bristles_and_coverage_grows_a_spray() {
+    use crate::brush_engine::brush::BrushType;
+    let mut b = bristle_brush(0.0);
+    b.bristles.count = 40;
+    b.bristles.pressure_cut = 1.0;
+    let pts = |p: f32| {
+        (0..60)
+            .map(|i| (Vec2::new(20.0 + i as f32 * 3.0, 64.0), p))
+            .collect::<Vec<_>>()
+    };
+    let light = covered(&stroke_with_pressure(&mut b, &pts(0.2)));
+    let hard = covered(&stroke_with_pressure(&mut b, &pts(1.0)));
+    assert!(light * 2 < hard, "{light} vs {hard}");
+
+    // By coverage, a bigger spray gets more particles: it covers the same
+    // share of a bigger area.
+    let mut spray = engine(BrushType::Spray);
+    spray.engines.spray.coverage = 0.2;
+    spray.brush_options.diameter = 20.0;
+    let (small, _) = paint(&mut spray, &[(Vec2::new(60.0, 64.0), 0.0)], 3, true);
+    spray.brush_options.diameter = 60.0;
+    let (big, _) = paint(&mut spray, &[(Vec2::new(60.0, 64.0), 0.0)], 3, true);
+    assert!(
+        covered(&big) > 4 * covered(&small),
+        "{} vs {}",
+        covered(&big),
+        covered(&small)
+    );
+}

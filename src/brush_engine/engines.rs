@@ -57,6 +57,23 @@ pub struct Spray {
     pub size_random: f32,
     /// Each particle turned at random (an image or square tip).
     pub random_rotation: bool,
+    /// Density mode: as many particles as cover this share of the area
+    /// (bigger sprays get more), in place of `amount`; 0 is off.
+    pub coverage: f32,
+    /// The spray area's height to width (1 a circle).
+    pub aspect: f32,
+    /// The spray area's turn, degrees.
+    pub rotation: f32,
+    /// How far the whole cloud jumps about from dab to dab, a share of
+    /// the radius (0 stays on the stroke).
+    pub jitter: f32,
+    /// Each particle's colour shifted at random by up to this much: hue
+    /// (degrees), saturation and value (0..1); all zero is off.
+    pub random_hsv: [f32; 3],
+    /// Each particle's opacity at random.
+    pub random_opacity: bool,
+    /// Each particle mixed with the secondary colour at random.
+    pub mix_secondary: bool,
 }
 
 impl Default for Spray {
@@ -67,6 +84,13 @@ impl Default for Spray {
             particle_size: 0.08,
             size_random: 0.5,
             random_rotation: true,
+            coverage: 0.0,
+            aspect: 1.0,
+            rotation: 0.0,
+            jitter: 0.0,
+            random_hsv: [0.0; 3],
+            random_opacity: false,
+            mix_secondary: false,
         }
     }
 }
@@ -78,12 +102,28 @@ pub struct Particle {
     pub offset: Vec2,
     pub scale: f32,
     pub angle: f32,
+    /// Its colour shift (hue degrees, saturation, value), opacity factor
+    /// and share of the secondary colour.
+    pub hsv: [f32; 3],
+    pub opacity: f32,
+    pub mix: f32,
 }
 
 impl Spray {
+    /// How many particles a dab has.
+    pub fn count(&self) -> u32 {
+        if self.coverage > 0.0 {
+            // A particle covers `particle_size`² of the area.
+            let share = self.particle_size.max(0.01).powi(2);
+            ((self.coverage.min(1.0) / share).round() as u32).clamp(1, 500)
+        } else {
+            self.amount.clamp(1, 500)
+        }
+    }
+
     /// The particles of a dab of `radius`, the same for the same `seed`.
     pub fn particles(&self, seed: u32, radius: f32) -> Vec<Particle> {
-        let n = self.amount.clamp(1, 500);
+        let n = self.count();
         let mut k = 0u32;
         let mut next = || {
             k += 1;
@@ -108,6 +148,17 @@ impl Spray {
                 .collect(),
             _ => Vec::new(),
         };
+        // The area's shape and turn, and where the cloud jumped to.
+        let (aspect, (rs, rc)) = (
+            self.aspect.clamp(0.05, 20.0),
+            self.rotation.to_radians().sin_cos(),
+        );
+        let shift = if self.jitter > 0.0 {
+            disc(next(), next(), radius * self.jitter)
+        } else {
+            Vec2::ZERO
+        };
+        let [dh, ds, dv] = self.random_hsv;
         (0..n)
             .map(|i| {
                 let (u, v) = (next(), next());
@@ -126,10 +177,20 @@ impl Spray {
                 } else {
                     0.0
                 };
+                let offset = Vec2::new(offset.x, offset.y * aspect);
+                let offset =
+                    Vec2::new(offset.x * rc - offset.y * rs, offset.x * rs + offset.y * rc) + shift;
+                let mut signed = || next() * 2.0 - 1.0;
+                let hsv = [dh * signed(), ds * signed(), dv * signed()];
+                let opacity = if self.random_opacity { next() } else { 1.0 };
+                let mix = if self.mix_secondary { next() } else { 0.0 };
                 Particle {
                     offset,
                     scale: size,
                     angle,
+                    hsv,
+                    opacity,
+                    mix,
                 }
             })
             .collect()
@@ -253,6 +314,18 @@ pub struct Grid {
     pub scale: f32,
     /// Each cell's hue turned at random, degrees either way.
     pub hue_jitter: f32,
+    /// A cell's height, canvas pixels (0: square, as wide as `cell`).
+    pub cell_height: f32,
+    /// Each cell divided into this many across and down (1 = whole).
+    pub divisions: u32,
+    /// The divisions grow with the pen's pressure (from whole cells at the
+    /// lightest to `divisions` at the hardest).
+    pub divide_by_pressure: bool,
+    /// How much each shape shrinks at random (0..1).
+    pub random_border: f32,
+    /// Cells are painted again by every dab over them (they build up),
+    /// not once a stroke.
+    pub repaint: bool,
 }
 
 impl Default for Grid {
@@ -262,53 +335,86 @@ impl Default for Grid {
             offset: [0.0, 0.0],
             scale: 0.9,
             hue_jitter: 0.0,
+            cell_height: 0.0,
+            divisions: 1,
+            divide_by_pressure: false,
+            random_border: 0.0,
+            repaint: false,
         }
     }
 }
 
+/// A grid cell: its column and row, and how finely it's divided.
+pub type GridCell = (i32, i32, u32);
+
 impl Grid {
-    fn side(&self) -> f32 {
-        self.cell.max(1.0)
+    /// How finely cells are divided at `pressure`.
+    pub fn division(&self, pressure: f32) -> u32 {
+        let most = self.divisions.clamp(1, 16);
+        if self.divide_by_pressure {
+            1 + ((most - 1) as f32 * pressure.clamp(0.0, 1.0)).round() as u32
+        } else {
+            most
+        }
     }
 
-    /// The cells a dab at `center` of `radius` covers part of.
-    pub fn cells(&self, center: Vec2, radius: f32) -> Vec<(i32, i32)> {
-        let side = self.side();
+    /// A (divided) cell's width and height.
+    fn sides(&self, division: u32) -> Vec2 {
+        let w = self.cell.max(1.0);
+        let h = if self.cell_height > 0.0 {
+            self.cell_height.max(1.0)
+        } else {
+            w
+        };
+        Vec2::new(w, h) / division.max(1) as f32
+    }
+
+    /// The cells (divided `division` times) a dab at `center` of `radius`
+    /// covers part of.
+    pub fn cells(&self, center: Vec2, radius: f32, division: u32) -> Vec<GridCell> {
+        let side = self.sides(division);
         let local = center - Vec2::from(self.offset);
         let r = radius.max(0.0);
         let (x0, x1) = (
-            ((local.x - r) / side).floor() as i32,
-            ((local.x + r) / side).floor() as i32,
+            ((local.x - r) / side.x).floor() as i32,
+            ((local.x + r) / side.x).floor() as i32,
         );
         let (y0, y1) = (
-            ((local.y - r) / side).floor() as i32,
-            ((local.y + r) / side).floor() as i32,
+            ((local.y - r) / side.y).floor() as i32,
+            ((local.y + r) / side.y).floor() as i32,
         );
         let mut out = Vec::new();
         for cy in y0..=y1 {
             for cx in x0..=x1 {
                 // The cell's nearest point to the centre, inside the circle.
                 let near = Vec2::new(
-                    local.x.clamp(cx as f32 * side, (cx + 1) as f32 * side),
-                    local.y.clamp(cy as f32 * side, (cy + 1) as f32 * side),
+                    local.x.clamp(cx as f32 * side.x, (cx + 1) as f32 * side.x),
+                    local.y.clamp(cy as f32 * side.y, (cy + 1) as f32 * side.y),
                 );
                 if (near - local).length() <= r {
-                    out.push((cx, cy));
+                    out.push((cx, cy, division));
                 }
             }
         }
         out
     }
 
-    /// The middle of cell `c`, canvas pixels.
-    pub fn center(&self, (cx, cy): (i32, i32)) -> Vec2 {
-        let side = self.side();
-        Vec2::from(self.offset) + Vec2::new((cx as f32 + 0.5) * side, (cy as f32 + 0.5) * side)
+    /// The middle of `cell`, canvas pixels.
+    pub fn center(&self, (cx, cy, division): GridCell) -> Vec2 {
+        let side = self.sides(division);
+        Vec2::from(self.offset) + Vec2::new((cx as f32 + 0.5) * side.x, (cy as f32 + 0.5) * side.y)
     }
 
-    /// A shape's radius in a cell.
-    pub fn radius(&self) -> f32 {
-        self.side() * 0.5 * self.scale.clamp(0.05, 1.5)
+    /// A shape's radius across and its height to width in `cell` (shrunk
+    /// at random by the random border).
+    pub fn shape(&self, cell: GridCell) -> (f32, f32) {
+        let side = self.sides(cell.2);
+        let shrink = 1.0
+            - self.random_border.clamp(0.0, 1.0) * hash01(cell.0 as u32 ^ 0x5bd1, cell.1 as u32);
+        (
+            side.x * 0.5 * self.scale.clamp(0.05, 1.5) * shrink,
+            side.y / side.x,
+        )
     }
 }
 
@@ -376,6 +482,13 @@ pub struct Particles {
     pub line_width: f32,
     /// How far apart they start, a share of the brush's size.
     pub spread: f32,
+    /// How differently each answers the pen's pull (0 all alike, 1 from
+    /// none to twice the weight).
+    pub weight_spread: f32,
+    /// Dots where they are each step, not lines along their paths.
+    pub dots: bool,
+    /// Steps they take for each dab (1..=30).
+    pub iterations: u32,
 }
 
 impl Default for Particles {
@@ -387,6 +500,9 @@ impl Default for Particles {
             gravity: [0.0, 0.0],
             line_width: 1.0,
             spread: 0.5,
+            weight_spread: 0.0,
+            dots: false,
+            iterations: 1,
         }
     }
 }
@@ -396,6 +512,8 @@ impl Default for Particles {
 pub struct Swarm {
     pub pos: Vec<Vec2>,
     pub vel: Vec<Vec2>,
+    /// Each particle's pull factor.
+    pub pull: Vec<f32>,
 }
 
 impl Particles {
@@ -411,25 +529,33 @@ impl Particles {
                 at + Vec2::new(c, s) * (spread * u.sqrt())
             })
             .collect();
+        let spread = self.weight_spread.clamp(0.0, 1.0);
+        let pull = (0..n)
+            .map(|i| 1.0 + spread * (hash01(seed ^ 0x9e37, i) * 2.0 - 1.0))
+            .collect();
         Swarm {
             pos,
             vel: vec![Vec2::ZERO; n as usize],
+            pull,
         }
     }
 
-    /// One step towards `target`: each particle's path this step (from, to).
+    /// The steps towards `target` for one dab: each particle's path each
+    /// step (from, to).
     pub fn step(&self, swarm: &mut Swarm, target: Vec2) -> Vec<(Vec2, Vec2)> {
         let pull = self.weight.clamp(0.0, 1.0);
         let keep = 1.0 - self.drag.clamp(0.0, 1.0);
         let gravity = Vec2::from(self.gravity);
-        (swarm.pos.iter_mut().zip(&mut swarm.vel))
-            .map(|(p, v)| {
-                *v = *v * keep + (target - *p) * pull + gravity;
+        let mut out = Vec::new();
+        for _ in 0..self.iterations.clamp(1, 30) {
+            for ((p, v), k) in swarm.pos.iter_mut().zip(&mut swarm.vel).zip(&swarm.pull) {
+                *v = *v * keep + (target - *p) * (pull * k) + gravity;
                 let from = *p;
                 *p += *v;
-                (from, *p)
-            })
-            .collect()
+                out.push((from, *p));
+            }
+        }
+        out
     }
 }
 
@@ -533,21 +659,141 @@ mod tests {
             cell: 10.0,
             ..Default::default()
         };
-        assert_eq!(grid.cells(Vec2::new(5.0, 5.0), 2.0), [(0, 0)]);
-        let cells = grid.cells(Vec2::new(10.0, 10.0), 3.0);
+        assert_eq!(grid.cells(Vec2::new(5.0, 5.0), 2.0, 1), [(0, 0, 1)]);
+        let cells = grid.cells(Vec2::new(10.0, 10.0), 3.0, 1);
         assert_eq!(cells.len(), 4, "a corner: four cells");
-        assert_eq!(grid.center((1, 2)), Vec2::new(15.0, 25.0));
+        assert_eq!(grid.center((1, 2, 1)), Vec2::new(15.0, 25.0));
         let shifted = Grid {
             offset: [3.0, 0.0],
             ..grid
         };
-        assert_eq!(shifted.center((0, 0)), Vec2::new(8.0, 5.0));
+        assert_eq!(shifted.center((0, 0, 1)), Vec2::new(8.0, 5.0));
         // A big dab: no cell twice.
-        let mut many = grid.cells(Vec2::new(50.0, 50.0), 35.0);
+        let mut many = grid.cells(Vec2::new(50.0, 50.0), 35.0, 1);
         let n = many.len();
         many.sort_unstable();
         many.dedup();
         assert_eq!(many.len(), n);
+    }
+
+    #[test]
+    fn grid_cells_can_be_tall_divided_by_pressure_and_shrunk_at_random() {
+        let grid = Grid {
+            cell: 10.0,
+            cell_height: 30.0,
+            divisions: 3,
+            divide_by_pressure: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            (grid.division(0.0), grid.division(0.5), grid.division(1.0)),
+            (1, 2, 3)
+        );
+        // Tall cells: a dab at (5, 25) is in the first one.
+        assert_eq!(grid.cells(Vec2::new(5.0, 25.0), 1.0, 1), [(0, 0, 1)]);
+        assert_eq!(grid.center((0, 0, 1)), Vec2::new(5.0, 15.0));
+        let (r, aspect) = grid.shape((0, 0, 1));
+        assert!((r - 4.5).abs() < 1e-4 && (aspect - 3.0).abs() < 1e-4);
+        // Divided in three: a third the size.
+        assert_eq!(grid.center((0, 0, 3)), Vec2::new(10.0 / 6.0, 5.0));
+        let bordered = Grid {
+            random_border: 1.0,
+            ..grid
+        };
+        let radii: Vec<f32> = (0..20).map(|i| bordered.shape((i, 0, 1)).0).collect();
+        assert!(radii.iter().all(|&r| (0.0..=4.5).contains(&r)));
+        assert!(radii.iter().any(|&r| r < 3.0), "{radii:?}");
+    }
+
+    #[test]
+    fn a_spray_can_go_by_coverage_be_stretched_jitter_and_vary_its_particles() {
+        let spray = Spray {
+            coverage: 0.5,
+            particle_size: 0.1,
+            ..Default::default()
+        };
+        assert_eq!(
+            spray.count(),
+            50,
+            "half the area in particles a tenth across"
+        );
+        // Stretched tall: further up and down than across.
+        let tall = Spray {
+            amount: 400,
+            aspect: 3.0,
+            ..Default::default()
+        };
+        let ps = tall.particles(3, 10.0);
+        let reach = |f: fn(&Particle) -> f32| ps.iter().map(f).fold(0.0f32, f32::max);
+        assert!(reach(|p| p.offset.y.abs()) > 2.0 * reach(|p| p.offset.x.abs()));
+        // Turned a quarter: the other way round.
+        let turned = Spray {
+            rotation: 90.0,
+            ..tall
+        };
+        let ps = turned.particles(3, 10.0);
+        assert!(
+            ps.iter().map(|p| p.offset.x.abs()).fold(0.0f32, f32::max)
+                > 2.0 * ps.iter().map(|p| p.offset.y.abs()).fold(0.0f32, f32::max)
+        );
+        // Jitter moves the whole cloud: its middle is off the dab's.
+        let jittery = Spray {
+            amount: 200,
+            jitter: 1.0,
+            ..Default::default()
+        };
+        let middles: Vec<Vec2> = (0..8)
+            .map(|seed| {
+                let ps = jittery.particles(seed, 10.0);
+                ps.iter().map(|p| p.offset).fold(Vec2::ZERO, |a, b| a + b) / ps.len() as f32
+            })
+            .collect();
+        assert!(middles.iter().any(|m| m.length() > 2.0), "{middles:?}");
+        // Colours, opacity and mixing, each within its range.
+        let colourful = Spray {
+            amount: 100,
+            random_hsv: [30.0, 0.2, 0.1],
+            random_opacity: true,
+            mix_secondary: true,
+            ..Default::default()
+        };
+        let ps = colourful.particles(1, 10.0);
+        assert!(
+            ps.iter()
+                .all(|p| p.hsv[0].abs() <= 30.0 && p.hsv[1].abs() <= 0.2)
+        );
+        assert!(ps.iter().any(|p| p.hsv[0] > 10.0) && ps.iter().any(|p| p.hsv[0] < -10.0));
+        assert!(
+            ps.iter()
+                .all(|p| (0.0..=1.0).contains(&p.opacity) && (0.0..=1.0).contains(&p.mix))
+        );
+        assert!(
+            Spray::default()
+                .particles(1, 10.0)
+                .iter()
+                .all(|p| p.opacity == 1.0 && p.mix == 0.0)
+        );
+    }
+
+    #[test]
+    fn particles_answer_the_pull_at_their_own_rates_and_step_several_times() {
+        let p = Particles {
+            count: 20,
+            spread: 0.0,
+            weight_spread: 1.0,
+            iterations: 3,
+            ..Default::default()
+        };
+        let mut swarm = p.start(Vec2::ZERO, 10.0, 4);
+        assert!(
+            swarm.pos.iter().all(|&q| q == Vec2::ZERO),
+            "all start at the pen"
+        );
+        let paths = p.step(&mut swarm, Vec2::new(100.0, 0.0));
+        assert_eq!(paths.len(), 60, "three steps each");
+        let mut xs: Vec<f32> = swarm.pos.iter().map(|q| q.x).collect();
+        xs.sort_by(f32::total_cmp);
+        assert!(xs[19] > 2.0 * xs[0] + 1.0, "some keep up, some lag: {xs:?}");
     }
 
     #[test]

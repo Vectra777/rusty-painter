@@ -13,12 +13,12 @@ Engines not here yet
 Krita engines that came across approximately (from reading Krita's source)
 
 - Colour smudge, legacy algorithm: Krita presets default to it (SmudgeRateUseNewEngine off); here every preset uses the new one's formulas, so older smudge presets mix differently. Also missing: the overlay mode (smudging all layers).
-- Spray: density mode (more particles the bigger the brush), aspect, jitter, per-particle colour (sampled from the layer, mixed with the background by pressure, random HSV or opacity), particle shapes other than the tip, particles turning with the cursor or the drawing angle.
-- Grid: cells wider than tall, divisions (by pressure too), random borders, line shapes; Krita repaints the cells under each dab, here each cell is painted once per stroke.
+- Spray: per-particle colour sampled from the layer, particle shapes other than the tip, particles turning with the cursor or the drawing angle.
+- Grid: line shapes.
 - Curve: Krita's cubic mode; its connection line is the pen's own segment, here from the curve's start to the pen.
-- Particle: a different model. Krita starts every particle at one point, each answering the pull at its own rate, drawing dots.
+- Particle: Krita's scale x/y options.
 - Tangent normal: direction, rotation and mix modes, elevation sensitivity, canvas rotation and mirroring.
-- Bristle: Krita's hairy model (a bristle for each pixel of the tip, cut off by pressure, shear, connected paths, ink depletion curves, saturation depletion, soaking ink from the layer). Krita hairy presets import as the type only.
+- Bristle: connected paths between dabs, ink depletion curves and weights, soaking ink from the layer; the Krita preset keys for the bristle options are read as documented but weren't checked against a real preset.
 - Sketch: magnetify, make-connection and distance density don't import.
 - Mix colour source with several sensors at once.
 - Deform: lens in and out, colour deform. Clone: healing.
@@ -46,9 +46,9 @@ Comics (C leads, I has most)
 
 Colour
 
-- More than 8 bits per channel: 16-bit or 32-bit float colour (K, PS, partly C). Soft airbrushing can band.
-- Colour management: ICC profiles, soft-proofing, CMYK export for print (K, PS, C).
-- Colour history, harmony wheels, a mixing palette (C, K), gamut masks (K).
+- Full depth for the tools still working at 8 bits in 16-bit and float documents: transforms, smudging and mixing brushes, wet paint, blurs and other spatial filters, fills, liquify.
+- The app's "linear light" decodes every profile with sRGB's curve; live shader layers show without the display conversion; CMYK PSD export.
+- A mixing palette (C, K), gamut masks (K).
 
 Layers
 

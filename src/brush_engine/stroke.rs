@@ -628,7 +628,7 @@ pub struct StrokeState {
     /// curve brush's too.
     sketch_points: Vec<Vec2>,
     /// A grid brush: the cells painted so far (each only once).
-    grid_cells: rustc_hash::FxHashSet<(i32, i32)>,
+    grid_cells: rustc_hash::FxHashSet<crate::brush_engine::engines::GridCell>,
     /// A particle brush's swarm, once the stroke has begun.
     swarm: Option<crate::brush_engine::engines::Swarm>,
     /// A dual brush's second tip: where its last dab went, and how far
@@ -977,17 +977,26 @@ impl StrokeState {
             BrushType::Grid => {
                 let g = e.grid;
                 for plan in plans {
-                    for cell in g.cells(plan.pos, base_r * plan.var.scale) {
-                        if !self.grid_cells.insert(cell) {
+                    let division = g.division(plan.var.pressure);
+                    for cell in g.cells(plan.pos, base_r * plan.var.scale, division) {
+                        // Once a stroke, unless every dab repaints its cells.
+                        if !self.grid_cells.insert(cell) && !g.repaint {
                             continue;
                         }
                         let hue = (hash01(cell.0 as u32, cell.1 as u32) * 2.0 - 1.0) * g.hue_jitter;
+                        // Across `rx`, up and down `ry`: the radius is the
+                        // longer, the tip squashed the other way (dabs
+                        // never reach past their radius).
+                        let (rx, aspect) = g.shape(cell);
+                        let ry = rx * aspect.max(0.01);
+                        let radius = rx.max(ry);
                         centers.push(g.center(cell));
                         vars.push(DabVar {
-                            scale: g.radius() / base_r,
+                            scale: radius / base_r,
                             strength: plan.var.strength,
                             tip: plan.var.tip,
                             hsv: [hue, 0.0, 0.0],
+                            orient: [radius / rx.max(1e-3), 0.0, 0.0, radius / ry.max(1e-3)],
                             ..DabVar::default()
                         });
                     }
@@ -1005,7 +1014,11 @@ impl StrokeState {
                         continue;
                     };
                     for (a, b) in p.step(swarm, plan.pos) {
-                        line(&straight(a, b, step), p.line_width, plan.var.strength);
+                        if p.dots {
+                            line(&[b], p.line_width, plan.var.strength);
+                        } else {
+                            line(&straight(a, b, step), p.line_width, plan.var.strength);
+                        }
                     }
                 }
             }
@@ -1346,6 +1359,7 @@ impl StrokeState {
             tip: self.pick_tip(brush, dab, pressure),
             along: dab.along,
             hatch,
+            pressure,
             ..DabVar::default()
         };
         if d.taper.is_active() && d.taper.start > 0.0 {

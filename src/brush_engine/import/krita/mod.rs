@@ -285,7 +285,30 @@ fn read_kpp(
                 }
             }
         }
-        "hairybrush" => b.brush_type = BrushType::Bristle,
+        "hairybrush" => {
+            b.brush_type = BrushType::Bristle;
+            // The hairs are the tip's pixels, as in Krita.
+            let h = &mut b.bristles;
+            h.from_tip = true;
+            if let Some(s) = number("HairyBristle/shear") {
+                h.shear = s.clamp(-1.0, 1.0);
+            }
+            if let Some(d) = number("HairyBristle/density") {
+                h.density = if d > 1.0 { d / 100.0 } else { d }.clamp(0.01, 1.0);
+            }
+            if let Some(r) = number("HairyBristle/randomFactor") {
+                h.random_offset = (r / 10.0).clamp(0.0, 1.0);
+            }
+            if yes("HairyBristle/useMousePressure") || number("HairyBristle/threshold").is_some() {
+                h.pressure_cut = number("HairyBristle/threshold")
+                    .unwrap_or(0.5)
+                    .clamp(0.0, 1.0);
+            }
+            if yes("HairyInk/enabled") {
+                h.ink = number("HairyInk/amount").unwrap_or(1024.0).max(1.0);
+                h.deplete_saturation = yes("HairyInk/useSaturation");
+            }
+        }
         "sketchbrush" => {
             // Sketch lines join points within the tip's radius, each by
             // its probability, as wide and as cut short at both ends as
@@ -375,7 +398,37 @@ fn read_kpp(
                 }
                 .clamp(0.01, 1.0);
             }
-            sp.random_rotation = yes("SprayShape/randomRotation");
+            sp.random_rotation =
+                yes("SprayShape/randomRotation") || yes("ShapeDynamics/randomRotation");
+            // Density: particles from the share of the area they cover
+            // (a fraction, or a percentage past 1).
+            if yes("Spray/useDensity")
+                && let Some(c) = number("Spray/coverage")
+            {
+                sp.coverage = if c > 1.0 { c / 100.0 } else { c }.clamp(0.001, 1.0);
+            }
+            if let Some(a) = number("Spray/aspect") {
+                sp.aspect = a.clamp(0.05, 20.0);
+            }
+            if let Some(r) = number("Spray/rotation") {
+                sp.rotation = r;
+            }
+            if yes("Spray/jitterMovement") {
+                sp.jitter = number("Spray/jitterMoveAmount")
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 5.0);
+            }
+            // Each particle's colour: random hue (degrees), saturation and
+            // value (percent), opacity, and a mix with the background colour.
+            if yes("ColorOption/useRandomHSV") {
+                sp.random_hsv = [
+                    number("ColorOption/hue").unwrap_or(0.0).abs(),
+                    number("ColorOption/saturation").unwrap_or(0.0).abs() / 100.0,
+                    number("ColorOption/value").unwrap_or(0.0).abs() / 100.0,
+                ];
+            }
+            sp.random_opacity = yes("ColorOption/useRandomOpacity");
+            sp.mix_secondary = yes("ColorOption/mixBgColor");
             notes.push(format!("{name}: Krita's spray came across approximated"));
         }
         "chalkbrush" => {
@@ -415,11 +468,19 @@ fn read_kpp(
                 number("Grid/horizontalOffset").unwrap_or(0.0),
                 number("Grid/verticalOffset").unwrap_or(0.0),
             ];
+            if let Some(h) = number("Grid/gridHeight") {
+                g.cell_height = (h * scale).clamp(2.0, 500.0);
+            }
             let border = number("Grid/verticalBorder").unwrap_or(0.0).max(0.0);
             g.scale = (1.0 - 2.0 * border / g.cell).clamp(0.05, 1.0);
-            notes.push(format!(
-                "{name}: Krita's grid came across approximated (square cells, no divisions)"
-            ));
+            if let Some(d) = number("Grid/divisionLevel") {
+                g.divisions = (d.round() as u32).clamp(1, 16);
+            }
+            g.divide_by_pressure = yes("Grid/pressureDivision");
+            if yes("Grid/randomBorder") {
+                g.random_border = 0.5;
+            }
+            notes.push(format!("{name}: Krita's grid came across approximated"));
         }
         "tangentnormal" => {
             b.brush_type = BrushType::TangentNormal;
@@ -441,6 +502,14 @@ fn read_kpp(
             if let Some(g) = number("Particle/gravity") {
                 pt.drag = (1.0 - g).clamp(0.0, 1.0);
             }
+            if let Some(n) = number("Particle/iterations") {
+                pt.iterations = (n.round() as u32).clamp(1, 30);
+            }
+            // Krita's particles all start at the pen, each answering its
+            // pull at its own rate, drawing dots.
+            pt.spread = 0.0;
+            pt.weight_spread = 1.0;
+            pt.dots = true;
             notes.push(format!(
                 "{name}: Krita's particles came across approximated"
             ));

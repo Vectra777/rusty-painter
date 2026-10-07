@@ -968,6 +968,79 @@ fn krita_engines_come_across_as_this_apps() {
     );
 }
 
+/// The options of Krita's spray, grid, particle and bristle engines this
+/// app has too.
+#[test]
+fn krita_engine_options_come_across() {
+    let brush = |engine: &str, params: &[(&str, &str)]| {
+        import_kpp(&with_params(engine, params), "file")
+            .unwrap()
+            .presets
+            .remove(0)
+            .brush
+    };
+    let spray = brush(
+        "spraybrush",
+        &[
+            ("Spray/useDensity", "true"),
+            ("Spray/coverage", "0.4"),
+            ("Spray/aspect", "2"),
+            ("Spray/rotation", "30"),
+            ("Spray/jitterMovement", "true"),
+            ("Spray/jitterMoveAmount", "0.5"),
+            ("ColorOption/useRandomHSV", "true"),
+            ("ColorOption/hue", "15"),
+            ("ColorOption/saturation", "-10"),
+            ("ColorOption/value", "35"),
+            ("ColorOption/useRandomOpacity", "true"),
+            ("ColorOption/mixBgColor", "true"),
+        ],
+    )
+    .engines
+    .spray;
+    assert_eq!(
+        (spray.coverage, spray.aspect, spray.rotation, spray.jitter),
+        (0.4, 2.0, 30.0, 0.5)
+    );
+    assert_eq!(spray.random_hsv, [15.0, 0.1, 0.35]);
+    assert!(spray.random_opacity && spray.mix_secondary);
+    let grid = brush(
+        "gridbrush",
+        &[
+            ("Grid/gridWidth", "20"),
+            ("Grid/gridHeight", "40"),
+            ("Grid/divisionLevel", "3"),
+            ("Grid/pressureDivision", "true"),
+            ("Grid/randomBorder", "true"),
+        ],
+    )
+    .engines
+    .grid;
+    assert_eq!(
+        (grid.cell, grid.cell_height, grid.divisions),
+        (20.0, 40.0, 3)
+    );
+    assert!(grid.divide_by_pressure && grid.random_border > 0.0);
+    let particles = brush("particlebrush", &[("Particle/iterations", "15")])
+        .engines
+        .particles;
+    assert_eq!(particles.iterations, 15);
+    assert!(particles.dots && particles.spread == 0.0 && particles.weight_spread > 0.0);
+    let hairy = brush(
+        "hairybrush",
+        &[
+            ("HairyBristle/shear", "0.5"),
+            ("HairyBristle/density", "60"),
+            ("HairyInk/enabled", "true"),
+            ("HairyInk/amount", "300"),
+            ("HairyInk/useSaturation", "true"),
+        ],
+    );
+    let b = hairy.bristles;
+    assert!(b.from_tip && b.deplete_saturation);
+    assert_eq!((b.shear, b.density, b.ink), (0.5, 0.6, 300.0));
+}
+
 #[test]
 fn a_bundle_brings_its_presets() {
     let mut zip = crate::project::zip::ZipWriter::default();

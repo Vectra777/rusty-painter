@@ -806,6 +806,9 @@ pub struct DabVar {
     /// A colour (sRGB 0..1) in place of the brush colour (a random colour
     /// source).
     pub base: Option<[f32; 3]>,
+    /// The pen's pressure at the dab (1 without one), for engines that
+    /// use it directly (bristles cut by it, grid divisions).
+    pub pressure: f32,
 }
 
 impl Default for DabVar {
@@ -836,6 +839,7 @@ impl Default for DabVar {
             color_rate: 1.0,
             thickness: 1.0,
             base: None,
+            pressure: 1.0,
         }
     }
 }
