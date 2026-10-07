@@ -158,6 +158,7 @@ pub struct DocumentState {
     pub layers: Vec<Layer>,
     pub active_layer_idx: usize,
     pub depth: Depth,
+    pub profile: crate::canvas::color_profile::ColorProfile,
 }
 
 impl Layer {
@@ -369,6 +370,8 @@ pub struct Canvas {
     pub blend_space: BlendSpace,
     /// Bits kept for each channel (see [`deep`]).
     depth: Depth,
+    /// Which colours the pixels' numbers are.
+    pub profile: crate::canvas::color_profile::ColorProfile,
 }
 
 /// A tile's `(tx, ty)` position.
@@ -416,6 +419,7 @@ impl Canvas {
             next_layer_id: 2,
             blend_space: BlendSpace::Linear,
             depth: Depth::U8,
+            profile: Default::default(),
         }
     }
 
@@ -426,6 +430,77 @@ impl Canvas {
         std::mem::swap(&mut self.layers, &mut doc.layers);
         std::mem::swap(&mut self.active_layer_idx, &mut doc.active_layer_idx);
         std::mem::swap(&mut self.depth, &mut doc.depth);
+        std::mem::swap(&mut self.profile, &mut doc.profile);
+    }
+
+    /// Say the pixels' numbers are colours of `profile` (their numbers stay,
+    /// so they show differently). Returns the document as it was, for undo
+    /// (swap it back with [`Canvas::swap_document`]); its layers share the
+    /// tiles, which this doesn't change.
+    pub fn assign_profile(
+        &mut self,
+        profile: crate::canvas::color_profile::ColorProfile,
+    ) -> DocumentState {
+        let mut doc = DocumentState {
+            width: self.width,
+            height: self.height,
+            layers: self.layers.iter().map(Layer::share).collect(),
+            active_layer_idx: self.active_layer_idx,
+            depth: self.depth,
+            profile,
+        };
+        self.swap_document(&mut doc);
+        doc
+    }
+
+    /// Convert the pixels to `profile`'s numbers for the same colours (at
+    /// the document's depth). Returns the document as it was, for undo.
+    pub fn convert_profile(
+        &mut self,
+        profile: crate::canvas::color_profile::ColorProfile,
+        transform: &crate::canvas::color_profile::RgbTransform,
+    ) -> DocumentState {
+        use rayon::prelude::*;
+        let depth = self.depth;
+        let layers = self
+            .layers
+            .iter()
+            .map(|layer| {
+                let mut snapshot = layer.snapshot();
+                // Masks hold coverage, not colours.
+                if !matches!(layer.kind, LayerKind::Mask { .. }) {
+                    snapshot.tiles.par_iter_mut().for_each(|tile| {
+                        match tile
+                            .deep
+                            .take()
+                            .or_else(|| DeepTile::widen(depth, &tile.data))
+                        {
+                            Some(mut deep) => {
+                                for i in 0..deep.len() {
+                                    deep.set_linear(i, transform.convert_linear(deep.linear(i)));
+                                }
+                                tile.data = deep.narrow_all();
+                                tile.deep = Some(deep);
+                            }
+                            None => transform.convert_pixels(&mut tile.data),
+                        }
+                    });
+                }
+                let mut converted = Layer::from_snapshot(snapshot);
+                converted.wet = layer.wet.clone();
+                converted
+            })
+            .collect();
+        let mut doc = DocumentState {
+            width: self.width,
+            height: self.height,
+            layers,
+            active_layer_idx: self.active_layer_idx,
+            depth,
+            profile,
+        };
+        self.swap_document(&mut doc);
+        doc
     }
 
     /// Keep `depth` bits for each channel from now on, every layer
@@ -457,6 +532,7 @@ impl Canvas {
             layers,
             active_layer_idx: self.active_layer_idx,
             depth,
+            profile: self.profile.clone(),
         };
         self.swap_document(&mut doc);
         doc
@@ -684,6 +760,7 @@ impl Canvas {
     pub fn detached_copy(&self) -> Canvas {
         let mut copy = Canvas::new(self.width, self.height, self.clear_color, self.tile_size);
         copy.depth = self.depth;
+        copy.profile = self.profile.clone();
         copy.replace_layers_from_snapshots(self.layer_snapshots(), self.active_layer_idx);
         copy.blend_space = self.blend_space;
         copy.next_layer_id = copy.next_layer_id.max(self.next_layer_id);

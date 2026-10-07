@@ -18,6 +18,21 @@ pub(crate) enum OpenFor {
     Brushes,
     /// An image whose colours become a palette.
     Palette,
+    /// An ICC profile, for what [`ProfileUse`] says.
+    Profile(ProfileUse),
+}
+
+/// What a picked ICC profile is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProfileUse {
+    /// The document's numbers are its colours.
+    Assign,
+    /// The document's colours are converted to it.
+    Convert,
+    /// The monitor's.
+    Monitor,
+    /// The print (CMYK) profile, for proofing and CMYK export.
+    Print,
 }
 
 /// A picker open on Android, and what its answer is for.
@@ -47,6 +62,7 @@ impl OpenFor {
                 ("Brushes", e)
             }
             OpenFor::Palette => ("Images", vec!["png", "jpg", "jpeg", "bmp", "tif", "tiff"]),
+            OpenFor::Profile(_) => ("ICC profiles", vec!["icc", "icm"]),
         }
     }
 
@@ -196,6 +212,16 @@ impl PainterApp {
                     .file_stem()
                     .map_or_else(|| "Image".into(), |s| s.to_string_lossy().into_owned());
                 self.palette_from_image_in_background(stem, source);
+            }
+            OpenFor::Profile(target) => {
+                let stem = std::path::Path::new(&name).file_stem().map_or_else(
+                    || "ICC profile".into(),
+                    |s| s.to_string_lossy().into_owned(),
+                );
+                match source.read() {
+                    Ok(bytes) => self.use_profile(*target, bytes.into_owned(), &stem),
+                    Err(err) => self.report(err),
+                }
             }
         }
     }

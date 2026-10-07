@@ -36,6 +36,8 @@ pub struct PsdDocument {
     /// In a deeper document, the flattened picture at full depth
     /// (premultiplied linear light), for writing a 16-bit file.
     pub composite_deep: Option<Vec<[f32; 4]>>,
+    /// Which colours the pixels are (the file's embedded ICC profile).
+    pub profile: crate::canvas::color_profile::ColorProfile,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -133,6 +135,7 @@ impl PsdDocument {
         PsdDocument {
             depth: if deep { Depth::U16 } else { Depth::U8 },
             composite_deep: deep.then(|| canvas.flatten_final_linear()),
+            profile: canvas.profile.clone(),
             width: canvas.width(),
             height: canvas.height(),
             layers,
@@ -148,6 +151,7 @@ impl PsdDocument {
         let mut canvas = Canvas::new(self.width, self.height, Color32::WHITE, ts);
         // (Before the layers come in: their tiles are made at it.)
         canvas.convert_depth(self.depth);
+        canvas.profile = self.profile.clone();
         let depth = self.depth;
         let mut snapshots = Vec::new();
         let mut next_id = 1u64;
@@ -697,7 +701,21 @@ pub fn encode_psd(doc: &PsdDocument) -> Result<Vec<u8>, String> {
     out.u16(8 * bytes as u16);
     out.u16(3); // RGB
     out.u32(0); // colour mode data
-    out.u32(0); // image resources
+    // Image resources: the colour profile (1039), unless sRGB, which a file
+    // without one means.
+    let resources = out.len_slot();
+    if doc.profile != crate::canvas::color_profile::ColorProfile::Srgb {
+        let icc = doc.profile.icc();
+        out.bytes(b"8BIM");
+        out.u16(1039);
+        out.u16(0); // no name (padded to even)
+        out.u32(icc.len() as u32);
+        out.bytes(&icc);
+        if icc.len() % 2 == 1 {
+            out.u8(0);
+        }
+    }
+    out.close_len(resources, 1);
 
     // Each layer's channels, encoded in parallel: (id, compressed bytes).
     let channels: Vec<Vec<(i16, Vec<u8>)>> = doc
@@ -1044,7 +1062,7 @@ pub fn decode_psd(bytes: &[u8]) -> Result<PsdDocument, String> {
     };
     crate::app::document::validate_canvas_size(width, height)?;
     r.block()?; // colour mode data
-    r.block()?; // image resources
+    let profile = read_profile(r.block()?);
     let mut section = r.block()?;
     let mut layers = Vec::new();
     if !section.b.is_empty() {
@@ -1097,11 +1115,39 @@ pub fn decode_psd(bytes: &[u8]) -> Result<PsdDocument, String> {
     Ok(PsdDocument {
         depth: if bytes == 2 { Depth::U16 } else { Depth::U8 },
         composite_deep: None,
+        profile,
         width,
         height,
         layers,
         composite,
     })
+}
+
+/// The colour profile among the image resources (1039, an ICC profile);
+/// sRGB if there's none, or it's damaged or not RGB.
+fn read_profile(mut r: In<'_>) -> crate::canvas::color_profile::ColorProfile {
+    use crate::canvas::color_profile::ColorProfile;
+    let mut next = || -> Result<Option<(u16, &[u8])>, String> {
+        if r.b.len() - r.pos < 12 || r.take(4)? != b"8BIM" {
+            return Ok(None);
+        }
+        let id = r.u16()?;
+        let name_len = r.u8()? as usize;
+        // The name and its length byte, padded to even.
+        r.take(name_len + (name_len + 1) % 2)?;
+        let len = r.u32()? as usize;
+        let data = r.take(len)?;
+        if len % 2 == 1 {
+            r.take(1).ok();
+        }
+        Ok(Some((id, data)))
+    };
+    while let Ok(Some((id, data))) = next() {
+        if id == 1039 {
+            return ColorProfile::from_icc(data.to_vec(), "Photoshop profile").unwrap_or_default();
+        }
+    }
+    ColorProfile::Srgb
 }
 
 /// A layer record, before its channel data is read.
@@ -1405,6 +1451,32 @@ mod tests {
         let mut steps: Vec<u32> = (0..64).map(|x| (got.linear(x)[0] * 1e7) as u32).collect();
         steps.dedup();
         assert!(steps.len() > 50, "{} steps", steps.len());
+    }
+
+    #[test]
+    fn the_colour_profile_travels_through_psd() {
+        use crate::canvas::color_profile::ColorProfile;
+        let mut canvas = Canvas::new(40, 30, Color32::WHITE, 64);
+        canvas.profile = ColorProfile::AdobeRgb;
+        let bytes = encode_psd(&PsdDocument::from_canvas(&canvas)).unwrap();
+        let doc = decode_psd(&bytes).unwrap();
+        assert_eq!(doc.profile.label(), "Adobe RGB (1998)");
+        assert_eq!(
+            doc.into_canvas().unwrap().profile.label(),
+            "Adobe RGB (1998)"
+        );
+        // sRGB writes no profile, and reads back as sRGB.
+        canvas.profile = ColorProfile::Srgb;
+        let plain = encode_psd(&PsdDocument::from_canvas(&canvas)).unwrap();
+        assert!(plain.len() < bytes.len());
+        assert_eq!(decode_psd(&plain).unwrap().profile, ColorProfile::Srgb);
+        // Krita's 16-bit documents are linear sRGB (gamma 1.0): kept as such.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/krita-layers-16bit.psd"
+        );
+        let krita = decode_psd(&std::fs::read(path).unwrap()).unwrap().profile;
+        assert_eq!(krita.label(), "sRGB-elle-V2-g10.icc");
     }
 
     #[test]

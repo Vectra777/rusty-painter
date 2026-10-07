@@ -33,7 +33,7 @@ pub struct LayerSwap {
 impl Layer {
     /// This layer's settings over the same tiles (shared, not copied), for
     /// a view that only reads them.
-    fn share(&self) -> Layer {
+    pub(crate) fn share(&self) -> Layer {
         let layer = self.shell();
         *layer.tiles.lock().unwrap_or_else(|e| e.into_inner()) =
             self.tiles.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -110,6 +110,7 @@ impl Canvas {
             next_layer_id: self.next_layer_id,
             blend_space: self.blend_space,
             depth: self.depth,
+            profile: self.profile.clone(),
         }
     }
 
@@ -139,6 +140,7 @@ impl Canvas {
             next_layer_id: self.next_layer_id,
             blend_space: self.blend_space,
             depth: self.depth,
+            profile: self.profile.clone(),
         }
     }
 

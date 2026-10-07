@@ -50,6 +50,13 @@
 - 16-bit Photoshop files open (layers, masks, ZIP-compressed channels too) as 16-bit documents, and deeper documents are written as 16-bit PSDs; 16-bit and float Krita documents open at their depth.
 - Tools not yet working at full depth (blurs and other spatial filters, transforms, smudging, wet paint, fills and the rest) still paint at 8 bits: the tiles they change are rounded to 8 bits.
 
+### Colour management
+- Documents have a colour profile: sRGB, Display P3, Adobe RGB (1998), Rec. 2020, or an RGB ICC profile from a file. Image → Colour Profile assigns one (same numbers) or converts to one (same colours, with a rendering intent), each one undo step; saved with the document.
+- The canvas is shown converted for the monitor's profile (View → Colour Management → Monitor), and View → Colour Management → Proof Colours shows how it would print on a CMYK profile (picked, or found on the system), with an optional gamut warning.
+- Exports embed the document's profile (PNG, JPEG, WebP, TIFF at every depth, PSD); new TIFF (CMYK, for print) export through the print profile.
+- Pictures are imported converted from the profile they carry to the document's; Photoshop and Krita documents open with theirs.
+- Colour harmonies in the colour panel: complementary, split complementary, analogous, triadic and tetradic hues shown on the wheel and as swatches to pick.
+
 ### Fixed
 - A Photoshop brush file with a tip whose bounds are far apart is refused instead of crashing a debug build (or reading a wrong size in a release one).
 

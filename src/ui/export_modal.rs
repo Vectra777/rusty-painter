@@ -1,11 +1,7 @@
 //! The Export dialog: format, file name and progress.
 
 use crate::ui::widgets::FitScreen;
-use crate::{
-    PainterApp,
-    app::document::validate_canvas_size,
-    project::export::{ExportFormat, save_color_image},
-};
+use crate::{PainterApp, app::document::validate_canvas_size, project::export::ExportFormat};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -134,6 +130,11 @@ fn start_export(app: &mut PainterApp, target: PathBuf, format: ExportFormat) {
     // Shader layers export as their current frame.
     app.bake_shader_layers();
     let canvas = app.canvas.detached_copy();
+    let color = crate::project::export::ExportColor {
+        profile: app.canvas.profile.clone(),
+        cmyk: app.workspace.color.cmyk_profile(),
+        intent: app.workspace.color.intent,
+    };
     let (tx, rx) = mpsc::channel();
     app.export_state.progress_rx = Some(rx);
     app.export_state.task = Some(thread::spawn(move || {
@@ -149,15 +150,7 @@ fn start_export(app: &mut PainterApp, target: PathBuf, format: ExportFormat) {
             ),
             ExportFormat::Svg => crate::project::svg::document_svg(&canvas)
                 .and_then(|svg| crate::project::export::save_svg(&svg, target.clone())),
-            _ if format.is_deep() => crate::project::export::save_linear_image(
-                &crate::project::export::LinearImage {
-                    size: [canvas.width(), canvas.height()],
-                    pixels: canvas.flatten_final_linear(),
-                },
-                target.clone(),
-                format,
-            ),
-            _ => save_color_image(canvas.flatten_final(), target.clone(), format),
+            _ => crate::project::export::export_canvas(&canvas, target.clone(), format, &color),
         }
         .and_then(|_| published(&target, format));
         match result {

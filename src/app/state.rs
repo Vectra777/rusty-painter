@@ -197,6 +197,9 @@ pub struct RenderCache {
     /// Shader layers showing live: the stack split into runs, each with its
     /// own atlases (see `canvas::shader::live_layout`).
     pub live: Option<std::sync::Arc<crate::canvas::shader::LiveLayout>>,
+    /// The document's colours converted for the monitor (or proofing) as
+    /// tiles go to the GPU; `None` shows them as they are.
+    pub display: Option<std::sync::Arc<crate::canvas::color_profile::DisplayTransform>>,
 }
 
 impl RenderCache {
@@ -224,6 +227,7 @@ impl RenderCache {
             texture_generation: 0,
             preview_tiles: FxHashMap::default(),
             live: None,
+            display: None,
         }
     }
 
@@ -405,6 +409,8 @@ pub struct WorkspaceState {
     pub max_threads: usize,
     pub pool: Arc<ThreadPool>,
     pub color_model: ColorModel,
+    /// The monitor's profile, proofing and the print profile.
+    pub color: crate::app::color_management::ColorSettings,
     /// Fit the canvas to the panel whenever the panel size changes, until the
     /// user pans, zooms or rotates the view.
     pub auto_fit: bool,
@@ -530,6 +536,7 @@ impl WorkspaceState {
             max_threads,
             pool,
             color_model,
+            color: Default::default(),
             auto_fit: true,
             fitted_to: None,
             // Android, or a desktop touchscreen via RUSTY_PAINTER_TOUCH=1.

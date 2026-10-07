@@ -13,6 +13,8 @@
 //! - [`frame_stats`]: how long each stage of a frame takes (the readout).
 //! - [`pressure_calibration`]: fitting the pen pressure curve to test strokes.
 //! - [`timelapse`]: recording the painting and exporting it as a video.
+//! - [`color_management`]: the monitor's profile, proofing, assigning and
+//!   converting the document's profile.
 //! - [`settings`]: preferences and tool options kept between sessions.
 //! - [`autosave`]: autosave and recovering unsaved work after a crash.
 //! - [`shader_ops`]: shader layers (compiling, playback, baking).
@@ -24,6 +26,7 @@ pub(crate) mod brush_io;
 pub(crate) mod brush_library;
 pub(crate) mod canvas_ops;
 pub(crate) mod clipboard;
+pub(crate) mod color_management;
 pub(crate) mod document;
 pub(crate) mod files;
 pub(crate) mod frame_stats;

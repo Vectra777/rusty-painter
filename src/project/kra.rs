@@ -45,6 +45,7 @@ fn flattened(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> 
     Ok(PsdDocument {
         depth: Depth::U8,
         composite_deep: None,
+        profile: Default::default(),
         width: w,
         height: h,
         layers: vec![pixel_layer(
@@ -141,9 +142,18 @@ fn layered(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
     if layers.is_empty() {
         return Err("The Krita document has no layers this can open".into());
     }
+    // The image's colour profile.
+    let profile = entries
+        .get(&format!("{name}/annotations/icc"))
+        .and_then(|icc| {
+            let label = image.attr("profile").unwrap_or("Krita profile");
+            crate::canvas::color_profile::ColorProfile::from_icc(icc.clone(), label).ok()
+        })
+        .unwrap_or_default();
     Ok(PsdDocument {
         depth: reader.depth,
         composite_deep: None,
+        profile,
         width: w,
         height: h,
         layers,

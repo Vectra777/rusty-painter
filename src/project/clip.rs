@@ -194,6 +194,7 @@ fn flattened(db: &rusqlite::Connection) -> Result<PsdDocument, String> {
     Ok(PsdDocument {
         depth: Depth::U8,
         composite_deep: None,
+        profile: Default::default(),
         width: w,
         height: h,
         composite: layer.pixels.clone(),
@@ -260,6 +261,7 @@ fn layered(
     Ok(PsdDocument {
         depth: Depth::U8,
         composite_deep: None,
+        profile: Default::default(),
         width: w,
         height: h,
         layers,

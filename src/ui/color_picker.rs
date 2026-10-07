@@ -1,5 +1,5 @@
-//! The colour panel: HSV triangle picker, opacity, hex entry and recent
-//! colours.
+//! The colour panel: HSV triangle picker with colour harmonies, opacity,
+//! hex entry and recent colours.
 
 use crate::ColorModel;
 use crate::app::state::BrushState;
@@ -22,6 +22,59 @@ struct PickerState {
     val: f32,
     last_color: Color32,
     drag: WheelDrag,
+    harmony: Harmony,
+}
+
+/// Colours that go with the current one, shown around the wheel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Harmony {
+    #[default]
+    None,
+    /// Opposite on the wheel.
+    Complementary,
+    /// Either side of the opposite.
+    SplitComplementary,
+    /// The neighbours.
+    Analogous,
+    /// A third of the way round, each way.
+    Triadic,
+    /// A square: every quarter.
+    Tetradic,
+}
+
+impl Harmony {
+    pub const ALL: [Harmony; 6] = [
+        Harmony::None,
+        Harmony::Complementary,
+        Harmony::SplitComplementary,
+        Harmony::Analogous,
+        Harmony::Triadic,
+        Harmony::Tetradic,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Harmony::None => "No harmony",
+            Harmony::Complementary => "Complementary",
+            Harmony::SplitComplementary => "Split complementary",
+            Harmony::Analogous => "Analogous",
+            Harmony::Triadic => "Triadic",
+            Harmony::Tetradic => "Tetradic",
+        }
+    }
+
+    /// The other hues (0..1) that go with `hue`.
+    pub fn hues(self, hue: f32) -> Vec<f32> {
+        let offsets: &[f32] = match self {
+            Harmony::None => &[],
+            Harmony::Complementary => &[0.5],
+            Harmony::SplitComplementary => &[5.0 / 12.0, 7.0 / 12.0],
+            Harmony::Analogous => &[-1.0 / 12.0, 1.0 / 12.0],
+            Harmony::Triadic => &[1.0 / 3.0, 2.0 / 3.0],
+            Harmony::Tetradic => &[0.25, 0.5, 0.75],
+        };
+        offsets.iter().map(|o| (hue + o).rem_euclid(1.0)).collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -178,6 +231,27 @@ fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState) -> bool {
     tri.add_triangle(0, 1, 2);
     painter.add(egui::Shape::mesh(tri));
 
+    // Harmony hues: dots on the ring; a click on one picks it.
+    let ring_mid_r = (r_in + r_out) * 0.5;
+    let harmony_dots: Vec<(f32, Pos2)> = (state.harmony.hues(state.hue).into_iter())
+        .map(|h| {
+            let (sin, cos) = (h * TAU).sin_cos();
+            (h, center + egui::vec2(cos, sin) * ring_mid_r)
+        })
+        .collect();
+    for &(h, p) in &harmony_dots {
+        painter.circle_filled(p, 5.0, Color32::from_hsva(h, state.sat, state.val, 1.0));
+        painter.circle_stroke(p, 5.0, Stroke::new(1.5_f32, Color32::WHITE));
+    }
+    if response.clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+        && let Some(&(h, _)) = harmony_dots.iter().find(|(_, p)| p.distance(pos) <= 8.0)
+    {
+        state.hue = h;
+        state.drag = WheelDrag::None;
+        return true;
+    }
+
     // Interaction: the press position decides whether the drag edits hue
     // (ring) or saturation/value (triangle) for the whole gesture.
     let mut changed = false;
@@ -260,6 +334,28 @@ fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState) -> bool {
     painter.circle_stroke(p, 5.0, Stroke::new(1.5_f32, Color32::WHITE));
 
     changed
+}
+
+/// The harmony picker and its colours as swatches; the hue of the one
+/// clicked.
+fn harmony_row(ui: &mut egui::Ui, state: &mut PickerState) -> Option<f32> {
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_id_salt("colour_harmony")
+            .selected_text(state.harmony.label())
+            .show_ui(ui, |ui| {
+                for h in Harmony::ALL {
+                    ui.selectable_value(&mut state.harmony, h, h.label());
+                }
+            });
+        for hue in state.harmony.hues(state.hue) {
+            let c = Color32::from_hsva(hue, state.sat, state.val, 1.0);
+            if color_swatch(ui, c, egui::vec2(28.0, 22.0)).clicked() {
+                picked = Some(hue);
+            }
+        }
+    });
+    picked
 }
 
 fn to_hex(color: Color32) -> String {
@@ -402,6 +498,7 @@ pub fn color_picker_panel(
                 val,
                 last_color: color,
                 drag: WheelDrag::None,
+                harmony: Harmony::None,
             }
         });
 
@@ -427,6 +524,11 @@ pub fn color_picker_panel(
                             Color32::from_hsva(state.hue, state.sat, state.val, alpha),
                             false,
                         ));
+                    }
+                    if let Some(hue) = harmony_row(ui, &mut state) {
+                        state.hue = hue;
+                        new_color =
+                            Some((Color32::from_hsva(hue, state.sat, state.val, alpha), false));
                     }
                     ui.add_space(6.0);
                     if let Some(c) = swatch_row(ui, brush_state) {
@@ -536,6 +638,26 @@ pub fn color_picker_panel(
 mod tests {
     use super::*;
 
+    #[test]
+    fn harmonies_place_their_hues_round_the_wheel() {
+        let close = |a: Vec<f32>, b: &[f32]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+        };
+        assert!(Harmony::None.hues(0.3).is_empty());
+        assert!(close(Harmony::Complementary.hues(0.75), &[0.25]));
+        assert!(close(Harmony::Triadic.hues(0.0), &[1.0 / 3.0, 2.0 / 3.0]));
+        assert!(close(Harmony::Tetradic.hues(0.1), &[0.35, 0.6, 0.85]));
+        // Wrapping round below zero.
+        assert!(close(
+            Harmony::Analogous.hues(0.0),
+            &[11.0 / 12.0, 1.0 / 12.0]
+        ));
+        assert!(close(
+            Harmony::SplitComplementary.hues(0.0),
+            &[5.0 / 12.0, 7.0 / 12.0]
+        ));
+    }
+
     fn state(hue: f32, sat: f32, val: f32) -> PickerState {
         PickerState {
             hue,
@@ -543,6 +665,7 @@ mod tests {
             val,
             last_color: Color32::BLACK,
             drag: WheelDrag::None,
+            harmony: Harmony::None,
         }
     }
 

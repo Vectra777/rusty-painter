@@ -566,6 +566,9 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     {
         app.mark_all_tiles_dirty();
     }
+    ui.menu_button("Colour Management", |ui| {
+        crate::ui::image_menu::view_color_items(app, ui);
+    });
     ui.separator();
     crate::ui::view_aids_menu::view_aids_items(app, ui, menu_item);
     ui.separator();

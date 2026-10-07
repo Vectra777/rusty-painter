@@ -267,6 +267,10 @@ fn tile_uploads(
                 let row = &img.pixels[y * img.size[0] + src[0]..y * img.size[0] + end[0]];
                 pixels.extend(row.iter().flat_map(|p| p.to_array()));
             }
+            // Colour managed: the document's colours as the monitor shows them.
+            if let Some(display) = &cache.display {
+                display.apply(&mut pixels);
+            }
             Some(TileUpload {
                 atlas: dest.atlas,
                 level,

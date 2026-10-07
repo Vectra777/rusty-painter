@@ -23,6 +23,8 @@ wide = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zstd = "0.13"
+# TIFF written directly (an ICC profile, CMYK): the version `image` uses.
+tiff = "0.10"
 crc32fast = "1.5"
 # Importing other apps' brushes: deflated ZIP entries (`.bundle` sets),
 # PNG text chunks (`.kpp` presets), their XML, Clip Studio's SQLite files.
@@ -36,6 +38,8 @@ quick-xml = "0.41"
 naga = { version = "22", features = ["glsl-in"] }
 wgpu = { version = "22.1", default-features = false, features = ["naga-ir"] }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# Colour management (ICC profiles, CMYK): Little CMS, built from its source.
+lcms2 = { version = "6.2", features = ["static"] }
 
 [dev-dependencies]
 pollster = "0.4"

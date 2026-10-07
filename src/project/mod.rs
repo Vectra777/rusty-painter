@@ -6,6 +6,7 @@
 //! the app wrap them. Older saves are the bare project data, still read.
 
 use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
+use crate::canvas::color_profile::ColorProfile;
 use crate::{
     PainterApp,
     app::{
@@ -442,6 +443,9 @@ struct ProjectFile {
     /// deep pixels sit beside the 8-bit ones, which older versions open.
     #[serde(default, skip_serializing_if = "is_8_bit")]
     depth: Depth,
+    /// The colour profile; absent for sRGB (and in older files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<StoredProfile>,
     active_layer_idx: usize,
     layers: Vec<StoredLayer>,
     /// Version 3: the one document history. Version 2: one per layer.
@@ -470,6 +474,7 @@ impl ProjectFile {
                 BlendSpace::Gamma => Some("gamma".to_string()),
             },
             depth: canvas.depth(),
+            profile: StoredProfile::from_profile(&canvas.profile, blobs)?,
             active_layer_idx: canvas.active_layer_idx,
             layers: canvas
                 .layer_snapshots()
@@ -511,6 +516,7 @@ impl ProjectFile {
         );
         // (Set before the layers come in: their tiles are already at it.)
         canvas.convert_depth(self.depth);
+        canvas.profile = StoredProfile::into_profile(self.profile, blobs)?;
         canvas.replace_layers_from_snapshots(layers, self.active_layer_idx);
         canvas.blend_space = match self.blend_space.as_deref() {
             Some("gamma") => BlendSpace::Gamma,
@@ -823,6 +829,55 @@ fn read_deep(
         .ok_or_else(|| "Invalid deep tile".to_string())
 }
 
+/// A document's colour profile: a built-in one by its key, or an ICC
+/// profile's bytes.
+#[derive(Serialize, Deserialize)]
+struct StoredProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icc: Option<StoredBlob>,
+}
+
+impl StoredProfile {
+    /// `None` for sRGB, which files without one mean.
+    fn from_profile(profile: &ColorProfile, blobs: &mut Vec<u8>) -> Result<Option<Self>, String> {
+        Ok(match profile {
+            ColorProfile::Srgb => None,
+            ColorProfile::Icc { name, data } => Some(Self {
+                key: None,
+                name: Some(name.clone()),
+                icc: push_blobs(blobs, &[data.to_vec()])?.into_iter().next(),
+            }),
+            built_in => Some(Self {
+                key: built_in.key().map(str::to_string),
+                name: None,
+                icc: None,
+            }),
+        })
+    }
+
+    /// An unknown or damaged profile opens as sRGB.
+    fn into_profile(stored: Option<Self>, blobs: &[u8]) -> Result<ColorProfile, String> {
+        let Some(stored) = stored else {
+            return Ok(ColorProfile::Srgb);
+        };
+        if let Some(p) = stored.key.as_deref().and_then(ColorProfile::from_key) {
+            return Ok(p);
+        }
+        Ok(match stored.icc {
+            Some(blob) => {
+                let data = read_blob(blobs, &blob)?;
+                let name = stored.name.unwrap_or_else(|| "ICC profile".into());
+                ColorProfile::from_icc(data, &name).unwrap_or_default()
+            }
+            None => ColorProfile::Srgb,
+        })
+    }
+}
+
 fn is_8_bit(depth: &Depth) -> bool {
     *depth == Depth::U8
 }
@@ -945,6 +1000,9 @@ struct StoredDocument {
     /// Bits for each channel; absent for 8 bits (and in older files).
     #[serde(default, skip_serializing_if = "is_8_bit")]
     depth: Depth,
+    /// The colour profile; absent for sRGB (and in older files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<StoredProfile>,
 }
 
 impl StoredDocument {
@@ -953,6 +1011,7 @@ impl StoredDocument {
             width: doc.width,
             height: doc.height,
             depth: doc.depth,
+            profile: StoredProfile::from_profile(&doc.profile, blobs)?,
             active_layer_idx: doc.active_layer_idx,
             layers: doc
                 .layers
@@ -985,6 +1044,7 @@ impl StoredDocument {
                 layers,
                 active_layer_idx,
                 depth: self.depth,
+                profile: StoredProfile::into_profile(self.profile, blobs)?,
             }),
         )))
     }

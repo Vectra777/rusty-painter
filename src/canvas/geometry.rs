@@ -314,6 +314,7 @@ impl Canvas {
             layers: Vec::new(),
             active_layer_idx: self.active_layer_idx,
             depth: self.depth(),
+            profile: self.profile.clone(),
         };
         for (layer, tiles) in new_layers {
             match tiles {

@@ -85,6 +85,7 @@ impl eframe::App for PainterApp {
             }
         }
         self.workspace.frame_stats.begin(frame.info().cpu_usage);
+        self.refresh_display_transform();
         self.workspace.refresh.tick();
         self.workspace.keyboard.observe(ctx);
         let label = self

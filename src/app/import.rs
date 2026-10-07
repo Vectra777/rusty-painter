@@ -29,10 +29,45 @@ impl FileSource {
     }
 }
 
+/// A picture's pixels, in sRGB (converted from the profile it carries).
 pub(crate) fn decode_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
-    Ok(image::load_from_memory(bytes)
+    decode_image_in(bytes, &crate::canvas::color_profile::ColorProfile::Srgb)
+}
+
+/// A picture's pixels, converted from the colour profile it carries (sRGB
+/// if none) to `to`.
+pub(crate) fn decode_image_in(
+    bytes: &[u8],
+    to: &crate::canvas::color_profile::ColorProfile,
+) -> Result<image::RgbaImage, String> {
+    use crate::canvas::color_profile::{ColorProfile, RenderingIntent, RgbTransform};
+    use image::ImageDecoder;
+    let failed = |e: image::ImageError| format!("Couldn't open the image: {e}");
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
         .map_err(|e| format!("Couldn't open the image: {e}"))?
-        .to_rgba8())
+        .into_decoder()
+        .map_err(failed)?;
+    let from = (decoder.icc_profile().ok().flatten())
+        .and_then(|icc| ColorProfile::from_icc(icc, "Picture's profile").ok())
+        .unwrap_or_default();
+    let mut img = image::DynamicImage::from_decoder(decoder)
+        .map_err(failed)?
+        .to_rgba8();
+    if &from != to
+        && let Ok(t) = RgbTransform::new(&from, to, RenderingIntent::Perceptual)
+    {
+        let mut rgb: Vec<[f32; 3]> = img
+            .pixels()
+            .map(|p| [p[0], p[1], p[2]].map(|v| v as f32 / 255.0))
+            .collect();
+        t.convert(&mut rgb);
+        for (p, c) in img.pixels_mut().zip(rgb) {
+            let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            p.0 = [r, g, b, p[3]];
+        }
+    }
+    Ok(img)
 }
 
 /// `img` scaled down to fit `w`×`h` if it's bigger.
@@ -53,10 +88,12 @@ impl PainterApp {
     /// canvas on another thread.
     pub(crate) fn import_image_in_background(&mut self, name: String, source: FileSource) {
         let size = (self.canvas.width() as u32, self.canvas.height() as u32);
+        // In the document's colours.
+        let profile = self.canvas.profile.clone();
         self.spawn_job(None, move || {
             let result = source
                 .read()
-                .and_then(|bytes| decode_image(&bytes))
+                .and_then(|bytes| decode_image_in(&bytes, &profile))
                 .map(|img| fit_image(img, size));
             Box::new(move |app: &mut PainterApp| match result {
                 // (Fitted again if the canvas changed size meanwhile.)

@@ -70,6 +70,7 @@ pub(crate) const LOAD_STEPS: [(&str, LoadStep); 7] = [
     }),
     ("Loading settings", |app, ctx| {
         app.load_view_settings();
+        app.load_color_profiles();
         app.load_panel_widths(ctx);
         app.load_settings();
     }),

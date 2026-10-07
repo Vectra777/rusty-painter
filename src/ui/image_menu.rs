@@ -87,6 +87,7 @@ pub fn image_menu(
         }
     }
     ui.separator();
+    ui.menu_button("Colour Profile", |ui| profile_items(app, ui));
     ui.menu_button("Colour Depth", |ui| {
         let current = app.canvas.depth();
         for depth in crate::canvas::storage::Depth::ALL {
@@ -216,4 +217,88 @@ fn anchor_grid(ui: &mut egui::Ui, anchor: &mut (u8, u8)) {
             });
         }
     });
+}
+
+/// Image → Colour Profile: which colours the document's numbers are.
+fn profile_items(app: &mut PainterApp, ui: &mut egui::Ui) {
+    use crate::app::files::{OpenFor, ProfileUse};
+    use crate::canvas::color_profile::{ColorProfile, RenderingIntent};
+    ui.label(format!("Document: {}", app.canvas.profile.label()));
+    ui.separator();
+    ui.menu_button("Assign Profile", |ui| {
+        ui.weak("The same numbers, read as this profile's colours.");
+        for p in ColorProfile::BUILT_IN {
+            if ui.radio(app.canvas.profile == p, p.label()).clicked() {
+                app.assign_profile(p);
+                ui.close_menu();
+            }
+        }
+        if ui.button("From an ICC file…").clicked() {
+            app.pick_open(OpenFor::Profile(ProfileUse::Assign));
+            ui.close_menu();
+        }
+    });
+    ui.menu_button("Convert to Profile", |ui| {
+        ui.weak("The same colours, as this profile's numbers.");
+        for p in ColorProfile::BUILT_IN {
+            let current = app.canvas.profile == p;
+            if ui
+                .add_enabled(!current, egui::Button::new(p.label()))
+                .clicked()
+            {
+                app.convert_profile(p);
+                ui.close_menu();
+            }
+        }
+        if ui.button("To an ICC file…").clicked() {
+            app.pick_open(OpenFor::Profile(ProfileUse::Convert));
+            ui.close_menu();
+        }
+    });
+    ui.menu_button("Rendering Intent", |ui| {
+        for intent in RenderingIntent::ALL {
+            ui.radio_value(&mut app.workspace.color.intent, intent, intent.label());
+        }
+    });
+}
+
+/// View → Colour Management: the monitor's profile and proofing.
+pub fn view_color_items(app: &mut PainterApp, ui: &mut egui::Ui) {
+    use crate::app::files::{OpenFor, ProfileUse};
+    use crate::canvas::color_profile::ColorProfile;
+    ui.menu_button(
+        format!("Monitor: {}", app.workspace.color.monitor.label()),
+        |ui| {
+            for p in ColorProfile::BUILT_IN {
+                let current = app.workspace.color.monitor == p;
+                if ui.radio(current, p.label()).clicked() {
+                    app.set_monitor_profile(p);
+                    ui.close_menu();
+                }
+            }
+            if ui.button("From an ICC file…").clicked() {
+                app.pick_open(OpenFor::Profile(ProfileUse::Monitor));
+                ui.close_menu();
+            }
+        },
+    );
+    ui.separator();
+    let print = app
+        .workspace
+        .color
+        .cmyk_profile()
+        .map_or_else(|| "none found".to_string(), |p| p.name);
+    ui.add_enabled_ui(app.workspace.color.cmyk.is_some(), |ui| {
+        ui.checkbox(&mut app.workspace.color.proofing, "Proof Colours")
+            .on_hover_text("Show the picture as it would print on the print profile.");
+        ui.add_enabled(
+            app.workspace.color.proofing,
+            egui::Checkbox::new(&mut app.workspace.color.gamut_warning, "Gamut Warning"),
+        )
+        .on_hover_text("Colours that can't print show in grey.");
+    });
+    if ui.button(format!("Print Profile ({print})…")).clicked() {
+        app.pick_open(OpenFor::Profile(ProfileUse::Print));
+        ui.close_menu();
+    }
 }
