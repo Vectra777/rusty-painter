@@ -90,7 +90,8 @@ fn undo_and_redo_put_deep_pixels_back_exactly() {
 }
 
 /// Every kind of stroke paints the same at full depth as in 8 bits, give
-/// or take the 8-bit rounding and dither (alpha lock aside, see below).
+/// or take the 8-bit rounding and dither (erasing and alpha lock aside, see
+/// below).
 #[test]
 fn deep_strokes_paint_what_8_bit_ones_do() {
     use crate::brush_engine::brush_options::BlendMode;
@@ -134,7 +135,24 @@ fn deep_strokes_paint_what_8_bit_ones_do() {
                 .flat_map(|(a, b)| (0..4).map(move |c| a[c].abs_diff(b[c])))
                 .max()
                 .unwrap();
-            if locked {
+            if name == "eraser" {
+                // The 8-bit eraser scales the stored (sRGB-encoded) values,
+                // which darkens what it fades; at full depth the colour
+                // stays. The alpha goes the same way.
+                let alpha = (want.iter().zip(&got))
+                    .map(|(a, b)| a.a().abs_diff(b.a()))
+                    .max();
+                assert!(
+                    alpha <= Some(2),
+                    "{name} at {depth:?}: alpha off by {alpha:?}"
+                );
+                let colour = crate::canvas::blend::unmultiply(below);
+                for p in got.iter().filter(|p| p.a() > 40) {
+                    let c = crate::canvas::blend::unmultiply(*p);
+                    let off = (0..3).map(|k| c[k].abs_diff(colour[k])).max().unwrap();
+                    assert!(off <= 3, "{name} at {depth:?}: {c:?} vs {colour:?}");
+                }
+            } else if locked {
                 // The 8-bit pixels rescale their stored (sRGB-encoded)
                 // values to the kept alpha, which only approximates keeping
                 // the colour; at full depth it's kept exactly, in linear

@@ -223,6 +223,20 @@ impl Layer {
         );
     }
 
+    /// Set tile `(tx, ty)`'s pixels at full depth (its 8-bit pixels are them
+    /// rounded).
+    pub(crate) fn set_tile_deep(&self, tx: i32, ty: i32, deep: DeepTile) {
+        let is_empty = deep.is_transparent();
+        self.tiles.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            (tx, ty),
+            Arc::new(Mutex::new(TileCell::with_deep(
+                deep.narrow_all(),
+                Some(deep),
+                is_empty,
+            ))),
+        );
+    }
+
     /// Allocate a new layer backing store but keep tile data lazy.
     fn new(id: LayerId, name: String, _width: usize, _height: usize, _tile_size: usize) -> Self {
         Self {

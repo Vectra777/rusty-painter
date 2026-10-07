@@ -629,6 +629,54 @@ impl Canvas {
             });
     }
 
+    /// Set the layer's pixels in `region` to `f` of its originals, at full
+    /// depth (premultiplied linear light in and out), mixed with them by
+    /// `coverage` where it's given (the selection). Only for a deeper
+    /// document (`false`, and nothing done, in an 8-bit one).
+    pub fn map_region_deep(
+        &self,
+        layer_idx: usize,
+        region: &Region,
+        coverage: Option<&crate::selection::SelectionMask>,
+        f: impl Fn([f32; 4]) -> [f32; 4] + Sync,
+    ) -> bool {
+        if !self.depth.is_deep() || layer_idx >= self.layers.len() {
+            return false;
+        }
+        let ts = self.tile_size as i32;
+        let [bx0, by0, bx1, by1] = region.bounds;
+        region
+            .tiles
+            .par_iter()
+            .for_each(|((tx, ty), original, deep, cell)| {
+                let Some(deep) = deep else {
+                    return;
+                };
+                let (tx, ty) = (*tx, *ty);
+                let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
+                let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
+                let (mut out, mut out8) = (deep.clone(), original.clone());
+                for ly in ly0..ly1 {
+                    for lx in lx0..lx1 {
+                        let (x, y) = (tx * ts + lx, ty * ts + ly);
+                        let i = (ly * ts + lx) as usize;
+                        let old = deep.linear(i);
+                        let mut new = f(old);
+                        if let Some(cov) = coverage {
+                            let k = cov.value(x, y) as f32 / 255.0;
+                            new = std::array::from_fn(|c| old[c] + (new[c] - old[c]) * k);
+                        }
+                        out.set_linear(i, new);
+                        out8[i] = out.narrow(i);
+                    }
+                }
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                cell.is_empty = out.is_transparent();
+                cell.set_both(Some(out8), Some(out));
+            });
+        true
+    }
+
     /// Set the layer's pixels in `region` to `pixels` (row-major over the
     /// region's bounds), mixed with the originals by `coverage` where it's
     /// given (the selection; 255 = all new). Alpha-locked layers keep their

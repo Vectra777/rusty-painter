@@ -1,6 +1,6 @@
 # Test documents
 
-Files the tests open (`src/project/kra.rs`).
+Files the tests open (`src/project/kra.rs`, `src/project/psd.rs`).
 
 - `krita-layers-8bit.kra`, `krita-layers-16bit.kra`: 200×120 documents made
   with Krita 5.2 (RGBA, 8 and 16 bits per channel), bottom to top:
@@ -12,6 +12,9 @@ Files the tests open (`src/project/kra.rs`).
 
   Each includes Krita's flattened picture (`mergedimage.png`), which the
   tests compare the app's own rendering against.
+- `krita-layers-16bit.psd`: the 16-bit document exported by Krita 5.2 as a
+  16-bit PSD (`krita krita-layers-16bit.kra --export --export-filename
+  krita-layers-16bit.psd`, with `QT_QPA_PLATFORM=minimal`).
 
 Clip Studio Paint documents can't be made without Clip Studio, so the
 `.clip` tests (`src/project/clip.rs`) build theirs in code, to the layout

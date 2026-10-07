@@ -187,39 +187,28 @@ impl DeepTile {
         }
     }
 
-    /// Pixel `i`, premultiplied, as stored values (sRGB encoded, 0..1): what
-    /// gamma-space documents blend.
+    /// Pixel `i` as gamma-space documents blend it: its sRGB-encoded
+    /// colour (0..1) times its alpha, and the alpha (as `GammaReader` reads
+    /// 8-bit pixels).
     #[inline]
     pub fn gamma(&self, i: usize) -> [f32; 4] {
-        match self {
-            DeepTile::U16(p) => p[i].map(|v| v as f32 / 65535.0),
-            DeepTile::F32(p) => {
-                let [r, g, b, a] = p[i];
-                [
-                    gamma_from_linear(r.max(0.0)),
-                    gamma_from_linear(g.max(0.0)),
-                    gamma_from_linear(b.max(0.0)),
-                    a,
-                ]
-            }
+        let [r, g, b, a] = self.linear(i);
+        if a <= 0.0 {
+            return [0.0; 4];
         }
+        let enc = |v: f32| gamma_from_linear((v / a).max(0.0)) * a;
+        [enc(r), enc(g), enc(b), a]
     }
 
-    /// Set pixel `i` from premultiplied stored values (sRGB encoded, 0..1).
+    /// Set pixel `i` from a gamma-space pixel (see [`DeepTile::gamma`]).
     #[inline]
     pub fn set_gamma(&mut self, i: usize, v: [f32; 4]) {
-        match self {
-            DeepTile::U16(p) => p[i] = tidy_u16(v.map(to_u16)),
-            DeepTile::F32(_) => self.set_linear(
-                i,
-                [
-                    linear_from_gamma(v[0].max(0.0)),
-                    linear_from_gamma(v[1].max(0.0)),
-                    linear_from_gamma(v[2].max(0.0)),
-                    v[3],
-                ],
-            ),
+        let a = v[3].clamp(0.0, 1.0);
+        if a <= 0.0 {
+            return self.set_linear(i, [0.0; 4]);
         }
+        let dec = |c: f32| linear_from_gamma((c / a).max(0.0)) * a;
+        self.set_linear(i, [dec(v[0]), dec(v[1]), dec(v[2]), a]);
     }
 
     /// Pixel `i` rounded to 8 bits.

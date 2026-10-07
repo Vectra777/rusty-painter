@@ -12,6 +12,7 @@
 
 use crate::brush_engine::import::sut::{Cell, rows};
 use crate::canvas::blend_modes::LayerBlend;
+use crate::canvas::storage::Depth;
 use crate::project::psd::{PsdDocument, PsdKind, PsdLayer, PsdMask};
 use eframe::egui::Color32;
 use std::collections::HashMap;
@@ -191,6 +192,8 @@ fn flattened(db: &rusqlite::Connection) -> Result<PsdDocument, String> {
     let layer = preview_layer(db, w, h, "Clip Studio picture")
         .ok_or("The Clip Studio document has no preview")?;
     Ok(PsdDocument {
+        depth: Depth::U8,
+        composite_deep: None,
         width: w,
         height: h,
         composite: layer.pixels.clone(),
@@ -200,6 +203,7 @@ fn flattened(db: &rusqlite::Connection) -> Result<PsdDocument, String> {
 
 fn pixel_layer(name: &str, rect: [i32; 4], pixels: Vec<Color32>) -> PsdLayer {
     PsdLayer {
+        deep: None,
         name: name.into(),
         kind: PsdKind::Pixels,
         rect,
@@ -254,6 +258,8 @@ fn layered(
         return Err("The Clip Studio document has no layers this can open".into());
     }
     Ok(PsdDocument {
+        depth: Depth::U8,
+        composite_deep: None,
         width: w,
         height: h,
         layers,

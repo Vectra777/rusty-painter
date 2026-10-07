@@ -1079,6 +1079,27 @@ impl Filter {
         })
     }
 
+    /// A colour adjustment on one premultiplied linear-light pixel at full
+    /// precision (no 8-bit table), for deeper documents; `None` for filters
+    /// that aren't one pixel at a time (blurs and the like). The alpha is
+    /// kept.
+    pub fn adjust_linear(&self, px: [f32; 4]) -> Option<[f32; 4]> {
+        use eframe::egui::ecolor::{gamma_from_linear, linear_from_gamma};
+        let a = px[3];
+        if a <= 0.0 {
+            // Nothing to change, if the filter works one pixel at a time.
+            return self.rgb([0.5; 3]).map(|_| px);
+        }
+        let rgb = [0, 1, 2].map(|c| gamma_from_linear((px[c] / a).clamp(0.0, 1.0)));
+        let out = self.rgb(rgb)?;
+        Some([
+            linear_from_gamma(out[0].clamp(0.0, 1.0)) * a,
+            linear_from_gamma(out[1].clamp(0.0, 1.0)) * a,
+            linear_from_gamma(out[2].clamp(0.0, 1.0)) * a,
+            a,
+        ])
+    }
+
     /// An adjustment on unmultiplied sRGB values (0..1), through `lut` when
     /// it has one: for compositing in gamma space, where the values are at
     /// hand without going through 8-bit colour.

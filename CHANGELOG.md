@@ -46,7 +46,9 @@
 - Brush strokes (every blend mode, the eraser, alpha lock, colour randomness) and gradients work at the document's full depth: soft airbrushing and gradients no longer band, and glazes too faint for 8 bits build up.
 - Undo, redo and saved files keep the full depth (older versions open such files at 8 bits).
 - PNG (16-bit) is composited at full precision; new TIFF (16-bit) and TIFF (32-bit float, linear) exports.
-- Tools not yet working at full depth (filters, transforms, smudging, wet paint, fills and the rest) still paint at 8 bits: the tiles they change are rounded to 8 bits.
+- Colour adjustments (levels, curves, hue/saturation...) and the Image menu (canvas and image size, crop, rotate, flip) work at full depth too.
+- 16-bit Photoshop files open (layers, masks, ZIP-compressed channels too) as 16-bit documents, and deeper documents are written as 16-bit PSDs; 16-bit and float Krita documents open at their depth.
+- Tools not yet working at full depth (blurs and other spatial filters, transforms, smudging, wet paint, fills and the rest) still paint at 8 bits: the tiles they change are rounded to 8 bits.
 
 ### Fixed
 - A Photoshop brush file with a tip whose bounds are far apart is refused instead of crashing a debug build (or reading a wrong size in a release one).

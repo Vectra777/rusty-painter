@@ -589,3 +589,84 @@ fn a_gradient_keeps_full_depth_and_undoes_to_it() {
         assert_eq!(app.canvas.get_layer_tile_deep(1, 1, 0).unwrap(), painted);
     }
 }
+
+/// Colour adjustments run at full depth in a deeper document: the same
+/// picture as in 8 bits (give or take its rounding), stretching dark tones
+/// without the gaps 8 bits leave, and undone back to full depth.
+#[test]
+fn colour_filters_work_at_full_depth() {
+    use crate::canvas::filters::Filter;
+    use crate::canvas::storage::Depth;
+    let dark_ramp = |depth: Depth| {
+        let mut app = app();
+        app.convert_depth(depth);
+        app.brush_state.brush.brush_options.color = Color32::BLACK;
+        app.brush_state.secondary_color = Color32::from_gray(40);
+        gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(256.0, 0.0));
+        app
+    };
+    let filters = [
+        Filter::Levels {
+            black: 0.0,
+            white: 0.16,
+            gamma: 1.0,
+        },
+        Filter::HueSaturation {
+            hue: 40.0,
+            saturation: 0.5,
+            lightness: 0.2,
+        },
+        Filter::BrightnessContrast {
+            brightness: 0.3,
+            contrast: 0.4,
+        },
+        Filter::Invert,
+    ];
+    let row = |app: &PainterApp| -> Vec<Color32> {
+        (0..4)
+            .flat_map(|tx| app.canvas.get_layer_tile_data(1, tx, 0).unwrap()[..64].to_vec())
+            .collect()
+    };
+    for filter in filters {
+        let mut eight = dark_ramp(Depth::U8);
+        eight.filter_open(filter);
+        eight.filter_commit();
+        let want = row(&eight);
+        let mut deep = dark_ramp(Depth::U16);
+        let before = deep.canvas.get_layer_tile_deep(1, 1, 0).unwrap();
+        deep.filter_open(filter);
+        deep.filter_commit();
+        let got = row(&deep);
+        let worst = (want.iter().zip(&got))
+            .flat_map(|(a, b)| (0..4).map(move |c| a[c].abs_diff(b[c])))
+            .max()
+            .unwrap();
+        // Levels stretches the dark tones 6×, and with them the 8-bit
+        // picture's rounding (and the gradient's dither).
+        let tolerance = if matches!(filter, Filter::Levels { .. }) {
+            12
+        } else {
+            6
+        };
+        assert!(worst <= tolerance, "{filter:?}: off by {worst}");
+        if matches!(filter, Filter::Levels { .. }) {
+            let steps = |px: &[Color32]| {
+                let mut v: Vec<u8> = px.iter().map(|p| p.r()).collect();
+                v.dedup();
+                v.len()
+            };
+            assert!(
+                steps(&got) > steps(&want) + 40,
+                "{} vs {}",
+                steps(&got),
+                steps(&want)
+            );
+        }
+        deep.apply_history(false);
+        assert_eq!(
+            deep.canvas.get_layer_tile_deep(1, 1, 0).unwrap(),
+            before,
+            "{filter:?}"
+        );
+    }
+}

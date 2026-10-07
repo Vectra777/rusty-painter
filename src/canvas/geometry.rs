@@ -5,7 +5,14 @@
 use eframe::egui::Color32;
 
 use crate::canvas::Canvas;
-use crate::canvas::storage::{DocumentState, LayerKind};
+use crate::canvas::storage::{DeepTile, DocumentState, LayerKind};
+
+/// A layer's tiles after an operation: 8-bit, or at a deeper document's
+/// full depth.
+enum NewTiles {
+    Eight(Vec<((i32, i32), Vec<Color32>)>),
+    Deep(Vec<((i32, i32), DeepTile)>),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ImageOp {
@@ -43,6 +50,26 @@ impl ImageOp {
     /// One layer's `w`×`h` pixels after this; `fill` is what new area
     /// shows (the background colour, a mask's white, else transparent).
     pub fn apply(self, src: &[Color32], w: usize, h: usize, fill: Color32) -> Vec<Color32> {
+        match self {
+            ImageOp::Resize {
+                w: nw,
+                h: nh,
+                smooth,
+            } => resample(src, w, h, nw, nh, smooth),
+            _ => self.move_pixels(src, w, h, fill),
+        }
+    }
+
+    /// [`Self::apply`] for any kind of pixel, for every operation but a
+    /// smooth resize: these only move pixels (a hard-pixel resize picks
+    /// them).
+    pub fn move_pixels<T: Copy + Send + Sync>(
+        self,
+        src: &[T],
+        w: usize,
+        h: usize,
+        fill: T,
+    ) -> Vec<T> {
         let (nw, nh) = self.new_size(w, h);
         match self {
             ImageOp::Reframe { x, y, .. } => {
@@ -62,7 +89,7 @@ impl ImageOp {
                 }
                 out
             }
-            ImageOp::Resize { smooth, .. } => resample(src, w, h, nw, nh, smooth),
+            ImageOp::Resize { .. } => nearest(src, w, h, nw, nh, fill),
             _ => {
                 let mut out = vec![fill; nw * nh];
                 for (i, o) in out.iter_mut().enumerate() {
@@ -92,7 +119,7 @@ fn resample(
     smooth: bool,
 ) -> Vec<Color32> {
     if !smooth {
-        return nearest(src, w, h, nw, nh);
+        return nearest(src, w, h, nw, nh, Color32::TRANSPARENT);
     }
     let bytes: Vec<u8> = src.iter().flat_map(|c| c.to_array()).collect();
     let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) else {
@@ -112,14 +139,35 @@ fn resample(
         .collect()
 }
 
+/// [`resample`] at full precision: premultiplied linear-light pixels
+/// (Catmull-Rom; it may overshoot a little, which storing them clamps).
+fn resample_linear(src: &[[f32; 4]], w: usize, h: usize, nw: usize, nh: usize) -> Vec<[f32; 4]> {
+    let values: Vec<f32> = src.iter().flatten().copied().collect();
+    let Some(img) = image::Rgba32FImage::from_raw(w as u32, h as u32, values) else {
+        return vec![[0.0; 4]; nw * nh];
+    };
+    let filter = image::imageops::FilterType::CatmullRom;
+    image::imageops::resize(&img, nw as u32, nh as u32, filter)
+        .pixels()
+        .map(|p| p.0)
+        .collect()
+}
+
 /// Hard pixels: each output pixel copies the source pixel under its centre
 /// (rows in parallel; the image crate's general resampler is ~10× slower).
-fn nearest(src: &[Color32], w: usize, h: usize, nw: usize, nh: usize) -> Vec<Color32> {
+fn nearest<T: Copy + Send + Sync>(
+    src: &[T],
+    w: usize,
+    h: usize,
+    nw: usize,
+    nh: usize,
+    fill: T,
+) -> Vec<T> {
     use rayon::prelude::*;
     let xs: Vec<usize> = (0..nw)
         .map(|x| (((x as f64 + 0.5) * w as f64 / nw as f64) as usize).min(w - 1))
         .collect();
-    let mut out = vec![Color32::TRANSPARENT; nw * nh];
+    let mut out = vec![fill; nw * nh];
     out.par_chunks_mut(nw).enumerate().for_each(|(y, row)| {
         let sy = (((y as f64 + 0.5) * h as f64 / nh as f64) as usize).min(h - 1);
         let src_row = &src[sy * w..(sy + 1) * w];
@@ -150,11 +198,36 @@ impl Canvas {
             // Folders have no pixels; an empty layer stays empty (a bare
             // background shows its colour everywhere either way).
             let tiles = if layer.kind == LayerKind::Group || self.layer_tile_keys(idx).is_empty() {
-                Vec::new()
+                NewTiles::Eight(Vec::new())
+            } else if let Some(depth) = Some(self.depth()).filter(|d| d.is_deep()) {
+                // A deeper document: the pixels at full depth.
+                let fill = eframe::egui::Rgba::from(fill).to_array();
+                let src = self.layer_linear(idx, fill);
+                let out = match op {
+                    ImageOp::Resize {
+                        w: nw,
+                        h: nh,
+                        smooth: true,
+                    } => resample_linear(&src, w, h, nw, nh),
+                    _ => op.move_pixels(&src, w, h, fill),
+                };
+                NewTiles::Deep(
+                    split_tiles(&out, nw, nh, ts, fill)
+                        .into_iter()
+                        .map(|(key, pixels)| {
+                            let mut deep =
+                                DeepTile::transparent(depth, pixels.len()).expect("a deep depth");
+                            for (i, p) in pixels.into_iter().enumerate() {
+                                deep.set_linear(i, p);
+                            }
+                            (key, deep)
+                        })
+                        .collect(),
+                )
             } else {
                 let src = self.layer_pixels(idx, fill);
                 let out = op.apply(&src, w, h, fill);
-                split_tiles(&out, nw, nh, ts, fill)
+                NewTiles::Eight(split_tiles(&out, nw, nh, ts, fill))
             };
             let mut shell = layer.shell();
             // Text keeps its source when only the frame moves; resampled,
@@ -243,13 +316,42 @@ impl Canvas {
             depth: self.depth(),
         };
         for (layer, tiles) in new_layers {
-            for ((tx, ty), data) in tiles {
-                layer.set_tile(tx, ty, data);
+            match tiles {
+                NewTiles::Eight(tiles) => {
+                    for ((tx, ty), data) in tiles {
+                        layer.set_tile(tx, ty, data);
+                    }
+                }
+                NewTiles::Deep(tiles) => {
+                    for ((tx, ty), deep) in tiles {
+                        layer.set_tile_deep(tx, ty, deep);
+                    }
+                }
             }
             doc.layers.push(layer);
         }
         self.swap_document(&mut doc);
         doc
+    }
+
+    /// [`Self::layer_pixels`] at full depth: premultiplied linear light.
+    fn layer_linear(&self, idx: usize, fill: [f32; 4]) -> Vec<[f32; 4]> {
+        let (w, h, ts) = (self.width(), self.height(), self.tile_size());
+        let mut out = vec![fill; w * h];
+        for ty in 0..h.div_ceil(ts) {
+            for tx in 0..w.div_ceil(ts) {
+                let Some(deep) = self.get_layer_tile_deep(idx, tx as i32, ty as i32) else {
+                    continue;
+                };
+                let (x0, y0) = (tx * ts, ty * ts);
+                for ly in 0..ts.min(h - y0) {
+                    for lx in 0..ts.min(w - x0) {
+                        out[(y0 + ly) * w + x0 + lx] = deep.linear(ly * ts + lx);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Layer `idx` over the whole canvas, row-major; unpainted areas read
@@ -274,13 +376,13 @@ impl Canvas {
 }
 
 /// A `w`×`h` buffer cut into tiles, leaving out those that are all `fill`.
-fn split_tiles(
-    src: &[Color32],
+fn split_tiles<T: Copy + PartialEq>(
+    src: &[T],
     w: usize,
     h: usize,
     ts: usize,
-    fill: Color32,
-) -> Vec<((i32, i32), Vec<Color32>)> {
+    fill: T,
+) -> Vec<((i32, i32), Vec<T>)> {
     let mut tiles = Vec::new();
     for ty in 0..h.div_ceil(ts) {
         for tx in 0..w.div_ceil(ts) {
@@ -425,5 +527,90 @@ mod tests {
         let mut img = eframe::egui::ColorImage::new([1, 1], Color32::TRANSPARENT);
         canvas.write_region_to_color_image(10, 10, 1, 1, &mut img, 1);
         assert_eq!(img.pixels[0], Color32::BLUE);
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+    use crate::canvas::storage::Depth;
+
+    /// A 128×64 canvas at `depth` whose layer 1 is a ramp too fine for 8
+    /// bits.
+    fn ramp(depth: Depth) -> (Canvas, DeepTile) {
+        let mut canvas = Canvas::new(128, 64, Color32::WHITE, 64);
+        canvas.convert_depth(depth);
+        let mut deep = DeepTile::transparent(depth, 64 * 64).unwrap();
+        for i in 0..deep.len() {
+            let v = i as f32 / deep.len() as f32 * 0.02;
+            deep.set_linear(i, [v, v * 0.5, v, 1.0]);
+        }
+        canvas.set_layer_tile_deep(1, 0, 0, &deep);
+        (canvas, deep)
+    }
+
+    #[test]
+    fn rotating_flipping_and_cropping_keep_full_depth() {
+        for depth in [Depth::U16, Depth::F32] {
+            let (mut canvas, deep) = ramp(depth);
+            for op in [
+                ImageOp::RotateCw,
+                ImageOp::RotateCcw,
+                ImageOp::FlipHorizontal,
+            ] {
+                canvas.apply_image_op(op);
+            }
+            canvas.apply_image_op(ImageOp::FlipHorizontal);
+            assert_eq!((canvas.width(), canvas.height()), (128, 64));
+            assert_eq!(
+                canvas.get_layer_tile_deep(1, 0, 0).unwrap(),
+                deep,
+                "{depth:?}"
+            );
+            // Cropped one tile in: what was at (64, 0) is at (0, 0).
+            canvas.apply_image_op(ImageOp::Reframe {
+                x: -64,
+                y: 0,
+                w: 128,
+                h: 64,
+            });
+            assert_eq!(
+                canvas.get_layer_tile_deep(1, 1, 0).unwrap(),
+                deep,
+                "{depth:?}"
+            );
+            assert_eq!(canvas.depth(), depth);
+        }
+    }
+
+    #[test]
+    fn a_smooth_resize_keeps_steps_8_bits_would_lose() {
+        for depth in [Depth::U16, Depth::F32] {
+            let (mut canvas, _) = ramp(depth);
+            canvas.apply_image_op(ImageOp::Resize {
+                w: 256,
+                h: 128,
+                smooth: true,
+            });
+            let deep = canvas.get_layer_tile_deep(1, 0, 0).unwrap();
+            let mut steps: Vec<u32> = (0..deep.len())
+                .map(|i| (deep.linear(i)[0] * 1e7) as u32)
+                .collect();
+            steps.sort_unstable();
+            steps.dedup();
+            assert!(steps.len() > 1000, "{depth:?}: {}", steps.len());
+        }
+    }
+
+    #[test]
+    fn an_undone_operation_brings_the_deep_pixels_back() {
+        let (mut canvas, deep) = ramp(Depth::U16);
+        let mut before = canvas.apply_image_op(ImageOp::Resize {
+            w: 32,
+            h: 16,
+            smooth: true,
+        });
+        canvas.swap_document(&mut before);
+        assert_eq!(canvas.get_layer_tile_deep(1, 0, 0).unwrap(), deep);
     }
 }

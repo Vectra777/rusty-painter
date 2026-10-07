@@ -583,8 +583,9 @@ pub(crate) fn resolve_stroke_deep(
             original.gamma(i)
         };
         let mut px = match stroke {
-            // Erasing scales the stored values, as the 8-bit eraser does.
-            DeepStroke::Erase => original.gamma(i).map(|v| v * (1.0 - a)),
+            // Erasing fades the alpha and keeps the colour (scaling the
+            // premultiplied pixel, in either space).
+            DeepStroke::Erase => below.map(|v| v * (1.0 - a)),
             DeepStroke::Paint { mode, colors } => {
                 let c = colors.map_or(base, |c| c[k]);
                 if mode == LayerBlend::Normal {
@@ -609,11 +610,10 @@ pub(crate) fn resolve_stroke_deep(
             let scale = if px[3] > 0.0 { keep / px[3] } else { 0.0 };
             px = [px[0] * scale, px[1] * scale, px[2] * scale, keep];
         }
-        let erase_or_gamma = matches!(stroke, DeepStroke::Erase) || !linear;
-        if erase_or_gamma {
-            out.set_gamma(i, px);
-        } else {
+        if linear {
             out.set_linear(i, px);
+        } else {
+            out.set_gamma(i, px);
         }
         *px8 = out.narrow(i);
     }

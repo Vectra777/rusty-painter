@@ -2,7 +2,8 @@
 //! `maindoc.xml` and each layer's pixels in its own file, as 64×64 tiles
 //! (LZF-compressed, one colour channel after another, B G R A).
 //!
-//! Paint layers (8 or 16 bits per channel, RGBA), folders, opacity,
+//! Paint layers (8 or 16 bits per channel or 16/32-bit float, RGBA; the
+//! deeper ones open as a 16-bit or float document), folders, opacity,
 //! visibility, blend modes, alpha inheritance (as clipping) and
 //! transparency masks come across. Layers of other kinds (filters, fills,
 //! vectors, files, clones) and other colour spaces are left out; when any
@@ -12,6 +13,7 @@
 
 use crate::brush_engine::import::krita::{Node, parse_xml};
 use crate::canvas::blend_modes::LayerBlend;
+use crate::canvas::storage::Depth;
 use crate::project::psd::{PsdDocument, PsdKind, PsdLayer, PsdMask};
 use eframe::egui::Color32;
 use std::collections::HashMap;
@@ -41,6 +43,8 @@ pub fn decode_kra(bytes: &[u8]) -> Result<PsdDocument, String> {
 fn flattened(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
     let (w, h, pixels) = merged_image(entries)?;
     Ok(PsdDocument {
+        depth: Depth::U8,
+        composite_deep: None,
         width: w,
         height: h,
         layers: vec![pixel_layer(
@@ -71,6 +75,7 @@ fn merged_image(
 
 fn pixel_layer(name: &str, rect: [i32; 4], pixels: Vec<Color32>) -> PsdLayer {
     PsdLayer {
+        deep: None,
         name: name.into(),
         kind: PsdKind::Pixels,
         rect,
@@ -92,6 +97,8 @@ struct Reader<'a> {
     size: (usize, usize),
     /// Something was left out.
     skipped: bool,
+    /// The deepest layer so far.
+    depth: Depth,
 }
 
 fn layered(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
@@ -113,6 +120,7 @@ fn layered(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
         dir: format!("{name}/layers/"),
         size: (w, h),
         skipped: false,
+        depth: Depth::U8,
     };
     let mut layers = Vec::new();
     if let Some(list) = child(image, "layers") {
@@ -134,6 +142,8 @@ fn layered(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
         return Err("The Krita document has no layers this can open".into());
     }
     Ok(PsdDocument {
+        depth: reader.depth,
+        composite_deep: None,
         width: w,
         height: h,
         layers,
@@ -177,9 +187,10 @@ impl Reader<'_> {
                 Some("paintlayer") => {
                     let mut l = common(PsdKind::Pixels);
                     match self.paint_layer(layer) {
-                        Ok((rect, pixels)) => {
+                        Ok((rect, pixels, deep)) => {
                             l.rect = rect;
                             l.pixels = pixels;
+                            l.deep = deep;
                         }
                         Err(err) => {
                             log::warn!("Krita layer {} left out: {err}", l.name);
@@ -205,12 +216,21 @@ impl Reader<'_> {
 
     /// A paint layer's pixels: the rectangle its tiles cover (the whole
     /// canvas too when its empty pixels aren't transparent).
-    fn paint_layer(&self, layer: &Node) -> Result<([i32; 4], Vec<Color32>), String> {
+    fn paint_layer(&mut self, layer: &Node) -> Result<LayerPixels, String> {
         let space = layer.attr("colorspacename").unwrap_or("RGBA");
-        let depth = match space {
-            "RGBA" => 1,
-            "RGBA16" => 2,
+        let channel = match space {
+            "RGBA" => Channel::U8,
+            "RGBA16" => Channel::U16,
+            "RGBAF16" => Channel::F16,
+            "RGBAF32" => Channel::F32,
             other => return Err(format!("colour space {other}")),
+        };
+        let depth = channel.bytes();
+        let deep_at = channel.depth();
+        self.depth = match (self.depth, deep_at) {
+            (Depth::F32, _) | (_, Depth::F32) => Depth::F32,
+            (Depth::U16, _) | (_, Depth::U16) => Depth::U16,
+            _ => Depth::U8,
         };
         let filename = layer.attr("filename").ok_or("no file")?;
         let data = self.file(filename).ok_or("its pixels are missing")?;
@@ -227,9 +247,10 @@ impl Reader<'_> {
         let tiles = read_tiles(data, 4 * depth)?;
         let default = self
             .file(&format!("{filename}.defaultpixel"))
-            .map_or(Color32::TRANSPARENT, |d| pixel(d, 0, 1, depth));
+            .map_or([0.0; 4], |d| channel.linear(d, 0, 1));
+        let default8 = to_color32(default);
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
-        let mut rect = if default.a() > 0 {
+        let mut rect = if default8.a() > 0 {
             [0, 0, w, h]
         } else {
             [i32::MAX, i32::MAX, i32::MIN, i32::MIN]
@@ -244,25 +265,39 @@ impl Reader<'_> {
             ];
         }
         if rect[0] >= rect[2] {
-            return Ok(([0; 4], Vec::new()));
+            return Ok(([0; 4], Vec::new(), None));
         }
         let rw = (rect[2] - rect[0]) as usize;
         let rh = (rect[3] - rect[1]) as usize;
         if rw * rh > 1 << 28 {
             return Err("too large".into());
         }
-        let mut pixels = vec![default; rw * rh];
+        // At full depth a pixel takes 16 bytes: a gigabyte at most.
+        if channel != Channel::U8 && rw * rh > MAX_DEEP_PIXELS {
+            return Err("too large at full depth".into());
+        }
+        let mut pixels = vec![default8; rw * rh];
+        // Deeper than 8 bits: the pixels at full depth too.
+        let mut deep = (channel != Channel::U8).then(|| vec![default; rw * rh]);
         for t in &tiles {
             let n = (t.w * t.h) as usize;
             for ty in 0..t.h {
                 for tx in 0..t.w {
                     let (x, y) = (t.x + offset.0 + tx - rect[0], t.y + offset.1 + ty - rect[1]);
                     let i = (ty * t.w + tx) as usize;
-                    pixels[y as usize * rw + x as usize] = pixel(&t.data, i, n, depth);
+                    let at = y as usize * rw + x as usize;
+                    match &mut deep {
+                        Some(deep) => {
+                            let px = channel.linear(&t.data, i, n);
+                            deep[at] = px;
+                            pixels[at] = to_color32(px);
+                        }
+                        None => pixels[at] = pixel(&t.data, i, n, depth),
+                    }
                 }
             }
         }
-        Ok((rect, pixels))
+        Ok((rect, pixels, deep))
     }
 
     /// The first transparency mask under `layer`, as grey levels.
@@ -298,6 +333,95 @@ impl Reader<'_> {
             default,
         })
     }
+}
+
+/// The most pixels a layer read at full depth may have (16 bytes each).
+pub(crate) const MAX_DEEP_PIXELS: usize = 1 << 26;
+
+/// A paint layer's rectangle, 8-bit pixels and, deeper than 8 bits, the
+/// same at full depth (premultiplied linear light).
+type LayerPixels = ([i32; 4], Vec<Color32>, Option<Vec<[f32; 4]>>);
+
+/// How a Krita colour space stores a channel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    U8,
+    /// 16-bit integers, sRGB encoded.
+    U16,
+    /// Half floats, linear light.
+    F16,
+    /// Floats, linear light.
+    F32,
+}
+
+impl Channel {
+    fn bytes(self) -> usize {
+        match self {
+            Channel::U8 => 1,
+            Channel::U16 | Channel::F16 => 2,
+            Channel::F32 => 4,
+        }
+    }
+
+    /// The document depth this keeps.
+    fn depth(self) -> Depth {
+        match self {
+            Channel::U8 => Depth::U8,
+            Channel::U16 => Depth::U16,
+            Channel::F16 | Channel::F32 => Depth::F32,
+        }
+    }
+
+    /// Pixel `i` of `n` from planar B, G, R, A data (unmultiplied, little
+    /// endian), premultiplied in linear light.
+    fn linear(self, data: &[u8], i: usize, n: usize) -> [f32; 4] {
+        let size = self.bytes();
+        let channel = |c: usize| -> f32 {
+            let at = (c * n + i) * size;
+            let Some(b) = data.get(at..at + size) else {
+                return 0.0;
+            };
+            let v = match self {
+                Channel::U8 => b[0] as f32 / 255.0,
+                Channel::U16 => u16::from_le_bytes([b[0], b[1]]) as f32 / 65535.0,
+                Channel::F16 => f16_to_f32(u16::from_le_bytes([b[0], b[1]])),
+                Channel::F32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            };
+            if v.is_finite() { v } else { 0.0 }
+        };
+        let a = channel(3).clamp(0.0, 1.0);
+        let rgb = [channel(2), channel(1), channel(0)];
+        let lin = |v: f32| match self {
+            Channel::U8 | Channel::U16 => {
+                eframe::egui::ecolor::linear_from_gamma(v.clamp(0.0, 1.0))
+            }
+            Channel::F16 | Channel::F32 => v.max(0.0),
+        };
+        [lin(rgb[0]) * a, lin(rgb[1]) * a, lin(rgb[2]) * a, a]
+    }
+}
+
+/// A half float's value.
+fn f16_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = ((h >> 10) & 0x1f) as i32;
+    let frac = (h & 0x3ff) as f32;
+    sign * match exp {
+        0 => frac * 2f32.powi(-24),
+        31 => f32::NAN,
+        _ => (1.0 + frac / 1024.0) * 2f32.powi(exp - 15),
+    }
+}
+
+/// A premultiplied linear-light pixel rounded to 8 bits.
+fn to_color32(px: [f32; 4]) -> Color32 {
+    let px = px.map(|v| v.max(0.0));
+    Color32::from(eframe::egui::Rgba::from_rgba_premultiplied(
+        px[0],
+        px[1],
+        px[2],
+        px[3].min(1.0),
+    ))
 }
 
 /// Pixel `i` of `n` from planar B, G, R, A data, each channel `depth`
@@ -565,6 +689,43 @@ mod tests {
     #[test]
     fn a_16_bit_krita_document_opens_too() {
         check_document(decode_kra(&fixture("krita-layers-16bit.kra")).unwrap());
+    }
+
+    #[test]
+    fn a_16_bit_krita_document_opens_at_16_bits() {
+        let doc = decode_kra(&fixture("krita-layers-16bit.kra")).unwrap();
+        assert_eq!(doc.depth, Depth::U16);
+        let canvas = doc.into_canvas().unwrap();
+        assert_eq!(canvas.depth(), Depth::U16);
+        let red = canvas
+            .layers
+            .iter()
+            .position(|l| l.name == "Red square")
+            .unwrap();
+        let deep = canvas.get_layer_tile_deep(red, 0, 0).unwrap();
+        assert_eq!(deep.linear(20 * 64 + 20), [1.0, 0.0, 0.0, 1.0]);
+        // The 8-bit document stays 8-bit.
+        let eight = decode_kra(&fixture("krita-layers-8bit.kra")).unwrap();
+        assert_eq!(eight.depth, Depth::U8);
+    }
+
+    #[test]
+    fn deep_channels_are_read_as_krita_stores_them() {
+        // One pixel, planar B, G, R, A.
+        let u16s = |v: [u16; 4]| v.iter().flat_map(|c| c.to_le_bytes()).collect::<Vec<u8>>();
+        let f32s = |v: [f32; 4]| v.iter().flat_map(|c| c.to_le_bytes()).collect::<Vec<u8>>();
+        // Half grey at half alpha, sRGB encoded: linear 0.214, premultiplied.
+        let px = Channel::U16.linear(&u16s([32768, 32768, 32768, 32768]), 0, 1);
+        assert!((px[0] - 0.214 * 0.5).abs() < 1e-3 && (px[3] - 0.5).abs() < 1e-4);
+        // Floats are linear already, and keep values past white.
+        let px = Channel::F32.linear(&f32s([0.25, 0.5, 2.0, 0.5]), 0, 1);
+        assert_eq!(px, [1.0, 0.25, 0.125, 0.5]);
+        // Halves: 1.0 = 0x3C00, 0.5 = 0x3800.
+        let px = Channel::F16.linear(&u16s([0x3C00, 0x3800, 0x3800, 0x3C00]), 0, 1);
+        assert_eq!(px, [0.5, 0.5, 1.0, 1.0]);
+        assert_eq!(f16_to_f32(0x0001), 2f32.powi(-24));
+        // Nothing to read: transparent, not a panic.
+        assert_eq!(Channel::F32.linear(&[1, 2], 0, 1), [0.0; 4]);
     }
 
     #[test]

@@ -406,9 +406,16 @@ impl PainterApp {
             let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
             let started = std::time::Instant::now();
             pool.install(|| {
-                let src = original.pixels(canvas.tile_size());
-                let out = filter.apply(&src, w, h, (x0, y0));
-                canvas.replace_region(layer, &original, &out, coverage.as_deref());
+                // A deeper document and a colour adjustment: at full depth.
+                let deep = filter.adjust_linear([0.5, 0.5, 0.5, 1.0]).is_some()
+                    && canvas.map_region_deep(layer, &original, coverage.as_deref(), |px| {
+                        filter.adjust_linear(px).unwrap_or(px)
+                    });
+                if !deep {
+                    let src = original.pixels(canvas.tile_size());
+                    let out = filter.apply(&src, w, h, (x0, y0));
+                    canvas.replace_region(layer, &original, &out, coverage.as_deref());
+                }
             });
             // The worker lets go of the canvas before it says it's done.
             drop(canvas);
