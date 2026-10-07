@@ -46,6 +46,11 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
             }
             "Click a line; drag a handle to bend it, Shift+drag to widen, Alt+drag to move it, Delete removes a handle"
         }
+        Tool::Animate => {
+            tool_title(ui, "Animate");
+            crate::ui::motion_panel::motion_fields(app, ui, false);
+            "Drag to move, a corner to scale, the round handle to turn, Alt+drag to move the pivot (Shift snaps); keyed at this frame"
+        }
         Tool::Text => {
             tool_title(ui, "Text");
             crate::ui::text_dialog::text_controls(app, ui);

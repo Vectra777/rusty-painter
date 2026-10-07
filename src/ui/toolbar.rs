@@ -210,6 +210,17 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     if tool_button(ui, app, Icon::Transform, transform_active, "Transform (V)") {
         app.set_transform_tool();
     }
+    let animate_active = matches!(app.active_tool, Tool::Animate);
+    if tool_button(
+        ui,
+        app,
+        Icon::Motion,
+        animate_active,
+        "Animate (A): move, scale and turn the layer, keyed at this frame",
+    ) {
+        app.active_tool = Tool::Animate;
+        app.workspace.animation.show_timeline = true;
+    }
     let picker_active = matches!(app.active_tool, Tool::Eyedropper);
     if tool_button(
         ui,

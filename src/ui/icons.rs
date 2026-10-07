@@ -49,6 +49,10 @@ pub(crate) enum Icon {
     Text,
     Layers,
     Sliders,
+    /// A dotted path to a key: the Animate tool.
+    Motion,
+    /// A strip of film: the timeline.
+    Timeline,
 }
 
 /// Maps 16×16 icon-grid coordinates into a square centered in `rect`.
@@ -249,6 +253,44 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                 let alpha = 1.0 - i as f32 / 5.0;
                 painter.rect_filled(band, 0.0, color.gamma_multiply(alpha));
             }
+        }
+        Icon::Timeline => {
+            // A strip of film: three frames between rows of holes.
+            let strip = Rect::from_min_max(g.p(1.5, 3.5), g.p(14.5, 12.5));
+            painter.rect_stroke(strip, g.w(1.0), thin);
+            for x in [5.8_f32, 10.2] {
+                painter.line_segment([g.p(x, 5.5), g.p(x, 10.5)], thin);
+            }
+            for k in 0..4 {
+                let x = 3.2 + k as f32 * 3.2;
+                for y in [4.6_f32, 11.4] {
+                    painter.rect_filled(
+                        Rect::from_center_size(g.p(x, y), egui::vec2(g.w(1.2), g.w(0.9))),
+                        0.0,
+                        color,
+                    );
+                }
+            }
+        }
+        Icon::Motion => {
+            // A dotted path curving up to a key's diamond.
+            let path = quad_bezier(g.p(2.0, 13.5), g.p(3.5, 4.0), g.p(11.0, 5.0), 10);
+            for p in path.iter().step_by(2) {
+                painter.circle_filled(*p, g.w(0.8), color);
+            }
+            let c = g.p(12.5, 5.0);
+            let r = g.w(2.6);
+            painter.add(Shape::convex_polygon(
+                vec![
+                    c + egui::vec2(0.0, -r),
+                    c + egui::vec2(r, 0.0),
+                    c + egui::vec2(0.0, r),
+                    c + egui::vec2(-r, 0.0),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+            painter.circle_stroke(g.p(2.0, 13.5), g.w(1.4), thin);
         }
         Icon::Layers => {
             // Three stacked sheets.

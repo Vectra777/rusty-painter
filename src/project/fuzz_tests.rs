@@ -27,6 +27,19 @@ fn rich_app() -> PainterApp {
     app.finish_stroke();
     app.release_canvas();
     app.brush_state.brush.impasto = None;
+    // Keyed motion and look, a layer following another, an animated layer.
+    use crate::canvas::motion::Prop;
+    let follower = app.canvas.layers[2].id.0;
+    app.motion_step(1, |m| {
+        m.set(Prop::Position, 0, [5.0, 3.0]);
+        m.set(Prop::Rotation, 4, [30.0, 0.0]);
+        m.set(Prop::Blur, 2, [4.0, 0.0]);
+        m.set(Prop::Anchor, 6, [20.0, 10.0]);
+    });
+    app.motion_step(2, |m| m.parent = Some(follower.wrapping_sub(1)));
+    app.new_animation_layer();
+    app.go_to_frame(3);
+    app.add_drawing(false);
     app
 }
 
@@ -37,6 +50,12 @@ fn open(bytes: &[u8]) {
     let mut canvas = loaded.canvas;
     let mut history = loaded.history;
     canvas.flatten();
+    // Moved layers at a few frames.
+    for t in [0, 3, 7] {
+        canvas.set_time(t);
+        canvas.pose_motions();
+        canvas.flatten();
+    }
     // Every step back and forward again.
     let mut selection = crate::selection::SelectionManager::new();
     let mut tool = crate::app::tools::Tool::Brush;

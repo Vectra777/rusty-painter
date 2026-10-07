@@ -24,6 +24,7 @@ pub enum Action {
     Gradient,
     Ruler,
     Transform,
+    Animate,
     Eyedropper,
     Fill,
     Liquify,
@@ -47,6 +48,18 @@ pub enum Action {
     PreviousFrame,
     NextFrame,
     PlayAnimation,
+    FirstFrame,
+    LastFrame,
+    PreviousDrawing,
+    NextDrawing,
+    NewDrawing,
+    CopyDrawing,
+    RemoveDrawing,
+    HoldLonger,
+    HoldShorter,
+    ToggleOnion,
+    KeyMotion,
+    NewAnimationLayer,
     // Edit
     Undo,
     Redo,
@@ -193,6 +206,7 @@ const CMD_ALT: Modifiers = Modifiers {
     alt: true,
     ..Modifiers::COMMAND
 };
+const ALT: Modifiers = Modifiers::ALT;
 
 macro_rules! b {
     ($m:expr, $k:ident) => {
@@ -252,6 +266,13 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Transform",
         "Tools",
         &[b!(NONE, V), b!(NONE, T)],
+    ),
+    info(
+        Action::Animate,
+        "animate",
+        "Animate (move, scale, turn, keyed)",
+        "Tools",
+        &[b!(NONE, A)],
     ),
     info(
         Action::Eyedropper,
@@ -364,6 +385,41 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Play / pause the animation",
         "Animation",
         &[b!(SHIFT, Space)],
+    ),
+    info(
+        Action::FirstFrame,
+        "first_frame",
+        "First frame",
+        "Animation",
+        &[b!(NONE, Home)],
+    ),
+    info(
+        Action::LastFrame,
+        "last_frame",
+        "Last frame",
+        "Animation",
+        &[b!(NONE, End)],
+    ),
+    info(
+        Action::PreviousDrawing,
+        "previous_drawing",
+        "Previous drawing or key",
+        "Animation",
+        &[b!(ALT, Comma)],
+    ),
+    info(
+        Action::NextDrawing,
+        "next_drawing",
+        "Next drawing or key",
+        "Animation",
+        &[b!(ALT, Period)],
+    ),
+    info(
+        Action::ToggleOnion,
+        "toggle_onion",
+        "Onion skin on / off",
+        "Animation",
+        &[b!(NONE, O)],
     ),
     info(
         Action::ActualPixels,
@@ -521,6 +577,55 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Export image",
         "File",
         &[b!(CMD, E)],
+    ),
+    info(
+        Action::NewDrawing,
+        "new_drawing",
+        "New blank drawing here",
+        "Drawings & keys",
+        &[b!(NONE, N)],
+    ),
+    info(
+        Action::CopyDrawing,
+        "copy_drawing",
+        "New drawing here, a copy of the one showing",
+        "Drawings & keys",
+        &[b!(SHIFT, N)],
+    ),
+    info(
+        Action::RemoveDrawing,
+        "remove_drawing",
+        "Remove the drawing starting here",
+        "Drawings & keys",
+        &[b!(SHIFT, Delete)],
+    ),
+    info(
+        Action::HoldLonger,
+        "hold_longer",
+        "Hold the drawing showing a frame longer",
+        "Drawings & keys",
+        &[b!(ALT, Equals), b!(ALT, Plus)],
+    ),
+    info(
+        Action::HoldShorter,
+        "hold_shorter",
+        "Hold the drawing showing a frame shorter",
+        "Drawings & keys",
+        &[b!(ALT, Minus)],
+    ),
+    info(
+        Action::KeyMotion,
+        "key_motion",
+        "Key the layer's motion here",
+        "Drawings & keys",
+        &[b!(ALT, K)],
+    ),
+    info(
+        Action::NewAnimationLayer,
+        "new_animation_layer",
+        "New animated layer",
+        "Drawings & keys",
+        &[b!(CMD_ALT, N)],
     ),
 ];
 

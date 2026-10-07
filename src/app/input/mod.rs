@@ -158,8 +158,8 @@ fn handle_pen_drag(
         return;
     }
     let (pos, raw) = (
-        app.tool_snap(pos, false, true),
-        app.tool_snap(raw, false, false),
+        on_layer(app, app.tool_snap(pos, false, true)),
+        on_layer(app, app.tool_snap(raw, false, false)),
     );
     match app.active_tool {
         Tool::Brush => app.add_stroke_point(raw, pressure),
@@ -180,6 +180,23 @@ fn handle_pen_drag(
         Tool::Gradient => app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift)),
         Tool::Text => app.text_drag(raw),
         Tool::VectorEdit => app.line_edit_drag(raw),
+        Tool::Animate => app.animate_drag(raw, ctx.input(|i| i.modifiers.shift)),
+    }
+}
+
+/// Where a tool working on the selected layer's own pixels takes `p` to
+/// be: on a moved layer, where the pointer is on its pixels (the brush maps
+/// its own points, and the selection and the Animate tool work on the
+/// canvas).
+fn on_layer(app: &PainterApp, p: Vec2) -> Vec2 {
+    match app.active_tool {
+        Tool::Fill
+        | Tool::Liquify
+        | Tool::Smudge
+        | Tool::Blur
+        | Tool::Shape(_)
+        | Tool::Gradient => app.to_layer_space(p),
+        _ => p,
     }
 }
 
@@ -348,7 +365,12 @@ fn handle_primary_press(
     // other tools need a press on the canvas itself.
     let brush = matches!(
         app.active_tool,
-        Tool::Brush | Tool::Shape(_) | Tool::Gradient | Tool::Text | Tool::VectorEdit
+        Tool::Brush
+            | Tool::Shape(_)
+            | Tool::Gradient
+            | Tool::Text
+            | Tool::VectorEdit
+            | Tool::Animate
     );
     if app.viewport.is_panning || !over {
         return;
@@ -376,6 +398,10 @@ fn handle_primary_press(
     // Onto guides and the grid, when snapping to them.
     let canvas_pos = (app.tool_snap(canvas_pos.0, true, true), canvas_pos.1);
     let raw = app.tool_snap(raw, true, false);
+    let (canvas_pos, raw) = (
+        (on_layer(app, canvas_pos.0), canvas_pos.1),
+        on_layer(app, raw),
+    );
 
     match app.active_tool {
         Tool::Brush => app.start_stroke_with_pressure(raw, pressure),
@@ -410,6 +436,7 @@ fn handle_primary_press(
             let m = response.ctx.input(|i| i.modifiers);
             app.line_edit_press(raw, m.shift, m.alt);
         }
+        Tool::Animate => app.animate_press(raw, response.ctx.input(|i| i.modifiers.alt)),
     }
 }
 
@@ -432,6 +459,7 @@ fn handle_primary_release(app: &mut PainterApp) {
         Tool::Gradient => app.gradient_release(),
         Tool::Text => app.text_release(),
         Tool::VectorEdit => app.line_edit_release(),
+        Tool::Animate => app.animate_release(),
     }
 }
 
@@ -505,7 +533,7 @@ fn handle_pointer_move(
                 false,
                 false,
             );
-            app.shape_move(raw, shape_mods(ctx));
+            app.shape_move(on_layer(app, raw), shape_mods(ctx));
             ctx.request_repaint();
         } else if matches!(app.active_tool, Tool::Gradient) {
             if app.viewport.is_primary_down {
@@ -514,13 +542,19 @@ fn handle_pointer_move(
                     false,
                     false,
                 );
-                app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift));
+                app.gradient_drag(on_layer(app, raw), ctx.input(|i| i.modifiers.shift));
                 ctx.request_repaint();
             }
         } else if matches!(app.active_tool, Tool::VectorEdit) {
             if app.viewport.is_primary_down {
                 let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
                 app.line_edit_drag(raw);
+                ctx.request_repaint();
+            }
+        } else if matches!(app.active_tool, Tool::Animate) {
+            if app.viewport.is_primary_down {
+                let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+                app.animate_drag(raw, ctx.input(|i| i.modifiers.shift));
                 ctx.request_repaint();
             }
         } else if matches!(app.active_tool, Tool::Text) {
@@ -546,6 +580,7 @@ fn handle_tool_move(
     pos: Vec2,
     is_inside: bool,
 ) {
+    let pos = on_layer(app, pos);
     match app.active_tool {
         Tool::Brush => handle_brush_move(app, response, pos),
         Tool::Select(_) => handle_select_move(app, ctx, pos),
@@ -577,7 +612,7 @@ fn handle_tool_move(
             transform::transform_drag(app, pos, keep_aspect);
             ctx.request_repaint();
         }
-        Tool::Shape(_) | Tool::Gradient | Tool::Text | Tool::VectorEdit => {}
+        Tool::Shape(_) | Tool::Gradient | Tool::Text | Tool::VectorEdit | Tool::Animate => {}
     }
 }
 

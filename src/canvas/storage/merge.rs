@@ -327,6 +327,10 @@ impl Canvas {
     /// [`Self::merge_down`]'s merged layer, without changing the layers
     /// yet (the slow part, which only reads them).
     pub fn plan_merge_down(&self, idx: usize) -> Result<MergePlan, &'static str> {
+        // Moved layers merge as they show (their keys are baked in).
+        if let Some(shown) = self.shown_copy() {
+            return shown.plan_merge_down(idx);
+        }
         let idx = match self.layers.get(idx).map(|l| l.kind) {
             Some(LayerKind::Mask { owner }) => self.layer_index_of(owner).ok_or("No layer")?,
             Some(_) => idx,
@@ -399,6 +403,9 @@ impl Canvas {
 
     /// [`Self::merge_visible`]'s merged layer, the layers left as they are.
     pub fn plan_merge_visible(&self) -> Result<MergePlan, &'static str> {
+        if let Some(shown) = self.shown_copy() {
+            return shown.plan_merge_visible();
+        }
         let n = self.layers.len();
         let shows = |i: usize| {
             let l = &self.layers[i];

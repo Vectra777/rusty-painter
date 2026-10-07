@@ -185,6 +185,7 @@ impl Canvas {
             });
         self.time = time;
         let rigs = self.render_rigs();
+        let moved = self.pose_for_time();
         if let Some(track) = active_track
             && let Some(i) = self.frame_at(track, time)
         {
@@ -193,7 +194,22 @@ impl Canvas {
         let after: Vec<Option<usize>> = (self.tracks().into_iter())
             .map(|t| self.frame_at(self.layers[t].id, time))
             .collect();
-        before != after || self.onion.enabled || rigs
+        before != after || self.onion.enabled || rigs || moved
+    }
+
+    /// What the frame showing shows, made again (after its time was set
+    /// without it): rigs posed, layers moved, the selected drawing the one
+    /// showing.
+    pub fn refresh_time(&mut self) {
+        self.render_rigs();
+        self.pose_for_time();
+        let active = self.layers.get(self.active_layer_idx);
+        if let Some(layer) = active
+            && let (Some(Anim::Frame(_)), Some(track)) = (layer.anim, layer.parent)
+            && let Some(i) = self.frame_at(track, self.time)
+        {
+            self.active_layer_idx = i;
+        }
     }
 
     /// Draw every rig layer posed at the frame showing (its tiles
@@ -264,6 +280,188 @@ impl Canvas {
             }
         }
         Some(i)
+    }
+}
+
+/// A copied drawing's pixels: its tiles (and, in a deeper document, at
+/// full depth).
+pub type ClipTiles = Vec<(
+    (i32, i32),
+    Vec<eframe::egui::Color32>,
+    Option<super::storage::DeepTile>,
+)>;
+
+/// A stretch of one layer's frames, copied: its drawings (by how far from
+/// the stretch's start; `None` is an empty one) and its keys.
+#[derive(Clone, Default)]
+pub struct FramesClip {
+    /// Copied from an animated layer (else it's only keys).
+    pub animated: bool,
+    pub drawings: Vec<(u32, Option<ClipTiles>)>,
+    pub keys: Vec<(super::motion::Prop, u32, super::rig::Key<[f32; 2]>)>,
+}
+
+impl Canvas {
+    /// A new empty paint layer on top (for tests). Returns its id.
+    #[cfg(test)]
+    pub fn insert_layer_for_tests(&mut self) -> LayerId {
+        let n = self.layers.len();
+        self.insert_new_layer(n, "Plain".into(), LayerKind::Paint, None)
+    }
+
+    /// Frames `from..=to` of layer `id`: what shows on them and its keys.
+    pub fn copy_frames(&self, id: LayerId, from: u32, to: u32) -> FramesClip {
+        let mut clip = FramesClip::default();
+        let Some(i) = self.layer_index_of(id) else {
+            return clip;
+        };
+        if self.layers[i].anim == Some(Anim::Track) {
+            clip.animated = true;
+            let frames = self.frames_of(id);
+            let first = frames.iter().rev().find(|f| f.0 <= from);
+            clip.drawings
+                .push((0, first.and_then(|&(_, d)| self.drawing_pixels(d))));
+            for &(at, d) in frames.iter().filter(|f| f.0 > from && f.0 <= to) {
+                clip.drawings.push((at - from, self.drawing_pixels(d)));
+            }
+        }
+        if let Some(motion) = &self.layers[i].motion {
+            for p in super::motion::Prop::ALL {
+                for k in motion.keys(p) {
+                    let t = k.time.round() as u32;
+                    if (from..=to).contains(&t) {
+                        clip.keys.push((p, t - from, k.clone()));
+                    }
+                }
+            }
+        }
+        clip
+    }
+
+    /// Drawing `d`'s pixels (`None` if it's empty).
+    fn drawing_pixels(&self, d: usize) -> Option<ClipTiles> {
+        if self.is_blank_drawing(d) {
+            return None;
+        }
+        Some(
+            (self.layer_tile_keys(d).into_iter())
+                .filter_map(|(tx, ty)| {
+                    let data = self.get_layer_tile_data(d, tx, ty)?;
+                    Some(((tx, ty), data, self.get_layer_tile_deep(d, tx, ty)))
+                })
+                .collect(),
+        )
+    }
+
+    /// Frames `from..=to` of layer `id` show nothing and have no keys; what
+    /// showed after them still does. Returns whether anything changed.
+    pub fn clear_frames(&mut self, id: LayerId, from: u32, to: u32) -> bool {
+        let keys = self.remove_keys_between(id, from, to);
+        let Some(i) = self.layer_index_of(id) else {
+            return keys;
+        };
+        if self.layers[i].anim != Some(Anim::Track) {
+            return keys;
+        }
+        let showed = self.frame_at(id, from).is_some()
+            || self
+                .frames_of(id)
+                .iter()
+                .any(|f| (from..=to).contains(&f.0));
+        if !showed {
+            return keys;
+        }
+        self.make_room(id, from, to);
+        self.add_frame(id, from, false);
+        true
+    }
+
+    /// `clip` (`len` frames long) onto layer `id` from frame `t`, over what
+    /// was there; what showed after still does.
+    pub fn paste_frames(&mut self, id: LayerId, t: u32, clip: &FramesClip, len: u32) {
+        let last = t + len.max(1) - 1;
+        let Some(i) = self.layer_index_of(id) else {
+            return;
+        };
+        if clip.animated && self.layers[i].anim == Some(Anim::Track) {
+            self.make_room(id, t, last);
+            for (offset, pixels) in &clip.drawings {
+                let Some(d) = self.add_frame(id, t + offset, false) else {
+                    continue;
+                };
+                for ((tx, ty), data, deep) in pixels.iter().flatten() {
+                    match deep {
+                        Some(deep) => self.set_layer_tile_deep(d, *tx, *ty, deep),
+                        None => self.set_layer_tile_data(d, *tx, *ty, data.clone()),
+                    }
+                }
+            }
+        }
+        if !clip.keys.is_empty() {
+            self.remove_keys_between(id, t, last);
+            let Some(i) = self.layer_index_of(id) else {
+                return;
+            };
+            let anchor = self.content_rect(i).map_or([0.0, 0.0], |[x0, y0, x1, y1]| {
+                [(x0 + x1) / 2.0, (y0 + y1) / 2.0]
+            });
+            let motion = self.layers[i]
+                .motion
+                .get_or_insert_with(|| Box::new(super::motion::Motion::new(anchor)));
+            for (p, offset, key) in &clip.keys {
+                motion.set(*p, t + offset, key.value);
+                motion.set_curve(*p, t + offset, key.curve);
+            }
+        }
+    }
+
+    /// Layer `id`'s keys on frames `from..=to` taken away.
+    fn remove_keys_between(&mut self, id: LayerId, from: u32, to: u32) -> bool {
+        let Some(i) = self.layer_index_of(id) else {
+            return false;
+        };
+        let Some(motion) = self.layers[i].motion.as_mut() else {
+            return false;
+        };
+        let mut any = false;
+        for p in super::motion::Prop::ALL {
+            let keys = motion.keys_mut(p);
+            let before = keys.len();
+            keys.retain(|k| !(from as f32 - 0.5..=to as f32 + 0.5).contains(&k.time));
+            any |= keys.len() != before;
+        }
+        any
+    }
+
+    /// Animated layer `id`'s drawings starting on `from..=to` taken away,
+    /// keeping what showed on frame `to + 1` showing from there (moved, or
+    /// a copy of it if it started before).
+    fn make_room(&mut self, id: LayerId, from: u32, to: u32) {
+        let after = to + 1;
+        let frames = self.frames_of(id);
+        let starts_after = frames.iter().any(|f| f.0 == after);
+        let showing_after = frames.iter().rev().find(|f| f.0 <= after).copied();
+        let mut gone = Vec::new();
+        for &(at, d) in frames.iter().filter(|f| (from..=to).contains(&f.0)) {
+            if Some((at, d)) == showing_after && !starts_after {
+                self.layers[d].anim = Some(Anim::Frame(after));
+                self.layers[d].name = format!("Frame {after}");
+            } else {
+                gone.push(self.layers[d].id);
+            }
+        }
+        for drawing in gone {
+            if let Some(d) = self.layer_index_of(drawing) {
+                self.layers.remove(d);
+            }
+        }
+        if let Some((at, _)) = showing_after
+            && at < from
+            && !starts_after
+        {
+            self.add_frame(id, after, true);
+        }
+        self.active_layer_idx = self.active_layer_idx.min(self.layers.len() - 1);
     }
 }
 
@@ -353,6 +551,33 @@ mod tests {
             canvas.onion_frames(track, 0),
             [(frames[1].1, 1), (extra, 2)]
         );
+    }
+
+    /// Which colour each frame shows, 0..n.
+    fn colours(canvas: &mut Canvas, n: u32) -> Vec<Color32> {
+        (0..n)
+            .map(|t| {
+                canvas.set_time(t);
+                one_pixel(canvas)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn frames_are_copied_cleared_and_pasted_keeping_what_follows() {
+        let (mut canvas, track) = animated(); // red 0..3, blue from 4
+        let (r, b, w) = (Color32::RED, Color32::BLUE, Color32::WHITE);
+        let clip = canvas.copy_frames(track, 3, 4);
+        assert_eq!(clip.drawings.len(), 2, "red at 0 (held), blue at 1");
+        // Cleared 1..=2: nothing shows there, red comes back at 3.
+        assert!(canvas.clear_frames(track, 1, 2));
+        assert_eq!(colours(&mut canvas, 6), [r, w, w, r, b, b]);
+        // Pasted at 7 over blue: red, blue, then blue again after.
+        canvas.paste_frames(track, 7, &clip, 2);
+        assert_eq!(colours(&mut canvas, 10), [r, w, w, r, b, b, b, r, b, b]);
+        // Pasted at 0: what followed (white, from the clear) still does.
+        canvas.paste_frames(track, 0, &clip, 2);
+        assert_eq!(colours(&mut canvas, 4), [r, b, w, r]);
     }
 
     #[test]

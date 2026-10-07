@@ -172,6 +172,10 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         return ui::radial_palette::palette_keys(app, ctx);
     }
     use crate::app::input::keymap::Action;
+    // Copying and pasting frames, over the timeline.
+    if ui::timeline::timeline_keys(app, ctx) {
+        return true;
+    }
     // Before the keys below consume V (the Transform tool).
     let clipboard = app.clipboard_keys(ctx);
 
@@ -206,6 +210,24 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let previous_frame = on(Action::PreviousFrame);
     let next_frame = on(Action::NextFrame);
     let play = on(Action::PlayAnimation);
+    let animate_tool = on(Action::Animate);
+    let animation: Vec<Action> = [
+        Action::FirstFrame,
+        Action::LastFrame,
+        Action::PreviousDrawing,
+        Action::NextDrawing,
+        Action::NewDrawing,
+        Action::CopyDrawing,
+        Action::RemoveDrawing,
+        Action::HoldLonger,
+        Action::HoldShorter,
+        Action::ToggleOnion,
+        Action::KeyMotion,
+        Action::NewAnimationLayer,
+    ]
+    .into_iter()
+    .filter(|&a| on(a))
+    .collect();
     let actual = on(Action::ActualPixels);
     let zoom_in = on(Action::ZoomIn);
     let zoom_out = on(Action::ZoomOut);
@@ -306,6 +328,15 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     if play {
         app.workspace.animation.playing = !app.workspace.animation.playing;
+        repaint = true;
+    }
+    if animate_tool {
+        app.active_tool = Tool::Animate;
+        app.workspace.animation.show_timeline = true;
+        repaint = true;
+    }
+    for action in animation {
+        app.animation_shortcut(action);
         repaint = true;
     }
     if actual {

@@ -57,10 +57,22 @@ pub(crate) fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     rotation_reset(app, ui);
 }
 
-/// The flip and ruler toggles.
+/// The timeline, flip and ruler toggles.
 pub(crate) fn view_toggles(app: &mut PainterApp, ui: &mut egui::Ui) {
     let flipped = app.viewport.flip_x;
     let size = (ui.available_height() - 2.0).clamp(18.0, 36.0);
+    let timeline = app.workspace.animation.show_timeline;
+    if icon_button(
+        ui,
+        Icon::Timeline,
+        size,
+        timeline,
+        "Timeline: frames, drawings and keys",
+    )
+    .clicked()
+    {
+        app.workspace.animation.show_timeline = !timeline;
+    }
     if icon_button(
         ui,
         Icon::Flip,

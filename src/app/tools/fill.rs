@@ -207,7 +207,7 @@ impl PainterApp {
     /// Limit `mask` to the selection's coverage, if there is a selection.
     fn clip_to_selection(&self, mask: &mut SelectionMask) {
         if self.selection_manager.has_selection() {
-            clip_to(&self.selection_manager, mask);
+            clip_to(&self.layer_selection(), mask);
         }
     }
 
@@ -233,7 +233,7 @@ impl PainterApp {
         let selection = self
             .selection_manager
             .has_selection()
-            .then(|| SelectionManager::with_shape(self.selection_manager.current_shape.clone()));
+            .then(|| SelectionManager::with_shape(self.layer_selection_shape()));
         let color = self.brush_state.brush.brush_options.color;
         let canvas = Arc::clone(&self.canvas);
         let pool = Arc::clone(&self.workspace.pool);

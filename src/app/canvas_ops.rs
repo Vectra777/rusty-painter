@@ -156,6 +156,8 @@ impl PainterApp {
         retired.extend(old.thumbnails.into_iter().flatten());
         retired.extend(old.float_overlay.map(|o| o.texture));
         self.layer_state.history = history;
+        self.canvas.render_rigs();
+        self.canvas.pose_motions();
         self.recreate_render_cache(width, height);
         // Shader state is per layer id, which the new document reuses.
         self.workspace.shaders.forget_document();
@@ -356,17 +358,29 @@ impl PainterApp {
     /// step, or its undo): rebuild what depends on them.
     pub(crate) fn after_document_swap(&mut self) {
         let (w, h) = (self.canvas.width(), self.canvas.height());
+        let resized = self.selection_manager.canvas_size != [w, h];
         self.recreate_render_cache(w, h);
         // The selection's coordinates belong to the old geometry.
         self.selection_manager.clear_selection();
         self.selection_manager.canvas_size = [w, h];
+        self.after_layers_change();
+        // A new size is fitted to the window; the same size stays as viewed.
+        if resized {
+            self.workspace.auto_fit = true;
+            self.workspace.fitted_to = None;
+        }
+    }
+
+    /// Layers were added, removed or rearranged wholesale (an animation
+    /// step, or its undo): what shows is drawn again.
+    pub(crate) fn after_layers_change(&mut self) {
         let count = self.canvas.layers.len();
         self.layer_state
             .layer_ui_colors
             .resize(count, Color32::from_gray(40));
         self.layer_state.thumbnails_dirty = true;
-        self.workspace.auto_fit = true;
-        self.workspace.fitted_to = None;
+        self.canvas.pose_motions();
+        self.mark_all_tiles_dirty();
     }
 
     /// Clip the active layer (or folder) to the layer below, or unclip it
@@ -394,6 +408,16 @@ impl PainterApp {
     }
 
     pub(crate) fn mark_tiles_in_bounds_dirty(&mut self, bounds: egui::Rect) {
+        if bounds.is_negative() {
+            return;
+        }
+        self.mark_bounds_dirty(bounds);
+        // (Painted on a moved layer: where that shows changed too.)
+        self.repose_active([bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y]);
+    }
+
+    /// [`Self::mark_tiles_in_bounds_dirty`] for `bounds` on the canvas only.
+    fn mark_bounds_dirty(&mut self, bounds: egui::Rect) {
         if bounds.is_negative() {
             return;
         }
@@ -662,6 +686,47 @@ impl PainterApp {
         self.rasterise_painted_text(&mut action);
         self.rasterise_painted_vector(&mut action);
         self.layer_state.history.push_action(action);
+        // A moved layer shows its changed pixels where it's moved.
+        if self.active_is_posed() {
+            self.canvas.pose_motions();
+            self.mark_all_tiles_dirty();
+        }
+    }
+
+    /// Whether the selected layer shows moved (see [`crate::canvas::motion`]).
+    pub(crate) fn active_is_posed(&self) -> bool {
+        (self.canvas.layers.get(self.canvas.active_layer_idx)).is_some_and(|l| l.is_posed())
+    }
+
+    /// Display tile `(tx, ty)` of the selected layer's own pixels changed:
+    /// where the layer is moved, where it shows is redrawn too.
+    pub(crate) fn mark_layer_tile_dirty(&mut self, tx: usize, ty: usize) {
+        self.mark_tile_dirty(tx, ty);
+        let ts = TILE_SIZE as f32;
+        let rect = [
+            tx as f32 * ts,
+            ty as f32 * ts,
+            (tx + 1) as f32 * ts,
+            (ty + 1) as f32 * ts,
+        ];
+        self.repose_active(rect);
+    }
+
+    /// Pose again the selected layer's part `rect` (its own pixels) if
+    /// it's moved, marking where that shows.
+    fn repose_active(&mut self, rect: [f32; 4]) {
+        if !self.active_is_posed() {
+            return;
+        }
+        if let Some(shown) = self
+            .canvas
+            .repose_region(self.canvas.active_layer_idx, rect)
+        {
+            self.mark_bounds_dirty(egui::Rect::from_min_max(
+                egui::pos2(shown[0], shown[1]),
+                egui::pos2(shown[2], shown[3]),
+            ));
+        }
     }
 
     /// Insert a new entry with undo; returns its index.

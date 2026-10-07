@@ -373,7 +373,12 @@ pub fn update_dirty_textures(
     let max_tiles = MAX_TILES_PER_FRAME * live_block.map_or(1, |b| b * b);
     let chosen: Vec<usize> = candidates.by_ref().take(max_tiles).collect();
     let filter = &app.workspace.filter;
-    let liquify = app.layer_state.liquify.as_ref().filter(|s| s.previewing());
+    // (A moved layer's quick previews would show it unmoved: it shows as
+    // its pixels are, posed, instead.)
+    let posed = canvas.layers.get(active).is_some_and(|l| l.is_posed());
+    let liquify = (app.layer_state.liquify.as_ref())
+        .filter(|s| s.previewing())
+        .filter(|_| !posed);
     let more = candidates.next().is_some();
     // Shader layers showing live: each run of layers between them is
     // composited on its own (the others hidden), into its own atlases.
@@ -474,8 +479,11 @@ fn tile_run_uploads(
     });
     let mut img = egui::ColorImage::new([0, 0], Color32::TRANSPARENT);
     if let Some(block) = live_block {
-        let layer = filter
-            .preview_pixels(canvas, tile.tx, tile.ty, block)
+        // (Not a moved layer's: its preview would show it unmoved.)
+        let posed = (canvas.layers.get(canvas.active_layer_idx)).is_some_and(|l| l.is_posed());
+        let layer = (!posed)
+            .then(|| filter.preview_pixels(canvas, tile.tx, tile.ty, block))
+            .flatten()
             .or_else(|| liquify?.preview_pixels(canvas, tile.tx, tile.ty, block));
         canvas.write_tile_preview(tile.tx, tile.ty, block, &mut img, layer);
         let img = preview_at_level(&img, block, tile_size, level);

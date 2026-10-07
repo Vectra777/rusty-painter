@@ -710,9 +710,10 @@ impl PainterApp {
         if outline_style || !session.has_area(settings.closed) {
             let mut brush = self.brush_state.brush.clone();
             brush.stabilizer_algorithm = StabilizerAlgorithm::None;
-            let selection = self.selection_manager.has_selection().then(|| {
-                SelectionManager::with_shape(self.selection_manager.current_shape.clone())
-            });
+            let selection = self
+                .selection_manager
+                .has_selection()
+                .then(|| SelectionManager::with_shape(self.layer_selection_shape()));
             let mut stroke = StrokeState::new();
             let mut tiles = StrokeTiles::default();
             let pool = std::sync::Arc::clone(&self.workspace.pool);
@@ -773,7 +774,7 @@ impl PainterApp {
             mask.x0 + mask.w as i32,
             mask.y0 + mask.h as i32,
         ];
-        let sel = &self.selection_manager;
+        let sel = &self.layer_selection();
         let selection = SelectionMask::rasterize(bounds, |y, x0, out| sel.row_coverage(y, x0, out));
         mask.combine(&selection, SelectionMode::Intersect).cropped()
     }

@@ -431,6 +431,9 @@ pub(super) struct StoredLayerMeta {
     /// Its part in an animation; absent in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anim: Option<crate::canvas::storage::Anim>,
+    /// Its keyed motion; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    motion: Option<crate::canvas::motion::Motion>,
 }
 
 impl From<&LayerMeta> for StoredLayerMeta {
@@ -459,6 +462,7 @@ impl From<&LayerMeta> for StoredLayerMeta {
             draft: meta.draft,
             reference: meta.reference,
             anim: meta.anim,
+            motion: meta.motion.as_deref().cloned(),
         }
     }
 }
@@ -498,6 +502,7 @@ impl StoredLayerMeta {
             // (Pictures aren't kept in history entries: a removed rig layer
             // comes back from a file as its last pixels.)
             rig: None,
+            motion: self.motion.map(Box::new),
         }
     }
 }

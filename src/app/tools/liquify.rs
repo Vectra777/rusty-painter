@@ -215,7 +215,7 @@ impl PainterApp {
             self.liquify_redraw(rect);
         }
         for (tx, ty) in shown {
-            self.mark_tile_dirty(tx as usize, ty as usize);
+            self.mark_layer_tile_dirty(tx as usize, ty as usize);
         }
     }
 
@@ -265,7 +265,7 @@ impl PainterApp {
         };
         s.preview.extend(tiles);
         for (tx, ty) in keys {
-            self.mark_tile_dirty(tx as usize, ty as usize);
+            self.mark_layer_tile_dirty(tx as usize, ty as usize);
         }
     }
 

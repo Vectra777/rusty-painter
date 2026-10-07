@@ -801,9 +801,7 @@ impl PainterApp {
             canvas: Arc::clone(&self.canvas),
             pool: Arc::clone(&self.workspace.pool),
             selection: self.selection_manager.has_selection().then(|| {
-                crate::selection::SelectionManager::with_shape(
-                    self.selection_manager.current_shape.clone(),
-                )
+                crate::selection::SelectionManager::with_shape(self.layer_selection_shape())
             }),
             brush,
             blur_size: self.workspace.blend.blur_size,

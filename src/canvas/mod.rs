@@ -18,6 +18,7 @@ pub mod impasto;
 pub mod inpaint;
 pub mod layer_style;
 pub mod liquify;
+pub mod motion;
 pub mod palette;
 pub mod rig;
 pub mod shader;

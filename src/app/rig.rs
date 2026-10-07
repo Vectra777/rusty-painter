@@ -121,6 +121,7 @@ impl PainterApp {
             edit(rig);
         }
         canvas.render_rigs();
+        self.workspace.animation.edits += 1;
         self.mark_all_tiles_dirty();
         self.mark_unsaved();
     }

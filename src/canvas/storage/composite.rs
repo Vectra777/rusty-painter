@@ -690,13 +690,13 @@ impl Canvas {
             }
         }
         let bg_arc = bg_visible
-            .then(|| self.layer_tile_cell(0, tx, ty))
+            .then(|| self.shown_tile_cell(0, tx, ty))
             .flatten();
         let bg_guard = bg_arc
             .as_ref()
             .map(|a| a.lock().unwrap_or_else(|e| e.into_inner()));
         let bg_data = bg_guard.as_ref().and_then(|g| g.data());
-        let paint_arc = paint_layer.and_then(|idx| self.layer_tile_cell(idx, tx, ty));
+        let paint_arc = paint_layer.and_then(|idx| self.shown_tile_cell(idx, tx, ty));
         let paint_guard = paint_arc
             .as_ref()
             .map(|a| a.lock().unwrap_or_else(|e| e.into_inner()));
@@ -1309,7 +1309,7 @@ impl Canvas {
                         row_tile_cache[layer_idx] = None;
 
                         // Fetch new tile and pre-convert to linear
-                        if let Some(tile_arc) = self.layer_tile_cell(layer_idx, tx, ty) {
+                        if let Some(tile_arc) = self.shown_tile_cell(layer_idx, tx, ty) {
                             // Lock temporarily to read data
                             let guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                             let is_empty = guard.is_empty;
@@ -1458,14 +1458,14 @@ impl Canvas {
         }
 
         let bg_arc = bg_visible
-            .then(|| self.layer_tile_cell(0, tx, ty))
+            .then(|| self.shown_tile_cell(0, tx, ty))
             .flatten();
         let bg_guard = bg_arc
             .as_ref()
             .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()));
         let bg_data = bg_guard.as_ref().and_then(|guard| guard.data());
 
-        let paint_arc = paint_layer.and_then(|idx| self.layer_tile_cell(idx, tx, ty));
+        let paint_arc = paint_layer.and_then(|idx| self.shown_tile_cell(idx, tx, ty));
         let paint_guard = paint_arc
             .as_ref()
             .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()));
@@ -1611,7 +1611,7 @@ impl Canvas {
                 tile.fill(Color32::TRANSPARENT);
                 let mut any = false;
                 for &(idx, opacity) in layers {
-                    let Some(cell) = self.layer_tile_cell(idx, tx, ty) else {
+                    let Some(cell) = self.shown_tile_cell(idx, tx, ty) else {
                         continue;
                     };
                     let cell = cell.lock().unwrap_or_else(|e| e.into_inner());

@@ -250,6 +250,13 @@ impl PainterApp {
         if self.is_active_layer_locked() || self.is_active_layer_folder() {
             return;
         }
+        // Painting stops playback (on the frame showing).
+        if self.workspace.animation.playing {
+            self.workspace.animation.playing = false;
+            self.leave_cached_frame();
+        }
+        // On a moved layer: where the pointer is on its own pixels.
+        let pos = self.to_layer_space(pos);
         // A stroke still running (a second press without a release) is
         // ended first: replacing it would lose its undo step.
         self.finish_stroke();
@@ -288,7 +295,7 @@ impl PainterApp {
         let selection = self
             .selection_manager
             .has_selection()
-            .then(|| SelectionManager::with_shape(self.selection_manager.current_shape.clone()));
+            .then(|| SelectionManager::with_shape(self.layer_selection_shape()));
         let pos = self.ruler_begin_stroke(pos);
         self.note_curve_start(pos, pressure);
         self.workspace.quickshape.begin(pos);
@@ -340,6 +347,7 @@ impl PainterApp {
     }
 
     pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
+        let pos = self.to_layer_space(pos);
         if self.vector_stroke_add(pos, pressure) {
             return;
         }
@@ -402,7 +410,9 @@ impl PainterApp {
     /// for redraw and file finished strokes into their layer's undo history.
     /// Returns whether it still has queued samples to paint.
     pub(crate) fn sync_stroke_worker(&mut self) -> bool {
-        for ((tx, ty), rect) in self.stroke_worker.take_dirty() {
+        let dirty = self.stroke_worker.take_dirty();
+        self.repose_painted(&dirty);
+        for ((tx, ty), rect) in dirty {
             self.mark_tile_damage(tx, ty, rect);
         }
         let (finished, ended) = self.stroke_worker.take_finished();

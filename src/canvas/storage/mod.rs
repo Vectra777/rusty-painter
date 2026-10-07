@@ -10,6 +10,9 @@ pub use deep::{DeepTile, Depth};
 mod merge;
 pub use merge::MergePlan;
 mod pixels;
+mod posed;
+#[cfg(test)]
+mod posed_tests;
 #[cfg(test)]
 mod tests;
 mod transform;
@@ -20,6 +23,7 @@ pub(crate) use composite::{gamma_over, shrink_tile};
 pub use merge::LayerSwap;
 pub use pixels::Region;
 pub(crate) use pixels::mix;
+pub(crate) use posed::transformed_rect;
 pub(crate) use transform::rect_corners;
 pub use transform::{Distort, DistortKind, InverseMap, TransformParams, is_convex_quad};
 
@@ -122,7 +126,11 @@ pub struct Layer {
     pub anim: Option<Anim>,
     /// A rig layer: its pixels are this rig posed at the current frame.
     pub rig: Option<Box<crate::canvas::rig::Rig>>,
+    /// Its keyed motion (see [`crate::canvas::motion`]).
+    pub motion: Option<Box<crate::canvas::motion::Motion>>,
     tiles: Mutex<TileMap>,
+    /// Its pixels as shown while it's moved (see `posed`).
+    posed: Mutex<Option<posed::Posed>>,
 }
 
 #[derive(Clone)]
@@ -164,6 +172,7 @@ pub struct CanvasLayerSnapshot {
     pub reference: bool,
     pub anim: Option<Anim>,
     pub rig: Option<Box<crate::canvas::rig::Rig>>,
+    pub motion: Option<Box<crate::canvas::motion::Motion>>,
     pub tiles: Vec<CanvasTileSnapshot>,
 }
 
@@ -230,7 +239,9 @@ impl Layer {
             reference: self.reference,
             anim: self.anim,
             rig: self.rig.clone(),
+            motion: self.motion.clone(),
             tiles: Mutex::new(TileMap::default()),
+            posed: Mutex::new(None),
         }
     }
 
@@ -283,7 +294,9 @@ impl Layer {
             reference: false,
             anim: None,
             rig: None,
+            motion: None,
             tiles: Mutex::new(TileMap::default()),
+            posed: Mutex::new(None),
         }
     }
 
@@ -337,6 +350,7 @@ impl Layer {
             reference: self.reference,
             anim: self.anim,
             rig: self.rig.clone(),
+            motion: self.motion.clone(),
             tiles,
         }
     }
@@ -376,7 +390,9 @@ impl Layer {
             reference: snapshot.reference,
             anim: snapshot.anim,
             rig: snapshot.rig,
+            motion: snapshot.motion,
             tiles: Mutex::new(tiles),
+            posed: Mutex::new(None),
         }
     }
 }
@@ -409,7 +425,12 @@ type TileKey = (i32, i32);
 /// A tile's shared, lockable storage.
 type SharedCell = Arc<Mutex<TileCell>>;
 
+/// Tile `(tx, ty)` of `layer` as the canvas shows it: where a moved layer
+/// shows, its posed copy's.
 fn layer_tile(layer: &Layer, tx: i32, ty: i32) -> Option<Arc<Mutex<TileCell>>> {
+    if let Some(posed) = layer.posed_tile(tx, ty) {
+        return posed;
+    }
     layer
         .tiles
         .lock()
@@ -610,6 +631,7 @@ impl Canvas {
                 && !l.clipped
                 && l.adjustment.is_none()
                 && l.shown_style().is_plain()
+                && !l.is_posed()
         })
     }
 
@@ -709,6 +731,7 @@ impl Canvas {
         layer.reference = meta.reference;
         layer.anim = meta.anim;
         layer.rig = meta.rig.clone();
+        layer.motion = meta.motion.clone();
         self.layers.insert(idx, layer);
         // `id` is a reused (previously-allocated) id, not a new one, but
         // guard against ever handing out a colliding id afterward.
@@ -771,6 +794,7 @@ impl Canvas {
             reference: layer.reference,
             anim: layer.anim,
             rig: layer.rig.clone(),
+            motion: layer.motion.clone(),
         })
     }
 
@@ -790,6 +814,23 @@ impl Canvas {
 
     pub fn layer_snapshots(&self) -> Vec<CanvasLayerSnapshot> {
         self.layers.iter().map(Layer::snapshot).collect()
+    }
+
+    /// A copy whose layers share this one's tiles: cheap, for reading in
+    /// the background (a change to either's tiles may show in the other;
+    /// tiles set or dropped on one don't).
+    pub fn shared_copy(&self) -> Canvas {
+        let mut copy = Canvas::new(self.width, self.height, self.clear_color, self.tile_size);
+        copy.depth = self.depth;
+        copy.profile = self.profile.clone();
+        copy.time = self.time;
+        copy.timeline = self.timeline;
+        copy.onion = self.onion;
+        copy.layers = self.layers.iter().map(|l| l.share()).collect();
+        copy.active_layer_idx = self.active_layer_idx;
+        copy.blend_space = self.blend_space;
+        copy.next_layer_id = self.next_layer_id;
+        copy
     }
 
     /// A copy sharing nothing with this canvas: saved or exported on

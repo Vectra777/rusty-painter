@@ -501,6 +501,7 @@ impl PainterApp {
         // Overlays follow the canvas exactly (zoom, pan and rotation).
         let map = render::screen_map(self, view);
         let panel = view.response.rect;
+        crate::app::playback::draw_cached_frame(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::view::grid::draw_grid(self, ui.painter(), &map, panel);
         crate::app::view::guide_lines::draw_guide_lines(self, ctx, ui.painter(), &map, panel);
         // With Transform, the outline shows where the box puts it.
@@ -519,8 +520,19 @@ impl PainterApp {
         crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
         crate::app::stroke_ops::draw_string(self, ui.painter(), &map);
-        crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| map.to_screen(p));
-        crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| map.to_screen(p));
+        // (On a moved layer, shapes and gradients are on its own pixels.)
+        crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| {
+            map.to_screen(self.to_canvas_space(p))
+        });
+        crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| {
+            map.to_screen(self.to_canvas_space(p))
+        });
+        crate::app::tools::animate::draw_animate(self, ui.painter(), &|p| map.to_screen(p));
+        if matches!(self.active_tool, crate::app::tools::Tool::Animate)
+            && let Some(canvas) = self.viewport.cursor_canvas
+        {
+            ctx.set_cursor_icon(self.animate_cursor(canvas, ctx.input(|i| i.modifiers.alt)));
+        }
         crate::app::tools::vector::draw_line_edit(self, ui.painter(), &map);
         crate::app::tools::blend::draw_clone_source(self, ui.painter(), &|p| map.to_screen(p));
         // A hand over the guide handles: they can be dragged.
@@ -552,7 +564,7 @@ impl PainterApp {
                 .fill
                 .path
                 .iter()
-                .map(|&p| map.to_screen(p))
+                .map(|&p| map.to_screen(self.to_canvas_space(p)))
                 .collect();
             let painter = ui.painter();
             painter.add(egui::Shape::line(
@@ -711,6 +723,10 @@ impl PainterApp {
             }
 
             if layer_action.is_some() {
+                self.mark_all_tiles_dirty();
+            }
+            // Moved layers show their restored pixels moved.
+            if self.canvas.pose_motions() {
                 self.mark_all_tiles_dirty();
             }
             for (tx, ty) in affected {

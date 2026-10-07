@@ -110,15 +110,17 @@ impl PainterApp {
         }
         let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
         // The selection's area, or the whole canvas.
-        let (bounds, coverage) = match self.selection_manager.get_bounds() {
-            Some(b) if self.selection_manager.has_selection() => {
+        // (On a moved layer: the selection carried onto its pixels.)
+        let selection = self.layer_selection();
+        let (bounds, coverage) = match selection.get_bounds() {
+            Some(b) if selection.has_selection() => {
                 let bounds = [
                     (b.min.x.floor() as i32 - 1).clamp(0, w),
                     (b.min.y.floor() as i32 - 1).clamp(0, h),
                     (b.max.x.ceil() as i32 + 1).clamp(0, w),
                     (b.max.y.ceil() as i32 + 1).clamp(0, h),
                 ];
-                let sel = &self.selection_manager;
+                let sel = &selection;
                 let mask =
                     SelectionMask::rasterize(bounds, |y, x0, out| sel.row_coverage(y, x0, out));
                 (bounds, Some(mask))

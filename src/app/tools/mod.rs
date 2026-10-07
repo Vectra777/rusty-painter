@@ -1,6 +1,7 @@
 //! The tools, one module each: what a press, drag and release do, their
 //! settings, and any session that lasts between presses (a shape being
 //! edited, a gradient being placed). `Tool` is the active tool.
+pub(crate) mod animate;
 pub(crate) mod assistants;
 pub(crate) mod blend;
 pub(crate) mod fill;
@@ -50,6 +51,8 @@ pub enum Tool {
     Text,
     /// Move a vector line's points, widen it there, or move it whole.
     VectorEdit,
+    /// Move, scale and turn the selected layer, keyed at the frame showing.
+    Animate,
 }
 
 impl Tool {
@@ -71,6 +74,7 @@ impl Tool {
             Tool::Gradient => "Gradient",
             Tool::Text => "Text",
             Tool::VectorEdit => "Edit line",
+            Tool::Animate => "Animate",
         }
     }
 }

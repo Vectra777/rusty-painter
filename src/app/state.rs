@@ -415,6 +415,8 @@ pub struct WorkspaceState {
     pub animation: crate::app::animation::AnimationState,
     /// Editing a rig layer.
     pub rig: crate::app::rig::RigEditState,
+    /// Editing a layer's keyed motion.
+    pub motion: crate::app::motion::MotionEditState,
     /// Fit the canvas to the panel whenever the panel size changes, until the
     /// user pans, zooms or rotates the view.
     pub auto_fit: bool,
@@ -543,6 +545,7 @@ impl WorkspaceState {
             color: Default::default(),
             animation: Default::default(),
             rig: Default::default(),
+            motion: Default::default(),
             auto_fit: true,
             fitted_to: None,
             // Android, or a desktop touchscreen via RUSTY_PAINTER_TOUCH=1.

@@ -206,8 +206,10 @@ impl PainterApp {
         let filter = filter.fitted(w as usize, h as usize);
         // The selection's area plus what a blur reads around it, or the
         // whole canvas.
-        let (bounds, coverage) = match self.selection_manager.get_bounds() {
-            Some(b) if self.selection_manager.has_selection() => {
+        // (On a moved layer: the selection carried onto its pixels.)
+        let selection = self.layer_selection();
+        let (bounds, coverage) = match selection.get_bounds() {
+            Some(b) if selection.has_selection() => {
                 let [x0, y0, x1, y1] = self.pixel_bounds(b);
                 let bounds = [
                     (x0 - MAX_REACH).max(0),
@@ -215,7 +217,7 @@ impl PainterApp {
                     (x1 + MAX_REACH).min(w),
                     (y1 + MAX_REACH).min(h),
                 ];
-                let sel = &self.selection_manager;
+                let sel = &selection;
                 let mask =
                     SelectionMask::rasterize(bounds, |y, x0, out| sel.row_coverage(y, x0, out));
                 (bounds, Some(mask))
@@ -370,7 +372,7 @@ impl PainterApp {
             tiles: preview_tiles,
         });
         for (tx, ty) in keys {
-            self.mark_tile_dirty(tx as usize, ty as usize);
+            self.mark_layer_tile_dirty(tx as usize, ty as usize);
         }
     }
 

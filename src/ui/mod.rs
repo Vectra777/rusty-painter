@@ -19,6 +19,7 @@ pub(crate) mod layer_style_dialog;
 pub(crate) mod layers;
 pub(crate) mod library;
 pub(crate) mod menus;
+pub(crate) mod motion_panel;
 pub(crate) mod navigator;
 pub(crate) mod palette_window;
 pub(crate) mod preview_worker;

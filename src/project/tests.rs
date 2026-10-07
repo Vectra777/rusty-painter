@@ -892,6 +892,23 @@ fn project_round_trips_shader_layers() {
 }
 
 #[test]
+fn project_round_trips_keyed_motion() {
+    use crate::canvas::motion::{Ease, Motion, Prop};
+    let mut canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
+    let mut motion = Motion::new([10.0, 20.0]);
+    motion.set(Prop::Position, 0, [0.0, 0.0]);
+    motion.set(Prop::Position, 12, [30.0, 5.0]);
+    motion.set(Prop::Rotation, 6, [45.0, 0.0]);
+    motion.set_curve(Prop::Position, 0, Ease::InOut.curve());
+    motion.parent = Some(7);
+    canvas.layers[1].motion = Some(Box::new(motion.clone()));
+    let encoded = encode_project(&test_app(canvas, vec![History::new(), History::new()])).unwrap();
+    let loaded = decode_project(&encoded).unwrap();
+    assert_eq!(loaded.canvas.layers[1].motion.as_deref(), Some(&motion));
+    assert_eq!(loaded.canvas.layers[0].motion, None);
+}
+
+#[test]
 fn project_round_trips_blend_modes_and_blend_space() {
     let mut canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
     canvas.layers[1].blend = LayerBlend::SoftLight;

@@ -126,6 +126,9 @@ fn blend_from_key(key: &[u8]) -> LayerBlend {
 impl PsdDocument {
     /// Everything PSD can hold of `canvas`.
     pub fn from_canvas(canvas: &Canvas) -> Self {
+        // Moved layers as they show (PSD has no keys).
+        let shown = canvas.shown_copy();
+        let canvas = shown.as_ref().unwrap_or(canvas);
         let mut layers = Vec::new();
         push_children(canvas, None, &mut layers, 0);
         // As exported: without the draft layers.
@@ -190,6 +193,7 @@ impl PsdDocument {
             reference: false,
             anim: None,
             rig: None,
+            motion: None,
             tiles: background.unwrap_or_default(),
         });
         // Folders being read: each GroupEnd opens one, its GroupStart closes it.
@@ -249,6 +253,7 @@ impl PsdDocument {
                 reference: false,
                 anim: None,
                 rig: None,
+                motion: None,
                 tiles,
             });
             if let Some(mask) = layer.mask.filter(|_| !is_group) {
@@ -275,6 +280,7 @@ impl PsdDocument {
                     reference: false,
                     anim: None,
                     rig: None,
+                    motion: None,
                     tiles: mask_tiles(&mask, self.width, self.height, ts),
                 });
                 next_id += 1;

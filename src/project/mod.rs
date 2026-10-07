@@ -623,6 +623,9 @@ struct StoredLayer {
     /// older files).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rig: Option<StoredRig>,
+    /// Its keyed motion; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    motion: Option<crate::canvas::motion::Motion>,
     tiles: Vec<StoredTile>,
 }
 
@@ -735,6 +738,7 @@ impl StoredLayer {
                 Some(rig) => Some(StoredRig::from_rig(rig, blobs)?),
                 None => None,
             },
+            motion: layer.motion.map(|m| *m),
             tiles: {
                 use rayon::prelude::*;
                 let raws: Vec<Vec<u8>> = layer
@@ -813,6 +817,7 @@ impl StoredLayer {
                 Some(rig) => Some(Box::new(rig.into_rig(blobs)?)),
                 None => None,
             },
+            motion: self.motion.map(Box::new),
             tiles: self
                 .tiles
                 .into_iter()
