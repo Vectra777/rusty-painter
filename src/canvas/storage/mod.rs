@@ -32,6 +32,17 @@ use crate::canvas::blend::{alpha_over_batch, apply_opacity_scale, gamma_rgba_to_
 use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
 use crate::canvas::history::{LayerMeta, TileSnapshot, UndoAction};
 
+/// A layer's part in an animation (see [`crate::canvas::animation`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Anim {
+    /// An animated layer: a folder whose children are its drawings, one
+    /// showing at a time.
+    Track,
+    /// One of an animated layer's drawings, showing from this frame until
+    /// the next one's.
+    Frame(u32),
+}
+
 /// Stable identity for a layer, independent of its current position in
 /// `Canvas::layers`. Undo history and other data that outlives a single
 /// frame must key off this instead of a raw index, since reordering,
@@ -107,6 +118,8 @@ pub struct Layer {
     /// A reference layer: fills (and the wand) set to "Reference" find
     /// their areas in it.
     pub reference: bool,
+    /// Its part in an animation, if any.
+    pub anim: Option<Anim>,
     tiles: Mutex<TileMap>,
 }
 
@@ -147,6 +160,7 @@ pub struct CanvasLayerSnapshot {
     pub position_locked: bool,
     pub draft: bool,
     pub reference: bool,
+    pub anim: Option<Anim>,
     pub tiles: Vec<CanvasTileSnapshot>,
 }
 
@@ -211,6 +225,7 @@ impl Layer {
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
+            anim: self.anim,
             tiles: Mutex::new(TileMap::default()),
         }
     }
@@ -262,6 +277,7 @@ impl Layer {
             position_locked: false,
             draft: false,
             reference: false,
+            anim: None,
             tiles: Mutex::new(TileMap::default()),
         }
     }
@@ -314,6 +330,7 @@ impl Layer {
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
+            anim: self.anim,
             tiles,
         }
     }
@@ -351,6 +368,7 @@ impl Layer {
             position_locked: snapshot.position_locked,
             draft: snapshot.draft,
             reference: snapshot.reference,
+            anim: snapshot.anim,
             tiles: Mutex::new(tiles),
         }
     }
@@ -372,6 +390,11 @@ pub struct Canvas {
     depth: Depth,
     /// Which colours the pixels' numbers are.
     pub profile: crate::canvas::color_profile::ColorProfile,
+    /// The frame showing (see [`crate::canvas::animation`]).
+    pub time: u32,
+    pub timeline: crate::canvas::animation::Timeline,
+    /// Onion skins, on screen (copies of the canvas leave them off).
+    pub onion: crate::canvas::animation::OnionSkin,
 }
 
 /// A tile's `(tx, ty)` position.
@@ -420,6 +443,9 @@ impl Canvas {
             blend_space: BlendSpace::Linear,
             depth: Depth::U8,
             profile: Default::default(),
+            time: 0,
+            timeline: Default::default(),
+            onion: Default::default(),
         }
     }
 
@@ -674,6 +700,7 @@ impl Canvas {
         layer.position_locked = meta.position_locked;
         layer.draft = meta.draft;
         layer.reference = meta.reference;
+        layer.anim = meta.anim;
         self.layers.insert(idx, layer);
         // `id` is a reused (previously-allocated) id, not a new one, but
         // guard against ever handing out a colliding id afterward.
@@ -734,6 +761,7 @@ impl Canvas {
             position_locked: layer.position_locked,
             draft: layer.draft,
             reference: layer.reference,
+            anim: layer.anim,
         })
     }
 
@@ -761,6 +789,8 @@ impl Canvas {
         let mut copy = Canvas::new(self.width, self.height, self.clear_color, self.tile_size);
         copy.depth = self.depth;
         copy.profile = self.profile.clone();
+        copy.time = self.time;
+        copy.timeline = self.timeline;
         copy.replace_layers_from_snapshots(self.layer_snapshots(), self.active_layer_idx);
         copy.blend_space = self.blend_space;
         copy.next_layer_id = copy.next_layer_id.max(self.next_layer_id);

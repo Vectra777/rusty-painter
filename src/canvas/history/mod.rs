@@ -163,6 +163,7 @@ pub struct LayerMeta {
     pub position_locked: bool,
     pub draft: bool,
     pub reference: bool,
+    pub anim: Option<crate::canvas::storage::Anim>,
 }
 
 /// A layer removed alongside the main one of a `Removed` op (its mask, or
@@ -407,7 +408,7 @@ fn describe(action: &UndoAction) -> Option<&'static str> {
         },
         Some(LayerHistoryOp::Removed { .. }) => "Delete layer",
         Some(LayerHistoryOp::Moved { .. }) => "Move layer",
-        Some(LayerHistoryOp::Document(_)) => "Image size, rotation or depth",
+        Some(LayerHistoryOp::Document(_)) => "Image or animation change",
         Some(LayerHistoryOp::Replaced(_)) => "Merge layers",
         Some(LayerHistoryOp::Text { .. }) => "Text",
         None if matches!(action.layer_action, Some(LayerHistoryOp::Text { .. }))
@@ -835,6 +836,7 @@ impl History {
                 position_locked: false,
                 draft: false,
                 reference: false,
+                anim: None,
             });
             canvas.insert_layer_with_meta(*index, *id, &meta);
         }

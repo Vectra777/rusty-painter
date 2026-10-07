@@ -35,6 +35,7 @@ pub(crate) mod kra;
 mod preview;
 pub(crate) mod psd;
 pub(crate) mod svg;
+pub(crate) mod video;
 pub(crate) mod zip;
 
 use blobs::{StoredBlob, push_blobs, read_blob};
@@ -446,6 +447,12 @@ struct ProjectFile {
     /// The colour profile; absent for sRGB (and in older files).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     profile: Option<StoredProfile>,
+    /// An animation's timeline and the frame showing; absent in documents
+    /// that aren't animated (and in older files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeline: Option<crate::canvas::animation::Timeline>,
+    #[serde(default)]
+    time: u32,
     active_layer_idx: usize,
     layers: Vec<StoredLayer>,
     /// Version 3: the one document history. Version 2: one per layer.
@@ -475,6 +482,9 @@ impl ProjectFile {
             },
             depth: canvas.depth(),
             profile: StoredProfile::from_profile(&canvas.profile, blobs)?,
+            timeline: (canvas.is_animated() || canvas.timeline != Default::default())
+                .then_some(canvas.timeline),
+            time: canvas.time,
             active_layer_idx: canvas.active_layer_idx,
             layers: canvas
                 .layer_snapshots()
@@ -517,6 +527,8 @@ impl ProjectFile {
         // (Set before the layers come in: their tiles are already at it.)
         canvas.convert_depth(self.depth);
         canvas.profile = StoredProfile::into_profile(self.profile, blobs)?;
+        canvas.timeline = self.timeline.unwrap_or_default();
+        canvas.time = self.time;
         canvas.replace_layers_from_snapshots(layers, self.active_layer_idx);
         canvas.blend_space = match self.blend_space.as_deref() {
             Some("gamma") => BlendSpace::Gamma,
@@ -603,6 +615,9 @@ struct StoredLayer {
     draft: bool,
     #[serde(default)]
     reference: bool,
+    /// Its part in an animation; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anim: Option<crate::canvas::storage::Anim>,
     tiles: Vec<StoredTile>,
 }
 
@@ -652,6 +667,7 @@ impl StoredLayer {
             position_locked: layer.position_locked,
             draft: layer.draft,
             reference: layer.reference,
+            anim: layer.anim,
             tiles: {
                 use rayon::prelude::*;
                 let raws: Vec<Vec<u8>> = layer
@@ -725,6 +741,7 @@ impl StoredLayer {
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
+            anim: self.anim,
             tiles: self
                 .tiles
                 .into_iter()

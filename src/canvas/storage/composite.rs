@@ -163,6 +163,39 @@ pub(crate) fn gamma_over(src: Color32, dst: Color32) -> Color32 {
     crate::canvas::blend::GammaReader::new().over(src, dst)
 }
 
+/// An onion skin: `node`'s paint in the tint for `k` drawings away (red
+/// before, green after), fainter the further.
+fn onion_tint(node: CompositeNode, k: i32, opacity: f32, space: BlendSpace) -> CompositeNode {
+    let CompositeNode::Layer {
+        mut input, mask, ..
+    } = node
+    else {
+        return node;
+    };
+    let tint = if k < 0 {
+        crate::canvas::animation::ONION_BEFORE
+    } else {
+        crate::canvas::animation::ONION_AFTER
+    };
+    let tint = match space {
+        BlendSpace::Linear => tint,
+        BlendSpace::Gamma => tint.map(eframe::egui::ecolor::gamma_from_linear),
+    };
+    let fade = opacity.clamp(0.0, 1.0) / k.unsigned_abs().max(1) as f32;
+    if let Some(px) = input.linear.as_mut() {
+        for p in px.iter_mut() {
+            let a = p.a() * fade;
+            *p = Rgba::from_rgba_premultiplied(tint[0] * a, tint[1] * a, tint[2] * a, a);
+        }
+    }
+    input.fill = Rgba::TRANSPARENT;
+    CompositeNode::Layer {
+        input,
+        mask,
+        blend: LayerBlend::Normal,
+    }
+}
+
 /// Mask coverage of a (premultiplied) mask pixel: brightness times alpha,
 /// so white shows, and black or transparent hides.
 #[inline]
@@ -962,6 +995,27 @@ impl Canvas {
             Node(usize),
         }
         let mut base = Base::None;
+        // An animated layer: its drawing showing now, over onion skins of
+        // the ones around it.
+        let track = parent.filter(|&p| {
+            self.layer_index_of(p)
+                .is_some_and(|i| self.layers[i].anim == Some(super::Anim::Track))
+        });
+        if let Some(track) = track {
+            if self.onion.enabled {
+                for (i, k) in self.onion_frames(track, self.time) {
+                    if let Some(node) = self.layer_node(i, tx, ty, masks, depth, shrink) {
+                        nodes.push(onion_tint(node, k, self.onion.opacity, self.blend_space));
+                    }
+                }
+            }
+            if let Some(i) = self.frame_at(track, self.time)
+                && let Some(node) = self.layer_node(i, tx, ty, masks, depth, shrink)
+            {
+                nodes.push(node);
+            }
+            return nodes;
+        }
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.parent != parent || matches!(layer.kind, LayerKind::Mask { .. }) {
                 continue;

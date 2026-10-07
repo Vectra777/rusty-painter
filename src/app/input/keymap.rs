@@ -43,6 +43,10 @@ pub enum Action {
     FlipView,
     Grid,
     Guides,
+    // Animation
+    PreviousFrame,
+    NextFrame,
+    PlayAnimation,
     // Edit
     Undo,
     Redo,
@@ -339,6 +343,27 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Fit to window",
         "View",
         &[b!(CMD, Num0)],
+    ),
+    info(
+        Action::PreviousFrame,
+        "previous_frame",
+        "Previous frame",
+        "Animation",
+        &[b!(NONE, Comma)],
+    ),
+    info(
+        Action::NextFrame,
+        "next_frame",
+        "Next frame",
+        "Animation",
+        &[b!(NONE, Period)],
+    ),
+    info(
+        Action::PlayAnimation,
+        "play_animation",
+        "Play / pause the animation",
+        "Animation",
+        &[b!(SHIFT, Space)],
     ),
     info(
         Action::ActualPixels,

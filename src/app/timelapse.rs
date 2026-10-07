@@ -179,14 +179,7 @@ impl PainterApp {
             .collect();
         self.export_state.message = Some("Exporting the time-lapse…".into());
         state.task = Some(std::thread::spawn(move || {
-            let gif = path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("gif"));
-            if gif {
-                write_gif(&frames, &path)?;
-            } else {
-                write_mp4(&frames, &path)?;
-            }
+            write_frames(&frames, &path)?;
             // Android: from the cache into Pictures.
             #[cfg(target_os = "android")]
             return crate::android::publish_file(&path, "image/gif").map(|done| done.message);
@@ -194,6 +187,25 @@ impl PainterApp {
             Ok(format!("Time-lapse saved to {}", path.display()))
         }));
     }
+}
+
+/// The recording as a GIF (by `path`'s extension) or an MP4.
+fn write_frames(frames: &[Frame], path: &std::path::Path) -> Result<(), String> {
+    use crate::project::video::{VideoFormat, VideoFrame, write_video};
+    let gif = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gif"));
+    let format = if gif {
+        VideoFormat::Gif
+    } else {
+        VideoFormat::Mp4
+    };
+    let video = video_frames(frames).map(|(width, height, rgba)| VideoFrame {
+        width,
+        height,
+        rgba,
+    });
+    write_video(path, format, FPS, true, video).map(|_| ())
 }
 
 /// Every frame at the last frame's size (earlier ones fitted into it on
@@ -240,71 +252,6 @@ fn video_frames(frames: &[Frame]) -> impl Iterator<Item = (usize, usize, Vec<u8>
             }
             Some((w, h, rgb))
         })
-}
-
-fn write_mp4(frames: &[Frame], path: &std::path::Path) -> Result<(), String> {
-    use std::io::Write;
-    let last = frames.last().expect("at least two frames");
-    let size = format!("{}x{}", last.width, last.height);
-    let mut child = std::process::Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-        ])
-        .args(["-s", &size, "-r", &FPS.to_string(), "-i", "-"])
-        // Even sides, as H.264 needs.
-        .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white"])
-        .args([
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(path)
-        .stdin(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|_| "MP4 needs ffmpeg installed (or export as .gif instead)".to_string())?;
-    let mut stdin = child.stdin.take().ok_or("Couldn't start ffmpeg")?;
-    for (_, _, rgba) in video_frames(frames) {
-        if stdin.write_all(&rgba).is_err() {
-            break; // ffmpeg stopped; its error says why
-        }
-    }
-    drop(stdin);
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "ffmpeg failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
-}
-
-fn write_gif(frames: &[Frame], path: &std::path::Path) -> Result<(), String> {
-    use image::codecs::gif::{GifEncoder, Repeat};
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut encoder = GifEncoder::new_with_speed(std::io::BufWriter::new(file), 20);
-    encoder
-        .set_repeat(Repeat::Infinite)
-        .map_err(|e| e.to_string())?;
-    let delay = image::Delay::from_numer_denom_ms(1000, FPS);
-    for (w, h, rgba) in video_frames(frames) {
-        let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba).ok_or("Bad frame")?;
-        encoder
-            .encode_frame(image::Frame::from_parts(img, 0, 0, delay))
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -371,7 +318,7 @@ mod tests {
         let pid = std::process::id();
         let gif = dir.join(format!("rp-timelapse-{pid}.gif"));
         let frames = std::mem::take(&mut app.workspace.timelapse.frames);
-        super::write_gif(&frames, &gif).unwrap();
+        super::write_frames(&frames, &gif).unwrap();
         let decoded = image::open(&gif).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (90, 50));
         let _ = std::fs::remove_file(&gif);
@@ -382,7 +329,7 @@ mod tests {
             .is_ok()
         {
             let mp4 = dir.join(format!("rp-timelapse-{pid}.mp4"));
-            super::write_mp4(&frames, &mp4).unwrap();
+            super::write_frames(&frames, &mp4).unwrap();
             assert!(std::fs::metadata(&mp4).unwrap().len() > 100);
             let _ = std::fs::remove_file(&mp4);
         }

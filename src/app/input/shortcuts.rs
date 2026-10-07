@@ -203,6 +203,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let merge_down = on(Action::MergeDown);
     let export = on(Action::Export);
     let fit = on(Action::FitView);
+    let previous_frame = on(Action::PreviousFrame);
+    let next_frame = on(Action::NextFrame);
+    let play = on(Action::PlayAnimation);
     let actual = on(Action::ActualPixels);
     let zoom_in = on(Action::ZoomIn);
     let zoom_out = on(Action::ZoomOut);
@@ -290,6 +293,19 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     if fit {
         app.fit_view();
+        repaint = true;
+    }
+    if previous_frame || next_frame {
+        let (t, timeline) = (app.canvas.time, app.canvas.timeline);
+        app.go_to_frame(if next_frame {
+            timeline.next(t)
+        } else {
+            timeline.previous(t)
+        });
+        repaint = true;
+    }
+    if play {
+        app.workspace.animation.playing = !app.workspace.animation.playing;
         repaint = true;
     }
     if actual {

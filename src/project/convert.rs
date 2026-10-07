@@ -428,6 +428,9 @@ pub(super) struct StoredLayerMeta {
     draft: bool,
     #[serde(default)]
     reference: bool,
+    /// Its part in an animation; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anim: Option<crate::canvas::storage::Anim>,
 }
 
 impl From<&LayerMeta> for StoredLayerMeta {
@@ -455,6 +458,7 @@ impl From<&LayerMeta> for StoredLayerMeta {
             position_locked: meta.position_locked,
             draft: meta.draft,
             reference: meta.reference,
+            anim: meta.anim,
         }
     }
 }
@@ -490,6 +494,7 @@ impl StoredLayerMeta {
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
+            anim: self.anim,
         }
     }
 }

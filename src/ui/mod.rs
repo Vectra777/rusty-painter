@@ -34,6 +34,7 @@ pub(crate) mod style;
 pub(crate) mod symmetry_menu;
 pub(crate) mod text_dialog;
 pub(crate) mod theme;
+pub(crate) mod timeline;
 pub(crate) mod tool_options;
 pub(crate) mod toolbar;
 pub(crate) mod view_aids_menu;

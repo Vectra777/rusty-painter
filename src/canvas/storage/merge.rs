@@ -111,6 +111,9 @@ impl Canvas {
             blend_space: self.blend_space,
             depth: self.depth,
             profile: self.profile.clone(),
+            time: self.time,
+            timeline: self.timeline,
+            onion: Default::default(),
         }
     }
 
@@ -141,6 +144,9 @@ impl Canvas {
             blend_space: self.blend_space,
             depth: self.depth,
             profile: self.profile.clone(),
+            time: self.time,
+            timeline: self.timeline,
+            onion: Default::default(),
         }
     }
 

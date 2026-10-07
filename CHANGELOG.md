@@ -57,6 +57,12 @@
 - Pictures are imported converted from the profile they carry to the document's; Photoshop and Krita documents open with theirs.
 - Colour harmonies in the colour panel: complementary, split complementary, analogous, triadic and tetradic hues shown on the wheel and as swatches to pick.
 
+### Animation
+- Frame-by-frame animation: animated layers whose drawings start on a frame and are held until the next, a timeline panel (View → Timeline) to play, step and set the frame rate and range, add, copy, drag and remove drawings, and onion skins before and after.
+- Undo works per drawing: a stroke undoes on the drawing it was made on, whatever frame is showing; adding, moving and removing drawings are undo steps too.
+- File → Export Animation: GIF, animated PNG, MP4 and WebM (through ffmpeg); documents save their timeline.
+- `,` and `.` step through frames, Shift+Space plays and pauses.
+
 ### Krita's engines, closer
 - Spray: density mode (particles by the share of the area they cover), the spray area's aspect and turn, jitter moving the whole cloud, and each particle's own random hue, saturation, value and opacity and mix with the secondary colour; Krita presets bring them.
 - Grid: cells taller or wider than square, divisions (also by pressure), a random border, and cells repainted by every dab; Krita presets bring them.

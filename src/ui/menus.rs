@@ -229,6 +229,14 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Export Image…", keys(app, ctx, Action::Export)) {
         open_export_dialog(app);
     }
+    if ui
+        .add_enabled_ui(app.canvas.is_animated(), |ui| {
+            menu_item(ui, "Export Animation…", None)
+        })
+        .inner
+    {
+        crate::ui::timeline::pick_export(app);
+    }
     ui.separator();
     let recording = app.workspace.timelapse.recording;
     let title = if recording {
@@ -566,6 +574,8 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     {
         app.mark_all_tiles_dirty();
     }
+    ui.checkbox(&mut app.workspace.animation.show_timeline, "Timeline")
+        .on_hover_text("Frames, playback and animated layers, under the canvas.");
     ui.menu_button("Colour Management", |ui| {
         crate::ui::image_menu::view_color_items(app, ui);
     });

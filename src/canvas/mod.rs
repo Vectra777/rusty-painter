@@ -1,6 +1,7 @@
 //! The document model: tiled layers ([`storage`]), blending and
 //! compositing, undo history, and the pixel algorithms tools run on it
 //! (fill, filters, gradient, liquify, inpaint, palette, text).
+pub mod animation;
 pub mod blend;
 pub mod blend_modes;
 pub mod color;

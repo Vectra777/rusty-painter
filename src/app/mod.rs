@@ -15,12 +15,14 @@
 //! - [`timelapse`]: recording the painting and exporting it as a video.
 //! - [`color_management`]: the monitor's profile, proofing, assigning and
 //!   converting the document's profile.
+//! - [`animation`]: frames, playback, drawings and exporting animations.
 //! - [`settings`]: preferences and tool options kept between sessions.
 //! - [`autosave`]: autosave and recovering unsaved work after a crash.
 //! - [`shader_ops`]: shader layers (compiling, playback, baking).
 //! - [`jobs`]: slow work (files, dialogs, decoding) off the UI thread.
 //! - [`layout`], [`init`], [`import`], [`brush_io`]: docks, startup, files
 //!   dropped or imported, brush tips on disk.
+pub(crate) mod animation;
 pub(crate) mod autosave;
 pub(crate) mod brush_io;
 pub(crate) mod brush_library;

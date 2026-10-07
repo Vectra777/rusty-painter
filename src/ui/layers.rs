@@ -160,7 +160,9 @@ fn display_order(canvas: &crate::canvas::Canvas) -> Vec<(usize, usize)> {
                 continue;
             }
             out.push((i, depth));
-            if layer.kind == LayerKind::Group && layer.expanded {
+            // An animated layer is one row: its drawings are on the timeline.
+            let track = layer.anim == Some(crate::canvas::storage::Anim::Track);
+            if layer.kind == LayerKind::Group && layer.expanded && !track {
                 visit(canvas, Some(layer.id), depth + 1, parent_of, out);
             }
         }
@@ -208,8 +210,19 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     let mut renaming: Option<usize> = ui.data(|d| d.get_temp(renaming_id));
 
     // The row that owns the selection (a selected mask highlights its layer).
-    let active_owner = match app.canvas.layers.get(active_idx).map(|l| l.kind) {
-        Some(LayerKind::Mask { owner }) => app.canvas.layer_index_of(owner).unwrap_or(active_idx),
+    let active_owner = match app
+        .canvas
+        .layers
+        .get(active_idx)
+        .map(|l| (l.kind, l.anim, l.parent))
+    {
+        Some((LayerKind::Mask { owner }, ..)) => {
+            app.canvas.layer_index_of(owner).unwrap_or(active_idx)
+        }
+        // A drawing of an animated layer: that layer's row.
+        Some((_, Some(crate::canvas::storage::Anim::Frame(_)), Some(track))) => {
+            app.canvas.layer_index_of(track).unwrap_or(active_idx)
+        }
         _ => active_idx,
     };
 
@@ -396,7 +409,23 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 let (visible, locked, name, opacity) = &mut edited;
 
                 vis_changed |= icon_toggle(&mut content, visible, Icon::Eye, Icon::EyeOff, "Toggle visibility");
-                if is_group {
+                let is_track = app.canvas.layers[i].anim == Some(crate::canvas::storage::Anim::Track);
+                if is_group && is_track {
+                    // An animated layer: its drawings are on the timeline.
+                    let (film_rect, film) = content
+                        .allocate_exact_size(egui::vec2(m.row_toggle + THUMB_W, THUMB_H), egui::Sense::click());
+                    content.painter().text(
+                        film_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "🎞",
+                        egui::FontId::proportional(14.0),
+                        TEXT_DIM,
+                    );
+                    if film.on_hover_text("An animated layer: its drawings are on the timeline").clicked() {
+                        active_idx = i;
+                        app.workspace.animation.show_timeline = true;
+                    }
+                } else if is_group {
                     // Disclosure arrow + folder icon in place of lock/thumbnail.
                     let (arrow_rect, arrow) = content
                         .allocate_exact_size(egui::vec2(m.row_toggle, m.row_toggle), egui::Sense::click());
@@ -714,6 +743,13 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         None => d.remove::<usize>(renaming_id),
     });
 
+    // An animated layer picked: its drawing showing (painting goes there).
+    if let Some(layer) = app.canvas.layers.get(active_idx)
+        && layer.anim == Some(crate::canvas::storage::Anim::Track)
+        && let Some(i) = app.canvas.frame_at(layer.id, app.canvas.time)
+    {
+        active_idx = i;
+    }
     if active_idx != app.canvas.active_layer_idx {
         app.canvas_mut().active_layer_idx = active_idx;
     }

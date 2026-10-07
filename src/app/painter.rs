@@ -86,6 +86,7 @@ impl eframe::App for PainterApp {
         }
         self.workspace.frame_stats.begin(frame.info().cpu_usage);
         self.refresh_display_transform();
+        self.animation_tick(ctx);
         self.workspace.refresh.tick();
         self.workspace.keyboard.observe(ctx);
         let label = self
@@ -142,6 +143,7 @@ impl eframe::App for PainterApp {
         ui::toolbar::toolbar(self, ctx);
         layout::right_rail(self, ctx);
         layout::show_panels(self, ctx);
+        ui::timeline::timeline_panel(self, ctx);
         self.workspace.frame_stats.mark(Stage::Panels);
 
         let canvas_frame = egui::Frame::none().fill(ui::style::BG_CANVAS);

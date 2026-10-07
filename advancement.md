@@ -36,9 +36,9 @@ Brush management
 
 Part 2: Everything else
 
-Animation (K, C, P, I): the biggest missing area
+Animation (K, C, P, I)
 
-- A timeline and frame-by-frame animation, onion skinning, export to GIF, MP4 and WebM. Procreate's Animation Assist shows how small a useful version can be. (Time-lapse recording exists and exports a GIF.)
+- Frame-by-frame animation is in. Still missing: tweening of transforms and opacity, audio, a playback cache for big canvases (every frame is composited as it shows), Krita's animation curves, and opening Krita's animated documents with their frames.
 
 Comics (C leads, I has most)
 
