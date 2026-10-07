@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::Color32;
 
+use super::deep::DeepTile;
 use super::{Canvas, SharedCell, TileCell, TileKey};
 use crate::canvas::color::{Color, ColorManipulation};
-use crate::canvas::history::{TileSnapshot, UndoAction};
+use crate::canvas::history::{SnapshotPixels, TileSnapshot, UndoAction};
 use crate::selection::SelectionManager;
 
 /// Some of a layer's tiles as they were, for [`Canvas::paint_over_region`].
@@ -22,8 +23,14 @@ pub struct Region {
     tiles: Vec<RegionTile>,
 }
 
-/// A tile's key, its pixels as they were, and the tile.
-type RegionTile = ((i32, i32), Vec<Color32>, Arc<Mutex<TileCell>>);
+/// A tile's key, its pixels as they were (and in a deeper document, at
+/// full depth), and the tile.
+type RegionTile = (
+    (i32, i32),
+    Vec<Color32>,
+    Option<DeepTile>,
+    Arc<Mutex<TileCell>>,
+);
 
 impl Region {
     /// The original pixels as one row-major buffer over `bounds`.
@@ -32,7 +39,7 @@ impl Region {
         let [bx0, by0, bx1, by1] = self.bounds;
         let (w, h) = ((bx1 - bx0).max(0) as usize, (by1 - by0).max(0) as usize);
         let mut out = vec![Color32::TRANSPARENT; w * h];
-        for ((tx, ty), data, _) in &self.tiles {
+        for ((tx, ty), data, _, _) in &self.tiles {
             let (ox, oy) = (tx * ts, ty * ts);
             let (x0, x1) = (bx0.max(ox), bx1.min(ox + ts));
             if x1 <= x0 {
@@ -52,7 +59,7 @@ impl Region {
     pub fn original_tiles(&self) -> impl Iterator<Item = ((i32, i32), &[Color32])> {
         self.tiles
             .iter()
-            .map(|(key, data, _)| (*key, data.as_slice()))
+            .map(|(key, data, _, _)| (*key, data.as_slice()))
     }
 }
 
@@ -83,7 +90,7 @@ impl Canvas {
             let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             for tile_arc in tiles.values() {
                 let mut cell = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-                cell.data = None;
+                cell.set_data(None);
                 cell.is_empty = true;
             }
         }
@@ -105,7 +112,7 @@ impl Canvas {
             .par_iter()
             .filter_map(|(key, cell)| {
                 let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-                guard.data.clone().map(|d| (*key, d))
+                guard.data().cloned().map(|d| (*key, d))
             })
             .collect()
     }
@@ -139,7 +146,7 @@ impl Canvas {
                 if cell.is_empty {
                     return None;
                 }
-                let data = cell.data.as_mut()?;
+                let data = cell.data_mut()?;
                 let before = data.clone();
                 let mut inside = vec![true; ts];
                 let mut any = false;
@@ -223,9 +230,7 @@ impl Canvas {
                 };
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
                 let was_empty = cell.is_empty;
-                let data = cell
-                    .data
-                    .get_or_insert_with(|| vec![Color32::TRANSPARENT; (ts * ts) as usize]);
+                let data = cell.data_or_insert((ts * ts) as usize);
                 if let Some(before) = before.as_deref_mut() {
                     before.entry((tx, ty)).or_insert_with(|| data.clone());
                 }
@@ -334,9 +339,7 @@ impl Canvas {
             .par_iter()
             .filter_map(|&((tx, ty), ref cell)| {
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let data = cell
-                    .data
-                    .get_or_insert_with(|| vec![Color32::TRANSPARENT; tile_len]);
+                let data = cell.data_or_insert(tile_len);
                 let before = data.clone();
                 let mut changed = false;
                 for ly in 0..ts {
@@ -413,9 +416,7 @@ impl Canvas {
             .par_iter()
             .filter_map(|&((tx, ty), ref cell)| {
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let data = cell
-                    .data
-                    .get_or_insert_with(|| vec![Color32::TRANSPARENT; tile_len]);
+                let data = cell.data_or_insert(tile_len);
                 let mut before: Option<Vec<Color32>> = None;
                 // Only the part of the tile inside the bounds.
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
@@ -484,16 +485,16 @@ impl Canvas {
             .iter()
             .filter_map(|&(tx, ty)| Some(((tx, ty), self.ensure_layer_tile(layer_idx, tx, ty)?)))
             .collect();
+        let depth = self.depth;
         let tiles = cells
             .into_par_iter()
             .map(|(key, cell)| {
-                let data = cell
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .data
-                    .clone()
-                    .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_len]);
-                (key, data, cell)
+                let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let data =
+                    (guard.data().cloned()).unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_len]);
+                let deep = (guard.deep().cloned()).or_else(|| DeepTile::widen(depth, &data));
+                drop(guard);
+                (key, data, deep, cell)
             })
             .collect();
         Region {
@@ -530,7 +531,7 @@ impl Canvas {
         region
             .tiles
             .par_iter()
-            .for_each(|((tx, ty), original, cell)| {
+            .for_each(|((tx, ty), original, _, cell)| {
                 let (tx, ty) = (*tx, *ty);
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
                 let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
@@ -557,7 +558,74 @@ impl Canvas {
                 }
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
                 cell.is_empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
-                cell.data = Some(out);
+                cell.set_data(Some(out));
+            });
+    }
+
+    /// [`Self::paint_over_region`] at full depth: `row(x0, y, out)` gives
+    /// premultiplied linear-light colours, painted over the region's
+    /// original pixels at the document's depth and rounded to its 8-bit
+    /// ones. In an 8-bit document, the colours are rounded first.
+    pub fn paint_over_region_deep(
+        &self,
+        layer_idx: usize,
+        region: &Region,
+        row: impl Fn(i32, i32, &mut [[f32; 4]]) + Sync,
+    ) {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return;
+        };
+        let alpha_lock = layer.alpha_locked;
+        let ts = self.tile_size as i32;
+        let [bx0, by0, bx1, by1] = region.bounds;
+        if !self.depth.is_deep() {
+            let encoder = crate::canvas::blend::LinearEncoder::new();
+            return self.paint_over_region(layer_idx, region, |x0, y, out| {
+                let mut deep = vec![[0.0; 4]; out.len()];
+                row(x0, y, &mut deep);
+                for (o, [r, g, b, a]) in out.iter_mut().zip(deep) {
+                    *o = encoder.encode(eframe::egui::Rgba::from_rgba_premultiplied(r, g, b, a));
+                }
+            });
+        }
+        region
+            .tiles
+            .par_iter()
+            .for_each(|((tx, ty), original, deep, cell)| {
+                let Some(deep) = deep else {
+                    return;
+                };
+                let (tx, ty) = (*tx, *ty);
+                let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
+                let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
+                let mut out = deep.clone();
+                let mut out8 = original.clone();
+                let mut src = vec![[0.0f32; 4]; (lx1 - lx0).max(0) as usize];
+                for ly in ly0..ly1 {
+                    row(tx * ts + lx0, ty * ts + ly, &mut src);
+                    let base = (ly * ts) as usize;
+                    for (lx, s) in (lx0..lx1).zip(&src) {
+                        if s[3] <= 0.0 {
+                            continue;
+                        }
+                        let i = base + lx as usize;
+                        let d = deep.linear(i);
+                        if alpha_lock && d[3] <= 0.0 {
+                            continue;
+                        }
+                        let keep = 1.0 - s[3];
+                        let mut px: [f32; 4] = std::array::from_fn(|c| s[c] + d[c] * keep);
+                        if alpha_lock {
+                            let scale = d[3] / px[3];
+                            px = [px[0] * scale, px[1] * scale, px[2] * scale, d[3]];
+                        }
+                        out.set_linear(i, px);
+                        out8[i] = out.narrow(i);
+                    }
+                }
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                cell.is_empty = out.is_transparent();
+                cell.set_both(Some(out8), Some(out));
             });
     }
 
@@ -582,7 +650,7 @@ impl Canvas {
         region
             .tiles
             .par_iter()
-            .for_each(|((tx, ty), original, cell)| {
+            .for_each(|((tx, ty), original, _, cell)| {
                 let (tx, ty) = (*tx, *ty);
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
                 let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
@@ -605,17 +673,20 @@ impl Canvas {
                 }
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
                 cell.is_empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
-                cell.data = Some(out);
+                cell.set_data(Some(out));
             });
     }
 
     /// Put the layer's pixels in `region` back to its originals.
     pub fn restore_region(&self, region: &Region) {
-        region.tiles.par_iter().for_each(|(_, original, cell)| {
-            let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-            cell.is_empty = original.iter().all(|&p| p == Color32::TRANSPARENT);
-            cell.data = Some(original.clone());
-        });
+        region
+            .tiles
+            .par_iter()
+            .for_each(|(_, original, deep, cell)| {
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                cell.is_empty = original.iter().all(|&p| p == Color32::TRANSPARENT);
+                cell.set_both(Some(original.clone()), deep.clone());
+            });
     }
 
     /// Undo snapshots of the tiles in `region` whose pixels changed since it
@@ -628,10 +699,11 @@ impl Canvas {
         region
             .tiles
             .par_iter()
-            .filter_map(|((tx, ty), original, cell)| {
+            .filter_map(|((tx, ty), original, deep, cell)| {
                 let (tx, ty) = (*tx, *ty);
                 let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let changed = cell.data.as_ref().is_some_and(|now| now != original);
+                let changed = cell.data().is_some_and(|now| now != original)
+                    || (deep.is_some() && cell.deep() != deep.as_ref());
                 changed.then(|| TileSnapshot {
                     tx,
                     ty,
@@ -640,7 +712,10 @@ impl Canvas {
                     y0: 0,
                     width: ts,
                     height: ts,
-                    data: original.clone().into(),
+                    data: match deep {
+                        Some(deep) => SnapshotPixels::Deep(deep.clone()),
+                        None => original.clone().into(),
+                    },
                 })
             })
             .collect()

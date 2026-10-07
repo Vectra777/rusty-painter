@@ -240,6 +240,7 @@ impl Canvas {
             height: nh,
             layers: Vec::new(),
             active_layer_idx: self.active_layer_idx,
+            depth: self.depth(),
         };
         for (layer, tiles) in new_layers {
             for ((tx, ty), data) in tiles {

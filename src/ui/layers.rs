@@ -97,7 +97,7 @@ pub fn refresh_thumbnails(app: &mut PainterApp, ctx: &egui::Context) {
             if guard.is_empty && !is_mask {
                 continue;
             }
-            if let Some(data) = &guard.data {
+            if let Some(data) = guard.data() {
                 for &(dst, src) in samples {
                     image.pixels[dst] = if is_mask {
                         let px = data[src];

@@ -221,6 +221,8 @@ impl PainterApp {
         self.rebuild_canvas(width, height, background);
         self.workspace.library.has_document = true;
         self.canvas_mut().blend_space = self.modal_state.new_canvas.blend_space;
+        let depth = self.modal_state.new_canvas.depth;
+        self.canvas_mut().convert_depth(depth);
         self.brush_state.brush.brush_options.color = Self::convert_color_for_model(
             self.brush_state.brush.brush_options.color,
             self.workspace.color_model,
@@ -251,6 +253,31 @@ impl PainterApp {
         self.filter_cancel();
         self.release_canvas();
         let before = exclusive(&mut self.canvas).apply_image_op(op);
+        self.layer_state.history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Document(std::sync::Arc::new(
+                std::sync::Mutex::new(before),
+            ))),
+        });
+        self.after_document_swap();
+    }
+
+    /// Keep `depth` bits for each channel from now on (Image → Colour
+    /// Depth), one undo step.
+    pub(crate) fn convert_depth(&mut self, depth: crate::canvas::storage::Depth) {
+        if self.canvas.depth() == depth {
+            return;
+        }
+        self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
+        self.liquify_commit();
+        self.gradient_commit();
+        self.shape_commit();
+        self.filter_cancel();
+        self.release_canvas();
+        let before = exclusive(&mut self.canvas).change_depth(depth);
         self.layer_state.history.push_action(UndoAction {
             tiles: Vec::new(),
             selection: None,
@@ -410,7 +437,7 @@ impl PainterApp {
                         cell_arc
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .data
+                            .data()
                             .is_some()
                     })
                     .unwrap_or(false);

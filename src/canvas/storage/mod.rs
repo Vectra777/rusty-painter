@@ -2,7 +2,11 @@
 //! layer tree operations. Compositing, pixel writing and transforms live
 //! in the submodules.
 
+mod cell;
+pub(crate) use cell::TileCell;
 mod composite;
+pub mod deep;
+pub use deep::{DeepTile, Depth};
 mod merge;
 pub use merge::MergePlan;
 mod pixels;
@@ -111,6 +115,8 @@ pub struct CanvasTileSnapshot {
     pub tx: i32,
     pub ty: i32,
     pub data: Vec<Color32>,
+    /// In a deeper document, the same pixels at full depth.
+    pub deep: Option<DeepTile>,
 }
 
 #[derive(Clone)]
@@ -151,6 +157,7 @@ pub struct DocumentState {
     pub height: usize,
     pub layers: Vec<Layer>,
     pub active_layer_idx: usize,
+    pub depth: Depth,
 }
 
 impl Layer {
@@ -175,13 +182,7 @@ impl Layer {
         let tiles = self.tiles.lock().unwrap_or_else(|e| e.into_inner());
         tiles
             .values()
-            .map(|t| {
-                t.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .data
-                    .as_ref()
-                    .map_or(0, |d| d.len() * std::mem::size_of::<Color32>())
-            })
+            .map(|t| t.lock().unwrap_or_else(|e| e.into_inner()).bytes())
             .sum()
     }
 
@@ -218,10 +219,7 @@ impl Layer {
         let is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
         self.tiles.lock().unwrap_or_else(|e| e.into_inner()).insert(
             (tx, ty),
-            Arc::new(Mutex::new(TileCell {
-                data: Some(data),
-                is_empty,
-            })),
+            Arc::new(Mutex::new(TileCell::new(Some(data), is_empty))),
         );
     }
 
@@ -271,10 +269,12 @@ impl Layer {
                 if guard.is_empty {
                     return None;
                 }
-                guard
-                    .data
-                    .clone()
-                    .map(|data| CanvasTileSnapshot { tx, ty, data })
+                guard.data().cloned().map(|data| CanvasTileSnapshot {
+                    tx,
+                    ty,
+                    data,
+                    deep: guard.deep().cloned(),
+                })
             })
             .collect();
         tiles.sort_by_key(|tile| (tile.ty, tile.tx));
@@ -308,9 +308,9 @@ impl Layer {
         for tile in snapshot.tiles {
             tiles.insert(
                 (tile.tx, tile.ty),
-                Arc::new(Mutex::new(TileCell {
-                    is_empty: tile.data.iter().all(|&p| p == Color32::TRANSPARENT),
-                    data: Some(tile.data),
+                Arc::new(Mutex::new({
+                    let is_empty = tile.data.iter().all(|&p| p == Color32::TRANSPARENT);
+                    TileCell::with_deep(tile.data, tile.deep, is_empty)
                 })),
             );
         }
@@ -353,20 +353,14 @@ pub struct Canvas {
     next_layer_id: u64,
     /// Colour space layers and strokes blend in (per document).
     pub blend_space: BlendSpace,
+    /// Bits kept for each channel (see [`deep`]).
+    depth: Depth,
 }
 
 /// A tile's `(tx, ty)` position.
 type TileKey = (i32, i32);
 /// A tile's shared, lockable storage.
 type SharedCell = Arc<Mutex<TileCell>>;
-
-#[derive(Debug)]
-/// Tile container that is lazily filled with pixel data.
-pub(crate) struct TileCell {
-    pub data: Option<Vec<Color32>>,
-    /// True if the tile contains only transparent pixels
-    pub is_empty: bool,
-}
 
 fn layer_tile(layer: &Layer, tx: i32, ty: i32) -> Option<Arc<Mutex<TileCell>>> {
     layer
@@ -407,6 +401,7 @@ impl Canvas {
             active_layer_idx: 1,
             next_layer_id: 2,
             blend_space: BlendSpace::Linear,
+            depth: Depth::U8,
         }
     }
 
@@ -416,6 +411,41 @@ impl Canvas {
         std::mem::swap(&mut self.height, &mut doc.height);
         std::mem::swap(&mut self.layers, &mut doc.layers);
         std::mem::swap(&mut self.active_layer_idx, &mut doc.active_layer_idx);
+        std::mem::swap(&mut self.depth, &mut doc.depth);
+    }
+
+    /// Keep `depth` bits for each channel from now on, every layer
+    /// converted. Returns the document as it was, for undo (swap it back
+    /// with [`Canvas::swap_document`]).
+    pub fn change_depth(&mut self, depth: Depth) -> DocumentState {
+        let layers = self
+            .layers
+            .iter()
+            .map(|layer| {
+                let mut snapshot = layer.snapshot();
+                for tile in &mut snapshot.tiles {
+                    let deep =
+                        (tile.deep.take()).or_else(|| DeepTile::widen(self.depth, &tile.data));
+                    tile.deep = deep.and_then(|d| d.convert(depth));
+                    if let Some(deep) = &tile.deep {
+                        tile.data = deep.narrow_all();
+                    }
+                }
+                let mut converted = Layer::from_snapshot(snapshot);
+                // Kept as they were: wet paint is still drying.
+                converted.wet = layer.wet.clone();
+                converted
+            })
+            .collect();
+        let mut doc = DocumentState {
+            width: self.width,
+            height: self.height,
+            layers,
+            active_layer_idx: self.active_layer_idx,
+            depth,
+        };
+        self.swap_document(&mut doc);
+        doc
     }
 
     /// Look up a layer's current position by its stable id. O(layer count);
@@ -578,7 +608,7 @@ impl Canvas {
                 if guard.is_empty {
                     return None;
                 }
-                guard.data.clone().map(|data| TileSnapshot {
+                guard.data().cloned().map(|data| TileSnapshot {
                     tx,
                     ty,
                     layer_id: id,
@@ -639,6 +669,7 @@ impl Canvas {
     /// another thread while this one changes.
     pub fn detached_copy(&self) -> Canvas {
         let mut copy = Canvas::new(self.width, self.height, self.clear_color, self.tile_size);
+        copy.depth = self.depth;
         copy.replace_layers_from_snapshots(self.layer_snapshots(), self.active_layer_idx);
         copy.blend_space = self.blend_space;
         copy.next_layer_id = copy.next_layer_id.max(self.next_layer_id);
@@ -674,6 +705,42 @@ impl Canvas {
     }
 
     /// Size of a tile edge in pixels.
+    /// Bits kept for each channel.
+    pub fn depth(&self) -> Depth {
+        self.depth
+    }
+
+    /// Keep `depth` bits for each channel from now on, converting every
+    /// tile (going to fewer bits rounds the pixels).
+    pub fn convert_depth(&mut self, depth: Depth) {
+        self.depth = depth;
+        for layer in &self.layers {
+            let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
+            for cell in tiles.values() {
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(deep) = cell.deep() else {
+                    // 8-bit pixels: exactly the same at any depth.
+                    continue;
+                };
+                if deep.depth() == depth {
+                    continue;
+                }
+                match deep.convert(depth) {
+                    Some(deep) => {
+                        let data = deep.narrow_all();
+                        cell.is_empty = deep.is_transparent();
+                        cell.set_both(Some(data), Some(deep));
+                    }
+                    // To 8 bits: the 8-bit pixels are already the rounding.
+                    None => {
+                        let data = cell.data().cloned();
+                        cell.set_data(data);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn tile_size(&self) -> usize {
         self.tile_size
     }
@@ -704,18 +771,13 @@ impl Canvas {
             let mut tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             tiles
                 .entry((tx, ty))
-                .or_insert_with(|| {
-                    Arc::new(Mutex::new(TileCell {
-                        data: None,
-                        is_empty: true,
-                    }))
-                })
+                .or_insert_with(|| Arc::new(Mutex::new(TileCell::new(None, true))))
                 .clone()
         };
 
         {
             let mut guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.data.is_none() {
+            if guard.data().is_none() {
                 let fill_color = if layer_idx == 0 {
                     self.clear_color
                 } else if matches!(layer.kind, LayerKind::Mask { .. }) {
@@ -727,7 +789,7 @@ impl Canvas {
 
                 let data = vec![fill_color; self.tile_size * self.tile_size];
                 guard.is_empty = fill_color == Color32::TRANSPARENT;
-                guard.data = Some(data);
+                guard.set_data(Some(data));
             }
         }
         Some(tile_arc)
@@ -802,7 +864,16 @@ impl Canvas {
     pub fn get_layer_tile_data(&self, layer_idx: usize, tx: i32, ty: i32) -> Option<Vec<Color32>> {
         let cell = self.layer_tile_cell(layer_idx, tx, ty)?;
         let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-        guard.data.clone()
+        guard.data().cloned()
+    }
+
+    /// A tile's pixels at the document's full depth (widened from 8 bits if
+    /// it has none of its own); `None` in an 8-bit document or for a tile
+    /// that doesn't exist.
+    pub fn get_layer_tile_deep(&self, layer_idx: usize, tx: i32, ty: i32) -> Option<DeepTile> {
+        let cell = self.layer_tile_cell(layer_idx, tx, ty)?;
+        let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+        (guard.deep().cloned()).or_else(|| DeepTile::widen(self.depth, guard.data()?))
     }
 
     /// Overwrite a tile's pixel buffer for a given layer.
@@ -812,7 +883,17 @@ impl Canvas {
             let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
             let is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
             guard.is_empty = is_empty;
-            guard.data = Some(data);
+            guard.set_data(Some(data));
+        }
+    }
+
+    /// Overwrite a tile's pixels at full depth (converted to the document's
+    /// depth; just rounded to 8 bits in an 8-bit document).
+    pub fn set_layer_tile_deep(&self, layer_idx: usize, tx: i32, ty: i32, deep: &DeepTile) {
+        if let Some(cell) = self.ensure_layer_tile(layer_idx, tx, ty) {
+            let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+            guard.is_empty = deep.is_transparent();
+            guard.set_both(Some(deep.narrow_all()), deep.convert(self.depth));
         }
     }
 
@@ -852,19 +933,16 @@ impl Canvas {
 
             for ((tx, ty), top_tile_arc) in top_tiles.iter() {
                 let top_guard = top_tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(top_data) = &top_guard.data {
+                if let Some(top_data) = top_guard.data() {
                     // Skip empty top tiles
                     if top_guard.is_empty {
                         continue;
                     }
 
                     // Ensure bottom tile exists
-                    let bottom_tile_arc = bottom_tiles.entry((*tx, *ty)).or_insert_with(|| {
-                        Arc::new(Mutex::new(TileCell {
-                            data: None,
-                            is_empty: true,
-                        }))
-                    });
+                    let bottom_tile_arc = bottom_tiles
+                        .entry((*tx, *ty))
+                        .or_insert_with(|| Arc::new(Mutex::new(TileCell::new(None, true))));
 
                     let mut bottom_guard =
                         bottom_tile_arc.lock().unwrap_or_else(|e| e.into_inner());
@@ -875,8 +953,8 @@ impl Canvas {
                     // otherwise produce) and the top layer's full content.
                     if let Some(action) = history.as_deref_mut() {
                         let bottom_before = bottom_guard
-                            .data
-                            .clone()
+                            .data()
+                            .cloned()
                             .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_size * tile_size]);
                         action.tiles.push(TileSnapshot {
                             tx: *tx,
@@ -901,12 +979,14 @@ impl Canvas {
                     }
 
                     // Initialize bottom data if missing
-                    if bottom_guard.data.is_none() {
-                        bottom_guard.data =
-                            Some(vec![Color32::TRANSPARENT; self.tile_size * self.tile_size]);
+                    if bottom_guard.data().is_none() {
+                        bottom_guard.set_data(Some(vec![
+                            Color32::TRANSPARENT;
+                            self.tile_size * self.tile_size
+                        ]));
                     }
 
-                    if let Some(bottom_data) = &mut bottom_guard.data {
+                    if let Some(bottom_data) = bottom_guard.data_mut() {
                         // Use SIMD batch processing for better performance
                         let tile_len = bottom_data.len();
 

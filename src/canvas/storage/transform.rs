@@ -586,18 +586,18 @@ fn write_transformed_tiles(
 ) {
     for ((tx, ty), data) in dst_tiles {
         let tile_arc = tiles.entry((tx, ty)).or_insert_with(|| {
-            Arc::new(Mutex::new(TileCell {
-                data: Some(vec![Color32::TRANSPARENT; tile_size * tile_size]),
-                is_empty: true,
-            }))
+            Arc::new(Mutex::new(TileCell::new(
+                Some(vec![Color32::TRANSPARENT; tile_size * tile_size]),
+                true,
+            )))
         });
         let mut guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.data.is_none() {
-            guard.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
+        if guard.data().is_none() {
+            guard.set_data(Some(vec![Color32::TRANSPARENT; tile_size * tile_size]));
         }
 
         let mut has_content = false;
-        if let Some(target_data) = &mut guard.data {
+        if let Some(target_data) = guard.data_mut() {
             for i in 0..data.len() {
                 if data[i].a() > 0 {
                     target_data[i] = data[i];
@@ -641,10 +641,7 @@ impl Canvas {
                 let is_empty = data.iter().all(|p| p.a() == 0);
                 (
                     key,
-                    Arc::new(Mutex::new(TileCell {
-                        data: Some(data),
-                        is_empty,
-                    })),
+                    Arc::new(Mutex::new(TileCell::new(Some(data), is_empty))),
                 )
             })
             .collect();
@@ -703,8 +700,8 @@ impl Canvas {
                     let data = if let Some(tile_arc) = tiles.get(&(tx, ty)) {
                         let guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
                         guard
-                            .data
-                            .clone()
+                            .data()
+                            .cloned()
                             .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_size * tile_size])
                     } else {
                         vec![Color32::TRANSPARENT; tile_size * tile_size]
@@ -733,7 +730,7 @@ impl Canvas {
                 .par_iter()
                 .for_each(|(tx, ty, source_data, tile_arc)| {
                     let mut guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(data) = &mut guard.data {
+                    if let Some(data) = guard.data_mut() {
                         let base_x = *tx * tile_size_i32;
                         let base_y = *ty * tile_size_i32;
                         for py in 0..tile_size {
@@ -782,7 +779,7 @@ impl Canvas {
                 if guard.is_empty {
                     return None;
                 }
-                let data = guard.data.as_ref()?;
+                let data = guard.data()?;
                 let mut b: Option<[i32; 4]> = None;
                 for py in 0..ts {
                     for px in 0..ts {
@@ -850,7 +847,7 @@ impl Canvas {
             .par_iter()
             .filter_map(|((tx, ty), cell)| {
                 let mut tile = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let data = tile.data.as_mut()?;
+                let data = tile.data_mut()?;
                 let mut lifted = vec![Color32::TRANSPARENT; ts * ts];
                 let mut has_content = false;
                 for y in 0..ts {
@@ -890,13 +887,7 @@ impl Canvas {
         {
             let mut tiles = new_layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
             for (key, data) in floated {
-                tiles.insert(
-                    key,
-                    Arc::new(Mutex::new(TileCell {
-                        data: Some(data),
-                        is_empty: false,
-                    })),
-                );
+                tiles.insert(key, Arc::new(Mutex::new(TileCell::new(Some(data), false))));
             }
         }
         // Directly above the source, so committing merges back into it.
@@ -935,12 +926,7 @@ impl Canvas {
                 .map(|(key, top)| {
                     let cell = tiles
                         .entry(key)
-                        .or_insert_with(|| {
-                            Arc::new(Mutex::new(TileCell {
-                                data: None,
-                                is_empty: true,
-                            }))
-                        })
+                        .or_insert_with(|| Arc::new(Mutex::new(TileCell::new(None, true))))
                         .clone();
                     (key, top, cell)
                 })
@@ -955,11 +941,9 @@ impl Canvas {
             .par_iter()
             .filter_map(|(key, top, cell)| {
                 let top = top.lock().unwrap_or_else(|e| e.into_inner());
-                let top_data = top.data.as_ref().filter(|_| !top.is_empty)?;
+                let top_data = top.data().filter(|_| !top.is_empty)?;
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let dst = cell
-                    .data
-                    .get_or_insert_with(|| vec![Color32::TRANSPARENT; ts * ts]);
+                let dst = cell.data_or_insert(ts * ts);
                 for (d, &t) in dst.iter_mut().zip(top_data) {
                     *d = over(t, *d);
                 }

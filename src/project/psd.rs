@@ -434,7 +434,12 @@ fn tiles_of(
                 data[dst..dst + n].copy_from_slice(&pixels[src..src + n]);
             }
             if data.iter().any(|&p| p != skip) {
-                tiles.push(CanvasTileSnapshot { tx, ty, data });
+                tiles.push(CanvasTileSnapshot {
+                    tx,
+                    ty,
+                    data,
+                    deep: None,
+                });
             }
         }
     }

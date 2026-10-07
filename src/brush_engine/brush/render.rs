@@ -2,6 +2,8 @@
 //! bands, and resolving the stroke into the layer.
 
 use super::*;
+use crate::canvas::blend::{DeepStroke, resolve_stroke_deep};
+use crate::canvas::history::SnapshotPixels;
 
 /// A whole tile's selection coverage, row by row.
 fn tile_selection_coverage(
@@ -487,10 +489,12 @@ fn resolve_spans(
         return;
     };
     let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(data) = tile.data.as_mut() else {
+    if tile.data().is_none() {
         return;
-    };
-    resolve_spans_in(ctx, region, buffer, spans, data);
+    }
+    let side = ctx.canvas.tile_size();
+    let (data, deep) = tile.deep_parts(ctx.canvas.depth(), side * side);
+    resolve_spans_in(ctx, region, buffer, spans, data, deep);
     tile.is_empty = false;
 }
 
@@ -502,6 +506,7 @@ fn resolve_spans_in(
     buffer: &mut StrokeBuffer,
     spans: &[(usize, usize)],
     data: &mut [Color32],
+    mut deep: Option<&mut crate::canvas::storage::DeepTile>,
 ) {
     let tile_size = ctx.canvas.tile_size();
     let (tile_x0, tile_y0) = (region.tx * tile_size, region.ty * tile_size);
@@ -553,6 +558,38 @@ fn resolve_spans_in(
         }
         // Canvas position of the span, for the alpha dither.
         let origin = [(tile_x0 + min_x) as u32, (tile_y0 + row) as u32];
+        // A deeper document: the stroke at full depth, rounded to 8 bits.
+        if let (Some(deep), Some(original)) = (deep.as_deref_mut(), &buffer.original_deep) {
+            let stroke = match ctx.blend_mode {
+                BlendMode::Eraser if ctx.alpha_lock => continue,
+                BlendMode::Eraser => DeepStroke::Erase,
+                BlendMode::Normal => DeepStroke::Paint {
+                    mode: if general {
+                        ctx.mode
+                    } else {
+                        LayerBlend::Normal
+                    },
+                    colors: (general && ctx.colored).then(|| {
+                        stroke_colors(buffer, range.clone(), ctx.tail_newer, &mut combined_colors);
+                        &combined_colors[..]
+                    }),
+                },
+            };
+            resolve_stroke_deep(
+                original,
+                range.start,
+                coverage,
+                deep,
+                &mut data[range],
+                ctx.color,
+                ctx.cap,
+                stroke,
+                ctx.space,
+                ctx.alpha_lock,
+                origin,
+            );
+            continue;
+        }
         if general {
             let colors = ctx.colored.then(|| {
                 stroke_colors(buffer, range.clone(), ctx.tail_newer, &mut combined_colors);
@@ -720,16 +757,23 @@ impl Brush {
             // the stroke missing in between.
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(data) = tile.data.as_mut() {
+                if tile.data().is_some() {
+                    let (data, mut deep) = tile.deep_parts(canvas.depth(), tile_size * tile_size);
                     for row in y0..y1 {
                         let range = row * tile_size + x0..row * tile_size + x1;
                         data[range.clone()].copy_from_slice(&buffer.original[range]);
+                    }
+                    if let (Some(deep), Some(original)) =
+                        (deep.as_deref_mut(), &buffer.original_deep)
+                    {
+                        let block = original.block(tile_size, (x0, y0, x1 - x0, y1 - y0));
+                        deep.put_block(tile_size, (x0, y0, x1 - x0), &block);
                     }
                     let region = TileRegion {
                         tx: key.0,
                         ty: key.1,
                     };
-                    resolve_spans_in(&ctx, region, &mut buffer, &spans, data);
+                    resolve_spans_in(&ctx, region, &mut buffer, &spans, data, deep);
                 }
             }
             stroke_tiles.dirty.insert(key);
@@ -1200,9 +1244,13 @@ impl Brush {
                 continue;
             };
             let tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(data) = tile.data.as_ref() else {
+            let Some(data) = tile.data() else {
                 continue;
             };
+            // A deeper document's pixels at full depth (widened from 8 bits
+            // if the tile has none yet).
+            let original_deep = (tile.deep().cloned())
+                .or_else(|| crate::canvas::storage::DeepTile::widen(canvas.depth(), data));
             undo_action.tiles.push(TileSnapshot {
                 tx: region.tx as i32,
                 ty: region.ty as i32,
@@ -1211,7 +1259,10 @@ impl Brush {
                 y0: 0,
                 width: tile_size,
                 height: tile_size,
-                data: data.clone().into(),
+                data: match &original_deep {
+                    Some(deep) => SnapshotPixels::Deep(deep.clone()),
+                    None => data.clone().into(),
+                },
             });
             // Impasto: the tile's heights as they were, for the stroke and
             // its undo step.
@@ -1231,6 +1282,7 @@ impl Brush {
                 Mutex::new(StrokeBuffer {
                     heights,
                     original: data.clone(),
+                    original_deep,
                     coverage: vec![0.0; tile_size * tile_size],
                     selection: None,
                     damage: None,

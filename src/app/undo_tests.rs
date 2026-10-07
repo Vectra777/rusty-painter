@@ -527,3 +527,65 @@ fn editing_a_shader_is_unsaved_work() {
     );
     assert!(app.has_unsaved_work());
 }
+
+#[test]
+fn converting_the_colour_depth_undoes_and_redoes() {
+    use crate::canvas::storage::Depth;
+    let mut app = app();
+    gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(256.0, 0.0));
+    let painted = snapshot(&app);
+    app.convert_depth(Depth::U16);
+    assert_eq!(app.canvas.depth(), Depth::U16);
+    assert_eq!(snapshot(&app), painted, "8 bits widen exactly");
+    // A gradient at 16 bits, then back down to 8.
+    gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(0.0, 128.0));
+    let deep = app.canvas.get_layer_tile_deep(1, 0, 0).unwrap();
+    app.convert_depth(Depth::U8);
+    assert_eq!(app.canvas.depth(), Depth::U8);
+    assert!(app.canvas.get_layer_tile_deep(1, 0, 0).is_none());
+    app.apply_history(false);
+    assert_eq!(app.canvas.depth(), Depth::U16);
+    assert_eq!(app.canvas.get_layer_tile_deep(1, 0, 0).unwrap(), deep);
+    app.apply_history(false);
+    app.apply_history(false);
+    assert_eq!(app.canvas.depth(), Depth::U8);
+    assert_eq!(snapshot(&app), painted);
+    app.apply_history(true);
+    assert_eq!(app.canvas.depth(), Depth::U16);
+}
+
+#[test]
+fn a_gradient_keeps_full_depth_and_undoes_to_it() {
+    use crate::canvas::storage::Depth;
+    for depth in [Depth::U16, Depth::F32] {
+        let mut app = app();
+        app.convert_depth(depth);
+        // Black to a very dark grey over the whole width: a few 8-bit steps.
+        app.brush_state.brush.brush_options.color = Color32::BLACK;
+        app.brush_state.secondary_color = Color32::from_gray(6);
+        gradient(&mut app, Vec2::new(0.0, 0.0), Vec2::new(256.0, 0.0));
+        let row: Vec<u32> = (0..4)
+            .flat_map(|tx| {
+                let deep = app.canvas.get_layer_tile_deep(1, tx, 0).unwrap();
+                (0..64).map(move |x| (deep.linear(x)[0] * 1e7) as u32)
+            })
+            .collect();
+        let mut steps = row.clone();
+        steps.dedup();
+        assert!(steps.len() > 150, "{depth:?}: {} steps", steps.len());
+        assert!(
+            row.windows(2).all(|w| w[0] <= w[1]),
+            "{depth:?}: a smooth ramp"
+        );
+        let painted = app.canvas.get_layer_tile_deep(1, 1, 0).unwrap();
+        app.apply_history(false);
+        assert!(
+            app.canvas
+                .get_layer_tile_deep(1, 1, 0)
+                .unwrap()
+                .is_transparent()
+        );
+        app.apply_history(true);
+        assert_eq!(app.canvas.get_layer_tile_deep(1, 1, 0).unwrap(), painted);
+    }
+}

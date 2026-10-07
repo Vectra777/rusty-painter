@@ -14,9 +14,10 @@ use crate::{
     },
     canvas::{
         Canvas,
-        history::{History, LayerHistoryOp, TileSnapshot, UndoAction},
+        history::{History, LayerHistoryOp, SnapshotPixels, TileSnapshot, UndoAction},
         storage::{
-            CanvasLayerSnapshot, CanvasTileSnapshot, DocumentState, Layer, LayerId, LayerSwap,
+            CanvasLayerSnapshot, CanvasTileSnapshot, DeepTile, Depth, DocumentState, Layer,
+            LayerId, LayerSwap,
         },
     },
 };
@@ -437,6 +438,10 @@ struct ProjectFile {
     /// "gamma" for gamma-space blending; absent (older files) = linear.
     #[serde(default)]
     blend_space: Option<String>,
+    /// Bits for each channel; absent for 8 bits (and in older files). The
+    /// deep pixels sit beside the 8-bit ones, which older versions open.
+    #[serde(default, skip_serializing_if = "is_8_bit")]
+    depth: Depth,
     active_layer_idx: usize,
     layers: Vec<StoredLayer>,
     /// Version 3: the one document history. Version 2: one per layer.
@@ -464,6 +469,7 @@ impl ProjectFile {
                 BlendSpace::Linear => None,
                 BlendSpace::Gamma => Some("gamma".to_string()),
             },
+            depth: canvas.depth(),
             active_layer_idx: canvas.active_layer_idx,
             layers: canvas
                 .layer_snapshots()
@@ -494,7 +500,7 @@ impl ProjectFile {
             .layers
             .into_iter()
             .enumerate()
-            .map(|(idx, layer)| layer.into_snapshot(idx, self.tile_size, blobs))
+            .map(|(idx, layer)| layer.into_snapshot(idx, self.tile_size, self.depth, blobs))
             .collect::<Result<_, _>>()?;
         let layers = checked_layer_tree(layers)?;
         let mut canvas = Canvas::new(
@@ -503,6 +509,8 @@ impl ProjectFile {
             self.clear_color.to_color(),
             self.tile_size,
         );
+        // (Set before the layers come in: their tiles are already at it.)
+        canvas.convert_depth(self.depth);
         canvas.replace_layers_from_snapshots(layers, self.active_layer_idx);
         canvas.blend_space = match self.blend_space.as_deref() {
             Some("gamma") => BlendSpace::Gamma,
@@ -512,7 +520,7 @@ impl ProjectFile {
         let histories: Vec<History> = self
             .histories
             .into_iter()
-            .map(|history| history.into_history(self.tile_size, blobs))
+            .map(|history| history.into_history(self.tile_size, self.depth, blobs))
             .collect::<Result<_, _>>()?;
         // Version 2's per-layer histories become one.
         let history = History::merged(histories);
@@ -628,6 +636,7 @@ impl StoredLayer {
                                 tx: *tx,
                                 ty: *ty,
                                 rgba_zstd,
+                                deep_zstd: None,
                             })
                             .collect(),
                     )
@@ -645,6 +654,11 @@ impl StoredLayer {
                     .map(|t| colors_to_bytes(&t.data))
                     .collect();
                 let stored = push_blobs(blobs, &raws)?;
+                // A deeper document's tiles at full depth, beside them.
+                let deep: Vec<Vec<u8>> = (layer.tiles.par_iter())
+                    .filter_map(|t| t.deep.as_ref().map(DeepTile::to_bytes))
+                    .collect();
+                let mut deep = push_blobs(blobs, &deep)?.into_iter();
                 layer
                     .tiles
                     .iter()
@@ -653,6 +667,7 @@ impl StoredLayer {
                         tx: t.tx,
                         ty: t.ty,
                         rgba_zstd,
+                        deep_zstd: t.deep.as_ref().and_then(|_| deep.next()),
                     })
                     .collect()
             },
@@ -663,6 +678,7 @@ impl StoredLayer {
         self,
         fallback_idx: usize,
         tile_size: usize,
+        depth: Depth,
         blobs: &[u8],
     ) -> Result<CanvasLayerSnapshot, String> {
         Ok(CanvasLayerSnapshot {
@@ -689,7 +705,7 @@ impl StoredLayer {
                 Some(tiles) => {
                     let map = crate::canvas::impasto::HeightMap::default();
                     for tile in tiles {
-                        let t = tile.into_snapshot(tile_size, blobs)?;
+                        let t = tile.into_snapshot(tile_size, Depth::U8, blobs)?;
                         map.set_tile(
                             (t.tx, t.ty),
                             Some(crate::canvas::impasto::from_pixels(&t.data)),
@@ -706,7 +722,7 @@ impl StoredLayer {
             tiles: self
                 .tiles
                 .into_iter()
-                .map(|tile| tile.into_snapshot(tile_size, blobs))
+                .map(|tile| tile.into_snapshot(tile_size, depth, blobs))
                 .collect::<Result<_, _>>()?,
         })
     }
@@ -763,20 +779,52 @@ struct StoredTile {
     tx: i32,
     ty: i32,
     rgba_zstd: StoredBlob,
+    /// In a deeper document, the tile at full depth (see
+    /// `DeepTile::to_bytes`); absent at 8 bits and in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deep_zstd: Option<StoredBlob>,
 }
 
 impl StoredTile {
-    fn into_snapshot(self, tile_size: usize, blobs: &[u8]) -> Result<CanvasTileSnapshot, String> {
+    fn into_snapshot(
+        self,
+        tile_size: usize,
+        depth: Depth,
+        blobs: &[u8],
+    ) -> Result<CanvasTileSnapshot, String> {
         let data = bytes_to_colors(read_blob(blobs, &self.rgba_zstd)?)?;
         if data.len() != tile_size * tile_size {
             return Err("Invalid tile pixel count".to_string());
         }
+        let deep = read_deep(blobs, self.deep_zstd.as_ref(), depth, data.len())?;
         Ok(CanvasTileSnapshot {
             tx: self.tx,
             ty: self.ty,
-            data,
+            // The 8-bit pixels are the deep ones rounded, whatever was stored.
+            data: deep.as_ref().map_or(data, DeepTile::narrow_all),
+            deep,
         })
     }
+}
+
+/// A tile's (or an undo snapshot's) pixels at full depth from `blob`, if
+/// there is one and the document is deeper than 8 bits.
+fn read_deep(
+    blobs: &[u8],
+    blob: Option<&StoredBlob>,
+    depth: Depth,
+    len: usize,
+) -> Result<Option<DeepTile>, String> {
+    let (Some(blob), true) = (blob, depth.is_deep()) else {
+        return Ok(None);
+    };
+    DeepTile::from_bytes(depth, &read_blob(blobs, blob)?, len)
+        .map(Some)
+        .ok_or_else(|| "Invalid deep tile".to_string())
+}
+
+fn is_8_bit(depth: &Depth) -> bool {
+    *depth == Depth::U8
 }
 
 #[derive(Serialize, Deserialize)]
@@ -800,15 +848,15 @@ impl StoredHistory {
         })
     }
 
-    fn into_history(self, tile_size: usize, blobs: &[u8]) -> Result<History, String> {
+    fn into_history(self, tile_size: usize, depth: Depth, blobs: &[u8]) -> Result<History, String> {
         Ok(History::from_stacks(
             self.undo
                 .into_iter()
-                .map(|action| action.into_action(tile_size, blobs))
+                .map(|action| action.into_action(tile_size, depth, blobs))
                 .collect::<Result<_, _>>()?,
             self.redo
                 .into_iter()
-                .map(|action| action.into_action(tile_size, blobs))
+                .map(|action| action.into_action(tile_size, depth, blobs))
                 .collect::<Result<_, _>>()?,
         ))
     }
@@ -861,13 +909,18 @@ impl StoredMerge {
         })
     }
 
-    fn into_op(self, tile_size: usize, blobs: &[u8]) -> Result<LayerHistoryOp, String> {
+    fn into_op(
+        self,
+        tile_size: usize,
+        depth: Depth,
+        blobs: &[u8],
+    ) -> Result<LayerHistoryOp, String> {
         let layers = self
             .layers
             .into_iter()
             .map(|(idx, layer)| {
                 layer
-                    .into_snapshot(idx, tile_size, blobs)
+                    .into_snapshot(idx, tile_size, depth, blobs)
                     .map(|snapshot| (idx, Layer::from_snapshot(snapshot)))
             })
             .collect::<Result<_, _>>()?;
@@ -889,6 +942,9 @@ struct StoredDocument {
     height: usize,
     active_layer_idx: usize,
     layers: Vec<StoredLayer>,
+    /// Bits for each channel; absent for 8 bits (and in older files).
+    #[serde(default, skip_serializing_if = "is_8_bit")]
+    depth: Depth,
 }
 
 impl StoredDocument {
@@ -896,6 +952,7 @@ impl StoredDocument {
         Ok(Self {
             width: doc.width,
             height: doc.height,
+            depth: doc.depth,
             active_layer_idx: doc.active_layer_idx,
             layers: doc
                 .layers
@@ -916,7 +973,7 @@ impl StoredDocument {
             .enumerate()
             .map(|(idx, layer)| {
                 layer
-                    .into_snapshot(idx, tile_size, blobs)
+                    .into_snapshot(idx, tile_size, self.depth, blobs)
                     .map(Layer::from_snapshot)
             })
             .collect::<Result<_, _>>()?;
@@ -927,6 +984,7 @@ impl StoredDocument {
                 height: self.height,
                 layers,
                 active_layer_idx,
+                depth: self.depth,
             }),
         )))
     }
@@ -943,11 +1001,17 @@ impl StoredUndoAction {
                     .map(|t| colors_to_bytes(&t.data.to_vec()))
                     .collect();
                 let stored = push_blobs(blobs, &raws)?;
+                let deeps: Vec<Option<DeepTile>> =
+                    action.tiles.par_iter().map(|t| t.data.deep()).collect();
+                let deep_raws: Vec<Vec<u8>> =
+                    deeps.iter().flatten().map(DeepTile::to_bytes).collect();
+                let mut deep_stored = push_blobs(blobs, &deep_raws)?.into_iter();
                 action
                     .tiles
                     .iter()
                     .zip(stored)
-                    .map(|(s, rgba_zstd)| StoredTileSnapshot {
+                    .zip(&deeps)
+                    .map(|((s, rgba_zstd), deep)| StoredTileSnapshot {
                         tx: s.tx,
                         ty: s.ty,
                         layer_idx: 0,
@@ -957,6 +1021,9 @@ impl StoredUndoAction {
                         width: s.width,
                         height: s.height,
                         rgba_zstd,
+                        deep: deep
+                            .as_ref()
+                            .and_then(|d| Some((d.depth(), deep_stored.next()?))),
                     })
                     .collect()
             },
@@ -986,10 +1053,15 @@ impl StoredUndoAction {
         })
     }
 
-    fn into_action(self, tile_size: usize, blobs: &[u8]) -> Result<UndoAction, String> {
+    fn into_action(
+        self,
+        tile_size: usize,
+        depth: Depth,
+        blobs: &[u8],
+    ) -> Result<UndoAction, String> {
         let layer_action = match (self.document, self.merge) {
             (Some(document), _) => Some(document.into_op(tile_size, blobs)?),
-            (None, Some(merge)) => Some(merge.into_op(tile_size, blobs)?),
+            (None, Some(merge)) => Some(merge.into_op(tile_size, depth, blobs)?),
             (None, None) => self.layer_action.map(StoredLayerHistoryOp::into_op),
         };
         Ok(UndoAction {
@@ -1023,11 +1095,19 @@ struct StoredTileSnapshot {
     width: usize,
     height: usize,
     rgba_zstd: StoredBlob,
+    /// The pixels at full depth, if they were kept deeper than 8 bits (see
+    /// `DeepTile::to_bytes`); absent otherwise and in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deep: Option<(Depth, StoredBlob)>,
 }
 
 impl StoredTileSnapshot {
     fn into_snapshot(self, tile_size: usize, blobs: &[u8]) -> Result<TileSnapshot, String> {
         let data = bytes_to_colors(read_blob(blobs, &self.rgba_zstd)?)?;
+        let deep = match &self.deep {
+            Some((depth, blob)) => read_deep(blobs, Some(blob), *depth, data.len())?,
+            None => None,
+        };
         let fits = |at: usize, len: usize| at.checked_add(len).is_some_and(|end| end <= tile_size);
         if self.width == 0
             || self.height == 0
@@ -1046,7 +1126,10 @@ impl StoredTileSnapshot {
             y0: self.y0,
             width: self.width,
             height: self.height,
-            data: data.into(),
+            data: match deep {
+                Some(deep) => SnapshotPixels::Deep(deep),
+                None => data.into(),
+            },
         })
     }
 }

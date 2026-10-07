@@ -11,6 +11,7 @@ use crate::brush_engine::stabilizer::Stabilizer;
 use crate::brush_engine::symmetry::{Copy2, Symmetry};
 use crate::canvas::Canvas;
 use crate::canvas::history::UndoAction;
+use crate::canvas::storage::DeepTile;
 use crate::selection::SelectionManager;
 use eframe::egui::Color32;
 use eframe::egui::Vec2;
@@ -28,6 +29,8 @@ use std::sync::Mutex;
 #[derive(Clone)]
 pub(crate) struct StrokeBuffer {
     pub original: Vec<Color32>,
+    /// In a deeper document, the same pixels at full depth.
+    pub original_deep: Option<crate::canvas::storage::DeepTile>,
     /// Impasto: the tile's heights before the stroke (`None` when it lays
     /// none down).
     pub heights: Option<Vec<u16>>,
@@ -94,8 +97,13 @@ pub(crate) struct CollectedDab {
     pub strength: f32,
 }
 
-/// A tile's stroke buffer, pixels and impasto heights, saved.
-type SavedTile = (StrokeBuffer, Vec<Color32>, Option<Vec<u16>>);
+/// A tile's stroke buffer, pixels (and deep ones) and impasto heights,
+/// saved.
+type SavedTile = (
+    StrokeBuffer,
+    (Vec<Color32>, Option<DeepTile>),
+    Option<Vec<u16>>,
+);
 
 /// The impasto heights of the layer `canvas` paints on, if it has some.
 fn layer_heights(canvas: &Canvas) -> Option<&crate::canvas::impasto::HeightMap> {
@@ -131,8 +139,8 @@ impl StrokeTiles {
             }
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(data) = tile.data.as_mut() {
-                    data.copy_from_slice(&buffer.original);
+                if tile.data().is_some() {
+                    tile.set_both(Some(buffer.original.clone()), buffer.original_deep.clone());
                     tile.is_empty = buffer.original.iter().all(|&p| p == Color32::TRANSPARENT);
                 }
             }
@@ -197,7 +205,10 @@ impl StrokeTiles {
         let saved = self.buffers.get(&key).map(|buffer| {
             let buffer = buffer.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let pixels = (canvas.lock_tile(key.0, key.1))
-                .and_then(|t| t.lock().unwrap_or_else(|e| e.into_inner()).data.clone())
+                .map(|t| {
+                    let t = t.lock().unwrap_or_else(|e| e.into_inner());
+                    (t.data().cloned().unwrap_or_default(), t.deep().cloned())
+                })
                 .unwrap_or_default();
             let heights = layer_heights(canvas).and_then(|m| m.tile((key.0 as i32, key.1 as i32)));
             (buffer, pixels, heights)
@@ -238,16 +249,15 @@ impl StrokeTiles {
                     buffer.tail_colors = [None, None];
                     buffer.mask = None;
                     buffer.mask_dirty = None;
-                    buffer.original.clone()
+                    (buffer.original.clone(), buffer.original_deep.clone())
                 }
             };
+            let (pixels, deep) = pixels;
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(data) = tile.data.as_mut()
-                    && data.len() == pixels.len()
-                {
-                    data.copy_from_slice(&pixels);
+                if tile.data().is_some_and(|data| data.len() == pixels.len()) {
                     tile.is_empty = pixels.iter().all(|&p| p == Color32::TRANSPARENT);
+                    tile.set_both(Some(pixels), deep);
                 }
             }
             buffer.damage = Some([0, 0, tile_size, tile_size]);

@@ -137,6 +137,12 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
             });
             ui.weak(blend_space_hint(settings.blend_space));
 
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Colour depth");
+                depth_picker(ui, &mut settings.depth);
+            });
+            ui.weak(depth_hint(settings.depth));
+
             let validation = settings.validated_dimensions();
             match validation {
                 Ok((px_w, px_h)) => {
@@ -172,6 +178,28 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     // Create and Cancel close it too.
     app.modal_state.show_new_canvas_modal &= open;
+}
+
+/// 8-bit / 16-bit / 32-bit float choice for a document.
+pub(crate) fn depth_picker(ui: &mut egui::Ui, depth: &mut crate::canvas::storage::Depth) -> bool {
+    let mut changed = false;
+    for d in crate::canvas::storage::Depth::ALL {
+        changed |= ui.selectable_value(depth, d, d.label()).changed();
+    }
+    changed
+}
+
+pub(crate) fn depth_hint(depth: crate::canvas::storage::Depth) -> &'static str {
+    use crate::canvas::storage::Depth;
+    match depth {
+        Depth::U8 => "The usual: fast and small.",
+        Depth::U16 => {
+            "Smooth gradients and soft airbrushing without banding; faint glazes build up. Twice the memory."
+        }
+        Depth::F32 => {
+            "Linear light with values past white, for compositing and HDR. Four times the memory."
+        }
+    }
 }
 
 /// Linear / Gamma choice for how a document blends colours.

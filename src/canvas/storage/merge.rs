@@ -109,6 +109,7 @@ impl Canvas {
             active_layer_idx: self.active_layer_idx,
             next_layer_id: self.next_layer_id,
             blend_space: self.blend_space,
+            depth: self.depth,
         }
     }
 
@@ -137,6 +138,7 @@ impl Canvas {
             active_layer_idx: self.active_layer_idx,
             next_layer_id: self.next_layer_id,
             blend_space: self.blend_space,
+            depth: self.depth,
         }
     }
 
@@ -179,6 +181,15 @@ impl Canvas {
         match self.without_drafts() {
             Some(view) => view.flatten(),
             None => self.flatten(),
+        }
+    }
+
+    /// [`Self::flatten_final`] at full precision (see
+    /// [`Canvas::flatten_linear`]).
+    pub fn flatten_final_linear(&self) -> Vec<[f32; 4]> {
+        match self.without_drafts() {
+            Some(view) => view.flatten_linear(),
+            None => self.flatten_linear(),
         }
     }
 
@@ -235,9 +246,9 @@ impl Canvas {
         let map = tiles
             .into_iter()
             .map(|(key, data)| {
-                let cell = TileCell {
-                    is_empty: data.iter().all(|&p| p == Color32::TRANSPARENT),
-                    data: Some(data),
+                let cell = {
+                    let is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
+                    TileCell::new(Some(data), is_empty)
                 };
                 (key, std::sync::Arc::new(Mutex::new(cell)))
             })

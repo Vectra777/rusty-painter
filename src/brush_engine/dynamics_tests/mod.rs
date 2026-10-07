@@ -10,6 +10,7 @@ use eframe::egui::{Color32, Vec2};
 use rayon::ThreadPoolBuilder;
 
 mod airbrush_and_tips;
+mod depth;
 mod inputs;
 mod special_brushes;
 mod strokes;

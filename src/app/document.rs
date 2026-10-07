@@ -52,6 +52,8 @@ pub struct NewCanvasSettings {
     pub color_model: ColorModel,
     /// Colour space the new document blends in.
     pub blend_space: crate::canvas::blend_modes::BlendSpace,
+    /// Bits the new document keeps for each channel.
+    pub depth: crate::canvas::storage::Depth,
 }
 
 /// A changed rectangle inside one tile, in tile-local pixels:
@@ -127,6 +129,7 @@ impl NewCanvasSettings {
             custom_bg: Color32::WHITE,
             color_model: ColorModel::Rgba,
             blend_space: canvas.blend_space,
+            depth: canvas.depth(),
         }
     }
 
@@ -249,6 +252,7 @@ mod tests {
             custom_bg: Color32::WHITE,
             color_model: ColorModel::Rgba,
             blend_space: Default::default(),
+            depth: Default::default(),
         };
         assert_eq!(settings.validated_dimensions().unwrap(), (9_600, 14_400));
     }
@@ -266,6 +270,7 @@ mod tests {
             custom_bg: Color32::from_rgb(255, 0, 0),
             color_model: ColorModel::Grayscale,
             blend_space: Default::default(),
+            depth: Default::default(),
         };
 
         let [r, g, b, _] = settings

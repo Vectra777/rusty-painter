@@ -428,6 +428,43 @@ impl Canvas {
         img
     }
 
+    /// The whole flattened picture at full precision, premultiplied in
+    /// linear light, row-major: what 16-bit and float exports write. A
+    /// deeper document's layers are read at their full depth.
+    pub fn flatten_linear(&self) -> Vec<[f32; 4]> {
+        let (w, h, ts) = (self.width, self.height, self.tile_size);
+        let mut out = vec![[0.0; 4]; w * h];
+        let gamma = self.blend_space == BlendSpace::Gamma;
+        let to_linear = |c: Rgba| {
+            let [r, g, b, a] = c.to_array();
+            if gamma {
+                let l = eframe::egui::ecolor::linear_from_gamma;
+                [l(r.max(0.0)), l(g.max(0.0)), l(b.max(0.0)), a]
+            } else {
+                [r, g, b, a]
+            }
+        };
+        out.par_chunks_mut(w * ts)
+            .enumerate()
+            .for_each(|(ty, strip)| {
+                let strip_h = strip.len() / w;
+                for tx in 0..w.div_ceil(ts) {
+                    let nodes = self.tile_nodes(tx as i32, ty as i32, None);
+                    for row in 0..strip_h.min(ts) {
+                        let gy = ty * ts + row;
+                        for col in 0..ts.min(w - tx * ts) {
+                            let gx = tx * ts + col;
+                            let noise = pixel_noise(gx as u32, gy as u32);
+                            let c =
+                                composite_nodes(&nodes, row * ts + col, Rgba::TRANSPARENT, noise);
+                            strip[row * w + gx] = to_linear(c);
+                        }
+                    }
+                }
+            });
+        out
+    }
+
     /// Composite one whole tile into `out` (downsampled by `step`), optionally
     /// starting from a precomputed composite of the layers below
     /// `below.first_layer` instead of compositing them again.
@@ -625,7 +662,7 @@ impl Canvas {
         let bg_guard = bg_arc
             .as_ref()
             .map(|a| a.lock().unwrap_or_else(|e| e.into_inner()));
-        let bg_data = bg_guard.as_ref().and_then(|g| g.data.as_ref());
+        let bg_data = bg_guard.as_ref().and_then(|g| g.data());
         let paint_arc = paint_layer.and_then(|idx| self.layer_tile_cell(idx, tx, ty));
         let paint_guard = paint_arc
             .as_ref()
@@ -633,7 +670,7 @@ impl Canvas {
         let paint_data = paint_guard
             .as_ref()
             .filter(|g| !g.is_empty)
-            .and_then(|g| g.data.as_ref());
+            .and_then(|g| g.data());
 
         let ts = self.tile_size;
         let (x0, y0) = (x_range.start % ts, y_range.start % ts);
@@ -742,7 +779,7 @@ impl Canvas {
             BlendSpace::Linear => color32_to_linear(c),
             BlendSpace::Gamma => gamma_color32_to_rgba(c),
         };
-        let data = guard.as_ref().and_then(|g| g.data.as_deref());
+        let data = guard.as_ref().and_then(|g| g.data().map(Vec::as_slice));
         if let Some(shrink) = shrink {
             let shrunk =
                 data.map(|d| shrink_tile(d, self.tile_size, shrink.w, shrink.h, shrink.block));
@@ -757,6 +794,25 @@ impl Canvas {
                     },
                     linear: None,
                 },
+            });
+        }
+        // A deeper document's tile: its pixels at full depth.
+        if let Some(deep) = guard.as_ref().and_then(|g| g.deep()) {
+            let read = |i| match space {
+                BlendSpace::Linear => deep.linear(i),
+                BlendSpace::Gamma => deep.gamma(i),
+            };
+            return Some(LayerInput {
+                opacity: layer.opacity,
+                fill: Rgba::TRANSPARENT,
+                linear: Some(
+                    (0..deep.len())
+                        .map(|i| {
+                            let [r, g, b, a] = read(i);
+                            Rgba::from_rgba_premultiplied(r, g, b, a)
+                        })
+                        .collect(),
+                ),
             });
         }
         Some(LayerInput {
@@ -793,7 +849,7 @@ impl Canvas {
                 if guard.is_empty {
                     return None;
                 }
-                guard.data.clone()?
+                guard.data().cloned()?
             }
         };
         // Impasto: the paint lit by its thickness, or by its lightness map.
@@ -826,7 +882,7 @@ impl Canvas {
                     continue;
                 };
                 let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(data) = guard.data.as_deref().filter(|_| !guard.is_empty) else {
+                let Some(data) = guard.data().map(Vec::as_slice).filter(|_| !guard.is_empty) else {
                     continue;
                 };
                 any = true;
@@ -995,7 +1051,7 @@ impl Canvas {
             .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()));
         let values = guard
             .as_ref()
-            .and_then(|g| g.data.as_deref())
+            .and_then(|g| g.data().map(Vec::as_slice))
             .map(|data| match shrink {
                 Some(s) => shrink_tile(data, self.tile_size, s.w, s.h, s.block)
                     .into_iter()
@@ -1205,7 +1261,8 @@ impl Canvas {
                             let is_empty = guard.is_empty;
 
                             // Pre-convert entire tile to linear space for efficiency
-                            let linear_data = guard.data.as_deref().map(color32s_to_linear);
+                            let linear_data =
+                                guard.data().map(Vec::as_slice).map(color32s_to_linear);
 
                             // Release lock and cache the Arc with converted data
                             drop(guard);
@@ -1352,7 +1409,7 @@ impl Canvas {
         let bg_guard = bg_arc
             .as_ref()
             .map(|arc| arc.lock().unwrap_or_else(|e| e.into_inner()));
-        let bg_data = bg_guard.as_ref().and_then(|guard| guard.data.as_ref());
+        let bg_data = bg_guard.as_ref().and_then(|guard| guard.data());
 
         let paint_arc = paint_layer.and_then(|idx| self.layer_tile_cell(idx, tx, ty));
         let paint_guard = paint_arc
@@ -1361,7 +1418,7 @@ impl Canvas {
         let paint_data = paint_guard
             .as_ref()
             .filter(|guard| !guard.is_empty)
-            .and_then(|guard| guard.data.as_ref());
+            .and_then(|guard| guard.data());
 
         let w = x_range.len();
         let local_x = x_range.start % self.tile_size;
@@ -1504,7 +1561,7 @@ impl Canvas {
                         continue;
                     };
                     let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                    let Some(data) = cell.data.as_ref().filter(|_| !cell.is_empty) else {
+                    let Some(data) = cell.data().filter(|_| !cell.is_empty) else {
                         continue;
                     };
                     if !any && opacity >= 1.0 {

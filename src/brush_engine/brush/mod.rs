@@ -420,7 +420,7 @@ impl Brush {
             );
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(data) = tile.data.as_mut()
+                if let Some(data) = tile.data_mut()
                     && data.len() == shown.len()
                 {
                     data.copy_from_slice(&shown);

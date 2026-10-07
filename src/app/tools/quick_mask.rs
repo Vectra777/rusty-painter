@@ -217,7 +217,7 @@ pub(crate) fn tint_tile(
     let guard = cell
         .as_ref()
         .map(|c| c.lock().unwrap_or_else(|e| e.into_inner()));
-    let tile = guard.as_ref().and_then(|g| g.data.as_deref());
+    let tile = guard.as_ref().and_then(|g| g.data().map(Vec::as_slice));
     let block = block.max(1);
     let tint = |p: Color32, coverage: f32| {
         let t = TINT_STRENGTH * (1.0 - coverage);

@@ -149,6 +149,14 @@ fn start_export(app: &mut PainterApp, target: PathBuf, format: ExportFormat) {
             ),
             ExportFormat::Svg => crate::project::svg::document_svg(&canvas)
                 .and_then(|svg| crate::project::export::save_svg(&svg, target.clone())),
+            _ if format.is_deep() => crate::project::export::save_linear_image(
+                &crate::project::export::LinearImage {
+                    size: [canvas.width(), canvas.height()],
+                    pixels: canvas.flatten_final_linear(),
+                },
+                target.clone(),
+                format,
+            ),
             _ => save_color_image(canvas.flatten_final(), target.clone(), format),
         }
         .and_then(|_| published(&target, format));

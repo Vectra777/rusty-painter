@@ -536,6 +536,89 @@ pub(crate) fn resolve_stroke_general(
     }
 }
 
+/// How a stroke goes onto a deeper document's pixels (see
+/// [`resolve_stroke_deep`]).
+#[derive(Clone, Copy)]
+pub(crate) enum DeepStroke<'a> {
+    /// Painting, with `mode` (and each pixel's own colour, if the dabs
+    /// differ: unmultiplied, in the document's blend space).
+    Paint {
+        mode: crate::canvas::blend_modes::LayerBlend,
+        colors: Option<&'a [[f32; 3]]>,
+    },
+    Erase,
+}
+
+/// The stroke resolves for a deeper document: one row of the stroke over
+/// the pixels the tile had before it (`original`, at `start`), at full
+/// depth, written to `out` and, rounded, to `out8` (the row's 8-bit
+/// pixels). Pixels with no coverage are left untouched. The same blending
+/// as the 8-bit resolves, without rounding (or dithering) in between.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_stroke_deep(
+    original: &crate::canvas::storage::DeepTile,
+    start: usize,
+    coverage: &[f32],
+    out: &mut crate::canvas::storage::DeepTile,
+    out8: &mut [Color32],
+    color: StrokeColor,
+    cap: f32,
+    stroke: DeepStroke<'_>,
+    space: crate::canvas::blend_modes::BlendSpace,
+    alpha_lock: bool,
+    origin: [u32; 2],
+) {
+    use crate::canvas::blend_modes::{BlendSpace, LayerBlend, composite, pixel_noise};
+    let linear = space == BlendSpace::Linear;
+    let base = if linear { color.linear } else { color.gamma };
+    for (k, (&cov, px8)) in coverage.iter().zip(out8.iter_mut()).enumerate() {
+        if cov <= 0.0 {
+            continue;
+        }
+        let i = start + k;
+        let a = (cov * cap).min(1.0);
+        let below = if linear {
+            original.linear(i)
+        } else {
+            original.gamma(i)
+        };
+        let mut px = match stroke {
+            // Erasing scales the stored values, as the 8-bit eraser does.
+            DeepStroke::Erase => original.gamma(i).map(|v| v * (1.0 - a)),
+            DeepStroke::Paint { mode, colors } => {
+                let c = colors.map_or(base, |c| c[k]);
+                if mode == LayerBlend::Normal {
+                    let keep = 1.0 - a;
+                    [
+                        c[0] * a + below[0] * keep,
+                        c[1] * a + below[1] * keep,
+                        c[2] * a + below[2] * keep,
+                        a + below[3] * keep,
+                    ]
+                } else {
+                    let src = Rgba::from_rgba_premultiplied(c[0] * a, c[1] * a, c[2] * a, a);
+                    let dst = Rgba::from_rgba_premultiplied(below[0], below[1], below[2], below[3]);
+                    let x = origin[0] + k as u32;
+                    composite(mode, src, dst, pixel_noise(x, origin[1])).to_array()
+                }
+            }
+        };
+        if alpha_lock {
+            // Recolour only: the alpha stays the original's.
+            let keep = below[3];
+            let scale = if px[3] > 0.0 { keep / px[3] } else { 0.0 };
+            px = [px[0] * scale, px[1] * scale, px[2] * scale, keep];
+        }
+        let erase_or_gamma = matches!(stroke, DeepStroke::Erase) || !linear;
+        if erase_or_gamma {
+            out.set_gamma(i, px);
+        } else {
+            out.set_linear(i, px);
+        }
+        *px8 = out.narrow(i);
+    }
+}
+
 /// [`resolve_stroke_normal`] for gamma-space documents: the brush colour
 /// and the pixel below are mixed as stored sRGB values, like Photoshop's
 /// 8-bit documents, instead of in linear light.

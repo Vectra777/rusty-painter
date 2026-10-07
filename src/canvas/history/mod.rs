@@ -6,6 +6,7 @@
 
 use crate::canvas::Canvas;
 use crate::canvas::storage::LayerId;
+use crate::canvas::storage::{DeepTile, Depth};
 use crate::selection::SelectionShape;
 use crate::selection::transform::TransformInfo;
 use eframe::egui::Color32;
@@ -33,7 +34,19 @@ pub struct TileSnapshot {
 #[derive(Clone)]
 pub enum SnapshotPixels {
     Raw(Vec<Color32>),
-    Compressed { bytes: Vec<u8>, len: usize },
+    Compressed {
+        bytes: Vec<u8>,
+        len: usize,
+    },
+    /// A deeper document's pixels at full depth (their 8-bit pixels are
+    /// these rounded).
+    Deep(DeepTile),
+    /// [`SnapshotPixels::Deep`], compressed.
+    DeepCompressed {
+        bytes: Vec<u8>,
+        len: usize,
+        depth: Depth,
+    },
 }
 
 impl From<Vec<Color32>> for SnapshotPixels {
@@ -47,7 +60,8 @@ impl SnapshotPixels {
     pub fn len(&self) -> usize {
         match self {
             Self::Raw(pixels) => pixels.len(),
-            Self::Compressed { len, .. } => *len,
+            Self::Compressed { len, .. } | Self::DeepCompressed { len, .. } => *len,
+            Self::Deep(deep) => deep.len(),
         }
     }
 
@@ -70,6 +84,22 @@ impl SnapshotPixels {
                         .collect()
                 })
                 .unwrap_or_default(),
+            Self::Deep(_) | Self::DeepCompressed { .. } => {
+                self.deep().map(|d| d.narrow_all()).unwrap_or_default()
+            }
+        }
+    }
+
+    /// The pixels at full depth, if they were kept at more than 8 bits.
+    pub fn deep(&self) -> Option<DeepTile> {
+        match self {
+            Self::Deep(deep) => Some(deep.clone()),
+            Self::DeepCompressed { bytes, len, depth } => {
+                let per_pixel = if *depth == Depth::U16 { 8 } else { 16 };
+                let raw = zstd::bulk::decompress(bytes, len.checked_mul(per_pixel)?).ok()?;
+                DeepTile::from_bytes(*depth, &raw, *len)
+            }
+            Self::Raw(_) | Self::Compressed { .. } => None,
         }
     }
 
@@ -77,20 +107,32 @@ impl SnapshotPixels {
     fn held_bytes(&self) -> usize {
         match self {
             Self::Raw(pixels) => pixels.len() * std::mem::size_of::<Color32>(),
-            Self::Compressed { bytes, .. } => bytes.len(),
+            Self::Compressed { bytes, .. } | Self::DeepCompressed { bytes, .. } => bytes.len(),
+            Self::Deep(deep) => deep.bytes(),
         }
     }
 
     fn compress(&mut self) {
-        let Self::Raw(pixels) = self else {
-            return;
-        };
-        let raw: Vec<u8> = pixels.iter().flat_map(|p| p.to_array()).collect();
-        if let Ok(bytes) = zstd::bulk::compress(&raw, 1) {
-            *self = Self::Compressed {
-                bytes,
-                len: pixels.len(),
-            };
+        match self {
+            Self::Raw(pixels) => {
+                let raw: Vec<u8> = pixels.iter().flat_map(|p| p.to_array()).collect();
+                if let Ok(bytes) = zstd::bulk::compress(&raw, 1) {
+                    *self = Self::Compressed {
+                        bytes,
+                        len: pixels.len(),
+                    };
+                }
+            }
+            Self::Deep(deep) => {
+                if let Ok(bytes) = zstd::bulk::compress(&deep.to_bytes(), 1) {
+                    *self = Self::DeepCompressed {
+                        bytes,
+                        len: deep.len(),
+                        depth: deep.depth(),
+                    };
+                }
+            }
+            Self::Compressed { .. } | Self::DeepCompressed { .. } => {}
         }
     }
 }
@@ -365,7 +407,7 @@ fn describe(action: &UndoAction) -> Option<&'static str> {
         },
         Some(LayerHistoryOp::Removed { .. }) => "Delete layer",
         Some(LayerHistoryOp::Moved { .. }) => "Move layer",
-        Some(LayerHistoryOp::Document(_)) => "Image size / rotation",
+        Some(LayerHistoryOp::Document(_)) => "Image size, rotation or depth",
         Some(LayerHistoryOp::Replaced(_)) => "Merge layers",
         Some(LayerHistoryOp::Text { .. }) => "Text",
         None if matches!(action.layer_action, Some(LayerHistoryOp::Text { .. }))
@@ -947,15 +989,25 @@ impl History {
             };
             if let Some(tile_arc) = canvas.ensure_layer_tile(layer_idx, snapshot.tx, snapshot.ty) {
                 let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-                // Ensure tile data exists
-                if tile.data.is_none() {
-                    tile.data = Some(vec![Color32::TRANSPARENT; tile_size * tile_size]);
-                }
-                let data = tile.data.as_mut().unwrap();
+                // A deeper document's tiles keep their deep pixels: the
+                // snapshot's go back at full depth (or widened, if it was
+                // taken at 8 bits), and the current ones are kept for redo.
+                let (data, deep) = tile.deep_parts(canvas.depth(), tile_size * tile_size);
                 let stored = snapshot.data.to_vec();
                 if stored.len() != snapshot.width * snapshot.height {
                     log::error!("Skipping undo snapshot that failed to decompress");
                     continue;
+                }
+                let block = (snapshot.x0, snapshot.y0, snapshot.width, snapshot.height);
+                let current_deep = deep.as_deref().map(|d| d.block(tile_size, block));
+                if let Some(deep) = deep {
+                    let stored_deep = snapshot
+                        .data
+                        .deep()
+                        .or_else(|| DeepTile::widen(deep.depth(), &stored));
+                    if let Some(stored_deep) = stored_deep {
+                        deep.put_block(tile_size, (block.0, block.1, block.2), &stored_deep);
+                    }
                 }
 
                 // Extract current region
@@ -985,7 +1037,10 @@ impl History {
                 tile.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
 
                 // Store current region for redo/undo swap
-                snapshot.data = current_region.into();
+                snapshot.data = match current_deep {
+                    Some(deep) => SnapshotPixels::Deep(deep),
+                    None => current_region.into(),
+                };
                 affected.push((snapshot.tx, snapshot.ty));
             }
         }

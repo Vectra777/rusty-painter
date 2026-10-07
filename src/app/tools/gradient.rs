@@ -283,7 +283,26 @@ impl PainterApp {
                 }
             });
         };
-        pool.install(|| canvas.paint_over_region(layer, original, row));
+        if canvas.depth().is_deep() {
+            // At full depth: no rounding, so no dither needed.
+            let row = |x0: i32, y: i32, out: &mut [[f32; 4]]| {
+                POSITIONS.with_borrow_mut(|t| {
+                    t.resize(out.len(), 0.0);
+                    gradient.row_positions(x0, y, t);
+                    for (i, (o, &t)) in out.iter_mut().zip(t.iter()).enumerate() {
+                        let cov = coverage.map_or(255, |m| m.value(x0 + i as i32, y));
+                        *o = if cov == 0 {
+                            [0.0; 4]
+                        } else {
+                            ramp.linear_covered(t, cov as f32 / 255.0)
+                        };
+                    }
+                });
+            };
+            pool.install(|| canvas.paint_over_region_deep(layer, original, row));
+        } else {
+            pool.install(|| canvas.paint_over_region(layer, original, row));
+        }
         session.dirty = false;
         drop(canvas);
         if let Some(area) = self.gradient_area() {

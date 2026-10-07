@@ -1221,3 +1221,53 @@ fn an_impasto_light_without_heights_leaves_the_stack_plain() {
     }
     assert!(canvas.needs_tree_compositing() && canvas.style_reach() == 1);
 }
+
+/// The full-precision flatten is the 8-bit one before rounding, for every
+/// kind of layer stack, and reads a deeper document's tiles at full depth.
+#[test]
+fn the_linear_flatten_is_the_8_bit_one_unrounded() {
+    use crate::canvas::blend::LinearEncoder;
+    use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
+    for space in [BlendSpace::Linear, BlendSpace::Gamma] {
+        let mut canvas = Canvas::new(70, 9, Color32::WHITE, 64);
+        canvas.blend_space = space;
+        let wash = Color32::from_rgba_unmultiplied(200, 30, 90, 150);
+        for ty in 0..1 {
+            for tx in 0..2 {
+                canvas.set_layer_tile_data(1, tx, ty, vec![wash; 64 * 64]);
+            }
+        }
+        let top = canvas.add_layer();
+        let top = canvas.layer_index_of(top).unwrap();
+        canvas.layers[top].blend = LayerBlend::Multiply;
+        canvas.layers[top].opacity = 0.6;
+        canvas.set_layer_tile_data(top, 1, 0, vec![Color32::from_rgb(40, 200, 250); 64 * 64]);
+        let eight = canvas.flatten();
+        let linear = canvas.flatten_linear();
+        let encoder = LinearEncoder::new();
+        for (i, (&want, &got)) in eight.pixels.iter().zip(&linear).enumerate() {
+            let got = encoder.encode(Rgba::from_rgba_premultiplied(
+                got[0], got[1], got[2], got[3],
+            ));
+            let off = (0..4).map(|c| want[c].abs_diff(got[c])).max().unwrap();
+            assert!(off <= 1, "{space:?} pixel {i}: {want:?} vs {got:?}");
+        }
+
+        // At 16 bits, a ramp too fine for 8 bits comes through.
+        canvas.convert_depth(crate::canvas::storage::Depth::U16);
+        let mut deep = crate::canvas::storage::DeepTile::transparent(
+            crate::canvas::storage::Depth::U16,
+            64 * 64,
+        )
+        .unwrap();
+        for i in 0..deep.len() {
+            let v = (i % 64) as f32 / 64.0 * 0.01;
+            deep.set_linear(i, [v, v, v, 1.0]);
+        }
+        canvas.set_layer_tile_deep(1, 0, 0, &deep);
+        let linear = canvas.flatten_linear();
+        let mut row: Vec<u32> = linear[..64].iter().map(|p| (p[0] * 1e6) as u32).collect();
+        row.dedup();
+        assert!(row.len() > 50, "{space:?}: {} steps", row.len());
+    }
+}

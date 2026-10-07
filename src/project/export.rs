@@ -8,11 +8,16 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExportFormat {
     Png,
-    /// PNG with 16 bits per channel, for tools that want them (the
-    /// picture's 8-bit values, spread over the full range).
+    /// PNG with 16 bits per channel, composited at full precision (a
+    /// 16-bit or float document keeps its depth).
     Png16,
     Jpeg,
     Tiff,
+    /// TIFF with 16 bits per channel, like [`ExportFormat::Png16`].
+    Tiff16,
+    /// TIFF with 32-bit float channels in linear light, as float documents
+    /// are kept.
+    Tiff32F,
     /// Lossless WebP.
     WebP,
     /// Layered: written from the document, not the flattened picture.
@@ -23,11 +28,13 @@ pub enum ExportFormat {
 
 impl ExportFormat {
     /// Every format, in the order the export dialog lists them.
-    pub const ALL: [ExportFormat; 7] = [
+    pub const ALL: [ExportFormat; 9] = [
         ExportFormat::Png,
         ExportFormat::Png16,
         ExportFormat::Jpeg,
         ExportFormat::Tiff,
+        ExportFormat::Tiff16,
+        ExportFormat::Tiff32F,
         ExportFormat::WebP,
         ExportFormat::Psd,
         ExportFormat::Svg,
@@ -39,6 +46,8 @@ impl ExportFormat {
             ExportFormat::Png16 => "PNG (16-bit)",
             ExportFormat::Jpeg => "JPEG",
             ExportFormat::Tiff => "TIFF",
+            ExportFormat::Tiff16 => "TIFF (16-bit)",
+            ExportFormat::Tiff32F => "TIFF (32-bit float, linear)",
             ExportFormat::WebP => "WebP (lossless)",
             ExportFormat::Psd => "PSD (layers)",
             ExportFormat::Svg => "SVG (layers, vector lines)",
@@ -49,7 +58,7 @@ impl ExportFormat {
         match self {
             ExportFormat::Png | ExportFormat::Png16 => "png",
             ExportFormat::Jpeg => "jpg",
-            ExportFormat::Tiff => "tiff",
+            ExportFormat::Tiff | ExportFormat::Tiff16 | ExportFormat::Tiff32F => "tiff",
             ExportFormat::WebP => "webp",
             ExportFormat::Psd => "psd",
             ExportFormat::Svg => "svg",
@@ -62,7 +71,7 @@ impl ExportFormat {
         match self {
             ExportFormat::Png | ExportFormat::Png16 => "image/png",
             ExportFormat::Jpeg => "image/jpeg",
-            ExportFormat::Tiff => "image/tiff",
+            ExportFormat::Tiff | ExportFormat::Tiff16 | ExportFormat::Tiff32F => "image/tiff",
             ExportFormat::WebP => "image/webp",
             ExportFormat::Psd => "image/vnd.adobe.photoshop",
             ExportFormat::Svg => "image/svg+xml",
@@ -75,12 +84,21 @@ impl ExportFormat {
         matches!(self, ExportFormat::Psd | ExportFormat::Svg)
     }
 
+    /// Written from the picture composited at full precision (see
+    /// [`LinearImage`]) rather than its 8-bit pixels.
+    pub fn is_deep(&self) -> bool {
+        matches!(
+            self,
+            ExportFormat::Png16 | ExportFormat::Tiff16 | ExportFormat::Tiff32F
+        )
+    }
+
     /// `None` for the layered formats (see [`save_psd`], [`save_svg`]).
     fn image_format(&self) -> Option<ImageFormat> {
         Some(match self {
             ExportFormat::Png | ExportFormat::Png16 => ImageFormat::Png,
             ExportFormat::Jpeg => ImageFormat::Jpeg,
-            ExportFormat::Tiff => ImageFormat::Tiff,
+            ExportFormat::Tiff | ExportFormat::Tiff16 | ExportFormat::Tiff32F => ImageFormat::Tiff,
             ExportFormat::WebP => ImageFormat::WebP,
             ExportFormat::Psd | ExportFormat::Svg => return None,
         })
@@ -106,6 +124,101 @@ fn to_rgba16_image(
         });
     image::ImageBuffer::from_raw(width as u32, height as u32, values)
         .ok_or_else(|| "Failed to build 16-bit image".to_string())
+}
+
+/// A flattened picture at full precision: premultiplied linear light,
+/// row-major (see `Canvas::flatten_final_linear`).
+pub struct LinearImage {
+    pub size: [usize; 2],
+    pub pixels: Vec<[f32; 4]>,
+}
+
+/// `p` unmultiplied (still linear); fully transparent is all zeros.
+#[inline]
+fn unmultiplied_linear(p: [f32; 4]) -> [f32; 4] {
+    let a = p[3].clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return [0.0; 4];
+    }
+    [p[0] / a, p[1] / a, p[2] / a, a]
+}
+
+/// 16 bits per channel, unmultiplied, sRGB encoded.
+fn linear_to_rgba16(
+    img: &LinearImage,
+) -> Result<image::ImageBuffer<image::Rgba<u16>, Vec<u16>>, String> {
+    use eframe::egui::ecolor::gamma_from_linear;
+    use rayon::prelude::*;
+    let [width, height] = img.size;
+    let to = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+    let mut values = vec![0u16; img.pixels.len() * 4];
+    values
+        .par_chunks_mut(4 * 4096)
+        .zip(img.pixels.par_chunks(4096))
+        .for_each(|(out, px)| {
+            for (o, &p) in out.as_chunks_mut::<4>().0.iter_mut().zip(px) {
+                let [r, g, b, a] = unmultiplied_linear(p);
+                *o = [
+                    to(gamma_from_linear(r.clamp(0.0, 1.0))),
+                    to(gamma_from_linear(g.clamp(0.0, 1.0))),
+                    to(gamma_from_linear(b.clamp(0.0, 1.0))),
+                    to(a),
+                ];
+            }
+        });
+    image::ImageBuffer::from_raw(width as u32, height as u32, values)
+        .ok_or_else(|| "Failed to build 16-bit image".to_string())
+}
+
+/// 32-bit float channels, unmultiplied, linear light (values above 1 kept).
+fn linear_to_rgba32f(img: &LinearImage) -> Result<image::Rgba32FImage, String> {
+    let [width, height] = img.size;
+    let values: Vec<f32> = img
+        .pixels
+        .iter()
+        .flat_map(|&p| unmultiplied_linear(p))
+        .collect();
+    image::Rgba32FImage::from_raw(width as u32, height as u32, values)
+        .ok_or_else(|| "Failed to build float image".to_string())
+}
+
+/// Encode a full-precision picture as one of the deep formats into `out`.
+fn encode_linear_into<W: std::io::Write + std::io::Seek>(
+    img: &LinearImage,
+    format: ExportFormat,
+    out: &mut W,
+) -> Result<(), String> {
+    let (Some(image_format), true) = (format.image_format(), format.is_deep()) else {
+        return Err(format!(
+            "{} isn't written at full precision",
+            format.label()
+        ));
+    };
+    let result = match format {
+        ExportFormat::Tiff32F => linear_to_rgba32f(img)?.write_to(out, image_format),
+        _ => linear_to_rgba16(img)?.write_to(out, image_format),
+    };
+    result.map_err(|e| e.to_string())
+}
+
+/// Save a full-precision picture as one of the deep formats.
+pub fn save_linear_image(
+    img: &LinearImage,
+    path: impl Into<PathBuf>,
+    format: ExportFormat,
+) -> Result<(), String> {
+    let file = std::fs::File::create(path.into()).map_err(|e| e.to_string())?;
+    let mut out = std::io::BufWriter::new(file);
+    encode_linear_into(img, format, &mut out)?;
+    std::io::Write::flush(&mut out).map_err(|e| e.to_string())
+}
+
+/// Encode a full-precision picture in memory.
+#[cfg(test)]
+pub fn encode_linear_image(img: &LinearImage, format: ExportFormat) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    encode_linear_into(img, format, &mut std::io::Cursor::new(&mut bytes))?;
+    Ok(bytes)
 }
 
 /// Convert an egui image into an `image` RGBA buffer.
@@ -167,7 +280,20 @@ fn encode_into<W: std::io::Write + std::io::Seek>(
     };
     let result = match format {
         ExportFormat::Jpeg => to_rgb_on_white(&img)?.write_to(out, image_format),
-        ExportFormat::Png16 => to_rgba16_image(&img)?.write_to(out, image_format),
+        ExportFormat::Png16 | ExportFormat::Tiff16 => {
+            to_rgba16_image(&img)?.write_to(out, image_format)
+        }
+        ExportFormat::Tiff32F => {
+            let linear = LinearImage {
+                size: img.size,
+                pixels: img
+                    .pixels
+                    .iter()
+                    .map(|&c| eframe::egui::Rgba::from(c).to_array())
+                    .collect(),
+            };
+            linear_to_rgba32f(&linear)?.write_to(out, image_format)
+        }
         _ => to_rgba_image(img)?.write_to(out, image_format),
     };
     result.map_err(|e| e.to_string())
@@ -246,6 +372,58 @@ mod tests {
         for (a, b) in wide.as_raw().iter().zip(want.as_raw()) {
             assert_eq!(*a, *b as u16 * 257);
         }
+    }
+
+    #[test]
+    fn deep_formats_keep_what_8_bits_lose() {
+        // A dark ramp: few 8-bit steps, many deep ones.
+        let n = 512;
+        let img = LinearImage {
+            size: [n, 1],
+            pixels: (0..n)
+                .map(|i| {
+                    let v = i as f32 / n as f32 * 0.01;
+                    [v, v, v, 1.0]
+                })
+                .collect(),
+        };
+        let distinct = |mut v: Vec<u32>| {
+            v.dedup();
+            v.len()
+        };
+        for (f, format) in [
+            (ExportFormat::Png16, ImageFormat::Png),
+            (ExportFormat::Tiff16, ImageFormat::Tiff),
+        ] {
+            let bytes = encode_linear_image(&img, f).unwrap();
+            let back = image::load_from_memory_with_format(&bytes, format)
+                .unwrap()
+                .to_rgba16();
+            let steps = distinct(back.pixels().map(|p| p.0[0] as u32).collect());
+            assert!(steps > 400, "{}: {steps}", f.label());
+            assert!(back.pixels().all(|p| p.0[3] == 65535));
+        }
+        let bytes = encode_linear_image(&img, ExportFormat::Tiff32F).unwrap();
+        let back = image::load_from_memory_with_format(&bytes, ImageFormat::Tiff)
+            .unwrap()
+            .to_rgba32f();
+        for (got, want) in back.pixels().zip(&img.pixels) {
+            assert_eq!(got.0, *want);
+        }
+        assert!(encode_linear_image(&img, ExportFormat::Png).is_err());
+    }
+
+    #[test]
+    fn half_transparent_deep_pixels_are_written_unmultiplied() {
+        let img = LinearImage {
+            size: [1, 1],
+            pixels: vec![[0.25, 0.0, 0.5, 0.5]],
+        };
+        let bytes = encode_linear_image(&img, ExportFormat::Tiff32F).unwrap();
+        let back = image::load_from_memory_with_format(&bytes, ImageFormat::Tiff)
+            .unwrap()
+            .to_rgba32f();
+        assert_eq!(back.get_pixel(0, 0).0, [0.5, 0.0, 1.0, 0.5]);
     }
 
     #[test]

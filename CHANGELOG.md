@@ -41,6 +41,13 @@
 - One editor window per shader layer: syntax colouring, errors at their line as you type, play/pause, speed, templates, and Bake.
 - Export, merging and saving use the current frame; the shader, its time and speed are saved with the project.
 
+### 16-bit and 32-bit float documents
+- A document can keep 16 bits per channel or 32-bit floats (linear light, with values past white) as well as 8 bits: pick it for a new canvas, or convert with Image → Colour Depth (one undo step).
+- Brush strokes (every blend mode, the eraser, alpha lock, colour randomness) and gradients work at the document's full depth: soft airbrushing and gradients no longer band, and glazes too faint for 8 bits build up.
+- Undo, redo and saved files keep the full depth (older versions open such files at 8 bits).
+- PNG (16-bit) is composited at full precision; new TIFF (16-bit) and TIFF (32-bit float, linear) exports.
+- Tools not yet working at full depth (filters, transforms, smudging, wet paint, fills and the rest) still paint at 8 bits: the tiles they change are rounded to 8 bits.
+
 ### Fixed
 - A Photoshop brush file with a tip whose bounds are far apart is refused instead of crashing a debug build (or reading a wrong size in a release one).
 

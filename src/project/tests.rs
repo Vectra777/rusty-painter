@@ -961,3 +961,70 @@ fn project_is_an_openraster_file() {
     let thumb = png("Thumbnails/thumbnail.png");
     assert_eq!((thumb.width(), thumb.height()), (256, 128));
 }
+
+#[test]
+fn deep_documents_round_trip_with_their_history() {
+    use crate::canvas::storage::{DeepTile, Depth};
+    for depth in [Depth::U16, Depth::F32] {
+        let mut canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
+        canvas.convert_depth(depth);
+        // A ramp too fine for 8 bits.
+        let mut deep = DeepTile::transparent(depth, TILE_SIZE * TILE_SIZE).unwrap();
+        for i in 0..deep.len() {
+            let v = i as f32 / deep.len() as f32 * 0.01;
+            deep.set_linear(i, [v, v, v, 1.0]);
+        }
+        canvas.set_layer_tile_deep(1, 0, 0, &deep);
+        let before = DeepTile::transparent(depth, TILE_SIZE * TILE_SIZE).unwrap();
+        let mut history = History::new();
+        history.push_action(UndoAction {
+            tiles: vec![TileSnapshot {
+                tx: 0,
+                ty: 0,
+                layer_id: LayerId(1),
+                x0: 0,
+                y0: 0,
+                width: TILE_SIZE,
+                height: TILE_SIZE,
+                data: SnapshotPixels::Deep(before.clone()),
+            }],
+            selection: None,
+            transform: None,
+            layer_action: None,
+        });
+        let app = test_app(canvas, vec![History::new(), history]);
+        let mut loaded = decode_project(&encode_project(&app).unwrap()).unwrap();
+        assert_eq!(loaded.canvas.depth(), depth);
+        assert_eq!(
+            loaded.canvas.get_layer_tile_deep(1, 0, 0).unwrap(),
+            deep,
+            "{depth:?}"
+        );
+        assert_eq!(
+            loaded.canvas.get_layer_tile_data(1, 0, 0).unwrap(),
+            deep.narrow_all()
+        );
+        let mut selection = crate::selection::SelectionManager::new();
+        let mut tool = crate::app::tools::Tool::Brush;
+        loaded
+            .history
+            .undo(&mut loaded.canvas, &mut selection, &mut tool);
+        assert_eq!(loaded.canvas.get_layer_tile_deep(1, 0, 0).unwrap(), before);
+        loaded
+            .history
+            .redo(&mut loaded.canvas, &mut selection, &mut tool);
+        assert_eq!(loaded.canvas.get_layer_tile_deep(1, 0, 0).unwrap(), deep);
+    }
+}
+
+#[test]
+fn an_8_bit_document_saves_no_depth() {
+    let canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
+    let app = test_app(canvas, vec![History::new(), History::new()]);
+    let data = encode_project_data(&ProjectSnapshot::capture(&app)).unwrap();
+    assert!(!String::from_utf8_lossy(&data).contains("\"depth\""));
+    assert_eq!(
+        decode_project(&data).unwrap().canvas.depth(),
+        crate::canvas::storage::Depth::U8
+    );
+}

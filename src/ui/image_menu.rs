@@ -86,6 +86,16 @@ pub fn image_menu(
             app.apply_image_op(op);
         }
     }
+    ui.separator();
+    ui.menu_button("Colour Depth", |ui| {
+        let current = app.canvas.depth();
+        for depth in crate::canvas::storage::Depth::ALL {
+            if ui.radio(current == depth, depth.label()).clicked() {
+                app.convert_depth(depth);
+                ui.close_menu();
+            }
+        }
+    });
 }
 
 pub fn size_dialog(app: &mut PainterApp, ctx: &egui::Context) {

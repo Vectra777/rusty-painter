@@ -296,6 +296,21 @@ impl Ramp {
         self.pixels[self.index(t, noise)]
     }
 
+    /// The colour at `t` at full precision, premultiplied in linear light,
+    /// with `coverage` (0..=1) of it: for deeper documents, which need no
+    /// dither. Interpolated between the precomputed steps.
+    #[inline]
+    pub fn linear_covered(&self, t: f32, coverage: f32) -> [f32; 4] {
+        let at = t.clamp(0.0, 1.0) * (RAMP_SIZE - 1) as f32;
+        let i = (at as usize).min(RAMP_SIZE - 2);
+        let u = at - i as f32;
+        let (a, b) = (self.unmultiplied[i], self.unmultiplied[i + 1]);
+        let c: [f32; 4] = std::array::from_fn(|k| a[k] + (b[k] - a[k]) * u);
+        let alpha = c[3] / 255.0 * coverage;
+        let lin = |v: f32| srgb_to_linear(v) * alpha;
+        [lin(c[0]), lin(c[1]), lin(c[2]), alpha]
+    }
+
     /// The pixel at `t` with `coverage` (0..=255) of it, for soft edges.
     #[inline]
     pub fn pixel_covered(&self, t: f32, noise: Option<f32>, coverage: u8) -> Color32 {
