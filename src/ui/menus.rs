@@ -229,13 +229,21 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Export Image…", keys(app, ctx, Action::Export)) {
         open_export_dialog(app);
     }
+    let animated = app.canvas.is_animated() || app.canvas.layers.iter().any(|l| l.rig.is_some());
     if ui
-        .add_enabled_ui(app.canvas.is_animated(), |ui| {
-            menu_item(ui, "Export Animation…", None)
-        })
+        .add_enabled_ui(animated, |ui| menu_item(ui, "Export Animation…", None))
         .inner
     {
         crate::ui::timeline::pick_export(app);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        if menu_item(ui, "Import Animation (Spine, DragonBones, Lottie)…", None) {
+            crate::ui::timeline::pick_animation(app);
+        }
+        if menu_item(ui, "Import Video as Frames…", None) {
+            crate::ui::timeline::pick_video(app);
+        }
     }
     ui.separator();
     let recording = app.workspace.timelapse.recording;

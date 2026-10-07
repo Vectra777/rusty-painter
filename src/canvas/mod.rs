@@ -19,6 +19,7 @@ pub mod inpaint;
 pub mod layer_style;
 pub mod liquify;
 pub mod palette;
+pub mod rig;
 pub mod shader;
 pub mod storage;
 pub mod text;

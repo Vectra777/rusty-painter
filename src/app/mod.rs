@@ -16,6 +16,7 @@
 //! - [`color_management`]: the monitor's profile, proofing, assigning and
 //!   converting the document's profile.
 //! - [`animation`]: frames, playback, drawings and exporting animations.
+//! - [`rig`]: rig layers, importing animations and videos.
 //! - [`settings`]: preferences and tool options kept between sessions.
 //! - [`autosave`]: autosave and recovering unsaved work after a crash.
 //! - [`shader_ops`]: shader layers (compiling, playback, baking).
@@ -39,6 +40,7 @@ pub(crate) mod jobs;
 pub(crate) mod layout;
 pub(crate) mod painter;
 pub(crate) mod pressure_calibration;
+pub(crate) mod rig;
 pub(crate) mod settings;
 pub(crate) mod shader_ops;
 pub(crate) mod state;

@@ -38,7 +38,7 @@ Part 2: Everything else
 
 Animation (K, C, P, I)
 
-- Frame-by-frame animation is in. Still missing: tweening of transforms and opacity, audio, a playback cache for big canvases (every frame is composited as it shows), Krita's animation curves, and opening Krita's animated documents with their frames.
+- Frame-by-frame animation and rig layers (Spine, DragonBones and Lottie imports) are in. Still missing for rigs: drawing bones on the canvas and dragging them (they're edited by numbers), building a rig from layers, weight painting, Spine's transform and path constraints and other skins, exporting rigs back to Spine or Lottie, and Moho's and Alight Motion's own project files (no published format: their exported videos and GIFs come in as frames). Still missing for frames: tweening of transforms and opacity, audio, a playback cache for big canvases (every frame is composited as it shows), Krita's animation curves, and opening Krita's animated documents with their frames.
 
 Comics (C leads, I has most)
 

@@ -189,6 +189,7 @@ impl PsdDocument {
             draft: false,
             reference: false,
             anim: None,
+            rig: None,
             tiles: background.unwrap_or_default(),
         });
         // Folders being read: each GroupEnd opens one, its GroupStart closes it.
@@ -247,6 +248,7 @@ impl PsdDocument {
                 draft: false,
                 reference: false,
                 anim: None,
+                rig: None,
                 tiles,
             });
             if let Some(mask) = layer.mask.filter(|_| !is_group) {
@@ -272,6 +274,7 @@ impl PsdDocument {
                     draft: false,
                     reference: false,
                     anim: None,
+                    rig: None,
                     tiles: mask_tiles(&mask, self.width, self.height, ts),
                 });
                 next_id += 1;

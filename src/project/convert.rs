@@ -495,6 +495,9 @@ impl StoredLayerMeta {
             draft: self.draft,
             reference: self.reference,
             anim: self.anim,
+            // (Pictures aren't kept in history entries: a removed rig layer
+            // comes back from a file as its last pixels.)
+            rig: None,
         }
     }
 }

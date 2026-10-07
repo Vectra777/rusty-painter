@@ -413,6 +413,8 @@ pub struct WorkspaceState {
     pub color: crate::app::color_management::ColorSettings,
     /// Playback and the timeline panel.
     pub animation: crate::app::animation::AnimationState,
+    /// Editing a rig layer.
+    pub rig: crate::app::rig::RigEditState,
     /// Fit the canvas to the panel whenever the panel size changes, until the
     /// user pans, zooms or rotates the view.
     pub auto_fit: bool,
@@ -540,6 +542,7 @@ impl WorkspaceState {
             color_model,
             color: Default::default(),
             animation: Default::default(),
+            rig: Default::default(),
             auto_fit: true,
             fitted_to: None,
             // Android, or a desktop touchscreen via RUSTY_PAINTER_TOUCH=1.

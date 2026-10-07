@@ -152,7 +152,10 @@ impl PainterApp {
     /// it changed anything) as one undo step: the whole document before it
     /// comes back on undo (its layers share their tiles, which this
     /// doesn't change).
-    fn document_step(&mut self, change: impl FnOnce(&mut crate::canvas::Canvas) -> bool) {
+    pub(crate) fn document_step(
+        &mut self,
+        change: impl FnOnce(&mut crate::canvas::Canvas) -> bool,
+    ) {
         self.release_canvas();
         let canvas = crate::app::stroke_ops::exclusive(&mut self.canvas);
         let before = crate::canvas::storage::DocumentState {

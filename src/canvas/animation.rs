@@ -184,6 +184,7 @@ impl Canvas {
                 _ => None,
             });
         self.time = time;
+        let rigs = self.render_rigs();
         if let Some(track) = active_track
             && let Some(i) = self.frame_at(track, time)
         {
@@ -192,7 +193,29 @@ impl Canvas {
         let after: Vec<Option<usize>> = (self.tracks().into_iter())
             .map(|t| self.frame_at(self.layers[t].id, time))
             .collect();
-        before != after || self.onion.enabled
+        before != after || self.onion.enabled || rigs
+    }
+
+    /// Draw every rig layer posed at the frame showing (its tiles
+    /// replaced). Returns whether there are any.
+    pub fn render_rigs(&self) -> bool {
+        let seconds = self.time as f32 / self.timeline.fps.max(1) as f32;
+        let (w, h, ts) = (self.width(), self.height(), self.tile_size());
+        let mut any = false;
+        for (i, layer) in self.layers.iter().enumerate() {
+            let Some(rig) = &layer.rig else {
+                continue;
+            };
+            any = true;
+            let tiles = rig.render(&rig.pose(seconds), w, h, ts);
+            for (tx, ty) in self.layer_tile_keys(i) {
+                self.clear_layer_tile(i, tx, ty);
+            }
+            for ((tx, ty), data) in tiles {
+                self.set_layer_tile_data(i, tx, ty, data);
+            }
+        }
+        any
     }
 
     /// Make paint layer `i` animated: a new animated layer in its place,

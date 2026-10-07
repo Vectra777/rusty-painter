@@ -22,6 +22,10 @@ pub fn timeline_panel(app: &mut PainterApp, ctx: &egui::Context) {
         .default_height(110.0)
         .show(ctx, |ui| {
             controls(app, ui);
+            if app.active_rig().is_some() {
+                ui.separator();
+                rig_controls(app, ui);
+            }
             ui.separator();
             egui::ScrollArea::both()
                 .id_salt("timeline_rows")
@@ -161,6 +165,78 @@ fn controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     });
 }
 
+/// The selected rig layer: the animation it plays, and its bones turned and
+/// moved (keyed at the frame showing, or its setup pose without an
+/// animation).
+fn rig_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let Some(rig) = app.active_rig().cloned() else {
+        return;
+    };
+    let seconds = app.canvas.time as f32 / app.canvas.timeline.fps.max(1) as f32;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Rig");
+        let current = (rig.animation.and_then(|a| rig.animations.get(a)))
+            .map_or("Setup pose", |a| a.name.as_str());
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("rig_animation")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(rig.animation.is_none(), "Setup pose")
+                    .clicked()
+                {
+                    chosen = Some(None);
+                }
+                for (i, a) in rig.animations.iter().enumerate() {
+                    if ui
+                        .selectable_label(rig.animation == Some(i), &a.name)
+                        .clicked()
+                    {
+                        chosen = Some(Some(i));
+                    }
+                }
+            });
+        if let Some(c) = chosen {
+            app.rig_edit(|r| r.animation = c);
+            app.rig_edit_done();
+        }
+        ui.label(
+            egui::RichText::new(if rig.animation.is_some() {
+                "Bone changes are keyed at this frame."
+            } else {
+                "Bone changes move the setup pose."
+            })
+            .color(TEXT_DIM),
+        );
+    });
+    egui::CollapsingHeader::new(format!("Bones ({})", rig.bones.len()))
+        .id_salt("rig_bones")
+        .show(ui, |ui| {
+            egui::Grid::new("rig_bone_grid")
+                .striped(true)
+                .show(ui, |ui| {
+                    for (b, bone) in rig.bones.iter().enumerate() {
+                        ui.label(&bone.name);
+                        let (mut rot, mut x, mut y) = crate::app::rig::bone_now(&rig, b, seconds);
+                        let mut changed = false;
+                        let mut done = false;
+                        for (value, suffix) in [(&mut rot, "°"), (&mut x, " x"), (&mut y, " y")] {
+                            let r = ui.add(egui::DragValue::new(value).speed(0.5).suffix(suffix));
+                            changed |= r.changed();
+                            done |= r.drag_stopped() || r.lost_focus();
+                        }
+                        if changed {
+                            app.rig_edit(|r| crate::app::rig::set_bone(r, b, seconds, rot, [x, y]));
+                        }
+                        if done {
+                            app.rig_edit_done();
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
 /// Each animated layer's frames: a key where a drawing starts, a bar while
 /// it's held; the frame showing marked. Click a frame to go there (and
 /// select that layer); drag a key to move its drawing.
@@ -263,6 +339,35 @@ fn select(app: &mut PainterApp, track: crate::canvas::storage::LayerId, t: u32) 
     );
 }
 
+/// Ask for a Spine, DragonBones or Lottie JSON to bring in as a rig layer.
+#[cfg(not(target_os = "android"))]
+pub fn pick_animation(app: &mut PainterApp) {
+    let dialog = crate::app::settings::file_dialog()
+        .add_filter("Spine, DragonBones or Lottie", &["json", "JSON"]);
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::File, |app, paths| {
+        if let Some(path) = paths.into_iter().next() {
+            app.import_animation_in_background(path);
+        }
+    });
+}
+
+/// Ask for a video, GIF or animated picture to bring in as an animated
+/// layer.
+#[cfg(not(target_os = "android"))]
+pub fn pick_video(app: &mut PainterApp) {
+    let dialog = crate::app::settings::file_dialog().add_filter(
+        "Videos and animated pictures",
+        &[
+            "mp4", "webm", "mov", "mkv", "avi", "gif", "png", "apng", "webp", "MP4", "MOV", "GIF",
+        ],
+    );
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::File, |app, paths| {
+        if let Some(path) = paths.into_iter().next() {
+            app.import_frames_in_background(path);
+        }
+    });
+}
+
 /// Ask where to export the animation (its format from the name).
 pub fn pick_export(app: &mut PainterApp) {
     #[cfg(not(target_os = "android"))]
@@ -317,7 +422,10 @@ mod tests {
         frame(Vec::new(), &mut app);
         // The rows sit at the bottom; frame 5's cell is NAMES + 5.5 cells in.
         let rows_top = ctx.used_rect().bottom() - super::ROW - 8.0;
-        let at = egui::pos2(super::NAMES + 5.5 * super::CELL + 8.0, rows_top + super::ROW / 2.0);
+        let at = egui::pos2(
+            super::NAMES + 5.5 * super::CELL + 8.0,
+            rows_top + super::ROW / 2.0,
+        );
         let press = |pressed| egui::Event::PointerButton {
             pos: at,
             button: egui::PointerButton::Primary,

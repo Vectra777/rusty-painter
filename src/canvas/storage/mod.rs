@@ -120,6 +120,8 @@ pub struct Layer {
     pub reference: bool,
     /// Its part in an animation, if any.
     pub anim: Option<Anim>,
+    /// A rig layer: its pixels are this rig posed at the current frame.
+    pub rig: Option<Box<crate::canvas::rig::Rig>>,
     tiles: Mutex<TileMap>,
 }
 
@@ -161,6 +163,7 @@ pub struct CanvasLayerSnapshot {
     pub draft: bool,
     pub reference: bool,
     pub anim: Option<Anim>,
+    pub rig: Option<Box<crate::canvas::rig::Rig>>,
     pub tiles: Vec<CanvasTileSnapshot>,
 }
 
@@ -226,6 +229,7 @@ impl Layer {
             draft: self.draft,
             reference: self.reference,
             anim: self.anim,
+            rig: self.rig.clone(),
             tiles: Mutex::new(TileMap::default()),
         }
     }
@@ -278,6 +282,7 @@ impl Layer {
             draft: false,
             reference: false,
             anim: None,
+            rig: None,
             tiles: Mutex::new(TileMap::default()),
         }
     }
@@ -331,6 +336,7 @@ impl Layer {
             draft: self.draft,
             reference: self.reference,
             anim: self.anim,
+            rig: self.rig.clone(),
             tiles,
         }
     }
@@ -369,6 +375,7 @@ impl Layer {
             draft: snapshot.draft,
             reference: snapshot.reference,
             anim: snapshot.anim,
+            rig: snapshot.rig,
             tiles: Mutex::new(tiles),
         }
     }
@@ -701,6 +708,7 @@ impl Canvas {
         layer.draft = meta.draft;
         layer.reference = meta.reference;
         layer.anim = meta.anim;
+        layer.rig = meta.rig.clone();
         self.layers.insert(idx, layer);
         // `id` is a reused (previously-allocated) id, not a new one, but
         // guard against ever handing out a colliding id afterward.
@@ -762,6 +770,7 @@ impl Canvas {
             draft: layer.draft,
             reference: layer.reference,
             anim: layer.anim,
+            rig: layer.rig.clone(),
         })
     }
 

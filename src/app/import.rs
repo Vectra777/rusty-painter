@@ -71,7 +71,7 @@ pub(crate) fn decode_image_in(
 }
 
 /// `img` scaled down to fit `w`×`h` if it's bigger.
-fn fit_image(img: image::RgbaImage, (cw, ch): (u32, u32)) -> image::RgbaImage {
+pub(crate) fn fit_image(img: image::RgbaImage, (cw, ch): (u32, u32)) -> image::RgbaImage {
     if img.width() <= cw && img.height() <= ch {
         return img;
     }
@@ -185,6 +185,19 @@ impl PainterApp {
                     .and_then(|p| p.file_name())
                     .map_or_else(|| file.name.clone(), |n| n.to_string_lossy().into_owned());
                 self.import_brushes_in_background(name, source);
+            } else if let Some(path) = path.filter(|p| {
+                extension("json")
+                    && std::fs::read(p).is_ok_and(|b| crate::project::anim_import::is_rig_json(&b))
+            }) {
+                // Spine, DragonBones or Lottie: a rig layer.
+                self.import_animation_in_background(path.to_path_buf());
+            } else if let Some(path) = path.filter(|_| {
+                ["mp4", "webm", "mov", "mkv", "avi"]
+                    .iter()
+                    .any(|e| extension(e))
+            }) {
+                // Videos: an animated layer.
+                self.import_frames_in_background(path.to_path_buf());
             } else if to_reference {
                 self.open_reference_in_background(file.name.clone(), source);
             } else if to_palette {

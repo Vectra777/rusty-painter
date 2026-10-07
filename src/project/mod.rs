@@ -26,6 +26,7 @@ use eframe::egui::Color32;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
+pub(crate) mod anim_import;
 mod blobs;
 #[cfg(feature = "sut-import")]
 pub(crate) mod clip;
@@ -618,7 +619,69 @@ struct StoredLayer {
     /// Its part in an animation; absent in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anim: Option<crate::canvas::storage::Anim>,
+    /// A rig layer's rig and pictures; absent on other layers (and in
+    /// older files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rig: Option<StoredRig>,
     tiles: Vec<StoredTile>,
+}
+
+/// A rig as saved: its bones, slots and animations, its pictures as blobs.
+#[derive(Serialize, Deserialize)]
+struct StoredRig {
+    rig: crate::canvas::rig::Rig,
+    images: Vec<StoredRigImage>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredRigImage {
+    name: String,
+    width: usize,
+    height: usize,
+    rgba_zstd: StoredBlob,
+}
+
+impl StoredRig {
+    fn from_rig(rig: &crate::canvas::rig::Rig, blobs: &mut Vec<u8>) -> Result<Self, String> {
+        let raws: Vec<Vec<u8>> = rig
+            .images
+            .iter()
+            .map(|i| colors_to_bytes(&i.pixels))
+            .collect();
+        let stored = push_blobs(blobs, &raws)?;
+        Ok(Self {
+            rig: rig.clone(),
+            images: (rig.images.iter().zip(stored))
+                .map(|(i, rgba_zstd)| StoredRigImage {
+                    name: i.name.clone(),
+                    width: i.width,
+                    height: i.height,
+                    rgba_zstd,
+                })
+                .collect(),
+        })
+    }
+
+    fn into_rig(self, blobs: &[u8]) -> Result<crate::canvas::rig::Rig, String> {
+        let mut rig = self.rig;
+        rig.images = self
+            .images
+            .into_iter()
+            .map(|i| {
+                let pixels = bytes_to_colors(read_blob(blobs, &i.rgba_zstd)?)?;
+                if Some(pixels.len()) != i.width.checked_mul(i.height) {
+                    return Err("Invalid rig picture".to_string());
+                }
+                Ok(crate::canvas::rig::RigImage {
+                    name: i.name,
+                    width: i.width,
+                    height: i.height,
+                    pixels: std::sync::Arc::new(pixels),
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(rig)
+    }
 }
 
 fn default_expanded() -> bool {
@@ -668,6 +731,10 @@ impl StoredLayer {
             draft: layer.draft,
             reference: layer.reference,
             anim: layer.anim,
+            rig: match &layer.rig {
+                Some(rig) => Some(StoredRig::from_rig(rig, blobs)?),
+                None => None,
+            },
             tiles: {
                 use rayon::prelude::*;
                 let raws: Vec<Vec<u8>> = layer
@@ -742,6 +809,10 @@ impl StoredLayer {
             draft: self.draft,
             reference: self.reference,
             anim: self.anim,
+            rig: match self.rig {
+                Some(rig) => Some(Box::new(rig.into_rig(blobs)?)),
+                None => None,
+            },
             tiles: self
                 .tiles
                 .into_iter()

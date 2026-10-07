@@ -57,6 +57,12 @@
 - Pictures are imported converted from the profile they carry to the document's; Photoshop and Krita documents open with theirs.
 - Colour harmonies in the colour panel: complementary, split complementary, analogous, triadic and tetradic hues shown on the wheel and as swatches to pick.
 
+### Skeletal animation
+- Rig layers: bones with their setup pose (and how much they take from their parents), slots in draw order, region and weighted mesh attachments, two-bone IK, and animations of bones (turn, place, scale, shear), slot colours, attachment swaps and mesh deforms with linear, stepped and Bézier keys; drawn at the timeline's frame, saved with the document.
+- File → Import Animation: Spine JSON (3.8 and 4.x, with its texture atlas or loose pictures), DragonBones JSON (5.x, with its texture atlas) and Lottie (layers as bones; images, solids and still shapes as pictures; precompositions), each from its published format; what can't come across is listed.
+- The timeline's rig section: the animation playing, and each bone's turn and place, keyed at the frame showing (one undo step a gesture).
+- File → Import Video as Frames (and dropping a video or an animation JSON on the window): videos through ffmpeg, GIFs, animated PNGs and WebPs as an animated layer, a drawing a frame.
+
 ### Animation
 - Frame-by-frame animation: animated layers whose drawings start on a frame and are held until the next, a timeline panel (View → Timeline) to play, step and set the frame rate and range, add, copy, drag and remove drawings, and onion skins before and after.
 - Undo works per drawing: a stroke undoes on the drawing it was made on, whatever frame is showing; adding, moving and removing drawings are undo steps too.

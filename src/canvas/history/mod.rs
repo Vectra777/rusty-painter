@@ -164,6 +164,7 @@ pub struct LayerMeta {
     pub draft: bool,
     pub reference: bool,
     pub anim: Option<crate::canvas::storage::Anim>,
+    pub rig: Option<Box<crate::canvas::rig::Rig>>,
 }
 
 /// A layer removed alongside the main one of a `Removed` op (its mask, or
@@ -837,6 +838,7 @@ impl History {
                 draft: false,
                 reference: false,
                 anim: None,
+                rig: None,
             });
             canvas.insert_layer_with_meta(*index, *id, &meta);
         }
