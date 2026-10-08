@@ -102,7 +102,9 @@ impl PainterApp {
         true
     }
 
-    /// `steps` steps of drying for the layers `wet`, waited for.
+    /// `steps` steps of drying for the layers `wet`, waited for (tests,
+    /// benchmarks).
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn wet_steps(
         &mut self,
         wet: &[(usize, std::sync::Arc<crate::canvas::wet::WetLayer>)],

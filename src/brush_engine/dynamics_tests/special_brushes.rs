@@ -508,7 +508,6 @@ fn a_stroke_resolved_late_ends_with_the_same_pixels() {
             );
         }
         stroke.finish(brush, &mut ctx);
-        drop(ctx);
         pixels_rgba(&canvas)
     };
     let mut soft = Brush::new(30.0, 60.0, Color32::from_rgb(20, 60, 200), 10.0);
