@@ -273,8 +273,9 @@ struct BlendStroke {
     /// Distance travelled since the last dab.
     travelled: f32,
     /// Smudge: the paint each mirror copy carries (copy 0 is the stroke
-    /// itself).
+    /// itself), and where its last dab was.
     carries: Vec<Option<Carry>>,
+    smudge_last: Vec<Option<Vec2>>,
     /// Mirror painting for this stroke.
     symmetry: crate::brush_engine::symmetry::Symmetry,
     copies: Vec<crate::brush_engine::symmetry::Copy2>,
@@ -510,12 +511,12 @@ fn patch_block<T: Copy>(
     if w == side && h * side == patch.len() {
         return std::borrow::Cow::Borrowed(patch);
     }
-    (0..h)
-        .flat_map(|row| {
-            let start = (dy + row) * side + dx;
-            patch[start..start + w].iter().copied()
-        })
-        .collect()
+    let mut out = Vec::with_capacity(w * h);
+    for row in 0..h {
+        let start = (dy + row) * side + dx;
+        out.extend_from_slice(&patch[start..start + w]);
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// [`crate::canvas::blend::with_alpha_of`] for linear paint: `v` with its
@@ -965,6 +966,7 @@ impl PainterApp {
                 last_pressure: pressure,
                 travelled: 0.0,
                 carries: Vec::new(),
+                smudge_last: Vec::new(),
                 symmetry: self.workspace.symmetry,
                 copies: self.workspace.symmetry.copies(),
                 filtered: HashMap::new(),
@@ -1264,6 +1266,7 @@ impl BlendSession {
             }
         }
         self.stroke.carries.clear();
+        self.stroke.smudge_last.clear();
         self.stroke.krita_last.clear();
         self.stroke.precise.clear();
         self.stroke.random = 0x9e37_79b9;
@@ -1486,10 +1489,15 @@ impl BlendSession {
         // The pixels as stored (kept exactly where the dab doesn't reach),
         // and as paint; blurring, also blurred.
         let blur_radius = ((r * blur_size).round() as usize).max(1);
+        // (Smudging: what it picks up, in `soft` too.)
         let (stored, under, mut soft) = match self.stroke.kind {
             BlendKind::Blur | BlendKind::Sharpen(_) => {
                 let (stored, under, soft) = self.blurred_patch((x0, y0), side, blur_radius);
                 (stored, under, Some(soft))
+            }
+            BlendKind::Smudge => {
+                let (stored, under, picked) = self.smudge_patch((x0, y0), side, center, copy);
+                (stored, under, Some(picked))
             }
             _ => {
                 let (stored, under) = self.read_layer((x0, y0), side, side);
@@ -1618,6 +1626,7 @@ impl BlendSession {
             }
             BlendKind::Adjust(hsv) => under.iter().map(|&u| adjust_hsv(codec, u, hsv)).collect(),
             BlendKind::Smudge => {
+                let picked = soft.take().unwrap_or_else(|| under.clone());
                 // The carried paint, resized if pressure changed the tip size.
                 let carries = &mut self.stroke.carries;
                 if carries.len() <= copy {
@@ -1639,15 +1648,15 @@ impl BlendSession {
                         px: under.clone(),
                     },
                 };
-                // The brush picks up the paint under it, keeping the smudge
-                // length's share of what it carried, then (a wet brush)
-                // mixes in its own colour; that is what it lays down.
+                // The brush picks up the paint it passed over, keeping the
+                // smudge length's share of what it carried, then (a wet
+                // brush) mixes in its own colour; that is what it lays down.
                 // (Picked up before it paints, so the length counts under
                 // all of the tip: picking up what it had just laid kept all
                 // it carried wherever the tip was at full strength.)
-                let under = &under;
+                let picked = &picked;
                 for_rows(&pool, &mut carry.px, side, |row, line| {
-                    for (c, u) in line.iter_mut().zip(&under[row * side..]) {
+                    for (c, u) in line.iter_mut().zip(&picked[row * side..]) {
                         for k in 0..4 {
                             c[k] = u[k] + (c[k] - u[k]) * length;
                             c[k] += (brush_paint[k] - c[k]) * color_rate;
@@ -1693,6 +1702,141 @@ impl BlendSession {
         if changed {
             self.write_blend_patch((x0, y0), side, &stored, &result, &mask);
         }
+    }
+
+    /// A smudge dab of mirror copy `copy` at `center`: its `side`² patch
+    /// at `origin` (as stored and as paint, as [`Self::read_layer`] gives
+    /// it), and what it picks up there: the layer it swept over since its
+    /// last dab, averaged along the way, as a brush moving all the while
+    /// would. (Only what's under it now, mostly the paint the last dab laid
+    /// a dab's spacing back, copied each edge a spacing along at every dab:
+    /// steps in the smear.)
+    fn smudge_patch(
+        &mut self,
+        origin: (i32, i32),
+        side: usize,
+        center: Vec2,
+        copy: usize,
+    ) -> (Vec<Color32>, Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        let lasts = &mut self.stroke.smudge_last;
+        if lasts.len() <= copy {
+            lasts.resize(copy + 1, None);
+        }
+        let moved = lasts[copy]
+            .replace(center)
+            .map_or(Vec2::ZERO, |l| center - l);
+        // (Not a pixel's move; or a jump round the edges with wrap-around,
+        // or farther than the dab: nothing swept.)
+        let back = -moved;
+        let n = back.x.abs().max(back.y.abs()).round() as usize;
+        if n <= 1 || moved.length() > side as f32 {
+            let (stored, under) = self.read_layer(origin, side, side);
+            let picked = under.clone();
+            return (stored, under, picked);
+        }
+        // Read once, with the margin it swept through on the side it came
+        // from (and two pixels for the rounding).
+        let (lo_x, lo_y) = (
+            back.x.min(0.0).floor() as i32 - 2,
+            back.y.min(0.0).floor() as i32 - 2,
+        );
+        let (hi_x, hi_y) = (
+            back.x.max(0.0).ceil() as i32 + 2,
+            back.y.max(0.0).ceil() as i32 + 2,
+        );
+        let (w, h) = (side + (hi_x - lo_x) as usize, side + (hi_y - lo_y) as usize);
+        let (stored, around) = self.read_layer((origin.0 + lo_x, origin.1 + lo_y), w, h);
+        let inside = ((-lo_x) as usize, (-lo_y) as usize, side, side);
+        let stored = if stored.is_empty() {
+            stored
+        } else {
+            patch_block(&stored, w, inside).into_owned()
+        };
+        let under = patch_block(&around, w, inside).into_owned();
+        // Each pixel picks up the `n` places a pixel apart back along the
+        // way it came. The paths of all the pixels are the same line
+        // shifted: walking the patch along lines that slope as the way does
+        // (a pixel along its longer axis, its slope across), each path is
+        // the run of `n` before a pixel on its own line, summed at once from
+        // the sums along that line. (So it costs about a pass over the
+        // patch, however far the dab moved and whichever way.)
+        let across = back.x.abs() >= back.y.abs();
+        // Along the longer axis ("major") and across it ("minor").
+        let (major, minor) = if across {
+            (back.x, back.y)
+        } else {
+            (back.y, back.x)
+        };
+        let (len, breadth) = if across { (w, h) } else { (h, w) };
+        let (at_major, at_minor) = if across {
+            ((-lo_x) as usize, (-lo_y) as usize)
+        } else {
+            ((-lo_y) as usize, (-lo_x) as usize)
+        };
+        let step = major.signum() as i32;
+        let slope = minor / major.abs();
+        // How far across its line is at a place along it.
+        let rises: Vec<i32> = (0..len)
+            .map(|m| (m as f32 * step as f32 * slope).round() as i32)
+            .collect();
+        let rise = |m: usize| rises[m];
+        let pixel = |m: usize, k: usize| {
+            if across {
+                around[k * w + m]
+            } else {
+                around[m * w + k]
+            }
+        };
+        // The lines that cross the patch: line `c` holds the pixels at
+        // (m, c + rise(m)).
+        let (lowest, highest) = (at_major..at_major + side)
+            .map(rise)
+            .fold((i32::MAX, i32::MIN), |(a, b), r| (a.min(r), b.max(r)));
+        let first = at_minor as i32 - highest;
+        let lines = (at_minor as i32 + side as i32 - 1 - lowest - first + 1) as usize;
+        // Each line's sums: `sums[l * (len + 1) + m]`, everything on line l
+        // before place m.
+        let mut sums = vec![[0.0f32; 4]; lines * (len + 1)];
+        for_rows(&self.pool, &mut sums, len + 1, |l, line| {
+            let c = first + l as i32;
+            let mut acc = [0.0f32; 4];
+            for m in 0..len {
+                let k = c + rise(m);
+                if (0..breadth as i32).contains(&k) {
+                    let p = pixel(m, k as usize);
+                    acc = [acc[0] + p[0], acc[1] + p[1], acc[2] + p[2], acc[3] + p[3]];
+                }
+                line[m + 1] = acc;
+            }
+        });
+        let share = 1.0 / n as f32;
+        let mut picked = vec![[0.0f32; 4]; side * side];
+        for_rows(&self.pool, &mut picked, side, |row, out| {
+            for (col, v) in out.iter_mut().enumerate() {
+                // This pixel along and across the way.
+                let (m, k) = if across {
+                    (at_major + col, at_minor + row)
+                } else {
+                    (at_major + row, at_minor + col)
+                };
+                let l = (k as i32 - rise(m) - first) as usize;
+                // The run back along the way, this place first.
+                let (lo, hi) = if step > 0 {
+                    (m, m + n)
+                } else {
+                    (m + 1 - n, m + 1)
+                };
+                let line = &sums[l * (len + 1)..(l + 1) * (len + 1)];
+                let (e, s) = (line[hi.min(len)], line[lo]);
+                *v = [
+                    (e[0] - s[0]) * share,
+                    (e[1] - s[1]) * share,
+                    (e[2] - s[2]) * share,
+                    (e[3] - s[3]) * share,
+                ];
+            }
+        });
+        (stored, under, picked)
     }
 
     /// The brush colour as paint (premultiplied, opaque, in the stroke's

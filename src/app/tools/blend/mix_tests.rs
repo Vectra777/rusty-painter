@@ -1017,3 +1017,33 @@ fn krita_s_older_dulling_samples_past_the_dab() {
     // (A 63 px square round 60: 22 of its columns black.)
     assert!(own == 255 && (200..225).contains(&wide), "{own} vs {wide}");
 }
+
+#[test]
+fn a_smudge_fades_smoothly_without_steps_at_each_dab() {
+    // Black dragged into white with dabs 8 px apart: behind the edge the
+    // paint thins out evenly, not in a step at each dab (picking up the
+    // paint the last dab laid, a whole dab spacing off, copied each edge
+    // that far along again and again).
+    let mut a = app(None);
+    black_then_white(&mut a, 40);
+    let o = &mut a.brush_state.brush.brush_options;
+    o.diameter = 40.0;
+    o.hardness = 0.0;
+    o.auto_spacing = None;
+    o.spacing = 20.0;
+    a.blend_press(Vec2::new(30.0, 32.0), 1.0);
+    for i in 1..=16 {
+        a.blend_drag(Vec2::new(30.0 + i as f32 * 5.0, 32.0), 1.0);
+    }
+    a.blend_release();
+    a.settle_strokes();
+    let row: Vec<i32> = (40..100).map(|x| pixel(&a, x).r() as i32).collect();
+    // Lighter and lighter along the stroke: no dip back darker.
+    let dips: Vec<(usize, i32)> = row
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| w[1] < w[0] - 1)
+        .map(|(i, w)| (i + 40, w[0] - w[1]))
+        .collect();
+    assert!(dips.is_empty(), "steps {dips:?} in {row:?}");
+}
