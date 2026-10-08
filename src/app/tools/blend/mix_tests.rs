@@ -678,11 +678,11 @@ fn halton_dulling_lands_near_the_full_weighted_average() {
     let codec = Codec::new();
     // Noise under a soft round tip.
     let mut seed = 12345u32;
-    let source: Vec<Color32> = (0..side * side)
+    let source: Vec<[f32; 4]> = (0..side * side)
         .map(|_| {
             seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
             let v = (seed >> 16) as u8;
-            Color32::from_rgb(v, v / 2, 255 - v)
+            codec.to_f(Color32::from_rgb(v, v / 2, 255 - v))
         })
         .collect();
     let mid = side as f32 * 0.5;
@@ -693,15 +693,14 @@ fn halton_dulling_lands_near_the_full_weighted_average() {
         })
         .collect();
     let (mut sum, mut weight) = ([0.0f32; 4], 0.0f32);
-    for (c, &w) in source.iter().zip(&mask) {
-        let px = codec.to_f(*c);
+    for (px, &w) in source.iter().zip(&mask) {
         for k in 0..4 {
             sum[k] += px[k] * w;
         }
         weight += w;
     }
     let full = sum.map(|v| v / weight);
-    let quick = halton_dull(&source, &mask, side, 40.0, codec).expect("paint");
+    let quick = halton_dull(&source, &mask, side, 40.0).expect("paint");
     // Pure noise is the worst case: it stops once a batch moves the
     // colour by 2/255 or less (as Krita does), a few levels off.
     for k in 0..4 {
@@ -711,7 +710,7 @@ fn halton_dulling_lands_near_the_full_weighted_average() {
         );
     }
     // Nothing under the tip: no colour.
-    assert!(halton_dull(&source, &vec![0.0; side * side], side, 40.0, codec).is_none());
+    assert!(halton_dull(&source, &vec![0.0; side * side], side, 40.0).is_none());
 }
 
 #[test]
@@ -729,5 +728,86 @@ fn no_colour_rate_is_the_plain_smudge() {
         pixel(&plain, 60),
         red,
         "smudging one colour changes nothing"
+    );
+}
+
+/// Layer 1 black left of `edge`, white from it on.
+fn black_then_white(app: &mut crate::PainterApp, edge: i32) {
+    for tx in 0..2 {
+        let tile = (0..64 * 64)
+            .map(|i| {
+                if tx * 64 + i % 64 < edge {
+                    Color32::BLACK
+                } else {
+                    Color32::WHITE
+                }
+            })
+            .collect();
+        app.canvas_mut().set_layer_tile_data(1, tx, 0, tile);
+    }
+}
+
+#[test]
+fn a_faint_smudge_builds_up_in_16_bits_where_8_bits_round_it_away() {
+    use crate::canvas::storage::Depth;
+    // Dragged out of the black so faintly each dab darkens the white by
+    // less than half an 8-bit step.
+    let smudged = |depth: Depth| {
+        let mut a = app(None);
+        black_then_white(&mut a, 60);
+        a.convert_depth(depth);
+        a.brush_state.brush.brush_options.opacity = 0.002;
+        drag(&mut a);
+        a
+    };
+    let eight = smudged(Depth::U8);
+    assert_eq!(pixel(&eight, 62), Color32::WHITE, "each dab rounds away");
+    let mut sixteen = smudged(Depth::U16);
+    let at = 32 * 64 + 62;
+    let deep = sixteen.canvas.get_layer_tile_deep(1, 0, 0).unwrap();
+    let lin = deep.linear(at)[0];
+    assert!(lin < 0.999, "the faint dabs build up: {lin}");
+    assert_eq!(
+        sixteen.canvas.get_layer_tile_data(1, 0, 0).unwrap(),
+        deep.narrow_all(),
+        "the 8-bit pixels are the deep ones rounded"
+    );
+    // Undone: white at full depth again.
+    sixteen.apply_history(false);
+    let deep = sixteen.canvas.get_layer_tile_deep(1, 0, 0).unwrap();
+    assert_eq!(deep.linear(at), [1.0; 4]);
+}
+
+#[test]
+fn a_half_pixel_move_carries_paint_half_a_pixel() {
+    // A hard edge under the middle of an imported smear at full rate: each
+    // dab copies the layer from where the last one was.
+    let mut a = app(None);
+    black_then_white(&mut a, 60);
+    krita_brush(&mut a, false, 1.0, 0.0);
+    let o = &mut a.brush_state.brush.brush_options;
+    o.auto_spacing = None;
+    o.spacing = 2.5;
+    // How much black row 32 holds round the edge (in pixels' worth).
+    let black = |a: &crate::PainterApp| -> f32 {
+        let codec = Codec::new();
+        (50..70).map(|x| 1.0 - codec.to_f(pixel(a, x))[0]).sum()
+    };
+    let before = black(&a);
+    // Half a pixel a dab, one pixel in all.
+    a.start_stroke_with_pressure(Vec2::new(60.0, 32.0), 1.0);
+    a.add_stroke_point(Vec2::new(60.5, 32.0), 1.0);
+    a.add_stroke_point(Vec2::new(61.0, 32.0), 1.0);
+    a.finish_stroke();
+    a.settle_strokes();
+    let moved = black(&a) - before;
+    let edge: Vec<u8> = (58..64).map(|x| pixel(&a, x).r()).collect();
+    assert!(
+        (moved - 1.0).abs() < 0.1,
+        "the edge moved as far as the brush: {moved} {edge:?}"
+    );
+    assert!(
+        edge.iter().any(|&r| r > 20 && r < 235),
+        "between whole pixels: {edge:?}"
     );
 }

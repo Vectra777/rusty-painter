@@ -264,6 +264,8 @@ struct BlendStroke {
     dir: Vec2,
     /// Tiles as they were before the stroke first changed them.
     before: HashMap<(i32, i32), Vec<Color32>>,
+    /// In a deeper document, the same tiles at full depth.
+    before_deep: HashMap<(i32, i32), crate::canvas::storage::DeepTile>,
     last: Option<Vec2>,
     /// The previous sample's pressure: dabs between samples blend from it.
     last_pressure: f32,
@@ -395,14 +397,51 @@ fn read_patch(
     h: usize,
     wrap: bool,
 ) -> Vec<Color32> {
+    read_wrapped(canvas, (x0, y0), w, h, wrap, |x, y, w, h| {
+        canvas.render_reference(source, x, y, w, h)
+    })
+}
+
+/// [`read_patch`] as linear paint (premultiplied): from one layer of a
+/// deeper document at its full depth, else the 8-bit pixels decoded.
+fn read_patch_linear(
+    canvas: &crate::canvas::Canvas,
+    source: Option<usize>,
+    origin: (i32, i32),
+    w: usize,
+    h: usize,
+    wrap: bool,
+) -> Vec<[f32; 4]> {
+    match source.filter(|_| canvas.depth().is_deep()) {
+        Some(idx) => read_wrapped(canvas, origin, w, h, wrap, |x, y, w, h| {
+            canvas.read_layer_linear(idx, (x, y, w, h))
+        }),
+        None => {
+            let codec = Codec::new();
+            let patch = read_patch(canvas, source, origin, w, h, wrap);
+            patch.into_iter().map(|c| codec.to_f(c)).collect()
+        }
+    }
+}
+
+/// The `w`×`h` canvas rectangle at `origin` as `read(x, y, w, h)` reads
+/// it; with `wrap`, read in pieces round the edges.
+fn read_wrapped<T: Copy + Default>(
+    canvas: &crate::canvas::Canvas,
+    (x0, y0): (i32, i32),
+    w: usize,
+    h: usize,
+    wrap: bool,
+    read: impl Fn(i32, i32, usize, usize) -> Vec<T>,
+) -> Vec<T> {
     if !wrap {
-        return canvas.render_reference(source, x0, y0, w, h);
+        return read(x0, y0, w, h);
     }
     let (cw, ch) = (canvas.width() as i32, canvas.height() as i32);
-    let mut out = vec![Color32::TRANSPARENT; w * h];
+    let mut out = vec![T::default(); w * h];
     for (sx, dx, pw) in wrap_pieces(x0, w, cw) {
         for (sy, dy, ph) in wrap_pieces(y0, h, ch) {
-            let part = canvas.render_reference(source, sx, sy, pw, ph);
+            let part = read(sx, sy, pw, ph);
             for row in 0..ph {
                 let at = (dy + row) * w + dx;
                 out[at..at + pw].copy_from_slice(&part[row * pw..(row + 1) * pw]);
@@ -410,6 +449,37 @@ fn read_patch(
         }
     }
     out
+}
+
+/// The `w`×`h` block at `(dx, dy)` of a `side`-wide patch (the patch
+/// itself when that's all of it).
+fn patch_block<T: Copy>(
+    patch: &[T],
+    side: usize,
+    (dx, dy, w, h): (usize, usize, usize, usize),
+) -> std::borrow::Cow<'_, [T]> {
+    if w == side && h * side == patch.len() {
+        return std::borrow::Cow::Borrowed(patch);
+    }
+    (0..h)
+        .flat_map(|row| {
+            let start = (dy + row) * side + dx;
+            patch[start..start + w].iter().copied()
+        })
+        .collect()
+}
+
+/// [`crate::canvas::blend::with_alpha_of`] for linear paint: `v` with its
+/// alpha replaced by `a`, keeping its unpremultiplied colour.
+fn with_alpha_linear(v: [f32; 4], a: f32) -> [f32; 4] {
+    if a <= 0.0 {
+        return [0.0; 4];
+    }
+    if v[3] <= 0.0 {
+        return [0.0, 0.0, 0.0, a];
+    }
+    let k = a / v[3];
+    [v[0] * k, v[1] * k, v[2] * k, a]
 }
 
 /// The span `start..start + len` on a canvas `size` long that wraps round:
@@ -608,13 +678,7 @@ fn halton(mut i: u32, base: u32) -> f32 {
 /// moving rather than reading them all: at least 64 (or 2%), then 16 at a
 /// time until no channel moves more than 2/255. `None` if what it read
 /// carried less than half a pixel's weight.
-fn halton_dull(
-    source: &[Color32],
-    mask: &[f32],
-    side: usize,
-    reach: f32,
-    codec: Codec,
-) -> Option<[f32; 4]> {
+fn halton_dull(source: &[[f32; 4]], mask: &[f32], side: usize, reach: f32) -> Option<[f32; 4]> {
     let mid = side as f32 * 0.5;
     let inside = |l: usize| (l as f32 + 0.5 - mid).abs() <= reach;
     let lo = (0..side).find(|&l| inside(l))?;
@@ -629,7 +693,7 @@ fn halton_dull(
         let at = y * side + x;
         let w = mask[at];
         if w > 0.0 {
-            let px = codec.to_f(source[at]);
+            let px = source[at];
             for c in 0..4 {
                 sum[c] += px[c] * w;
             }
@@ -813,6 +877,7 @@ impl PainterApp {
                 kind,
                 dir: Vec2::ZERO,
                 before: HashMap::new(),
+                before_deep: HashMap::new(),
                 last: Some(pos),
                 last_pressure: pressure,
                 travelled: 0.0,
@@ -961,6 +1026,7 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
             map: None,
             inner: None,
         });
+        let mut before_deep = self.stroke.before_deep;
         let tiles = self
             .stroke
             .before
@@ -973,7 +1039,10 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
                 y0: 0,
                 width: ts,
                 height: ts,
-                data: data.into(),
+                data: match before_deep.remove(&(tx, ty)) {
+                    Some(deep) => crate::canvas::history::SnapshotPixels::Deep(deep),
+                    None => data.into(),
+                },
             })
             .collect();
         Some(UndoAction {
@@ -1089,7 +1158,10 @@ impl BlendSession {
         let ts = self.canvas.tile_size();
         for (&(tx, ty), pixels) in &self.stroke.before {
             let rect = (tx * ts as i32, ty * ts as i32, ts, ts);
-            self.canvas.write_layer_region(self.idx, rect, pixels, None);
+            match self.stroke.before_deep.get(&(tx, ty)) {
+                Some(deep) => self.canvas.set_layer_tile_deep(self.idx, tx, ty, deep),
+                None => self.canvas.write_layer_region(self.idx, rect, pixels, None),
+            }
             self.damage
                 .push([rect.0, rect.1, rect.0 + ts as i32, rect.1 + ts as i32]);
         }
@@ -1341,15 +1413,25 @@ impl BlendSession {
         let paint_blend = mix.blend;
 
         let wrap = self.wrap;
+        // A deeper document's layer is read and written at its full depth,
+        // as linear paint all the way (rounding each dab to 8 bits would
+        // lose what the depth keeps, and band a long smudge).
+        let deep = self.canvas.depth().is_deep();
         // The pixels as stored (kept exactly where the dab doesn't reach),
         // and as linear paint.
-        let stored = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
-        let mut under = vec![[0.0f32; 4]; side * side];
-        for_rows(&pool, &mut under, side, |row, line| {
-            for (u, &c) in line.iter_mut().zip(&stored[row * side..]) {
-                *u = codec.to_f(c);
-            }
-        });
+        let (stored, under) = if deep {
+            let under = read_patch_linear(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
+            (Vec::new(), under)
+        } else {
+            let stored = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
+            let mut under = vec![[0.0f32; 4]; side * side];
+            for_rows(&pool, &mut under, side, |row, line| {
+                for (u, &c) in line.iter_mut().zip(&stored[row * side..]) {
+                    *u = codec.to_f(c);
+                }
+            });
+            (stored, under)
+        };
         // Deform moves the pixels themselves: each takes its colour from
         // where the displacement says, at full weight (the mask sets how
         // far it moves).
@@ -1365,17 +1447,14 @@ impl BlendSession {
             let step = self.brush.brush_options.spacing_px(diameter, 1.0).max(1.0);
             let margin = (r * amount * 0.6).max(step).ceil() as i32 + 2;
             let big_side = side + 2 * margin as usize;
-            let big: Vec<[f32; 4]> = read_patch(
+            let big = read_patch_linear(
                 &self.canvas,
                 Some(idx),
                 (x0 - margin, y0 - margin),
                 big_side,
                 big_side,
                 wrap,
-            )
-            .into_iter()
-            .map(|c| codec.to_f(c))
-            .collect();
+            );
             let local_center = center - Vec2::new(x0 as f32, y0 as f32);
             let moved = |i: usize| {
                 let m = mask[i];
@@ -1412,7 +1491,7 @@ impl BlendSession {
             target
         } else if let BlendKind::Clone { offset, merged } = stroke.kind {
             let source = if merged { None } else { Some(idx) };
-            read_patch(
+            read_patch_linear(
                 &self.canvas,
                 source,
                 (x0 + offset.0, y0 + offset.1),
@@ -1420,9 +1499,6 @@ impl BlendSession {
                 side,
                 wrap,
             )
-            .into_iter()
-            .map(|c| codec.to_f(c))
-            .collect()
         } else if let BlendKind::Sharpen(amount) = stroke.kind {
             let radius = ((r * blur_size).round() as usize).max(1);
             let soft = box_blur(&pool, &under, side, radius);
@@ -1516,7 +1592,29 @@ impl BlendSession {
             box_blur(&pool, &under, side, radius)
         };
 
+        // Pixel `i` under the dab: the target mixed into what's there.
+        let mixed = |i: usize| {
+            let (u, t) = (under[i], target[i]);
+            let m = if weights_are_mask { mask[i] } else { 1.0 };
+            // A mixing brush's blend mode: its paint over what's there.
+            let t = if paint_blend == crate::canvas::blend_modes::LayerBlend::Normal {
+                t
+            } else {
+                let rgba = |v: [f32; 4]| {
+                    eframe::egui::Rgba::from_rgba_premultiplied(v[0], v[1], v[2], v[3])
+                };
+                crate::canvas::blend_modes::composite(paint_blend, rgba(t), rgba(u), 0.0).to_array()
+            };
+            let mut v = [0.0; 4];
+            for c in 0..4 {
+                v[c] = u[c] + (t[c] - u[c]) * m;
+            }
+            v
+        };
+        // The result as 8-bit pixels or, in a deeper document, as linear
+        // paint (the other one left empty).
         let mut result = stored.clone();
+        let mut result_deep = if deep { under.clone() } else { Vec::new() };
         let changed = std::sync::atomic::AtomicBool::new(false);
         for_rows(&pool, &mut result, side, |row, line| {
             let mut row_changed = false;
@@ -1527,28 +1625,30 @@ impl BlendSession {
                 if mask[i] <= 0.0 {
                     continue;
                 }
-                let (u, t) = (under[i], target[i]);
-                let m = if weights_are_mask { mask[i] } else { 1.0 };
-                // A mixing brush's blend mode: its paint over what's there.
-                let t = if paint_blend == crate::canvas::blend_modes::LayerBlend::Normal {
-                    t
-                } else {
-                    let rgba = |v: [f32; 4]| {
-                        eframe::egui::Rgba::from_rgba_premultiplied(v[0], v[1], v[2], v[3])
-                    };
-                    crate::canvas::blend_modes::composite(paint_blend, rgba(t), rgba(u), 0.0)
-                        .to_array()
-                };
-                let mut v = [0.0; 4];
-                for c in 0..4 {
-                    v[c] = u[c] + (t[c] - u[c]) * m;
-                }
                 let before = *out;
-                let mut new = codec.to_c(v);
+                let mut new = codec.to_c(mixed(i));
                 if alpha_lock {
                     new = crate::canvas::blend::with_alpha_of(new, before.a());
                 }
                 row_changed |= new != before;
+                *out = new;
+            }
+            if row_changed {
+                changed.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        for_rows(&pool, &mut result_deep, side, |row, line| {
+            let mut row_changed = false;
+            for (lx, out) in line.iter_mut().enumerate() {
+                let i = row * side + lx;
+                if mask[i] <= 0.0 {
+                    continue;
+                }
+                let mut new = mixed(i);
+                if alpha_lock {
+                    new = with_alpha_linear(new, out[3]);
+                }
+                row_changed |= new != *out;
                 *out = new;
             }
             if row_changed {
@@ -1560,52 +1660,24 @@ impl BlendSession {
         if color_rate <= 0.0
             && let Some(carry) = stroke.carries.get_mut(copy).and_then(|c| c.as_mut())
         {
-            let result = &result;
+            let (result, result_deep) = (&result, &result_deep);
             for_rows(&pool, &mut carry.px, side, |row, line| {
-                for (c, &res) in line.iter_mut().zip(&result[row * side..]) {
-                    let res = codec.to_f(res);
+                for (lx, c) in line.iter_mut().enumerate() {
+                    let i = row * side + lx;
+                    let res = if deep {
+                        result_deep[i]
+                    } else {
+                        codec.to_f(result[i])
+                    };
                     for k in 0..4 {
                         c[k] = res[k] + (c[k] - res[k]) * length;
                     }
                 }
             });
         }
-        if !changed.into_inner() {
-            return;
-        }
-        if !wrap {
-            self.canvas.write_layer_region(
-                idx,
-                (x0, y0, side, side),
-                &result,
-                Some(&mut stroke.before),
-            );
-            self.damage
-                .push([x0, y0, x0 + side as i32, y0 + side as i32]);
-            return;
-        }
-        // Wrap-around: each piece of the patch where it lands on the canvas.
-        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
-        let mut damage = Vec::new();
-        for (sx, dx, w) in wrap_pieces(x0, side, cw) {
-            for (sy, dy, h) in wrap_pieces(y0, side, ch) {
-                let piece: Vec<Color32> = (0..h)
-                    .flat_map(|row| {
-                        let start = (dy + row) * side + dx;
-                        result[start..start + w].iter().copied()
-                    })
-                    .collect();
-                self.canvas.write_layer_region(
-                    idx,
-                    (sx, sy, w, h),
-                    &piece,
-                    Some(&mut stroke.before),
-                );
-                damage.push([sx, sy, sx + w as i32, sy + h as i32]);
-            }
-        }
-        for rect in damage {
-            self.damage.push(rect);
+        if changed.into_inner() {
+            let linear = deep.then_some(&result_deep[..]);
+            self.write_blend_patch(idx, (x0, y0), side, &result, linear, wrap);
         }
     }
 }
@@ -1670,18 +1742,40 @@ impl BlendSession {
             })
             .collect();
 
-        let stored = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
-        // Where the last dab was, in whole pixels (read aligned).
-        let shift = (last - center).round();
-        let (sx, sy) = (x0 + shift.x as i32, y0 + shift.y as i32);
-        let source = read_patch(&self.canvas, Some(idx), (sx, sy), side, side, wrap);
+        // The layer under the dab as linear paint, at full depth in a deeper
+        // document (written back so too), else as stored and decoded.
+        let deep = self.canvas.depth().is_deep();
+        let (stored, under) = if deep {
+            let under = read_patch_linear(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
+            (Vec::new(), under)
+        } else {
+            let stored = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
+            let under = stored.iter().map(|&c| codec.to_f(c)).collect();
+            (stored, under)
+        };
+        // The layer where the last dab was, to the sub-pixel: between the
+        // whole pixels round it (bilinear, as Krita samples it), so the
+        // paint moves as far as the brush did rather than in whole-pixel
+        // jumps (a slow stroke's moves under half a pixel moved none).
+        let shift = last - center;
+        let whole = shift.floor();
+        let (sx, sy) = (x0 + whole.x as i32, y0 + whole.y as i32);
+        let around = read_patch_linear(&self.canvas, Some(idx), (sx, sy), side + 1, side + 1, wrap);
+        let frac = shift - whole;
+        let mut source = vec![[0.0f32; 4]; side * side];
+        for_rows(&pool, &mut source, side, |ly, row| {
+            for (lx, s) in row.iter_mut().enumerate() {
+                let p = Vec2::new(lx as f32 + 0.5, ly as f32 + 0.5) + frac;
+                *s = sample_bilinear(&around, side + 1, p);
+            }
+        });
         // Dulling: one colour, the weighted average (by the tip and the
         // paint's coverage, premultiplied) of the middle of the source, out
         // to the smudge radius, widened while that holds no paint.
         let dulled = k.dulling.then(|| {
             let mut radius = k.radius;
             loop {
-                if let Some(c) = halton_dull(&source, &mask, side, (r * radius).max(0.5), codec) {
+                if let Some(c) = halton_dull(&source, &mask, side, (r * radius).max(0.5)) {
                     break c;
                 }
                 if radius >= 1.0 {
@@ -1693,9 +1787,9 @@ impl BlendSession {
 
         // One pixel under the tip: the picked-up paint over the layer,
         // then the brush colour, put down through the tip.
-        let smudge_pixel = |i: usize| -> Color32 {
-            let u = codec.to_f(stored[i]);
-            let s = dulled.unwrap_or_else(|| codec.to_f(source[i]));
+        let smudge_pixel = |i: usize| -> [f32; 4] {
+            let u = under[i];
+            let s = dulled.unwrap_or(source[i]);
             // The picked-up paint over the layer (copied, alpha too, with
             // smear alpha).
             let mut v: [f32; 4] = if k.smear_alpha {
@@ -1717,36 +1811,35 @@ impl BlendSession {
                 };
             }
             let m = mask[i].min(1.0);
-            let mut out = codec.to_c(std::array::from_fn(|c| u[c] + (v[c] - u[c]) * m));
-            if alpha_lock {
-                out = crate::canvas::blend::with_alpha_of(out, stored[i].a());
-            }
-            out
+            std::array::from_fn(|c| u[c] + (v[c] - u[c]) * m)
         };
 
+        // The result as 8-bit pixels or, in a deeper document, as linear
+        // paint (the other one left empty).
         let mut result = stored.clone();
-        let changed = pool.install(|| {
-            result
-                .par_chunks_mut(side)
-                .enumerate()
-                .map(|(ly, row)| {
-                    let (first, last) = spans[ly];
-                    let mut changed = false;
-                    for (lx, px) in row.iter_mut().enumerate().take(last).skip(first) {
-                        let i = ly * side + lx;
-                        if mask[i] <= 0.0 {
-                            continue;
-                        }
-                        let out = smudge_pixel(i);
-                        changed |= out != *px;
-                        *px = out;
-                    }
-                    changed
-                })
-                .reduce(|| false, |a, b| a || b)
-        });
+        let mut result_deep = if deep { under.clone() } else { Vec::new() };
+        let changed = if deep {
+            lay_spans(&pool, &mut result_deep, side, &spans, &mask, |i| {
+                let v = smudge_pixel(i);
+                if alpha_lock {
+                    with_alpha_linear(v, under[i][3])
+                } else {
+                    v
+                }
+            })
+        } else {
+            lay_spans(&pool, &mut result, side, &spans, &mask, |i| {
+                let out = codec.to_c(smudge_pixel(i));
+                if alpha_lock {
+                    crate::canvas::blend::with_alpha_of(out, stored[i].a())
+                } else {
+                    out
+                }
+            })
+        };
         if changed {
-            self.write_blend_patch(idx, (x0, y0), side, &result, wrap);
+            let linear = deep.then_some(&result_deep[..]);
+            self.write_blend_patch(idx, (x0, y0), side, &result, linear, wrap);
         }
         // A lightness tip: its grey on the lightness map, as much as the
         // paint thickness says (overwriting: at the dab's opacity; else as
@@ -1853,50 +1946,82 @@ impl BlendSession {
 
     /// Put a blend stroke's `side`² `result` on layer `idx` at `origin`
     /// (round the edges with wrap-around), keeping the tiles' pixels from
-    /// before the stroke for its undo.
+    /// before the stroke for its undo. With `linear` (a deeper document),
+    /// that is written instead, at full depth.
     fn write_blend_patch(
         &mut self,
         idx: usize,
         (x0, y0): (i32, i32),
         side: usize,
         result: &[Color32],
+        linear: Option<&[[f32; 4]]>,
         wrap: bool,
     ) {
         let stroke = &mut self.stroke;
-        if !wrap {
-            self.canvas.write_layer_region(
-                idx,
-                (x0, y0, side, side),
-                result,
-                Some(&mut stroke.before),
-            );
-            self.damage
-                .push([x0, y0, x0 + side as i32, y0 + side as i32]);
-            return;
-        }
-        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
-        let mut damage = Vec::new();
-        for (sx, dx, w) in wrap_pieces(x0, side, cw) {
-            for (sy, dy, h) in wrap_pieces(y0, side, ch) {
-                let piece: Vec<Color32> = (0..h)
-                    .flat_map(|row| {
-                        let start = (dy + row) * side + dx;
-                        result[start..start + w].iter().copied()
-                    })
-                    .collect();
-                self.canvas.write_layer_region(
+        // Wrap-around: each piece of the patch where it lands on the canvas.
+        let pieces = if wrap {
+            let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+            let rows = wrap_pieces(y0, side, ch);
+            wrap_pieces(x0, side, cw)
+                .into_iter()
+                .flat_map(|(sx, dx, w)| rows.iter().map(move |&(sy, dy, h)| (sx, sy, dx, dy, w, h)))
+                .collect()
+        } else {
+            vec![(x0, y0, 0, 0, side, side)]
+        };
+        for (sx, sy, dx, dy, w, h) in pieces {
+            let rect = (sx, sy, w, h);
+            match linear {
+                Some(px) => self.canvas.write_layer_region_deep(
                     idx,
-                    (sx, sy, w, h),
-                    &piece,
+                    rect,
+                    &patch_block(px, side, (dx, dy, w, h)),
+                    &mut stroke.before,
+                    &mut stroke.before_deep,
+                ),
+                None => self.canvas.write_layer_region(
+                    idx,
+                    rect,
+                    &patch_block(result, side, (dx, dy, w, h)),
                     Some(&mut stroke.before),
-                );
-                damage.push([sx, sy, sx + w as i32, sy + h as i32]);
+                ),
             }
-        }
-        for rect in damage {
-            self.damage.push(rect);
+            self.damage.push([sx, sy, sx + w as i32, sy + h as i32]);
         }
     }
+}
+
+/// Set each pixel of the `side`-wide `patch` under the tip (by row, the
+/// span `spans` gives, where `mask` reaches) to `f` of its index, rows on
+/// `pool`: whether any changed.
+fn lay_spans<T: PartialEq + Send>(
+    pool: &rayon::ThreadPool,
+    patch: &mut [T],
+    side: usize,
+    spans: &[(usize, usize)],
+    mask: &[f32],
+    f: impl Fn(usize) -> T + Sync,
+) -> bool {
+    pool.install(|| {
+        patch
+            .par_chunks_mut(side)
+            .enumerate()
+            .map(|(ly, row)| {
+                let (first, last) = spans[ly];
+                let mut changed = false;
+                for (lx, px) in row.iter_mut().enumerate().take(last).skip(first) {
+                    let i = ly * side + lx;
+                    if mask[i] <= 0.0 {
+                        continue;
+                    }
+                    let out = f(i);
+                    changed |= out != *px;
+                    *px = out;
+                }
+                changed
+            })
+            .reduce(|| false, |a, b| a || b)
+    })
 }
 
 /// Tile `key` of layer `idx` as it was before the stroke (`before` holds

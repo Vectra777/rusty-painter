@@ -254,6 +254,105 @@ impl Canvas {
         }
     }
 
+    /// Layer `layer_idx`'s pixels over the `w`×`h` area at `(x, y)` as
+    /// premultiplied linear light: at full depth where its tiles have deep
+    /// pixels, else their 8-bit ones decoded. It reads the tiles
+    /// [`Self::render_reference`] reads for one layer.
+    pub fn read_layer_linear(
+        &self,
+        layer_idx: usize,
+        (x, y, w, h): (i32, i32, usize, usize),
+    ) -> Vec<[f32; 4]> {
+        let ts = self.tile_size as i32;
+        let mut out = vec![[0.0; 4]; w * h];
+        if w == 0 || h == 0 {
+            return out;
+        }
+        let decoder = crate::canvas::blend::LinearDecoder::new();
+        let (x1, y1) = (x + w as i32, y + h as i32);
+        for ty in y.div_euclid(ts)..=(y1 - 1).div_euclid(ts) {
+            for tx in x.div_euclid(ts)..=(x1 - 1).div_euclid(ts) {
+                let Some(cell) = self.shown_tile_cell(layer_idx, tx, ty) else {
+                    continue;
+                };
+                let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(data) = cell.data().filter(|_| !cell.is_empty) else {
+                    continue;
+                };
+                let deep = cell.deep();
+                let (ox, oy) = (tx * ts, ty * ts);
+                let (cx0, cx1) = (x.max(ox), x1.min(ox + ts));
+                for py in y.max(oy)..y1.min(oy + ts) {
+                    let src = ((py - oy) * ts + (cx0 - ox)) as usize;
+                    let dst = ((py - y) as usize) * w + (cx0 - x) as usize;
+                    for k in 0..(cx1 - cx0) as usize {
+                        out[dst + k] = match deep {
+                            Some(deep) => deep.linear(src + k),
+                            None => decoder.decode(data[src + k]).to_array(),
+                        };
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// [`Self::write_layer_region`] at full depth, for a deeper document:
+    /// `pixels` are premultiplied linear light, kept in the tiles' deep
+    /// pixels and rounded to their 8-bit ones. Each tile's pixels before its
+    /// first write are saved into `before`, and at full depth into
+    /// `before_deep`, for undo. Nothing is written in an 8-bit document.
+    pub fn write_layer_region_deep(
+        &self,
+        layer_idx: usize,
+        (x, y, w, h): (i32, i32, usize, usize),
+        pixels: &[[f32; 4]],
+        before: &mut HashMap<(i32, i32), Vec<Color32>>,
+        before_deep: &mut HashMap<(i32, i32), DeepTile>,
+    ) {
+        let ts = self.tile_size as i32;
+        let (x0, y0) = (x.max(0), y.max(0));
+        let (x1, y1) = (
+            (x + w as i32).min(self.width as i32),
+            (y + h as i32).min(self.height as i32),
+        );
+        if x1 <= x0 || y1 <= y0 || !self.depth.is_deep() {
+            return;
+        }
+        for ty in y0 / ts..=(y1 - 1) / ts {
+            for tx in x0 / ts..=(x1 - 1) / ts {
+                let Some(cell) = self.ensure_layer_tile(layer_idx, tx, ty) else {
+                    continue;
+                };
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let was_empty = cell.is_empty;
+                let (data, deep) = cell.deep_parts(self.depth, (ts * ts) as usize);
+                let Some(deep) = deep else {
+                    continue;
+                };
+                before.entry((tx, ty)).or_insert_with(|| data.clone());
+                before_deep.entry((tx, ty)).or_insert_with(|| deep.clone());
+                let (ox, oy) = (tx * ts, ty * ts);
+                let (cx0, cx1) = (x0.max(ox), x1.min(ox + ts));
+                let mut wrote_paint = false;
+                for py in y0.max(oy)..y1.min(oy + ts) {
+                    let src = ((py - y) as usize) * w + (cx0 - x) as usize;
+                    let dst = ((py - oy) * ts + (cx0 - ox)) as usize;
+                    for k in 0..(cx1 - cx0) as usize {
+                        let v = pixels[src + k];
+                        wrote_paint |= v[3] > 0.0;
+                        deep.set_linear(dst + k, v);
+                        data[dst + k] = deep.narrow(dst + k);
+                    }
+                }
+                // As the 8-bit writer: the whole tile is looked at only when
+                // clearing pixels of a painted one.
+                let empty = !wrote_paint && (was_empty || deep.is_transparent());
+                cell.is_empty = empty;
+            }
+        }
+    }
+
     /// Paint `color` (unmultiplied) into layer `layer_idx` with `mask` as
     /// coverage, recording the touched tiles in `history`. Alpha-locked
     /// layers only recolour. Returns the changed canvas area.
