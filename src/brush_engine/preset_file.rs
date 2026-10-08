@@ -966,10 +966,13 @@ mod tests {
             if let (PixelBrushShape::Custom(x), PixelBrushShape::Custom(y)) = (
                 &a.brush.brush_options.pixel_shape,
                 &b.brush.brush_options.pixel_shape,
-            ) {
+            ) && builtin_tip_name(x).is_some()
+            {
                 assert!(Arc::ptr_eq(x, y), "{}: built-in tip not shared", a.name);
             }
-            if let (Some(x), Some(y)) = (&a.brush.texture, &b.brush.texture) {
+            if let (Some(x), Some(y)) = (&a.brush.texture, &b.brush.texture)
+                && is_builtin_texture(&x.pattern)
+            {
                 assert!(Arc::ptr_eq(&x.pattern, &y.pattern), "{}", a.name);
             }
         }

@@ -272,8 +272,42 @@ pub fn default_tags(name: &str) -> &'static [&'static str] {
         "Mosaic Grid" => &["Effects"],
         "Normal Map" => &["3D"],
         "Watercolour Wash" | "Wet Round" | "Water (Re-wet)" | "Drippy Ink" => &["Painting", "Wet"],
-        _ => &[],
+        _ => krita_default_tags(name),
     }
+}
+
+/// The app's tags, for the presets that came from Krita's defaults (whose
+/// tags are kept in the default brushes file, by their names here).
+const TAGS: &[&str] = &[
+    "Sketching",
+    "Inking",
+    "Painting",
+    "Texture",
+    "Effects",
+    "Erasers",
+    "Pixel",
+    "3D",
+    "Krita",
+];
+
+/// The tags the default brushes file gives the preset called `name`.
+fn krita_default_tags(name: &str) -> &'static [&'static str] {
+    static TAGGED: std::sync::OnceLock<std::collections::HashMap<String, Vec<&'static str>>> =
+        std::sync::OnceLock::new();
+    let tagged = TAGGED.get_or_init(|| {
+        let file = PainterApp::default_brushes_file();
+        let presets = crate::brush_engine::preset_file::decode_with_meta(file).unwrap_or_default();
+        (presets.into_iter())
+            .map(|(p, meta)| {
+                let tags = TAGS
+                    .iter()
+                    .copied()
+                    .filter(|t| meta.tags.iter().any(|m| m == t));
+                (p.name, tags.collect())
+            })
+            .collect()
+    });
+    tagged.get(name).map_or(&[], Vec::as_slice)
 }
 
 /// The app a brush file comes from, by its extension.
@@ -530,6 +564,101 @@ mod tests {
                 assert_eq!(hit(d.x, d.y, n), RadialHit::Slice(i), "{i} of {n}");
             }
         }
+    }
+
+    /// Rebuild `assets/default-brushes.rpbrush`: the app's own presets,
+    /// then Krita's defaults (from an installed Krita) as this app imports
+    /// them, less those it can't paint like Krita.
+    #[test]
+    #[ignore = "rewrites the default brushes from an installed Krita"]
+    fn regenerate_default_brushes_from_krita() {
+        const BUNDLE: &str = "/usr/share/krita/bundles/Krita_4_Default_Resources.bundle";
+        // Engines with no counterpart (experiment, clone, deform, filter)
+        // and an SVG tip.
+        const SKIP: &[&str] = &[
+            "t)_Shapes_Fill",
+            "v)_Clone_Tool",
+            "v)_Distort_Grow",
+            "v)_Distort_Move",
+            "v)_Distort_Shrink",
+            "x)_Filter_Blur",
+            "x)_Filter_Sharpen",
+            "z)_Stamp_Leaves",
+        ];
+        let bytes = std::fs::read(BUNDLE).expect("Krita installed");
+        let entries = crate::project::zip::read_all(&bytes).unwrap();
+        let manifest = entries
+            .iter()
+            .find(|(n, _)| n == "META-INF/manifest.xml")
+            .unwrap();
+        let manifest = String::from_utf8_lossy(&manifest.1);
+        // Krita's tags for the preset in `file`, as this app's.
+        let krita_tags = |file: &str| -> Vec<String> {
+            let entry = format!("full-path=\"paintoppresets/{file}.kpp\"");
+            let Some(at) = manifest.find(&entry) else {
+                return vec!["Krita".into()];
+            };
+            let rest = &manifest[at..];
+            let rest = &rest[..rest.find("</manifest:file-entry>").unwrap_or(rest.len())];
+            let mut tags = vec!["Krita".to_string()];
+            for tag in rest.split("<manifest:tag>").skip(1) {
+                let ours = match tag.split('<').next().unwrap_or("") {
+                    "Ink" => "Inking",
+                    "Sketch" => "Sketching",
+                    "Paint" | "Digital" => "Painting",
+                    "Textures" => "Texture",
+                    "FX" => "Effects",
+                    "Erasers" => "Erasers",
+                    "Pixel Art" => "Pixel",
+                    _ => continue,
+                };
+                if !tags.iter().any(|t| t == ours) {
+                    tags.push(ours.into());
+                }
+            }
+            if file.contains("Normal_Map") {
+                tags.push("3D".into());
+            }
+            tags
+        };
+        let own: Vec<_> =
+            crate::brush_engine::preset_file::decode_with_meta(PainterApp::default_brushes_file())
+                .unwrap()
+                .into_iter()
+                .filter(|(_, meta)| !meta.tags.iter().any(|t| t == "Krita"))
+                .collect();
+        let imported = crate::brush_engine::import::import("krita.bundle", &bytes).unwrap();
+        let (mut presets, mut meta): (Vec<_>, Vec<_>) = own
+            .into_iter()
+            .map(|(p, _)| (p, crate::brush_engine::preset_file::PresetMeta::default()))
+            .unzip();
+        for mut preset in imported.presets {
+            let file = preset.name.clone();
+            if SKIP.contains(&file.as_str()) {
+                continue;
+            }
+            // "b)_Basic-2_Opacity": "Basic-2 Opacity".
+            let name = file.split_once(")_").map_or(file.as_str(), |(_, n)| n);
+            preset.name = name.replace('_', " ");
+            if presets.iter().any(|p| p.name == preset.name) {
+                preset.name += " (Krita)";
+            }
+            meta.push(crate::brush_engine::preset_file::PresetMeta {
+                tags: krita_tags(&file),
+                favourite: false,
+            });
+            presets.push(preset);
+        }
+        let out = crate::brush_engine::preset_file::encode_with_meta(&presets, &meta).unwrap();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/default-brushes.rpbrush"
+        );
+        std::fs::write(path, out).unwrap();
+        for note in imported.notes {
+            println!("{note}");
+        }
+        println!("{} presets", presets.len());
     }
 
     #[test]

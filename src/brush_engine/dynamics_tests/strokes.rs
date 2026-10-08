@@ -519,10 +519,21 @@ fn every_preset_paints_and_undoes_exactly() {
         } else {
             Color32::from_rgb(235, 230, 220)
         };
-        let before = pixels_rgba(&painted(below));
-        let (mut canvas, undo) = paint_preset(&mut brush, below);
-        let after = pixels_rgba(&canvas);
-        let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+        let mut before = pixels_rgba(&painted(below));
+        let (mut canvas, mut undo) = paint_preset(&mut brush, below);
+        let changed = |before: &[Color32], canvas: &Canvas| {
+            let after = pixels_rgba(canvas);
+            before.iter().zip(&after).filter(|(a, b)| a != b).count()
+        };
+        // Lightening ones (add, dodge, lighten): white on a dark layer.
+        if changed(&before, &canvas) <= 150 {
+            let below = Color32::from_rgb(30, 30, 40);
+            brush = preset.brush.clone();
+            brush.brush_options.color = Color32::WHITE;
+            before = pixels_rgba(&painted(below));
+            (canvas, undo) = paint_preset(&mut brush, below);
+        }
+        let changed = changed(&before, &canvas);
         // A 1 px pixel-art line changes about as many pixels as it's long.
         assert!(
             changed > 150,

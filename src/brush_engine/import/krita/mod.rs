@@ -372,6 +372,7 @@ fn read_kpp(
         }
         "spraybrush" => {
             b.brush_type = BrushType::Spray;
+            let tip_diameter = b.brush_options.diameter;
             if let Some(d) = number("Spray/diameter") {
                 b.brush_options.diameter = d.clamp(1.0, 2000.0);
             }
@@ -390,7 +391,13 @@ fn read_kpp(
             };
             // Its particles' size: pixels, or a percentage of the spray's
             // size when proportional.
-            if let Some(w) = number("SprayShape/width") {
+            // With its shape off, a particle is the tip, scaled
+            // (`KisSprayPaintOp`).
+            if param("SprayShape/enabled") == Some("false") {
+                let scale = number("Spray/scale").unwrap_or(1.0);
+                sp.particle_size =
+                    (tip_diameter * scale / b.brush_options.diameter.max(1.0)).clamp(0.01, 1.0);
+            } else if let Some(w) = number("SprayShape/width") {
                 sp.particle_size = if yes("SprayShape/proportional") {
                     w / 100.0
                 } else {

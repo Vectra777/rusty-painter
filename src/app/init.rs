@@ -158,8 +158,24 @@ impl PainterApp {
     /// (built into the program, and copied into the user's library on first
     /// start: see [`Self::install_default_presets`]).
     pub(crate) fn default_brush_presets() -> Vec<BrushPreset> {
-        static FILE: &[u8] = include_bytes!("../../assets/default-brushes.rpbrush");
-        crate::brush_engine::preset_file::decode(FILE).expect("the default brushes load")
+        // Decoded once: the file holds Krita's tips and textures too (a
+        // few MB), and tips are shared (`Arc`) between the copies.
+        static PRESETS: std::sync::OnceLock<Vec<BrushPreset>> = std::sync::OnceLock::new();
+        PRESETS
+            .get_or_init(|| {
+                let started = std::time::Instant::now();
+                let presets =
+                    crate::brush_engine::preset_file::decode(Self::default_brushes_file())
+                        .expect("the default brushes load");
+                log::info!("Default brushes decoded in {:.1?}", started.elapsed());
+                presets
+            })
+            .clone()
+    }
+
+    /// The bytes of `assets/default-brushes.rpbrush`.
+    pub(crate) fn default_brushes_file() -> &'static [u8] {
+        include_bytes!("../../assets/default-brushes.rpbrush")
     }
 
     fn create_workspace(color_model: ColorModel) -> WorkspaceState {

@@ -902,6 +902,18 @@ fn krita_engines_come_across_as_this_apps() {
         spray.engines.spray.distribution,
         crate::brush_engine::engines::Distribution::Gaussian
     );
+    // Shape off: the particles are the (36 px) tip, scaled.
+    let stamp = with(
+        "spraybrush",
+        &[
+            p("Spray/diameter", "200"),
+            p("Spray/scale", "2"),
+            p("SprayShape/enabled", "false"),
+            p("SprayShape/width", "6"),
+        ]
+        .concat(),
+    );
+    assert!((stamp.engines.spray.particle_size - 0.36).abs() < 1e-6);
     let chalk = with("chalkbrush", &p("Chalk/radius", "12"));
     assert_eq!(
         (chalk.brush_type, chalk.brush_options.diameter),

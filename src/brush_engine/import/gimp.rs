@@ -129,7 +129,13 @@ pub(super) fn import_gih(bytes: &[u8], fallback: &str) -> Result<Imported, Strin
     let mut tips = Vec::with_capacity(count);
     let mut spacing = 25.0;
     for _ in 0..count {
-        let gbr = read_gbr(&mut r)?;
+        // Some files hold fewer cells than they say (Krita's own
+        // fairy-dust.gih): keep the ones there are, as Krita does.
+        let gbr = match read_gbr(&mut r) {
+            Ok(gbr) => gbr,
+            Err(_) if !tips.is_empty() => break,
+            Err(err) => return Err(err),
+        };
         spacing = gbr.spacing;
         tips.push(gbr.tip);
     }
@@ -232,6 +238,14 @@ pub(super) mod tests {
         assert_eq!(o.tip_count(), 3);
         assert_eq!(o.tip_order, TipOrder::Random);
         assert!(imported.notes.is_empty());
+    }
+
+    #[test]
+    fn a_gih_short_of_cells_keeps_the_ones_it_has() {
+        let mut bytes = b"Hose\n4 ncells:4 dim:1 rank0:4 sel0:random\n".to_vec();
+        bytes.extend(gbr("cell", 8, 8, 1, 30, &[255; 64]));
+        let imported = import_gih(&bytes, "file").unwrap();
+        assert_eq!(imported.presets[0].brush.brush_options.tip_count(), 1);
     }
 
     #[test]
