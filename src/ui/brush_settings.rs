@@ -1820,6 +1820,15 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
              pace (0: it never runs out).",
         )
         .changed();
+        if b.ink > 0.0 {
+            changed |= curve_row(
+                ui,
+                "Drying curve",
+                "How dry the hairs are (up) as they go through their paint (across) \
+                 (off: at a steady pace).",
+                &mut b.depletion,
+            );
+        }
         changed |= slider_row(
             ui,
             "Variation",
@@ -1869,6 +1878,13 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
         }
         changed |= ui
             .checkbox(&mut b.deplete_saturation, "Colour fades as it dries")
+            .changed();
+        changed |= ui
+            .checkbox(&mut b.soak, "Soaks up the layer's colour")
+            .on_hover_text(
+                "Each hair paints with the colour under it where the stroke starts \
+                 (the brush colour where the layer is clear).",
+            )
             .changed();
     });
     changed
@@ -2260,13 +2276,28 @@ fn pressure_curve_row(
     name: &str,
     curve: &mut Option<crate::brush_engine::hardness::SoftnessCurve>,
 ) -> bool {
+    curve_row(
+        ui,
+        &format!("{name} curve"),
+        "Shape how pen pressure drives this setting (off: straight through).",
+        curve,
+    )
+}
+
+/// An optional rising curve: off (straight through) or an editable one.
+fn curve_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    hint: &str,
+    curve: &mut Option<crate::brush_engine::hardness::SoftnessCurve>,
+) -> bool {
     use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
     let mut changed = false;
     let mut custom = curve.is_some();
-    property_row(ui, &format!("{name} curve"), |ui| {
+    property_row(ui, label, |ui| {
         if ui
             .checkbox(&mut custom, "Custom")
-            .on_hover_text("Shape how pen pressure drives this setting (off: straight through).")
+            .on_hover_text(hint)
             .changed()
         {
             *curve = custom.then(|| SoftnessCurve {

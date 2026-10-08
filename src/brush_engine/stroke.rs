@@ -85,6 +85,9 @@ pub struct StrokeTiles {
     /// with their strength) rather than painted: a mixing brush lays each
     /// down itself.
     pub(crate) collect: Option<Vec<CollectedDab>>,
+    /// A soaking bristle brush's hairs' colours, taken where the stroke
+    /// started (`None` before its first dab, or where the layer was clear).
+    pub(crate) hair_colors: Option<Vec<Option<[f32; 3]>>>,
 }
 
 /// A dab as the brush would paint it, for a stroke that lays its dabs down

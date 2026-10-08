@@ -377,7 +377,7 @@ impl StoredBrush {
             dual: b.dual.as_ref().map(|d| StoredDual::from_dual(d, res)),
             wet_edge: b.wet_edge,
             wet_edge_width: b.wet_edge_width,
-            bristles: b.bristles,
+            bristles: b.bristles.clone(),
             sketch: b.sketch,
             hatching: b.hatching,
             engines: b.engines,

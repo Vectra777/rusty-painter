@@ -18,7 +18,7 @@ Krita engines that came across approximately (from reading Krita's source)
 - Curve: Krita's cubic mode; its connection line is the pen's own segment, here from the curve's start to the pen.
 - Particle: Krita's scale x/y options.
 - Tangent normal: direction, rotation and mix modes, elevation sensitivity, canvas rotation and mirroring.
-- Bristle: connected paths between dabs, ink depletion curves and weights, soaking ink from the layer; the Krita preset keys for the bristle options are read as documented but weren't checked against a real preset.
+- Bristle: connected paths between dabs, Krita's ink depletion weights (pressure, bristle length, ink amount).
 - Sketch: magnetify, make-connection and distance density don't import.
 - Mix colour source with several sensors at once.
 - Deform: lens in and out, colour deform. Clone: healing.

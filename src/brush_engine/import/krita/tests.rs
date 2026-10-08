@@ -1044,13 +1044,19 @@ fn krita_engine_options_come_across() {
             ("HairyBristle/shear", "0.5"),
             ("HairyBristle/density", "60"),
             ("HairyInk/enabled", "true"),
-            ("HairyInk/amount", "300"),
+            ("HairyBristle/random", "5"),
+            ("HairyInk/inkAmount", "300"),
             ("HairyInk/useSaturation", "true"),
+            ("HairyInk/inkDepletionCurve", "0,0;0.666667,0.629956;1,1;"),
+            ("HairyInk/soak", "true"),
         ],
     );
     let b = hairy.bristles;
-    assert!(b.from_tip && b.deplete_saturation);
+    assert!(b.from_tip && b.deplete_saturation && b.soak);
     assert_eq!((b.shear, b.density, b.ink), (0.5, 0.6, 300.0));
+    assert_eq!(b.random_offset, 0.5);
+    let curve = b.depletion.expect("its depletion curve");
+    assert!((curve.eval(0.666667) - 0.63).abs() < 0.01);
 }
 
 #[test]

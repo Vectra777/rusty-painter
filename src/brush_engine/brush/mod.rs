@@ -452,6 +452,7 @@ impl Brush {
     /// tips, inputs driving the colour).
     pub fn varies_color(&self) -> bool {
         matches!(self.brush_type, BrushType::TangentNormal | BrushType::Grid)
+            || (self.brush_type == BrushType::Bristle && self.bristles.soak)
             || self.dynamics.random.has_color()
             || self.paints_tip_colors()
             || self.brush_options.color_source != ColorSource::Plain
@@ -686,7 +687,13 @@ impl Brush {
         // A bristle brush: each dab is one small dab per hair.
         let hair_dabs;
         let (centers, vars, orients) = if self.brush_type == BrushType::Bristle {
-            hair_dabs = self.hair_dabs(centers, vars, orients);
+            hair_dabs = self.hair_dabs(
+                centers,
+                vars,
+                orients,
+                canvas,
+                &mut stroke_tiles.hair_colors,
+            );
             (&hair_dabs.0[..], &hair_dabs.1[..], None)
         } else if self.brush_type == BrushType::Spray {
             hair_dabs = self.spray_dabs(centers, vars);
@@ -809,12 +816,16 @@ impl Brush {
     }
 
     /// A bristle brush's dabs, one per hair of each of `centers` (with its
-    /// variation and mirror copy): the hairs' centres and variations.
+    /// variation and mirror copy): the hairs' centres and variations. A
+    /// brush that soaks takes each hair's colour from `canvas`'s active
+    /// layer under the stroke's first dab, kept in `soaked`.
     fn hair_dabs(
         &self,
         centers: &[Vec2],
         vars: &[crate::brush_engine::dynamics::DabVar],
         orients: Option<&[[f32; 4]]>,
+        canvas: &Canvas,
+        soaked: &mut Option<Vec<Option<[f32; 3]>>>,
     ) -> (Vec<Vec2>, Vec<crate::brush_engine::dynamics::DabVar>) {
         use crate::brush_engine::dynamics::{DabVar, IDENTITY, compose};
         let b = &self.bristles;
@@ -842,14 +853,25 @@ impl Brush {
                 IDENTITY
             };
             let spread = base_r * var.scale * b.spread;
-            for hair in &hairs {
+            let offset = |hair: &crate::brush_engine::bristle::Hair| {
+                let at = b.place(hair, var.along);
+                let (tx, ty) = (at.x * spread, at.y * spread);
+                Vec2::new(inv[0] * tx + inv[1] * ty, inv[2] * tx + inv[3] * ty)
+            };
+            if b.soak && soaked.is_none() {
+                *soaked = Some(
+                    hairs
+                        .iter()
+                        .map(|hair| layer_color(canvas, center + offset(hair)))
+                        .collect(),
+                );
+            }
+            for (k, hair) in hairs.iter().enumerate() {
                 let ink = b.ink_left(hair, var.along);
                 if ink <= 0.0 || !b.touches(hair, var.pressure) {
                     continue;
                 }
-                let at = b.place(hair, var.along);
-                let (tx, ty) = (at.x * spread, at.y * spread);
-                let offset = Vec2::new(inv[0] * tx + inv[1] * ty, inv[2] * tx + inv[3] * ty);
+                let offset = offset(hair);
                 out_centers.push(center + offset);
                 let hair_r = (b.thickness * 0.5 * hair.thickness).max(0.3);
                 let mut hsv = var.hsv;
@@ -857,17 +879,32 @@ impl Brush {
                     // Running dry, the colour fades to grey with the paint.
                     hsv[1] -= 1.0 - ink;
                 }
+                let base = match soaked.as_ref().filter(|_| b.soak) {
+                    Some(colors) => colors.get(k).copied().flatten().or(var.base),
+                    None => var.base,
+                };
                 out_vars.push(DabVar {
                     scale: hair_r / base_r,
                     strength: var.strength * hair.strength * ink,
                     orient: IDENTITY,
                     hsv,
+                    base,
                     ..var
                 });
             }
         }
         (out_centers, out_vars)
     }
+}
+
+/// The active layer's colour (sRGB 0..1) at `at`; `None` where it's
+/// (nearly) clear.
+fn layer_color(canvas: &Canvas, at: Vec2) -> Option<[f32; 3]> {
+    let [r, g, b, a] = canvas.read_layer_linear(
+        canvas.active_layer_idx,
+        (at.x.floor() as i32, at.y.floor() as i32, 1, 1),
+    )[0];
+    (a > 0.05).then(|| [r, g, b].map(|v| eframe::egui::ecolor::gamma_from_linear(v / a)))
 }
 
 /// `a` and `b` mixed, `t` (0..1) of the way to `b`, in unmultiplied sRGB.

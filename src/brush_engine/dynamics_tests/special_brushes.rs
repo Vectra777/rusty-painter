@@ -366,3 +366,28 @@ fn with_wrap_around_a_dab_past_an_edge_comes_in_at_the_other() {
     let plain = dabs_at(&[Vec2::new(w - 5.0, 40.0)], false);
     assert_eq!(alpha(&plain, 3, 40), 0);
 }
+
+#[test]
+fn a_soaking_bristle_brush_paints_with_the_colour_where_it_started() {
+    // Red under the first tile only; the brush is black.
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    for ty in 0..(H / 64) as i32 {
+        canvas.set_layer_tile_data(1, 0, ty, vec![Color32::RED; 64 * 64]);
+    }
+    let mut brush = bristle_brush(0.0);
+    brush.bristles.soak = true;
+    let points: Vec<(Vec2, f64)> = (0..=40)
+        .map(|i| (Vec2::new(30.0 + i as f32 * 5.0, 64.0), i as f64 * 0.01))
+        .collect();
+    paint_on(&canvas, &mut brush, &points, 1);
+    let soaked: Vec<Color32> = (0..H)
+        .map(|y| pixel(&canvas, 180, y))
+        .filter(|p| p.a() > 100)
+        .collect();
+    assert!(!soaked.is_empty(), "the hairs painted past the red");
+    assert!(
+        soaked.iter().all(|p| p.r() > 150 && p.g() < 60),
+        "red, not the brush's black: {soaked:?}"
+    );
+}

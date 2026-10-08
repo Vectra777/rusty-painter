@@ -119,9 +119,10 @@ below.
   thins and its paint gathers at the rim (strength and width). The
   Watercolour preset uses them with a wash on rough paper.
 - [x] **Bristle engine.** A row of hairs across the stroke, each painting
-  its own line; they fan out with pressure and run dry at their own pace.
-  Presets: Oil Bristle, Dry Brush. (For colour picked up from the canvas,
-  use the Smudge tool.)
+  its own line; they fan out with pressure and run dry at their own pace,
+  along a curve, and can soak up the layer's colour where the stroke
+  starts. Presets: Oil Bristle, Dry Brush. (For colour mixed in all along
+  the stroke, use colour mixing or the Smudge tool.)
 - [x] **Ribbon and decoration brushes.** Colour pictures keep their
   colours and a brush can paint them (flowers, stitches); a ribbon lays the
   picture along the stroke, repeated, its height across it (lace, printed

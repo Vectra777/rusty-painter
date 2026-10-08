@@ -12,12 +12,13 @@
 //! After Krita's bristle (hairy) brush, as its manual describes it: the
 //! hairs can come from the tip's own pixels, lean along the stroke
 //! (shear), be thinned out (density), wander (random offset), lift off
-//! under light pressure, and lose their colour as they run dry.
+//! under light pressure, lose their colour as they run dry (at the pace a
+//! curve sets), and soak up the layer's colour where the stroke starts.
 
 use eframe::egui::Vec2;
 
 /// A bristle brush's hairs.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Bristles {
     /// How many hairs.
@@ -47,6 +48,12 @@ pub struct Bristles {
     pub pressure_cut: f32,
     /// Hairs running dry lose their colour's saturation as well as paint.
     pub deplete_saturation: bool,
+    /// How dry a hair is (y) as it goes through its paint (x), as Krita's
+    /// ink depletion curve; `None` dries at a steady pace.
+    pub depletion: Option<crate::brush_engine::hardness::SoftnessCurve>,
+    /// Each hair takes the layer's colour from under it where the stroke
+    /// starts and paints with it (Krita's soak ink).
+    pub soak: bool,
 }
 
 impl Default for Bristles {
@@ -63,6 +70,8 @@ impl Default for Bristles {
             random_offset: 0.0,
             pressure_cut: 0.0,
             deplete_saturation: false,
+            depletion: None,
+            soak: false,
         }
     }
 }
@@ -178,7 +187,11 @@ impl Bristles {
         if self.ink <= 0.0 {
             return 1.0;
         }
-        (1.0 - along * hair.thirst / self.ink).clamp(0.0, 1.0)
+        let gone = (along * hair.thirst / self.ink).clamp(0.0, 1.0);
+        match &self.depletion {
+            Some(curve) => (1.0 - curve.eval(gone)).clamp(0.0, 1.0),
+            None => 1.0 - gone,
+        }
     }
 
     /// Distance between the stroke's dabs: under a hair's thickness, so
@@ -234,7 +247,7 @@ mod tests {
             "only where the tip paints"
         );
         // Shear: hairs further across lean further along.
-        let sheared = Bristles { shear: 0.5, ..b };
+        let sheared = Bristles { shear: 0.5, ..b.clone() };
         let h = Hair {
             offset: Vec2::new(0.0, 1.0),
             ..hairs[0]
@@ -283,5 +296,25 @@ mod tests {
         assert!(left.contains(&0.0) && left.iter().any(|&l| l > 0.2));
         let never = Bristles::default();
         assert_eq!(never.ink_left(&hairs[0], 1e6), 1.0);
+        // A curve: Krita's straight one dries as the steady pace does, one
+        // that stays wet longer leaves more paint halfway.
+        use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
+        let curve = |mid: f32| Bristles {
+            depletion: Some(SoftnessCurve {
+                points: vec![
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(0.5, mid),
+                    CurvePoint::new(1.0, 1.0),
+                ],
+            }),
+            ..b.clone()
+        };
+        let h = Hair {
+            thirst: 1.0,
+            ..hairs[0]
+        };
+        assert!((curve(0.5).ink_left(&h, 50.0) - b.ink_left(&h, 50.0)).abs() < 1e-3);
+        assert!(curve(0.1).ink_left(&h, 50.0) > 0.8);
+        assert_eq!(curve(0.1).ink_left(&h, 100.0), 0.0);
     }
 }

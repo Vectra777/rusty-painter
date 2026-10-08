@@ -296,7 +296,7 @@ fn read_kpp(
             if let Some(d) = number("HairyBristle/density") {
                 h.density = if d > 1.0 { d / 100.0 } else { d }.clamp(0.01, 1.0);
             }
-            if let Some(r) = number("HairyBristle/randomFactor") {
+            if let Some(r) = number("HairyBristle/random") {
                 h.random_offset = (r / 10.0).clamp(0.0, 1.0);
             }
             if yes("HairyBristle/useMousePressure") || number("HairyBristle/threshold").is_some() {
@@ -305,9 +305,13 @@ fn read_kpp(
                     .clamp(0.0, 1.0);
             }
             if yes("HairyInk/enabled") {
-                h.ink = number("HairyInk/amount").unwrap_or(1024.0).max(1.0);
+                h.ink = number("HairyInk/inkAmount").unwrap_or(1024.0).max(1.0);
                 h.deplete_saturation = yes("HairyInk/useSaturation");
+                h.depletion = param("HairyInk/inkDepletionCurve")
+                    .and_then(parse_curve)
+                    .filter(|c| !is_straight(c));
             }
+            h.soak = yes("HairyInk/soak");
         }
         "sketchbrush" => {
             // Sketch lines join points within the tip's radius, each by
