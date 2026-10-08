@@ -446,7 +446,9 @@ pub struct WorkspaceState {
     pub wet_gravity: [f32; 2],
     pub wet_clock: Option<std::time::Instant>,
     pub wet_step: Option<(u64, usize)>,
-    pub wet_step_secs: f64,
+    /// Wet paint drying in the background (see
+    /// [`crate::app::stroke_ops::WetDrying`]).
+    pub wet_drying: Option<crate::app::stroke_ops::WetDrying>,
     /// Test strokes for fitting the pressure curve, while that's open.
     pub calibration: Option<crate::app::pressure_calibration::Calibration>,
     /// The brush (tool settings) panel is open.
@@ -565,7 +567,7 @@ impl WorkspaceState {
             wet_gravity: [0.0, 1.0],
             wet_clock: None,
             wet_step: None,
-            wet_step_secs: 0.0,
+            wet_drying: None,
             // Closed: the canvas gets the screen; the rails open them.
             show_left_panel: false,
             show_color: false,

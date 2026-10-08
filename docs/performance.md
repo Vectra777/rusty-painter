@@ -149,12 +149,14 @@ smudge's bilinear sampling most of it).
 
 ## Known costs left
 
-- **Wet paint** dries in steps of 1/30 s between strokes (at most four
-  a frame, as many as fit 8 ms by the last step's time, at least one: a
-  big wash dries slower rather than holding up the frames more): one step
-  over 64 wet tiles takes about 2.8 ms on 16 cores, 23 ms on one
-  (`wet_step_64_tiles`); a 300 px wash's step about 7 ms. It runs on the
-  UI thread, so a wash of a thousand tiles still costs a frame about 80 ms.
+- **Wet paint** dries in steps of 1/30 s between strokes, worked out on
+  the brush thread pool while the frames go on and shown when ready (a
+  tile something changed meanwhile is left as it is): one step over 64 wet
+  tiles takes about 2.8 ms on 16 cores, 23 ms on one (`wet_step_64_tiles`);
+  a 300 px wash's step about 7 ms. A big wash dries slower than real time
+  rather than holding up the frames; the UI thread only copies the dried
+  tiles in. Undo, a new stroke or anything else that needs the canvas to
+  itself waits for the step under way (one step).
   A wet tile holds about 100 KB (water, pigment, the dry paint and what it
   shows) until it dries.
 - **Impasto**: a stroke laying heights costs about a fifth more than

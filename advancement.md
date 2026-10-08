@@ -26,7 +26,7 @@ Krita engines that came across approximately (from reading Krita's source)
 Paint behaviour
 
 - A lightness map (paint thickness) stays under later strokes of other brushes; Krita flattens it into the paint as soon as another tool paints. Bake Impasto does it by hand.
-- Wet paint: flowing while the pen is down in wash mode and with post-correction (only the stroke's own paint flows meanwhile, one step a frame); drips following the tablet's or phone's tilt; drying runs on the UI thread (a frame budget keeps it smooth, but a wash of a thousand tiles still costs a frame about 80 ms).
+- Wet paint: flowing while the pen is down in wash mode and with post-correction (only the stroke's own paint flows meanwhile, one step a frame); drips following the tablet's or phone's tilt; a big wash dries slower than real time (its steps are worked out in the background, as fast as the cores go).
 
 Brush management
 

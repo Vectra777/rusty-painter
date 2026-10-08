@@ -10,6 +10,7 @@ use crate::brush_engine::stroke_worker::{Finished, StrokeSetup};
 use crate::canvas::Canvas;
 use crate::selection::SelectionManager;
 use eframe::egui::{self, Color32, Stroke, Vec2};
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 /// A pulled-string stroke's string, as the stroke worker pulls it (the same
@@ -77,8 +78,14 @@ impl PainterApp {
             self.workspace.wet_clock = None;
             return false;
         }
-        // Not while painting (a stroke lays its own paint first).
-        if self.brush_state.is_drawing || self.stroke_worker.is_busy() {
+        // The steps worked out since the last frame, shown.
+        self.take_wet_drying(false);
+        // Not while painting (a stroke lays its own paint first), nor while
+        // the last steps are still being worked out.
+        if self.brush_state.is_drawing
+            || self.stroke_worker.is_busy()
+            || self.workspace.wet_drying.is_some()
+        {
             return true;
         }
         let now = std::time::Instant::now();
@@ -89,51 +96,134 @@ impl PainterApp {
             return true;
         }
         self.workspace.wet_clock = Some(now);
-        // As many as fit the frame's budget (at least one: it always dries,
-        // slower when there's a lot of it).
-        let fit = (WET_BUDGET / self.workspace.wet_step_secs.max(1e-6)) as usize;
-        let steps = steps.min(4).min(fit.max(1));
-        self.wet_steps(&wet, steps);
-        self.workspace.wet_step_secs = now.elapsed().as_secs_f64() / steps as f64;
+        // (Worked out off the UI thread: a big wash's step takes a frame's
+        // time or more, and shows a frame or two later.)
+        self.start_wet_drying(&wet, steps.min(4));
         true
     }
 
-    /// `steps` steps of drying for the layers `wet`.
+    /// `steps` steps of drying for the layers `wet`, waited for.
     pub(crate) fn wet_steps(
         &mut self,
         wet: &[(usize, std::sync::Arc<crate::canvas::wet::WetLayer>)],
         steps: usize,
     ) {
-        let ts = self.canvas.tile_size();
-        let (cols, rows) = (
-            self.canvas.width().div_ceil(ts) as i32,
-            self.canvas.height().div_ceil(ts) as i32,
-        );
-        let gravity = Vec2::from(self.workspace.wet_gravity);
+        self.start_wet_drying(wet, steps);
+        self.take_wet_drying(true);
+    }
+
+    /// Start `steps` steps of drying for the layers `wet` on the pool; see
+    /// [`Self::take_wet_drying`].
+    fn start_wet_drying(
+        &mut self,
+        wet: &[(usize, std::sync::Arc<crate::canvas::wet::WetLayer>)],
+        steps: usize,
+    ) {
+        self.take_wet_drying(true);
         // What it does from here on goes into the step on top, so undoing
         // that puts it all back; where that can't be (a layer added,
         // removed, merged...), the water stays on the tiles it's on.
         let tracked = self.wet_into_top_step(wet);
-        for (idx, layer) in wet {
-            let canvas = &self.canvas;
-            let stepped = layer.step(steps, ts, gravity, tracked, None, |(tx, ty)| {
-                ((0..cols).contains(&tx) && (0..rows).contains(&ty)).then(|| {
-                    canvas
-                        .get_layer_tile_data(*idx, tx, ty)
-                        .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
+        let canvas = Arc::clone(&self.canvas);
+        let gravity = Vec2::from(self.workspace.wet_gravity);
+        let layers: Vec<(usize, crate::canvas::storage::LayerId, _)> = (wet.iter())
+            .map(|(idx, layer)| (*idx, self.canvas.layers[*idx].id, Arc::clone(layer)))
+            .collect();
+        let (send, result) = std::sync::mpsc::channel();
+        self.workspace.pool.spawn(move || {
+            let ts = canvas.tile_size();
+            let (cols, rows) = (
+                canvas.width().div_ceil(ts) as i32,
+                canvas.height().div_ceil(ts) as i32,
+            );
+            let stepped = layers
+                .into_iter()
+                .map(|(idx, id, layer)| {
+                    // Each tile's pixels as first read (what the steps start
+                    // from), to tell when applying whether anything changed
+                    // them meanwhile.
+                    let read = std::sync::Mutex::new(FxHashMap::default());
+                    let stepped = layer.step(steps, ts, gravity, tracked, None, |(tx, ty)| {
+                        ((0..cols).contains(&tx) && (0..rows).contains(&ty)).then(|| {
+                            let pixels = canvas
+                                .get_layer_tile_data(idx, tx, ty)
+                                .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts]);
+                            (read.lock().unwrap_or_else(|e| e.into_inner()))
+                                .entry((tx, ty))
+                                .or_insert_with(|| fingerprint(&pixels));
+                            pixels
+                        })
+                    });
+                    (idx, id, stepped, read.into_inner().unwrap_or_default())
                 })
-            });
-            let id = self.canvas.layers[*idx].id;
+                .collect();
+            drop(canvas);
+            let _ = send.send(stepped);
+        });
+        self.workspace.wet_drying = Some(WetDrying {
+            result,
+            token: self.layer_state.history.top_token(),
+            tracked,
+        });
+    }
+
+    /// Show the drying worked out in the background, once it is (`wait`:
+    /// waiting for it). Tiles anything changed meanwhile (a stroke, a tool)
+    /// are left: their wet paint dries as it is. Where the water spread is
+    /// noted in the step on top, if that's still the one it went into.
+    pub(crate) fn take_wet_drying(&mut self, wait: bool) {
+        let Some(drying) = self.workspace.wet_drying.as_ref() else {
+            return;
+        };
+        let layers = if wait {
+            drying.result.recv().ok()
+        } else {
+            match drying.result.try_recv() {
+                Ok(layers) => Some(layers),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+            }
+        };
+        let WetDrying { token, tracked, .. } = self.workspace.wet_drying.take().expect("drying");
+        let Some(layers) = layers else {
+            return;
+        };
+        let ts = self.canvas.tile_size();
+        let same_step = self.layer_state.history.top_token() == token;
+        for (idx, id, stepped, read) in layers {
+            if self.canvas.layers.get(idx).map(|l| l.id) != Some(id) {
+                continue;
+            }
+            let unchanged = |canvas: &Canvas, key: (i32, i32)| {
+                read.get(&key).is_some_and(|&f| {
+                    let now = canvas
+                        .get_layer_tile_data(idx, key.0, key.1)
+                        .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts]);
+                    fingerprint(&now) == f
+                })
+            };
             // Where it spread to, as it was.
-            if tracked && let Some(action) = self.layer_state.history.top_mut() {
+            let spread: rustc_hash::FxHashSet<(i32, i32)> =
+                stepped.fresh.iter().map(|(k, _)| *k).collect();
+            let mut noted = rustc_hash::FxHashSet::default();
+            if tracked
+                && same_step
+                && let Some(action) = self.layer_state.history.top_mut()
+            {
                 for (key, before) in stepped.fresh {
                     crate::canvas::wet::record_undo(action, id, key, None);
                     note_tile(action, id, key, ts, before);
+                    noted.insert(key);
                 }
             }
-            for ((tx, ty), pixels) in stepped.shown {
-                self.canvas.set_layer_tile_data(*idx, tx, ty, pixels);
-                let (x, y) = (tx * ts as i32, ty * ts as i32);
+            for (key, pixels) in stepped.shown {
+                // (A tile it spread to that couldn't be noted is left dry.)
+                let unnoted = spread.contains(&key) && !noted.contains(&key);
+                if unnoted || !unchanged(&self.canvas, key) {
+                    continue;
+                }
+                self.canvas.set_layer_tile_data(idx, key.0, key.1, pixels);
+                let (x, y) = (key.0 * ts as i32, key.1 * ts as i32);
                 self.mark_rect_damage([x, y, x + ts as i32, y + ts as i32]);
             }
         }
@@ -460,6 +550,8 @@ impl PainterApp {
     pub(crate) fn settle_strokes(&mut self) {
         self.stroke_worker.wait_idle();
         self.sync_stroke_worker();
+        // (Drying in the background holds the canvas too.)
+        self.take_wet_drying(true);
     }
 
     /// End any in-progress stroke and let the worker go idle, which releases
@@ -477,8 +569,31 @@ impl PainterApp {
     }
 }
 
-/// Most time a frame spends drying wet paint, seconds.
-const WET_BUDGET: f64 = 0.008;
+/// Wet paint drying in the background: its result to come, the step on top
+/// of the undo history it went into, and whether it could (see
+/// [`PainterApp::take_wet_drying`]).
+pub(crate) struct WetDrying {
+    result: std::sync::mpsc::Receiver<Vec<WetDried>>,
+    token: (u64, usize),
+    tracked: bool,
+}
+
+/// A layer's drying: its index and id, what the steps changed, and each
+/// tile's pixels as read ([`fingerprint`]).
+type WetDried = (
+    usize,
+    crate::canvas::storage::LayerId,
+    crate::canvas::wet::Stepped,
+    FxHashMap<(i32, i32), u64>,
+);
+
+/// A tile's pixels, to tell whether they changed.
+fn fingerprint(pixels: &[Color32]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    pixels.hash(&mut h);
+    h.finish()
+}
 
 /// Tile `key` of layer `id` as it was (`pixels`) in `action`, unless it
 /// has it already (the first is how it was before the step).
@@ -826,6 +941,42 @@ mod tests {
         app.apply_history(false);
         app.apply_history(false);
         assert!(app.canvas.flatten().pixels == before, "all gone");
+    }
+
+    #[test]
+    fn wet_paint_dried_in_the_background_leaves_what_changed_meanwhile() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(192, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        let brush = &mut app.brush_state.brush;
+        brush.brush_options.color = Color32::from_rgb(30, 60, 200);
+        brush.brush_options.diameter = 12.0;
+        brush.wet = Some(crate::canvas::wet::WetPaint {
+            drying: 2.0,
+            ..Default::default()
+        });
+        // Across two tiles.
+        app.start_stroke_with_pressure(Vec2::new(30.0, 32.0), 1.0);
+        app.add_stroke_point(Vec2::new(110.0, 32.0), 1.0);
+        app.finish_stroke();
+        app.settle_strokes();
+        let wet = app.canvas.layers[1].wet.clone().unwrap();
+        let tile = |app: &crate::PainterApp, tx| app.canvas.get_layer_tile_data(1, tx, 0).unwrap();
+        let second = tile(&app, 1);
+        // Drying starts; meanwhile something paints the first tile red.
+        app.start_wet_drying(&[(1, wet)], 8);
+        let red = vec![Color32::RED; 64 * 64];
+        app.canvas.set_layer_tile_data(1, 0, 0, red.clone());
+        app.take_wet_drying(true);
+        // Never the stale pixels back: the tile is as it was made red, or
+        // dried on from there (if the drying read it red) where the water
+        // from the next tile reaches. Far from the water, red either way.
+        assert_eq!(
+            tile(&app, 0)[0],
+            Color32::RED,
+            "what changed meanwhile is kept"
+        );
+        assert!(tile(&app, 1) != second, "the rest dried on");
+        assert!(app.workspace.wet_drying.is_none());
     }
 
     #[test]
