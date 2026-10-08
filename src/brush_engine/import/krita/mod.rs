@@ -224,6 +224,9 @@ fn read_kpp(
             // The preset's own smudge: its smudge rate is always on, its
             // colour rate and smudge radius options.
             let rate = |k: &str| number(k).unwrap_or(0.5).clamp(0.0, 1.0);
+            // Without "use new smudge algorithm" (all presets from before
+            // it), Krita's older engine.
+            let legacy = param("SmudgeRateUseNewEngine") != Some("true");
             b.mixing = Some(crate::brush_engine::brush_options::Mixing {
                 smudge_length: rate("SmudgeRateValue"),
                 krita: Some(crate::brush_engine::brush_options::KritaSmudge {
@@ -231,7 +234,8 @@ fn read_kpp(
                     dulling: param("SmudgeRateMode") == Some("1"),
                     smear_alpha: param("SmudgeRateSmearAlpha") != Some("false"),
                     radius: if yes("PressureSmudgeRadius") {
-                        number("SmudgeRadiusValue").unwrap_or(0.0).clamp(0.0, 1.0)
+                        let most = if legacy { 3.0 } else { 1.0 };
+                        number("SmudgeRadiusValue").unwrap_or(0.0).clamp(0.0, most)
                     } else {
                         0.0
                     },
@@ -244,6 +248,7 @@ fn read_kpp(
                         1.0
                     },
                     overwrite: param("PaintThicknessThicknessMode") == Some("1"),
+                    legacy,
                 }),
                 color_rate: if yes("PressureColorRate") {
                     rate("ColorRateValue")

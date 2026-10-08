@@ -39,7 +39,7 @@ fn box_blur_reference(src: &[[f32; 4]], side: usize, r: usize) -> Vec<[f32; 4]> 
             };
             let col: Vec<[f32; 4]> = (0..side).map(|i| input[at(i)]).collect();
             let mut res = vec![[0.0; 4]; side];
-            blur_line(&col, &mut res, r);
+            blur_line(&col, &mut res, r, 0);
             for (i, v) in res.into_iter().enumerate() {
                 out[at(i)] = v;
             }
@@ -75,5 +75,29 @@ fn the_parallel_box_blur_matches_the_line_by_line_one() {
             .flat_map(|(a, b)| (0..4).map(move |c| (a[c] - b[c]).abs()))
             .fold(0.0f32, f32::max);
         assert!(worst < 1e-4, "side {side} r {r}: off by {worst}");
+    }
+}
+
+#[test]
+fn the_box_blur_inside_a_margin_is_the_whole_one_cut_down() {
+    let side = 41;
+    let src: Vec<[f32; 4]> = (0..side * side)
+        .map(|i| {
+            let v = ((i * 7919) % 101) as f32 / 100.0;
+            [v, 1.0 - v, v * 0.5, 1.0]
+        })
+        .collect();
+    for (r, pad) in [(1, 1), (3, 3), (6, 6), (4, 10)] {
+        let whole = box_blur(&pool(), &src, side, r);
+        let inside = box_blur_inside(&pool(), &src, side, r, pad);
+        let inner = side - 2 * pad;
+        for y in 0..inner {
+            for x in 0..inner {
+                let (a, b) = (inside[y * inner + x], whole[(y + pad) * side + x + pad]);
+                for c in 0..4 {
+                    assert!((a[c] - b[c]).abs() < 1e-5, "r {r} pad {pad} ({x}, {y})");
+                }
+            }
+        }
     }
 }

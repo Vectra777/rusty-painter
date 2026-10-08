@@ -700,7 +700,8 @@ fn halton_dulling_lands_near_the_full_weighted_average() {
         weight += w;
     }
     let full = sum.map(|v| v / weight);
-    let quick = halton_dull(&source, &mask, side, 40.0).expect("paint");
+    let (quick, enough) = halton_dull(&source, Some(&mask), side, 40.0);
+    assert!(enough, "paint");
     // Pure noise is the worst case: it stops once a batch moves the
     // colour by 2/255 or less (as Krita does), a few levels off.
     for k in 0..4 {
@@ -709,8 +710,9 @@ fn halton_dulling_lands_near_the_full_weighted_average() {
             "{quick:?} vs {full:?}"
         );
     }
-    // Nothing under the tip: no colour.
-    assert!(halton_dull(&source, &vec![0.0; side * side], side, 40.0).is_none());
+    // Nothing under the tip: not enough, and transparent.
+    let (none, enough) = halton_dull(&source, Some(&vec![0.0; side * side]), side, 40.0);
+    assert!(!enough && none == [0.0; 4]);
 }
 
 #[test]
@@ -748,10 +750,11 @@ fn black_then_white(app: &mut crate::PainterApp, edge: i32) {
 }
 
 #[test]
-fn a_faint_smudge_builds_up_in_16_bits_where_8_bits_round_it_away() {
+fn a_faint_smudge_builds_up_in_8_bits_as_in_16() {
     use crate::canvas::storage::Depth;
     // Dragged out of the black so faintly each dab darkens the white by
-    // less than half an 8-bit step.
+    // less than half an 8-bit step: the stroke keeps what it mixed at full
+    // precision, so the dabs add up even in 8 bits.
     let smudged = |depth: Depth| {
         let mut a = app(None);
         black_then_white(&mut a, 60);
@@ -761,7 +764,6 @@ fn a_faint_smudge_builds_up_in_16_bits_where_8_bits_round_it_away() {
         a
     };
     let eight = smudged(Depth::U8);
-    assert_eq!(pixel(&eight, 62), Color32::WHITE, "each dab rounds away");
     let mut sixteen = smudged(Depth::U16);
     let at = 32 * 64 + 62;
     let deep = sixteen.canvas.get_layer_tile_deep(1, 0, 0).unwrap();
@@ -772,6 +774,13 @@ fn a_faint_smudge_builds_up_in_16_bits_where_8_bits_round_it_away() {
         deep.narrow_all(),
         "the 8-bit pixels are the deep ones rounded"
     );
+    let narrowed = deep.narrow_all();
+    for x in 0..64 {
+        let (got, want) = (pixel(&eight, x), narrowed[(32 * 64 + x) as usize]);
+        for (g, w) in got.to_array().iter().zip(want.to_array()) {
+            assert!(g.abs_diff(w) <= 1, "x {x}: {got:?} vs {want:?}");
+        }
+    }
     // Undone: white at full depth again.
     sixteen.apply_history(false);
     let deep = sixteen.canvas.get_layer_tile_deep(1, 0, 0).unwrap();
@@ -779,9 +788,11 @@ fn a_faint_smudge_builds_up_in_16_bits_where_8_bits_round_it_away() {
 }
 
 #[test]
-fn a_half_pixel_move_carries_paint_half_a_pixel() {
+fn slow_moves_add_up_to_whole_pixel_moves() {
     // A hard edge under the middle of an imported smear at full rate: each
-    // dab copies the layer from where the last one was.
+    // dab copies the layer from where the last one was, by whole pixels (as
+    // Krita does: never resampled, so the edge stays sharp), the moves
+    // adding up as the dabs cross pixels.
     let mut a = app(None);
     black_then_white(&mut a, 60);
     krita_brush(&mut a, false, 1.0, 0.0);
@@ -803,11 +814,206 @@ fn a_half_pixel_move_carries_paint_half_a_pixel() {
     let moved = black(&a) - before;
     let edge: Vec<u8> = (58..64).map(|x| pixel(&a, x).r()).collect();
     assert!(
-        (moved - 1.0).abs() < 0.1,
+        (moved - 1.0).abs() < 0.01,
         "the edge moved as far as the brush: {moved} {edge:?}"
     );
     assert!(
-        edge.iter().any(|&r| r > 20 && r < 235),
-        "between whole pixels: {edge:?}"
+        edge.iter().all(|&r| r == 0 || r == 255),
+        "on whole pixels: {edge:?}"
     );
+}
+
+#[test]
+fn the_smudge_length_counts_under_a_full_strength_tip() {
+    // Black dragged into white by a hard tip at full strength: a short
+    // length lets it go sooner. (Picking up what it had just laid, the
+    // brush kept all it carried wherever the tip was at full strength,
+    // whatever the length.)
+    let far = |length: f32| {
+        let mut a = app(None);
+        black_then_white(&mut a, 20);
+        a.workspace.blend.smudge_length = length;
+        drag(&mut a);
+        pixel(&a, 80).r()
+    };
+    let (short, long) = (far(0.3), far(0.8));
+    assert!(short > 200 && short > long + 50, "{short} vs {long}");
+}
+
+#[test]
+fn a_blur_dab_takes_in_what_lies_just_past_it() {
+    // White starts just past a hard tip's edge: the blur near the edge
+    // takes it in, as filtering the layer would; deeper in, only black.
+    let mut a = app(None);
+    black_then_white(&mut a, 51);
+    a.active_tool = crate::app::tools::Tool::Blur;
+    a.blend_press(Vec2::new(40.0, 32.0), 1.0);
+    a.blend_release();
+    a.settle_strokes();
+    assert!(pixel(&a, 49).r() > 0, "{:?}", pixel(&a, 49));
+    assert_eq!(pixel(&a, 40), Color32::BLACK);
+}
+
+#[test]
+fn a_gamma_space_document_blurs_in_gamma() {
+    // Black and white stripes blurred together: half way between in the
+    // stored sRGB values in gamma space, much lighter mixed as light (at
+    // full depth too).
+    use crate::canvas::storage::Depth;
+    let grey = |space: crate::canvas::blend_modes::BlendSpace, depth: Depth| {
+        let mut a = app(None);
+        for tx in 0..2 {
+            let tile = (0..64 * 64)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        Color32::BLACK
+                    } else {
+                        Color32::WHITE
+                    }
+                })
+                .collect();
+            a.canvas_mut().set_layer_tile_data(1, tx, 0, tile);
+        }
+        a.canvas_mut().blend_space = space;
+        a.convert_depth(depth);
+        a.active_tool = crate::app::tools::Tool::Blur;
+        a.workspace.blend.blur_size = 0.5;
+        a.blend_press(Vec2::new(60.0, 32.0), 1.0);
+        a.blend_release();
+        a.settle_strokes();
+        pixel(&a, 60).r()
+    };
+    use crate::canvas::blend_modes::BlendSpace;
+    for depth in [Depth::U8, Depth::U16] {
+        let (gamma, linear) = (
+            grey(BlendSpace::Gamma, depth),
+            grey(BlendSpace::Linear, depth),
+        );
+        assert!((110..=150).contains(&gamma), "{depth:?}: gamma {gamma}");
+        assert!(linear >= 170, "{depth:?}: linear {linear}");
+    }
+}
+
+#[test]
+fn krita_smudge_takes_each_dab_s_colour() {
+    // Hue randomness: the colour mixed in turns from the brush's.
+    let mut a = app(Some(Color32::WHITE));
+    krita_brush(&mut a, false, 0.5, 1.0);
+    a.brush_state.brush.dynamics.random.hue = 120.0;
+    brush_drag(&mut a, 10.0, 110.0);
+    let px = layer(&a);
+    assert!(
+        px.iter().any(|c| c.r() > 60 || c.g() > 80),
+        "some dab isn't the brush's blue"
+    );
+}
+
+/// Two dabs of the Brush tool on row 32, at 60 and 70.
+fn two_dabs(a: &mut crate::PainterApp) {
+    let o = &mut a.brush_state.brush.brush_options;
+    o.auto_spacing = None;
+    o.spacing = 50.0;
+    a.start_stroke_with_pressure(Vec2::new(60.0, 32.0), 1.0);
+    a.add_stroke_point(Vec2::new(70.0, 32.0), 1.0);
+    a.finish_stroke();
+    a.settle_strokes();
+}
+
+/// White mixed with `share` of the brush colour (as light).
+fn white_with(a: &crate::PainterApp, share: f32) -> Color32 {
+    let codec = Codec::new();
+    let paint = codec.to_f(a.brush_state.brush.brush_options.color);
+    codec.to_c(std::array::from_fn(|c| 1.0 + (paint[c] - 1.0) * share))
+}
+
+fn close(got: Color32, want: Color32) -> bool {
+    (got.to_array().iter().zip(want.to_array())).all(|(g, w)| g.abs_diff(w) <= 2)
+}
+
+#[test]
+fn krita_s_older_engine_puts_its_mix_down_at_the_smudge_rate() {
+    // Dulling on white at smudge rate 0.5 and colour rate 1: the older
+    // engine mixes in half the colour (what the most smudge leaves) and
+    // puts that down at the smudge rate, a quarter in all; the new one
+    // lays all the colour (the colour rate squared, put down whole).
+    let laid = |legacy: bool| {
+        let mut a = app(Some(Color32::WHITE));
+        krita_brush(&mut a, true, 0.5, 1.0);
+        if let Some(k) = a
+            .brush_state
+            .brush
+            .mixing
+            .as_mut()
+            .and_then(|m| m.krita.as_mut())
+        {
+            k.legacy = legacy;
+        }
+        two_dabs(&mut a);
+        (
+            pixel(&a, 70),
+            white_with(&a, if legacy { 0.25 } else { 1.0 }),
+        )
+    };
+    for legacy in [true, false] {
+        let (got, want) = laid(legacy);
+        assert!(close(got, want), "{legacy}: {got:?} vs {want:?}");
+    }
+}
+
+#[test]
+fn krita_dulling_over_the_layer_mixes_the_colour_in_first() {
+    // Without smear alpha, Krita mixes the brush colour into the dulled
+    // colour and lays that at the dulling rate (0.8 × the smudge rate):
+    // eight tenths of the brush colour, not all of it.
+    let mut a = app(Some(Color32::WHITE));
+    krita_brush(&mut a, true, 1.0, 1.0);
+    if let Some(k) = a
+        .brush_state
+        .brush
+        .mixing
+        .as_mut()
+        .and_then(|m| m.krita.as_mut())
+    {
+        k.smear_alpha = false;
+    }
+    two_dabs(&mut a);
+    let (got, want) = (pixel(&a, 70), white_with(&a, 0.8));
+    assert!(close(got, want), "{got:?} vs {want:?}");
+}
+
+#[test]
+fn krita_s_older_dulling_samples_past_the_dab() {
+    // White round the dabs, black farther out: sampling the dab's own
+    // square stays white; three times it takes in the black.
+    let dulled = |radius: f32| {
+        let mut a = app(None);
+        for tx in 0..2 {
+            let tile = (0..64 * 64)
+                .map(|i| {
+                    if (45..86).contains(&(tx * 64 + i % 64)) {
+                        Color32::WHITE
+                    } else {
+                        Color32::BLACK
+                    }
+                })
+                .collect();
+            a.canvas_mut().set_layer_tile_data(1, tx, 0, tile);
+        }
+        krita_brush(&mut a, true, 1.0, 0.0);
+        if let Some(k) = a
+            .brush_state
+            .brush
+            .mixing
+            .as_mut()
+            .and_then(|m| m.krita.as_mut())
+        {
+            k.legacy = true;
+            k.radius = radius;
+        }
+        two_dabs(&mut a);
+        pixel(&a, 70).r()
+    };
+    let (own, wide) = (dulled(1.0), dulled(3.0));
+    // (A 63 px square round 60: 22 of its columns black.)
+    assert!(own == 255 && (200..225).contains(&wide), "{own} vs {wide}");
 }

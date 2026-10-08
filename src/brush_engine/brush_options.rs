@@ -184,7 +184,7 @@ pub struct KritaSmudge {
     /// picked-up paint only going over what's there.
     pub smear_alpha: bool,
     /// Dulling: how much of the dab the colour is sampled from (0 its
-    /// centre, 1 all of it).
+    /// centre, 1 all of it; the older engine up to 3, past the dab).
     pub radius: f32,
     /// With a lightness tip: how much of the tip's lightness each dab lays
     /// on the layer's lightness map (0..1), and whether at full
@@ -192,6 +192,11 @@ pub struct KritaSmudge {
     /// (Krita's paint thickness: overlay).
     pub thickness: f32,
     pub overwrite: bool,
+    /// Krita's older engine (presets saved without its new smudge
+    /// algorithm): what's picked up is copied whole and the result put
+    /// down at the smudge rate; the colour rate isn't squared but goes up
+    /// to what the most smudge leaves; dulling averages its pixels alike.
+    pub legacy: bool,
 }
 
 impl Default for KritaSmudge {
@@ -202,6 +207,7 @@ impl Default for KritaSmudge {
             radius: 0.0,
             thickness: 1.0,
             overwrite: false,
+            legacy: false,
         }
     }
 }

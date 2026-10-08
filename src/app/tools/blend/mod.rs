@@ -10,13 +10,12 @@
 //! saturation, brightness) under the brush, or paint any of the Filter
 //! menu's filters (**filter**).
 //!
-//! Smudge carries a patch of paint along the stroke: every dab mixes the
-//! carried paint into the canvas under the tip, then picks up some of the
-//! result (how much it keeps is the smudge length). With a colour rate it
-//! is a wet mixing brush: each dab first mixes
-//! that much of the brush colour into the carried paint, so it lays down
-//! the brush colour blended with whatever it drags. Blur mixes each pixel
-//! toward the average around it. Both are sequential per dab (each dab sees
+//! Smudge carries a patch of paint along the stroke: every dab picks up
+//! the paint under the tip (how much of what it carried it keeps is the
+//! smudge length) and mixes that into the canvas. With a colour rate it is
+//! a wet mixing brush: each dab also mixes that much of the brush colour
+//! into the carried paint, so it lays down the brush colour blended with
+//! whatever it drags. Blur mixes each pixel toward the average around it. Both are sequential per dab (each dab sees
 //! the previous one's result), so they run their own small engine rather
 //! than the batched brush pipeline: a [`BlendSession`], painted on the
 //! stroke worker like a brush stroke, so a big tip never holds up the UI.
@@ -228,6 +227,8 @@ pub struct BlendSession {
     stroke: BlendStroke,
     /// Smudging (the Smudge tool, a mixing brush): where its dabs go.
     dabber: Option<Box<Dabber>>,
+    /// The space the paint is mixed in.
+    codec: Codec,
 }
 
 /// The dabs of a smudge, placed and varied as the brush's own strokes'
@@ -284,27 +285,21 @@ struct BlendStroke {
     coverage: HashMap<(i32, i32), Vec<f32>>,
     /// Smudge: how it mixes.
     mix: SmudgeMix,
-    /// The imported smudge: where each mirror copy's last dab was (it reads the
-    /// layer there), and the stroke's random state (a turning tip).
-    krita_last: Vec<Option<Vec2>>,
+    /// The imported smudge: the whole pixel each mirror copy's last dab was
+    /// on (it reads the layer there), and the stroke's random state (a
+    /// turning tip).
+    krita_last: Vec<Option<(i32, i32)>>,
     random: u32,
     /// Krita's colour smudge with a lightness tip: the layer's lightness
     /// map tiles as they were before the stroke first changed them.
     lightness_before: HashMap<(i32, i32), Option<Vec<u16>>>,
-}
-
-/// Pixels are mixed as linear-light premultiplied colour, the same space
-/// the compositor works in. (Mixing the stored sRGB bytes and clamping each
-/// channel to alpha darkened light colours at soft edges, as if another
-/// colour were being picked up.)
-fn to_f(c: Color32) -> [f32; 4] {
-    crate::canvas::blend::LinearDecoder::new()
-        .decode(c)
-        .to_array()
-}
-
-fn to_c(v: [f32; 4]) -> Color32 {
-    encode(crate::canvas::blend::LinearEncoder::new(), v)
+    /// An 8-bit document: the tiles the stroke has painted, as the paint
+    /// it mixed (in the codec's space) before it was rounded to 8 bits
+    /// (an alpha below 0 where it hasn't painted).
+    /// The stroke reads them back from here, as Krita paints a stroke on a
+    /// 16-bit copy of the layer: a faint dab builds up rather than each
+    /// rounding away.
+    precise: HashMap<(i32, i32), Vec<[f32; 4]>>,
 }
 
 #[inline]
@@ -323,33 +318,92 @@ fn encode(encoder: crate::canvas::blend::LinearEncoder, v: [f32; 4]) -> Color32 
     ))
 }
 
-/// [`to_f`] and [`to_c`] with their tables looked up once, for the loops
-/// over a dab's pixels (once a pixel, the lookups cost more than the
-/// conversion).
+/// The paint a blend stroke mixes: premultiplied colour, 0..1 a channel,
+/// in the document's blend space. Linear light by default, the space the
+/// compositor works in (mixing the stored sRGB bytes and clamping each
+/// channel to alpha darkened light colours at soft edges, as if another
+/// colour were being picked up); in a document that blends in gamma space,
+/// the stored sRGB values premultiplied, as Krita mixes an sRGB layer.
+/// Its tables are looked up once, for the loops over a dab's pixels (once
+/// a pixel, the lookups cost more than the conversion).
 #[derive(Clone, Copy)]
 struct Codec {
     decoder: crate::canvas::blend::LinearDecoder,
     encoder: crate::canvas::blend::LinearEncoder,
+    /// Gamma space: how its stored pixels are read.
+    gamma: Option<crate::canvas::blend::GammaReader>,
 }
 
 impl Codec {
+    /// Linear light.
     #[inline]
     fn new() -> Self {
         Self {
             decoder: crate::canvas::blend::LinearDecoder::new(),
             encoder: crate::canvas::blend::LinearEncoder::new(),
+            gamma: None,
+        }
+    }
+
+    /// The space `canvas` blends in.
+    fn for_canvas(canvas: &crate::canvas::Canvas) -> Self {
+        let gamma = canvas.blend_space == crate::canvas::blend_modes::BlendSpace::Gamma;
+        Self {
+            gamma: gamma.then(crate::canvas::blend::GammaReader::new),
+            ..Self::new()
         }
     }
 
     #[inline]
     fn to_f(self, c: Color32) -> [f32; 4] {
-        self.decoder.decode(c).to_array()
+        match self.gamma {
+            Some(reader) => reader.read(c).to_array(),
+            None => self.decoder.decode(c).to_array(),
+        }
     }
 
     #[inline]
     fn to_c(self, v: [f32; 4]) -> Color32 {
-        encode(self.encoder, v)
+        match self.gamma {
+            Some(_) => {
+                let a = v[3].clamp(0.0, 1.0);
+                let c = |x: f32| x.clamp(0.0, a);
+                crate::canvas::blend::gamma_rgba_to_color32(
+                    eframe::egui::Rgba::from_rgba_premultiplied(c(v[0]), c(v[1]), c(v[2]), a),
+                )
+            }
+            None => encode(self.encoder, v),
+        }
     }
+
+    /// Linear premultiplied paint (a deeper layer's) in this space.
+    #[inline]
+    fn of_linear(self, v: [f32; 4]) -> [f32; 4] {
+        match self.gamma {
+            Some(_) => recurve(v, eframe::egui::ecolor::gamma_from_linear),
+            None => v,
+        }
+    }
+
+    /// Paint in this space as linear premultiplied paint.
+    #[inline]
+    fn to_linear(self, v: [f32; 4]) -> [f32; 4] {
+        match self.gamma {
+            Some(_) => recurve(v, eframe::egui::ecolor::linear_from_gamma),
+            None => v,
+        }
+    }
+}
+
+/// Premultiplied `v` with `curve` on its unpremultiplied colour.
+#[inline]
+fn recurve(v: [f32; 4], curve: fn(f32) -> f32) -> [f32; 4] {
+    let a = v[3];
+    if a <= 0.0 {
+        return [0.0; 4];
+    }
+    let c = |x: f32| curve((x / a).clamp(0.0, 1.0)) * a;
+    [c(v[0]), c(v[1]), c(v[2]), a]
 }
 
 /// Run `f` on each `side`-long row of `data` (with its index), on `pool`
@@ -404,26 +458,19 @@ fn read_patch(
     })
 }
 
-/// [`read_patch`] as linear paint (premultiplied): from one layer of a
-/// deeper document at its full depth, else the 8-bit pixels decoded.
-fn read_patch_linear(
+/// Layer `idx` of a deeper document over the `w`×`h` canvas rectangle at
+/// `origin`, at its full depth, as linear paint (premultiplied).
+fn read_deep(
     canvas: &crate::canvas::Canvas,
-    source: Option<usize>,
+    idx: usize,
     origin: (i32, i32),
     w: usize,
     h: usize,
     wrap: bool,
 ) -> Vec<[f32; 4]> {
-    match source.filter(|_| canvas.depth().is_deep()) {
-        Some(idx) => read_wrapped(canvas, origin, w, h, wrap, |x, y, w, h| {
-            canvas.read_layer_linear(idx, (x, y, w, h))
-        }),
-        None => {
-            let codec = Codec::new();
-            let patch = read_patch(canvas, source, origin, w, h, wrap);
-            patch.into_iter().map(|c| codec.to_f(c)).collect()
-        }
-    }
+    read_wrapped(canvas, origin, w, h, wrap, |x, y, w, h| {
+        canvas.read_layer_linear(idx, (x, y, w, h))
+    })
 }
 
 /// The `w`×`h` canvas rectangle at `origin` as `read(x, y, w, h)` reads
@@ -537,16 +584,17 @@ fn sample_bilinear(px: &[[f32; 4]], side: usize, p: Vec2) -> [f32; 4] {
     })
 }
 
-/// A pixel (linear premultiplied) with its hue turned by `hsv[0]` degrees
-/// and its saturation and brightness moved by `hsv[1]`, `hsv[2]`.
-fn adjust_hsv(v: [f32; 4], hsv: [f32; 3]) -> [f32; 4] {
-    let c = to_c(v);
+/// A pixel (premultiplied, in `codec`'s space) with its hue turned by
+/// `hsv[0]` degrees and its saturation and brightness moved by `hsv[1]`,
+/// `hsv[2]`.
+fn adjust_hsv(codec: Codec, v: [f32; 4], hsv: [f32; 3]) -> [f32; 4] {
+    let c = codec.to_c(v);
     if c.a() == 0 {
         return v;
     }
     let srgb = crate::brush_engine::dynamics::shift_hsv(c, hsv);
     let byte = |x: f32| (x * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
-    to_f(Color32::from_rgba_unmultiplied(
+    codec.to_f(Color32::from_rgba_unmultiplied(
         byte(srgb[0]),
         byte(srgb[1]),
         byte(srgb[2]),
@@ -554,39 +602,60 @@ fn adjust_hsv(v: [f32; 4], hsv: [f32; 3]) -> [f32; 4] {
     ))
 }
 
-/// Box blur of a `side`×`side` patch with radius `r` (two passes, so it
-/// looks nearly Gaussian). Each output pixel averages what of its window
-/// lies inside the patch. Rows go across the pool, a big patch's columns in
-/// bands of rows (a window of whole rows sliding down, so memory is read in
-/// order).
+/// Box blur of a `side`×`side` patch with radius `r` (two passes: a
+/// tent-shaped kernel, softer than one box). Each output pixel averages
+/// what of its window lies inside the patch. Rows go across the pool, a big
+/// patch's columns in bands of rows (a window of whole rows sliding down,
+/// so memory is read in order).
+#[cfg(test)]
 fn box_blur(pool: &rayon::ThreadPool, src: &[[f32; 4]], side: usize, r: usize) -> Vec<[f32; 4]> {
-    let mut a = src.to_vec();
-    let mut b = vec![[0.0f32; 4]; side * side];
-    for _ in 0..2 {
-        // Across.
-        for_rows(pool, &mut b, side, |row, out| {
-            blur_line(&a[row * side..(row + 1) * side], out, r);
-        });
-        // Down.
-        blur_columns(pool, &b, &mut a, side, r);
-    }
-    a
+    box_blur_inside(pool, src, side, r, 0)
 }
 
-/// One line of a box blur: `out[i]` averages `line` over `i - r..=i + r`
-/// (what of it is inside).
-fn blur_line(line: &[[f32; 4]], out: &mut [[f32; 4]], r: usize) {
+/// [`box_blur`]'s output inside the `side`-wide patch's margin `pad` (the
+/// middle `side - 2 pad` square): the second pass works out only that, and
+/// the rows the last one reads.
+fn box_blur_inside(
+    pool: &rayon::ThreadPool,
+    src: &[[f32; 4]],
+    side: usize,
+    r: usize,
+    pad: usize,
+) -> Vec<[f32; 4]> {
+    let inner = side - 2 * pad;
+    // The first pass, all of it.
+    let mut across = vec![[0.0f32; 4]; side * side];
+    for_rows(pool, &mut across, side, |row, out| {
+        blur_line(&src[row * side..(row + 1) * side], out, r, 0);
+    });
+    let mut once = vec![[0.0f32; 4]; side * side];
+    blur_columns(pool, &across, (side, side), r, &mut once, 0);
+    // The second: across, the middle columns of every row; down, the
+    // middle rows.
+    let mut across = vec![[0.0f32; 4]; side * inner];
+    for_rows(pool, &mut across, inner, |row, out| {
+        blur_line(&once[row * side..(row + 1) * side], out, r, pad);
+    });
+    let mut out = vec![[0.0f32; 4]; inner * inner];
+    blur_columns(pool, &across, (inner, side), r, &mut out, pad);
+    out
+}
+
+/// One line of a box blur: `out[i]` averages `line` over `from + i - r
+/// ..= from + i + r` (what of it is inside).
+fn blur_line(line: &[[f32; 4]], out: &mut [[f32; 4]], r: usize, from: usize) {
     let n = line.len();
     let mut sum = [0.0f32; 4];
     let mut count = 0.0f32;
-    for p in &line[..=r.min(n - 1)] {
+    for p in &line[from.saturating_sub(r)..=(from + r).min(n - 1)] {
         for c in 0..4 {
             sum[c] += p[c];
         }
         count += 1.0;
     }
-    for i in 0..n {
-        out[i] = sum.map(|s| s / count);
+    for (k, o) in out.iter_mut().enumerate() {
+        let i = from + k;
+        *o = sum.map(|s| s / count);
         if i + r + 1 < n {
             let p = line[i + r + 1];
             for c in 0..4 {
@@ -604,20 +673,22 @@ fn blur_line(line: &[[f32; 4]], out: &mut [[f32; 4]], r: usize) {
     }
 }
 
-/// The down pass of [`box_blur`]: `src`'s columns blurred into `out`.
+/// The down pass of a box blur: the columns of `src` (`w`×`h`) blurred into
+/// `out`, its rows from `from` on.
 fn blur_columns(
     pool: &rayon::ThreadPool,
     src: &[[f32; 4]],
-    out: &mut [[f32; 4]],
-    side: usize,
+    (w, h): (usize, usize),
     r: usize,
+    out: &mut [[f32; 4]],
+    from: usize,
 ) {
     use rayon::prelude::*;
-    let row = |y: usize| &src[y * side..(y + 1) * side];
-    // Output rows `first..first + lines.len() / side`, with their own window.
+    let row = |y: usize| &src[y * w..(y + 1) * w];
+    // Output rows `first..first + lines.len() / w`, with their own window.
     let band = |first: usize, lines: &mut [[f32; 4]]| {
-        let (lo, hi) = (first.saturating_sub(r), (first + r).min(side - 1));
-        let mut sum = vec![[0.0f32; 4]; side];
+        let (lo, hi) = (first.saturating_sub(r), (first + r).min(h - 1));
+        let mut sum = vec![[0.0f32; 4]; w];
         for y in lo..=hi {
             for (s, p) in sum.iter_mut().zip(row(y)) {
                 for c in 0..4 {
@@ -626,12 +697,12 @@ fn blur_columns(
             }
         }
         let mut count = (hi - lo + 1) as f32;
-        for (k, line) in lines.chunks_mut(side).enumerate() {
+        for (k, line) in lines.chunks_mut(w).enumerate() {
             let y = first + k;
             for (o, s) in line.iter_mut().zip(&sum) {
                 *o = s.map(|v| v / count);
             }
-            if y + r + 1 < side {
+            if y + r + 1 < h {
                 for (s, p) in sum.iter_mut().zip(row(y + r + 1)) {
                     for c in 0..4 {
                         s[c] += p[c];
@@ -649,17 +720,18 @@ fn blur_columns(
             }
         }
     };
-    if side >= PARALLEL_SIDE {
+    let n = out.len() / w.max(1);
+    if w >= PARALLEL_SIDE {
         // Bands of a few thousand pixels' worth of rows (each starts its
         // window afresh: worth it once the band is longer than it).
-        let rows = (PARALLEL_PIXELS / side).max(2 * r + 1).min(side);
+        let rows = (PARALLEL_PIXELS / w).max(2 * r + 1).min(n.max(1));
         pool.install(|| {
-            out.par_chunks_mut(side * rows)
+            out.par_chunks_mut(w * rows)
                 .enumerate()
-                .for_each(|(i, lines)| band(i * rows, lines))
+                .for_each(|(i, lines)| band(from + i * rows, lines))
         });
     } else {
-        band(0, out);
+        band(from, out);
     }
 }
 
@@ -675,16 +747,24 @@ fn halton(mut i: u32, base: u32) -> f32 {
 }
 
 /// Dulling's colour: the average of `source` (a `side`² patch) weighted by
-/// `mask`, over the pixels within `reach` of the middle. Like Krita, it
-/// samples spread-out pixels (a Halton sequence) until the colour stops
-/// moving rather than reading them all: at least 64 (or 2%), then 16 at a
-/// time until no channel moves more than 2/255. `None` if what it read
-/// carried less than half a pixel's weight.
-fn halton_dull(source: &[[f32; 4]], mask: &[f32], side: usize, reach: f32) -> Option<[f32; 4]> {
+/// `mask`, over the pixels within `reach` of the middle; without a mask
+/// (Krita's older engine), every pixel alike. Like Krita, it samples
+/// spread-out pixels (a Halton sequence) until the colour stops moving
+/// rather than reading them all: at least 64 (or 2%), then 16 at a time
+/// until no channel moves more than 2/255. Also whether what it read
+/// carried at least half a pixel's weight (else Krita looks wider); with
+/// no weight at all the colour is transparent.
+fn halton_dull(
+    source: &[[f32; 4]],
+    mask: Option<&[f32]>,
+    side: usize,
+    reach: f32,
+) -> ([f32; 4], bool) {
     let mid = side as f32 * 0.5;
     let inside = |l: usize| (l as f32 + 0.5 - mid).abs() <= reach;
-    let lo = (0..side).find(|&l| inside(l))?;
-    let hi = (0..side).rfind(|&l| inside(l))? + 1;
+    // At least the middle pixel.
+    let lo = (0..side).find(|&l| inside(l)).unwrap_or(side / 2);
+    let hi = (0..side).rfind(|&l| inside(l)).map_or(lo + 1, |l| l + 1);
     let n_side = hi - lo;
     let n = n_side * n_side;
     let first = n.min(64.max((n as f32 * 0.02).round() as usize));
@@ -693,7 +773,7 @@ fn halton_dull(source: &[[f32; 4]], mask: &[f32], side: usize, reach: f32) -> Op
         let x = lo + ((halton(i, 2) * n_side as f32) as usize).min(n_side - 1);
         let y = lo + ((halton(i, 3) * n_side as f32) as usize).min(n_side - 1);
         let at = y * side + x;
-        let w = mask[at];
+        let w = mask.map_or(1.0, |m| m[at]);
         if w > 0.0 {
             let px = source[at];
             for c in 0..4 {
@@ -724,7 +804,7 @@ fn halton_dull(source: &[[f32; 4]], mask: &[f32], side: usize, reach: f32) -> Op
             break;
         }
     }
-    (weight > 0.5).then_some(last)
+    (last, mask.is_none() || weight > 0.5)
 }
 
 impl PainterApp {
@@ -875,6 +955,7 @@ impl PainterApp {
             idx,
             damage: Vec::new(),
             dabber,
+            codec: Codec::for_canvas(&self.canvas),
             stroke: BlendStroke {
                 kind,
                 dir: Vec2::ZERO,
@@ -892,6 +973,7 @@ impl PainterApp {
                 krita_last: Vec::new(),
                 random: 0x9e37_79b9,
                 lightness_before: HashMap::new(),
+                precise: HashMap::new(),
             },
         };
         self.brush_state.blend_stroke = Some(ActiveBlend {
@@ -1183,6 +1265,7 @@ impl BlendSession {
         }
         self.stroke.carries.clear();
         self.stroke.krita_last.clear();
+        self.stroke.precise.clear();
         self.stroke.random = 0x9e37_79b9;
         // The first dab, as `start` placed it, then the rest.
         let mut smoothed = smoothed.into_iter();
@@ -1332,33 +1415,18 @@ impl BlendSession {
             strength *= o.pressure_curves.flow(pressure);
         }
         let hardness = (o.hardness / 100.0).clamp(0.0, 1.0);
+        // The share of a brush width between dabs.
+        let gap = (o.spacing_px(diameter, o.spacing_factor(pressure)).max(1.0) / diameter.max(1.0))
+            .min(1.0);
         let blur_size = self.blur_size;
-        // The brush colour as carried paint (linear, premultiplied, opaque):
-        // the dab's own when its colour varies (inputs, colour source).
-        let brush_paint = match placed {
-            // (The dab's colour is in the document's blend space.)
-            Some(p) if self.brush.varies_color() => {
-                if self.canvas.blend_space == crate::canvas::blend_modes::BlendSpace::Linear {
-                    let [r, g, b] = p.dab.color;
-                    [r, g, b, 1.0]
-                } else {
-                    let [r, g, b] = p
-                        .dab
-                        .color
-                        .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
-                    to_f(Color32::from_rgb(r, g, b))
-                }
-            }
-            _ => to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b())),
-        };
-        let spacing = o.spacing;
+        let brush_paint = self.paint_of(placed);
         let idx = self.idx;
         let alpha_lock = self.canvas.layers[idx].alpha_locked;
         let rc = placed.map_or(r, |p| p.dab.reach).ceil() as i32;
         let side = (2 * rc + 1) as usize;
         let (x0, y0) = (center.x.floor() as i32 - rc, center.y.floor() as i32 - rc);
         let pool = Arc::clone(&self.pool);
-        let codec = Codec::new();
+        let codec = self.codec;
         let mask = match placed {
             Some(p) => self.placed_mask(p, (x0, y0), side),
             // A round tip, shaped like the brush's (hardness falloff),
@@ -1403,195 +1471,194 @@ impl BlendSession {
         };
         // A mixing brush's inputs scale its smudge length and colour rate.
         let (by_length, by_rate) = placed.map_or((1.0, 1.0), |p| (p.dab.smudge, p.dab.color_rate));
-        let stroke = &mut self.stroke;
-        let mix = &stroke.mix;
+        let mix = &self.stroke.mix;
         let by_pressure = |on: bool| if on { pressure.clamp(0.0, 1.0) } else { 1.0 };
+        // (Per dab: the dabs overlapping pick up again the paint the brush
+        // has just laid, so how far it carries hardly changes with the
+        // spacing.)
         let length = (mix.length * by_pressure(mix.pressure_length) * by_length).clamp(0.0, 1.0);
         // Brush colour added per brush width travelled, whatever the
         // spacing: per dab, the share that compounds to it over one width.
-        let steps_per_width = (100.0 / spacing.max(1.0)).max(1.0);
         let rate = (mix.color_rate * by_pressure(mix.pressure_color) * by_rate).clamp(0.0, 1.0);
-        let color_rate = 1.0 - (1.0 - rate).powf(1.0 / steps_per_width);
+        let color_rate = 1.0 - (1.0 - rate).powf(gap);
         let paint_blend = mix.blend;
 
-        let wrap = self.wrap;
-        // A deeper document's layer is read and written at its full depth,
-        // as linear paint all the way (rounding each dab to 8 bits would
-        // lose what the depth keeps, and band a long smudge).
-        let deep = self.canvas.depth().is_deep();
         // The pixels as stored (kept exactly where the dab doesn't reach),
-        // and as linear paint.
-        let (stored, under) = if deep {
-            let under = read_patch_linear(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
-            (Vec::new(), under)
-        } else {
-            let stored = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
-            let mut under = vec![[0.0f32; 4]; side * side];
-            for_rows(&pool, &mut under, side, |row, line| {
-                for (u, &c) in line.iter_mut().zip(&stored[row * side..]) {
-                    *u = codec.to_f(c);
-                }
-            });
-            (stored, under)
+        // and as paint; blurring, also blurred.
+        let blur_radius = ((r * blur_size).round() as usize).max(1);
+        let (stored, under, mut soft) = match self.stroke.kind {
+            BlendKind::Blur | BlendKind::Sharpen(_) => {
+                let (stored, under, soft) = self.blurred_patch((x0, y0), side, blur_radius);
+                (stored, under, Some(soft))
+            }
+            _ => {
+                let (stored, under) = self.read_layer((x0, y0), side, side);
+                (stored, under, None)
+            }
         };
         // Deform moves the pixels themselves: each takes its colour from
         // where the displacement says, at full weight (the mask sets how
         // far it moves).
         let mut weights_are_mask = true;
-        let target: Vec<[f32; 4]> = if let BlendKind::Deform(mode, amount) = stroke.kind {
-            weights_are_mask = false;
-            let dir = if copy == 0 {
-                stroke.dir
-            } else {
-                let s = &stroke.symmetry;
-                s.map(&stroke.copies[copy - 1], s.center + stroke.dir) - s.center
-            };
-            let step = self.brush.brush_options.spacing_px(diameter, 1.0).max(1.0);
-            let margin = (r * amount * 0.6).max(step).ceil() as i32 + 2;
-            let big_side = side + 2 * margin as usize;
-            let big = read_patch_linear(
-                &self.canvas,
-                Some(idx),
-                (x0 - margin, y0 - margin),
-                big_side,
-                big_side,
-                wrap,
-            );
-            let local_center = center - Vec2::new(x0 as f32, y0 as f32);
-            let moved = |i: usize| {
-                let m = mask[i];
-                if m <= 0.0 {
-                    return under[i];
-                }
-                let p = Vec2::new((i % side) as f32 + 0.5, (i / side) as f32 + 0.5);
-                let off = p - local_center;
-                let src = match mode {
-                    // As far as the brush moved since the last dab: at
-                    // full amount the paint keeps up with the brush.
-                    DeformMode::Push => p - dir * (amount * m * step),
-                    DeformMode::Grow => local_center + off * (1.0 - amount * m * 0.5),
-                    DeformMode::Shrink => local_center + off * (1.0 + amount * m * 0.5),
-                    DeformMode::SwirlLeft | DeformMode::SwirlRight => {
-                        let turn = amount * m * 0.8;
-                        let a = if mode == DeformMode::SwirlLeft {
-                            turn
-                        } else {
-                            -turn
-                        };
-                        let (s, c) = a.sin_cos();
-                        local_center + Vec2::new(c * off.x + s * off.y, -s * off.x + c * off.y)
-                    }
+        let target: Vec<[f32; 4]> = match self.stroke.kind {
+            BlendKind::Deform(mode, amount) => {
+                weights_are_mask = false;
+                let stroke = &self.stroke;
+                let dir = if copy == 0 {
+                    stroke.dir
+                } else {
+                    let s = &stroke.symmetry;
+                    s.map(&stroke.copies[copy - 1], s.center + stroke.dir) - s.center
                 };
-                sample_bilinear(&big, big_side, src + Vec2::splat(margin as f32))
-            };
-            let mut target = vec![[0.0f32; 4]; side * side];
-            for_rows(&pool, &mut target, side, |row, line| {
-                for (lx, t) in line.iter_mut().enumerate() {
-                    *t = moved(row * side + lx);
-                }
-            });
-            target
-        } else if let BlendKind::Clone { offset, merged } = stroke.kind {
-            let source = if merged { None } else { Some(idx) };
-            read_patch_linear(
-                &self.canvas,
-                source,
-                (x0 + offset.0, y0 + offset.1),
-                side,
-                side,
-                wrap,
-            )
-        } else if let BlendKind::Sharpen(amount) = stroke.kind {
-            let radius = ((r * blur_size).round() as usize).max(1);
-            let soft = box_blur(&pool, &under, side, radius);
-            under
-                .iter()
-                .zip(&soft)
-                .map(|(u, b)| {
-                    let a = u[3];
-                    let mut v = *u;
-                    for k in 0..3 {
-                        v[k] = (u[k] + (u[k] - b[k]) * amount).clamp(0.0, a);
+                let step = self.brush.brush_options.spacing_px(diameter, 1.0).max(1.0);
+                let margin = (r * amount * 0.6).max(step).ceil() as i32 + 2;
+                let big_side = side + 2 * margin as usize;
+                let (_, big) = self.read_layer((x0 - margin, y0 - margin), big_side, big_side);
+                let local_center = center - Vec2::new(x0 as f32, y0 as f32);
+                let moved = |i: usize| {
+                    let m = mask[i];
+                    if m <= 0.0 {
+                        return under[i];
                     }
-                    v
-                })
-                .collect()
-        } else if let BlendKind::Filter(filter) = stroke.kind {
-            // The filtered layer laid down through the brush, its coverage
-            // building up like paint: going over a spot again never
-            // filters it twice.
-            weights_are_mask = false;
-            let ts = self.canvas.tile_size() as i32;
-            let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
-            let mut target = under.clone();
-            for (i, &m) in mask.iter().enumerate() {
-                if m <= 0.0 {
-                    continue;
-                }
-                let (mut x, mut y) = (x0 + (i % side) as i32, y0 + (i / side) as i32);
-                if wrap {
-                    (x, y) = (x.rem_euclid(cw), y.rem_euclid(ch));
-                } else if x < 0 || y < 0 || x >= cw || y >= ch {
-                    continue;
-                }
-                let key = (x.div_euclid(ts), y.div_euclid(ts));
-                let at = ((y - key.1 * ts) * ts + (x - key.0 * ts)) as usize;
-                if !stroke.filtered.contains_key(&key) {
-                    let tile = filter_tile(&self.canvas, idx, &stroke.before, key, filter, wrap);
-                    stroke.filtered.insert(key, tile);
-                }
-                let filtered = to_f(stroke.filtered[&key][at]);
-                let original = stroke.before.get(&key).map_or(under[i], |t| to_f(t[at]));
-                let cov = &mut stroke
-                    .coverage
-                    .entry(key)
-                    .or_insert_with(|| vec![0.0; (ts * ts) as usize])[at];
-                *cov += m * (1.0 - *cov);
-                let c = *cov;
-                target[i] = std::array::from_fn(|k| original[k] + (filtered[k] - original[k]) * c);
-            }
-            target
-        } else if let BlendKind::Adjust(hsv) = stroke.kind {
-            under.iter().map(|&u| adjust_hsv(u, hsv)).collect()
-        } else if stroke.kind == BlendKind::Smudge {
-            // The carried paint, resized if pressure changed the tip size.
-            if stroke.carries.len() <= copy {
-                stroke.carries.resize_with(copy + 1, || None);
-            }
-            let carry = match stroke.carries[copy].take() {
-                Some(c) if c.side == side => c,
-                Some(c) => Carry {
-                    side,
-                    px: (0..side * side)
-                        .map(|i| {
-                            let (x, y) = (i % side * c.side / side, i / side * c.side / side);
-                            c.px[y * c.side + x]
-                        })
-                        .collect(),
-                },
-                None => Carry {
-                    side,
-                    px: under.clone(),
-                },
-            };
-            let mut carry = carry;
-            if color_rate > 0.0 {
-                // Wet paint: the brush picks up the
-                // paint under it (keeping the smudge length's share of what
-                // it carried), then adds its own colour.
-                for (c, u) in carry.px.iter_mut().zip(&under) {
-                    for k in 0..4 {
-                        c[k] = u[k] + (c[k] - u[k]) * length;
-                        c[k] += (brush_paint[k] - c[k]) * color_rate;
+                    let p = Vec2::new((i % side) as f32 + 0.5, (i / side) as f32 + 0.5);
+                    let off = p - local_center;
+                    let src = match mode {
+                        // As far as the brush moved since the last dab: at
+                        // full amount the paint keeps up with the brush.
+                        DeformMode::Push => p - dir * (amount * m * step),
+                        DeformMode::Grow => local_center + off * (1.0 - amount * m * 0.5),
+                        DeformMode::Shrink => local_center + off * (1.0 + amount * m * 0.5),
+                        DeformMode::SwirlLeft | DeformMode::SwirlRight => {
+                            let turn = amount * m * 0.8;
+                            let a = if mode == DeformMode::SwirlLeft {
+                                turn
+                            } else {
+                                -turn
+                            };
+                            let (s, c) = a.sin_cos();
+                            local_center + Vec2::new(c * off.x + s * off.y, -s * off.x + c * off.y)
+                        }
+                    };
+                    sample_bilinear(&big, big_side, src + Vec2::splat(margin as f32))
+                };
+                let mut target = vec![[0.0f32; 4]; side * side];
+                for_rows(&pool, &mut target, side, |row, line| {
+                    for (lx, t) in line.iter_mut().enumerate() {
+                        *t = moved(row * side + lx);
                     }
+                });
+                target
+            }
+            BlendKind::Clone { offset, merged } => {
+                let origin = (x0 + offset.0, y0 + offset.1);
+                if merged {
+                    let patch = read_patch(&self.canvas, None, origin, side, side, self.wrap);
+                    patch.into_iter().map(|c| codec.to_f(c)).collect()
+                } else {
+                    self.read_layer(origin, side, side).1
                 }
             }
-            let px = carry.px.clone();
-            stroke.carries[copy] = Some(carry);
-            px
-        } else {
-            let radius = ((r * blur_size).round() as usize).max(1);
-            box_blur(&pool, &under, side, radius)
+            BlendKind::Sharpen(amount) => {
+                let soft = soft.as_deref().unwrap_or(&under);
+                under
+                    .iter()
+                    .zip(soft)
+                    .map(|(u, b)| {
+                        let a = u[3];
+                        let mut v = *u;
+                        for k in 0..3 {
+                            v[k] = (u[k] + (u[k] - b[k]) * amount).clamp(0.0, a);
+                        }
+                        v
+                    })
+                    .collect()
+            }
+            BlendKind::Filter(filter) => {
+                // The filtered layer laid down through the brush, its
+                // coverage building up like paint: going over a spot again
+                // never filters it twice.
+                weights_are_mask = false;
+                let stroke = &mut self.stroke;
+                let ts = self.canvas.tile_size() as i32;
+                let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+                let wrap = self.wrap;
+                let mut target = under.clone();
+                for (i, &m) in mask.iter().enumerate() {
+                    if m <= 0.0 {
+                        continue;
+                    }
+                    let (mut x, mut y) = (x0 + (i % side) as i32, y0 + (i / side) as i32);
+                    if wrap {
+                        (x, y) = (x.rem_euclid(cw), y.rem_euclid(ch));
+                    } else if x < 0 || y < 0 || x >= cw || y >= ch {
+                        continue;
+                    }
+                    let key = (x.div_euclid(ts), y.div_euclid(ts));
+                    let at = ((y - key.1 * ts) * ts + (x - key.0 * ts)) as usize;
+                    if !stroke.filtered.contains_key(&key) {
+                        let tile =
+                            filter_tile(&self.canvas, idx, &stroke.before, key, filter, wrap);
+                        stroke.filtered.insert(key, tile);
+                    }
+                    let filtered = codec.to_f(stroke.filtered[&key][at]);
+                    let original = stroke
+                        .before
+                        .get(&key)
+                        .map_or(under[i], |t| codec.to_f(t[at]));
+                    let cov = &mut stroke
+                        .coverage
+                        .entry(key)
+                        .or_insert_with(|| vec![0.0; (ts * ts) as usize])[at];
+                    *cov += m * (1.0 - *cov);
+                    let c = *cov;
+                    target[i] =
+                        std::array::from_fn(|k| original[k] + (filtered[k] - original[k]) * c);
+                }
+                target
+            }
+            BlendKind::Adjust(hsv) => under.iter().map(|&u| adjust_hsv(codec, u, hsv)).collect(),
+            BlendKind::Smudge => {
+                // The carried paint, resized if pressure changed the tip size.
+                let carries = &mut self.stroke.carries;
+                if carries.len() <= copy {
+                    carries.resize_with(copy + 1, || None);
+                }
+                let mut carry = match carries[copy].take() {
+                    Some(c) if c.side == side => c,
+                    Some(c) => Carry {
+                        side,
+                        px: (0..side * side)
+                            .map(|i| {
+                                let (x, y) = (i % side * c.side / side, i / side * c.side / side);
+                                c.px[y * c.side + x]
+                            })
+                            .collect(),
+                    },
+                    None => Carry {
+                        side,
+                        px: under.clone(),
+                    },
+                };
+                // The brush picks up the paint under it, keeping the smudge
+                // length's share of what it carried, then (a wet brush)
+                // mixes in its own colour; that is what it lays down.
+                // (Picked up before it paints, so the length counts under
+                // all of the tip: picking up what it had just laid kept all
+                // it carried wherever the tip was at full strength.)
+                let under = &under;
+                for_rows(&pool, &mut carry.px, side, |row, line| {
+                    for (c, u) in line.iter_mut().zip(&under[row * side..]) {
+                        for k in 0..4 {
+                            c[k] = u[k] + (c[k] - u[k]) * length;
+                            c[k] += (brush_paint[k] - c[k]) * color_rate;
+                        }
+                    }
+                });
+                let px = carry.px.clone();
+                carries[copy] = Some(carry);
+                px
+            }
+            BlendKind::Blur => soft.take().unwrap_or_else(|| under.clone()),
         };
 
         // Pixel `i` under the dab: the target mixed into what's there.
@@ -1613,74 +1680,103 @@ impl BlendSession {
             }
             v
         };
-        // The result as 8-bit pixels or, in a deeper document, as linear
-        // paint (the other one left empty).
-        let mut result = stored.clone();
-        let mut result_deep = if deep { under.clone() } else { Vec::new() };
-        let changed = std::sync::atomic::AtomicBool::new(false);
-        for_rows(&pool, &mut result, side, |row, line| {
-            let mut row_changed = false;
-            for (lx, out) in line.iter_mut().enumerate() {
-                let i = row * side + lx;
-                // Outside the dab: the stored pixel as it is (no round
-                // trip through linear light, and nothing to work out).
-                if mask[i] <= 0.0 {
-                    continue;
-                }
-                let before = *out;
-                let mut new = codec.to_c(mixed(i));
-                if alpha_lock {
-                    new = crate::canvas::blend::with_alpha_of(new, before.a());
-                }
-                row_changed |= new != before;
-                *out = new;
-            }
-            if row_changed {
-                changed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let spans = spans_of(&mask, side);
+        let mut result = under.clone();
+        let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i| {
+            let v = mixed(i);
+            if alpha_lock {
+                with_alpha_linear(v, under[i][3])
+            } else {
+                v
             }
         });
-        for_rows(&pool, &mut result_deep, side, |row, line| {
-            let mut row_changed = false;
-            for (lx, out) in line.iter_mut().enumerate() {
-                let i = row * side + lx;
-                if mask[i] <= 0.0 {
-                    continue;
-                }
-                let mut new = mixed(i);
-                if alpha_lock {
-                    new = with_alpha_linear(new, out[3]);
-                }
-                row_changed |= new != *out;
-                *out = new;
+        if changed {
+            self.write_blend_patch((x0, y0), side, &stored, &result, &mask);
+        }
+    }
+
+    /// The brush colour as paint (premultiplied, opaque, in the stroke's
+    /// space): the placed dab's own when its colour varies (inputs, colour
+    /// source, randomness).
+    fn paint_of(&self, placed: Option<&Placed>) -> [f32; 4] {
+        match placed {
+            // (The dab's colour is in the document's blend space, as the
+            // stroke's paint is.)
+            Some(p) if self.brush.varies_color() => {
+                let [r, g, b] = p.dab.color;
+                [r, g, b, 1.0]
             }
-            if row_changed {
-                changed.store(true, std::sync::atomic::Ordering::Relaxed);
+            _ => {
+                let c = self.brush.brush_options.color;
+                self.codec.to_f(Color32::from_rgb(c.r(), c.g(), c.b()))
+            }
+        }
+    }
+
+    /// The layer under the `side`² patch at `origin` (as stored and as
+    /// paint, as [`Self::read_layer`] gives it), and box-blurred with
+    /// `radius`: read that much wider all round, so near the patch's edge
+    /// the blur takes in what lies beyond it, as filtering the layer would
+    /// (cut off there, a hard tip's edge pixels averaged only what was
+    /// inside it).
+    fn blurred_patch(
+        &self,
+        (x0, y0): (i32, i32),
+        side: usize,
+        radius: usize,
+    ) -> (Vec<Color32>, Vec<[f32; 4]>, Vec<[f32; 4]>) {
+        let pad = radius as i32;
+        let wide = side + 2 * radius;
+        let (stored, paint) = self.read_layer((x0 - pad, y0 - pad), wide, wide);
+        let soft = box_blur_inside(&self.pool, &paint, wide, radius, radius);
+        let inside = (radius, radius, side, side);
+        let stored = if stored.is_empty() {
+            stored
+        } else {
+            patch_block(&stored, wide, inside).into_owned()
+        };
+        (stored, patch_block(&paint, wide, inside).into_owned(), soft)
+    }
+
+    /// The layer over the `w`×`h` rectangle at `origin` (round the edges
+    /// with wrap-around): its pixels as stored (an 8-bit document's, else
+    /// none), and as paint in the stroke's space. What the stroke has
+    /// painted comes back as it mixed it, not rounded to 8 bits.
+    fn read_layer(&self, origin: (i32, i32), w: usize, h: usize) -> (Vec<Color32>, Vec<[f32; 4]>) {
+        let codec = self.codec;
+        if self.canvas.depth().is_deep() {
+            let mut paint = read_deep(&self.canvas, self.idx, origin, w, h, self.wrap);
+            if codec.gamma.is_some() {
+                for v in &mut paint {
+                    *v = codec.of_linear(*v);
+                }
+            }
+            return (Vec::new(), paint);
+        }
+        let stored = read_patch(&self.canvas, Some(self.idx), origin, w, h, self.wrap);
+        let mut paint = vec![[0.0f32; 4]; w * h];
+        for_rows(&self.pool, &mut paint, w, |row, line| {
+            for (p, &c) in line.iter_mut().zip(&stored[row * w..]) {
+                *p = codec.to_f(c);
             }
         });
-        // Smudge picks up the blended paint for the next dab (a wet brush
-        // picked up the paint under it before painting).
-        if color_rate <= 0.0
-            && let Some(carry) = stroke.carries.get_mut(copy).and_then(|c| c.as_mut())
-        {
-            let (result, result_deep) = (&result, &result_deep);
-            for_rows(&pool, &mut carry.px, side, |row, line| {
-                for (lx, c) in line.iter_mut().enumerate() {
-                    let i = row * side + lx;
-                    let res = if deep {
-                        result_deep[i]
-                    } else {
-                        codec.to_f(result[i])
-                    };
-                    for k in 0..4 {
-                        c[k] = res[k] + (c[k] - res[k]) * length;
+        let precise = &self.stroke.precise;
+        if !precise.is_empty() {
+            tile_blocks(&self.canvas, origin, (w, h), self.wrap, |key, block| {
+                let Some(t) = precise.get(&key) else {
+                    return;
+                };
+                let n = block.run;
+                for (at, from) in block.rows() {
+                    for (p, v) in paint[from..from + n].iter_mut().zip(&t[at..at + n]) {
+                        if v[3] >= 0.0 {
+                            *p = *v;
+                        }
                     }
                 }
             });
         }
-        if changed.into_inner() {
-            let linear = deep.then_some(&result_deep[..]);
-            self.write_blend_patch(idx, (x0, y0), side, &result, linear, wrap);
-        }
+        (stored, paint)
     }
 }
 
@@ -1689,10 +1785,11 @@ impl BlendSession {
     /// dab was laid over it (smearing; in dulling mode one colour sampled
     /// there), at the smudge rate × opacity; then the brush colour at the
     /// colour rate² × opacity (by the brush's blend mode); the result put
-    /// down through the tip. The stroke's first dab only says where it is.
+    /// down through the tip. Krita's older engine copies what it picks up
+    /// whole, adds less colour and puts the result down at the smudge
+    /// rate. The stroke's first dab only says where it is.
     fn krita_smudge_dab(&mut self, center: Vec2, pressure: f32, copy: usize, placed: &Placed) {
         let brush = &self.brush;
-        let o = &brush.brush_options;
         let r = placed.dab.r;
         let p = pressure.clamp(0.0, 1.0);
         // The dab's strength: opacity and flow, by pressure as the brush
@@ -1704,28 +1801,42 @@ impl BlendSession {
         let Some(k) = m.krita else {
             return;
         };
+        // (A lightness tip always takes the new engine, as in Krita.)
+        let legacy = k.legacy && !brush.lays_lightness();
         let by = |on: bool| if on { p } else { 1.0 };
         let rate = m.smudge_length * by(m.pressure_length) * placed.dab.smudge;
         let color_rate = m.color_rate * by(m.pressure_color) * placed.dab.color_rate;
-        let smear = if k.dulling { 0.8 } else { 1.0 } * rate * opacity;
-        let colour = color_rate * color_rate * opacity;
-        let paint = to_f(Color32::from_rgb(o.color.r(), o.color.g(), o.color.b()));
-        // The colour tables looked up once, not once a pixel.
-        let codec = Codec::new();
+        // How much of what's picked up goes over the layer, how much brush
+        // colour then, and how much of the result is put down.
+        let (smear, colour, laid) = if legacy {
+            // The brush colour at most what the most smudge leaves (at
+            // least a fifth).
+            let most = (1.0 - m.smudge_length).max(0.2);
+            let colour = (most * color_rate * opacity).clamp(0.0, 1.0);
+            (1.0, colour, (rate * opacity).clamp(0.0, 1.0))
+        } else {
+            let smear = if k.dulling { 0.8 } else { 1.0 } * rate * opacity;
+            (smear, color_rate * color_rate * opacity, 1.0)
+        };
+        let paint = self.paint_of(Some(placed));
         let paint_blend = brush.paint_blend;
-        let wrap = self.wrap;
-        let idx = self.idx;
+        // Krita puts a smearing dab on whole pixels and reads the layer
+        // where the last one was, as many whole pixels away: the paint
+        // moves in whole pixels, never resampled (resampling it each dab
+        // blurred a long smear), and a slow stroke's moves add up as its
+        // dabs cross pixels.
+        let at = (center.x.floor() as i32, center.y.floor() as i32);
         let stroke = &mut self.stroke;
         if stroke.krita_last.len() <= copy {
             stroke.krita_last.resize(copy + 1, None);
         }
-        let Some(last) = stroke.krita_last[copy].replace(center) else {
+        let Some(last) = stroke.krita_last[copy].replace(at) else {
             return;
         };
-        let alpha_lock = self.canvas.layers[idx].alpha_locked;
+        let alpha_lock = self.canvas.layers[self.idx].alpha_locked;
         let rc = placed.dab.reach.ceil() as i32;
         let side = (2 * rc + 1) as usize;
-        let (x0, y0) = (center.x.floor() as i32 - rc, center.y.floor() as i32 - rc);
+        let (x0, y0) = (at.0 - rc, at.1 - rc);
         // The tip (turned, textured, selected): how much of the result
         // each pixel takes.
         let shape = Placed {
@@ -1735,87 +1846,76 @@ impl BlendSession {
         let mask = self.placed_mask(&shape, (x0, y0), side);
         let pool = Arc::clone(&self.pool);
         // Each row's part under the tip: the rest is left as it is.
-        let spans: Vec<(usize, usize)> = mask
-            .chunks(side)
-            .map(|row| {
-                let first = row.iter().position(|&m| m > 0.0).unwrap_or(side);
-                let last = row.iter().rposition(|&m| m > 0.0).map_or(first, |i| i + 1);
-                (first, last)
-            })
-            .collect();
-
-        // The layer under the dab as linear paint, at full depth in a deeper
-        // document (written back so too), else as stored and decoded.
-        let deep = self.canvas.depth().is_deep();
-        let (stored, under) = if deep {
-            let under = read_patch_linear(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
-            (Vec::new(), under)
-        } else {
-            let stored = read_patch(&self.canvas, Some(idx), (x0, y0), side, side, wrap);
-            let under = stored.iter().map(|&c| codec.to_f(c)).collect();
-            (stored, under)
-        };
-        // The layer where the last dab was, to the sub-pixel: between the
-        // whole pixels round it (bilinear, as Krita samples it), so the
-        // paint moves as far as the brush did rather than in whole-pixel
-        // jumps (a slow stroke's moves under half a pixel moved none).
-        let shift = last - center;
-        let whole = shift.floor();
-        let (sx, sy) = (x0 + whole.x as i32, y0 + whole.y as i32);
-        let around = read_patch_linear(&self.canvas, Some(idx), (sx, sy), side + 1, side + 1, wrap);
-        let frac = shift - whole;
-        // (The same part of a pixel off everywhere: each pixel the same
-        // weights of the four round it, only where the tip reaches.)
-        let (fx, fy) = (frac.x, frac.y);
-        let weights = [
-            (1.0 - fx) * (1.0 - fy),
-            fx * (1.0 - fy),
-            (1.0 - fx) * fy,
-            fx * fy,
-        ];
-        let wide = side + 1;
-        let mut source = vec![[0.0f32; 4]; side * side];
-        for_rows(&pool, &mut source, side, |ly, row| {
-            let (first, last) = spans[ly];
-            let (top, bottom) = (&around[ly * wide..], &around[(ly + 1) * wide..]);
-            for lx in first..last {
-                let (a, b, c, d) = (top[lx], top[lx + 1], bottom[lx], bottom[lx + 1]);
-                row[lx] = std::array::from_fn(|k| {
-                    a[k] * weights[0] + b[k] * weights[1] + c[k] * weights[2] + d[k] * weights[3]
-                });
-            }
-        });
-        // Dulling: one colour, the weighted average (by the tip and the
-        // paint's coverage, premultiplied) of the middle of the source, out
-        // to the smudge radius, widened while that holds no paint.
+        let spans = spans_of(&mask, side);
+        let (stored, under) = self.read_layer((x0, y0), side, side);
+        let from = (x0 + last.0 - at.0, y0 + last.1 - at.1);
+        let source = self.read_layer(from, side, side).1;
+        // Dulling: one colour sampled where the last dab was.
         let dulled = k.dulling.then(|| {
-            let mut radius = k.radius;
-            loop {
-                if let Some(c) = halton_dull(&source, &mask, side, (r * radius).max(0.5)) {
-                    break c;
+            if legacy {
+                // Every pixel alike, over the dab's square scaled by the
+                // radius (up to three times it: past the dab), at least
+                // its middle pixel.
+                let grow = (side as f32 * 0.5 * (k.radius - 1.0)) as i32;
+                let n = if k.radius > 0.0 {
+                    (side as i32 + 2 * grow).max(1) as usize
+                } else {
+                    1
+                };
+                let half = (n / 2) as i32;
+                let around = self
+                    .read_layer((from.0 + rc - half, from.1 + rc - half), n, n)
+                    .1;
+                halton_dull(&around, None, n, n as f32).0
+            } else {
+                // Weighted by the tip and the paint's coverage
+                // (premultiplied), out to the smudge radius, widened while
+                // that holds no paint.
+                let mut radius = k.radius.min(1.0);
+                loop {
+                    let (c, enough) =
+                        halton_dull(&source, Some(&mask), side, (r * radius).max(0.5));
+                    if enough || radius >= 1.0 {
+                        break c;
+                    }
+                    radius = (radius + 0.05).min(1.0);
                 }
-                if radius >= 1.0 {
-                    break [0.0; 4];
-                }
-                radius = (radius + 0.05).min(1.0);
             }
         });
+        let normal = paint_blend == crate::canvas::blend_modes::LayerBlend::Normal;
+        // With both going over the layer (no smear alpha, a Normal brush),
+        // Krita mixes the brush colour into the dulled colour first, and
+        // lays that at the dulling rate.
+        let fused = !legacy && k.dulling && colour > 0.0 && !k.smear_alpha && normal;
+        let dulled = dulled.map(|d| {
+            if fused {
+                std::array::from_fn(|c| paint[c] * colour + d[c] * (1.0 - colour))
+            } else {
+                d
+            }
+        });
+        let over = |s: [f32; 4], u: [f32; 4], o: f32| -> [f32; 4] {
+            std::array::from_fn(|c| s[c] * o + u[c] * (1.0 - s[3] * o))
+        };
+        let lerp = |u: [f32; 4], s: [f32; 4], o: f32| -> [f32; 4] {
+            std::array::from_fn(|c| u[c] + (s[c] - u[c]) * o)
+        };
 
         // One pixel under the tip: the picked-up paint over the layer,
         // then the brush colour, put down through the tip.
         let smudge_pixel = |i: usize| -> [f32; 4] {
             let u = under[i];
             let s = dulled.unwrap_or(source[i]);
-            // The picked-up paint over the layer (copied, alpha too, with
-            // smear alpha).
-            let mut v: [f32; 4] = if k.smear_alpha {
-                std::array::from_fn(|c| u[c] + (s[c] - u[c]) * smear)
+            // The picked-up paint over the layer: copied (alpha too) with
+            // smear alpha, and always by the older engine.
+            let mut v = if legacy || k.smear_alpha {
+                lerp(u, s, smear)
             } else {
-                std::array::from_fn(|c| s[c] * smear + u[c] * (1.0 - s[3] * smear))
+                over(s, u, smear)
             };
             // Then the brush colour.
-            if colour > 0.0 {
-                v = if paint_blend == crate::canvas::blend_modes::LayerBlend::Normal {
+            if colour > 0.0 && !fused {
+                v = if normal {
                     std::array::from_fn(|c| paint[c] * colour + v[c] * (1.0 - colour))
                 } else {
                     let rgba = |x: [f32; 4]| {
@@ -1826,36 +1926,27 @@ impl BlendSession {
                         .to_array()
                 };
             }
-            let m = mask[i].min(1.0);
-            std::array::from_fn(|c| u[c] + (v[c] - u[c]) * m)
+            // Put down through the tip: copied, or over the layer by the
+            // older engine without smear alpha.
+            let m = mask[i].min(1.0) * laid;
+            if legacy && !k.smear_alpha {
+                over(v, u, m)
+            } else {
+                lerp(u, v, m)
+            }
         };
 
-        // The result as 8-bit pixels or, in a deeper document, as linear
-        // paint (the other one left empty).
-        let mut result = stored.clone();
-        let mut result_deep = if deep { under.clone() } else { Vec::new() };
-        let changed = if deep {
-            lay_spans(&pool, &mut result_deep, side, &spans, &mask, |i| {
-                let v = smudge_pixel(i);
-                if alpha_lock {
-                    with_alpha_linear(v, under[i][3])
-                } else {
-                    v
-                }
-            })
-        } else {
-            lay_spans(&pool, &mut result, side, &spans, &mask, |i| {
-                let out = codec.to_c(smudge_pixel(i));
-                if alpha_lock {
-                    crate::canvas::blend::with_alpha_of(out, stored[i].a())
-                } else {
-                    out
-                }
-            })
-        };
+        let mut result = under.clone();
+        let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i| {
+            let v = smudge_pixel(i);
+            if alpha_lock {
+                with_alpha_linear(v, under[i][3])
+            } else {
+                v
+            }
+        });
         if changed {
-            let linear = deep.then_some(&result_deep[..]);
-            self.write_blend_patch(idx, (x0, y0), side, &result, linear, wrap);
+            self.write_blend_patch((x0, y0), side, &stored, &result, &mask);
         }
         // A lightness tip: its grey on the lightness map, as much as the
         // paint thickness says (overwriting: at the dab's opacity; else as
@@ -1960,22 +2051,23 @@ impl BlendSession {
         }
     }
 
-    /// Put a blend stroke's `side`² `result` on layer `idx` at `origin`
-    /// (round the edges with wrap-around), keeping the tiles' pixels from
-    /// before the stroke for its undo. With `linear` (a deeper document),
-    /// that is written instead, at full depth.
+    /// Put `paint` (a `side`² patch at `origin`, in the stroke's space) on
+    /// layer where `mask` reaches (round the edges with wrap-around),
+    /// keeping the tiles' pixels from before the stroke for its undo. A
+    /// deeper document takes it at full depth; an 8-bit one rounded
+    /// (`stored`, its pixels as they were, kept exactly where the mask
+    /// doesn't reach), the paint itself kept for the stroke to read back.
     fn write_blend_patch(
         &mut self,
-        idx: usize,
         (x0, y0): (i32, i32),
         side: usize,
-        result: &[Color32],
-        linear: Option<&[[f32; 4]]>,
-        wrap: bool,
+        stored: &[Color32],
+        paint: &[[f32; 4]],
+        mask: &[f32],
     ) {
-        let stroke = &mut self.stroke;
+        let (idx, wrap, codec) = (self.idx, self.wrap, self.codec);
         // Wrap-around: each piece of the patch where it lands on the canvas.
-        let pieces = if wrap {
+        let pieces: Vec<_> = if wrap {
             let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
             let rows = wrap_pieces(y0, side, ch);
             wrap_pieces(x0, side, cw)
@@ -1985,25 +2077,136 @@ impl BlendSession {
         } else {
             vec![(x0, y0, 0, 0, side, side)]
         };
+        let deep = self.canvas.depth().is_deep();
+        let linear: std::borrow::Cow<'_, [[f32; 4]]> = match deep && codec.gamma.is_some() {
+            true => paint.iter().map(|&v| codec.to_linear(v)).collect(),
+            false => std::borrow::Cow::Borrowed(paint),
+        };
+        let mut result = Vec::new();
+        if !deep {
+            result = stored.to_vec();
+            for_rows(&self.pool, &mut result, side, |row, line| {
+                for (lx, out) in line.iter_mut().enumerate() {
+                    let i = row * side + lx;
+                    if mask[i] > 0.0 {
+                        *out = codec.to_c(paint[i]);
+                    }
+                }
+            });
+        }
+        let stroke = &mut self.stroke;
         for (sx, sy, dx, dy, w, h) in pieces {
             let rect = (sx, sy, w, h);
-            match linear {
-                Some(px) => self.canvas.write_layer_region_deep(
+            if deep {
+                self.canvas.write_layer_region_deep(
                     idx,
                     rect,
-                    &patch_block(px, side, (dx, dy, w, h)),
+                    &patch_block(&linear, side, (dx, dy, w, h)),
                     &mut stroke.before,
                     &mut stroke.before_deep,
-                ),
-                None => self.canvas.write_layer_region(
+                );
+            } else {
+                self.canvas.write_layer_region(
                     idx,
                     rect,
-                    &patch_block(result, side, (dx, dy, w, h)),
+                    &patch_block(&result, side, (dx, dy, w, h)),
                     Some(&mut stroke.before),
-                ),
+                );
             }
             self.damage.push([sx, sy, sx + w as i32, sy + h as i32]);
         }
+        if deep {
+            return;
+        }
+        // The paint, for the stroke to read back (a tile met for the first
+        // time holds none: an alpha below 0).
+        let ts = self.canvas.tile_size();
+        let precise = &mut stroke.precise;
+        tile_blocks(&self.canvas, (x0, y0), (side, side), wrap, |key, block| {
+            let tile = precise
+                .entry(key)
+                .or_insert_with(|| vec![[0.0, 0.0, 0.0, -1.0]; ts * ts]);
+            let n = block.run;
+            for (at, from) in block.rows() {
+                tile[at..at + n].copy_from_slice(&paint[from..from + n]);
+            }
+        });
+    }
+}
+
+/// Each row's part of a `side`-wide `mask` that it reaches, as
+/// `(first, last)` (empty when none).
+fn spans_of(mask: &[f32], side: usize) -> Vec<(usize, usize)> {
+    mask.chunks(side)
+        .map(|row| {
+            let first = row.iter().position(|&m| m > 0.0).unwrap_or(side);
+            let last = row.iter().rposition(|&m| m > 0.0).map_or(first, |i| i + 1);
+            (first, last)
+        })
+        .collect()
+}
+
+/// The `w`×`h` canvas rectangle at `origin` (round the edges with
+/// wrap-around, else what's on the canvas) in blocks each within one tile:
+/// `f(tile, block)` once a block, its rows' runs in it.
+fn tile_blocks(
+    canvas: &crate::canvas::Canvas,
+    (x0, y0): (i32, i32),
+    (w, h): (usize, usize),
+    wrap: bool,
+    mut f: impl FnMut((i32, i32), TileBlock),
+) {
+    let ts = canvas.tile_size();
+    let (cw, ch) = (canvas.width() as i32, canvas.height() as i32);
+    // A span's pieces on the canvas, cut at the tiles' edges: (tile, start
+    // in the tile, start in the rectangle, length).
+    let split = |start: i32, len: usize, size: i32| {
+        let mut out = Vec::new();
+        for (at, offset, run) in wrap_pieces_or_clip(start, len, size, wrap) {
+            let (mut c, end) = (at as usize, at as usize + run);
+            while c < end {
+                let to = ((c / ts + 1) * ts).min(end);
+                out.push(((c / ts) as i32, c % ts, offset + c - at as usize, to - c));
+                c = to;
+            }
+        }
+        out
+    };
+    let columns = split(x0, w, cw);
+    for (ty, in_y, dy, rows) in split(y0, h, ch) {
+        for &(tx, in_x, dx, run) in &columns {
+            f(
+                (tx, ty),
+                TileBlock {
+                    at: in_y * ts + in_x,
+                    from: dy * w + dx,
+                    run,
+                    rows,
+                    tile_stride: ts,
+                    stride: w,
+                },
+            );
+        }
+    }
+}
+
+/// A block of a rectangle within one tile (see [`tile_blocks`]).
+struct TileBlock {
+    /// Where it starts in the tile and in the rectangle.
+    at: usize,
+    from: usize,
+    /// Its width and height.
+    run: usize,
+    rows: usize,
+    /// The tile's and the rectangle's widths.
+    tile_stride: usize,
+    stride: usize,
+}
+
+impl TileBlock {
+    /// Each row's (start in the tile, start in the rectangle).
+    fn rows(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        (0..self.rows).map(|r| (self.at + r * self.tile_stride, self.from + r * self.stride))
     }
 }
 

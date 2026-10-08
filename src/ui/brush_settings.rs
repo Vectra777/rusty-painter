@@ -683,6 +683,14 @@ fn brush_settings_contents(
                 );
             });
             changed |= ui
+                .checkbox(&mut k.legacy, "Older engine")
+                .on_hover_text(
+                    "Krita's colour smudge from before its new smudge algorithm (older \
+                     presets): what's picked up is copied whole and put down at the smudge \
+                     rate, and dulling samples up to three times the dab.",
+                )
+                .changed();
+            changed |= ui
                 .checkbox(&mut k.smear_alpha, "Smear alpha")
                 .on_hover_text("Smudge transparency too, not just the paint over what's there.")
                 .changed();
@@ -710,11 +718,12 @@ fn brush_settings_contents(
                 );
             });
             if k.dulling {
+                let most = if k.legacy { 3.0 } else { 1.0 };
                 changed |= slider_row(
                     ui,
                     "Sample radius",
                     crate::ui::widgets::reset(&mut k.radius, |v| {
-                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                        percent_of_unit(egui::Slider::new(v, 0.0..=most))
                     }),
                 )
                 .on_hover_text(

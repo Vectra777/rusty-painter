@@ -1117,3 +1117,30 @@ fn fuzz_krita_presets() {
         },
     );
 }
+
+#[test]
+fn a_colour_smudge_without_the_new_algorithm_takes_the_older_engine() {
+    let older = with_params(
+        "colorsmudge",
+        &[
+            ("SmudgeRateMode", "1"),
+            ("PressureSmudgeRadius", "true"),
+            ("SmudgeRadiusValue", "2.5"),
+        ],
+    );
+    let imported = import_kpp(&older, "file").unwrap();
+    let k = imported.presets[0].brush.mixing.unwrap().krita.unwrap();
+    // Its dulling samples past the dab (up to three times it).
+    assert!(k.legacy && k.dulling && k.radius == 2.5);
+    let newer = with_params(
+        "colorsmudge",
+        &[
+            ("SmudgeRateUseNewEngine", "true"),
+            ("PressureSmudgeRadius", "true"),
+            ("SmudgeRadiusValue", "2.5"),
+        ],
+    );
+    let imported = import_kpp(&newer, "file").unwrap();
+    let k = imported.presets[0].brush.mixing.unwrap().krita.unwrap();
+    assert!(!k.legacy && k.radius == 1.0);
+}
