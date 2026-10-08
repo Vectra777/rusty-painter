@@ -391,3 +391,51 @@ fn a_soaking_bristle_brush_paints_with_the_colour_where_it_started() {
         "red, not the brush's black: {soaked:?}"
     );
 }
+
+#[test]
+fn wet_paint_flows_while_the_pen_is_down_and_undoes_with_the_stroke() {
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    canvas.layers[1].wet = Some(Default::default());
+    let wet = canvas.layers[1].wet.clone().unwrap();
+    let clear = |canvas: &Canvas| {
+        (0..(H / 64) as i32).all(|ty| {
+            (0..(W / 64) as i32).all(|tx| {
+                (canvas.get_layer_tile_data(1, tx, ty)).is_none_or(|t| t.iter().all(|p| p.a() == 0))
+            })
+        })
+    };
+    let mut brush = Brush::new(20.0, 100.0, Color32::from_rgb(30, 60, 200), 10.0);
+    brush.wet = Some(crate::canvas::wet::WetPaint {
+        lift: 0.0,
+        ..Default::default()
+    });
+    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(1);
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        for i in 0..12 {
+            // A sample every 50 ms, across a tile border.
+            let t = i as f64 * 0.05;
+            let at = Vec2::new(30.0 + i as f32 * 10.0, 64.0);
+            stroke.add_sample(&mut brush, at, 1.0, Some(t), &mut ctx);
+            stroke.flow_wet(&brush, t, Vec2::new(0.0, 1.0), &mut ctx);
+        }
+        assert!(!wet.is_empty(), "wet before the pen lifts");
+        stroke.finish(&mut brush, &mut ctx);
+    }
+    // Painted all along, the dabs after a flow on top of it.
+    for x in [35, 90, 140] {
+        let p = pixel(&canvas, x, 64);
+        assert!(p.a() > 100 && p.b() > p.r(), "{x}: {p:?}");
+    }
+    let mut history = History::new();
+    history.push_action(undo);
+    let mut selection = crate::selection::SelectionManager::new();
+    let mut tool = crate::app::tools::Tool::Brush;
+    history.undo(&mut canvas, &mut selection, &mut tool);
+    assert!(clear(&canvas), "the layer as it was");
+    assert!(wet.is_empty(), "and no water left");
+}

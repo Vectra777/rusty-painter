@@ -264,8 +264,7 @@ impl TipMask {
 
     /// An SVG picture's own size: its longest side, in its pixels.
     pub fn svg_longest(src: &str) -> Option<f32> {
-        let tree =
-            resvg::usvg::Tree::from_str(src, &resvg::usvg::Options::default()).ok()?;
+        let tree = resvg::usvg::Tree::from_str(src, &resvg::usvg::Options::default()).ok()?;
         Some(tree.size().width().max(tree.size().height()))
     }
 

@@ -387,6 +387,19 @@ impl Brush {
         stroke_tiles: &mut StrokeTiles,
         undo_action: &mut UndoAction,
     ) {
+        self.lay_wet_tiles(canvas, stroke_tiles, undo_action, false);
+    }
+
+    /// [`Self::lay_wet`]; `so_far`, while the pen is down: only the tiles
+    /// with new paint (and no tail to come), which then start again from
+    /// the wet paint, so the dabs to come go on top of it.
+    fn lay_wet_tiles(
+        &self,
+        canvas: &Canvas,
+        stroke_tiles: &mut StrokeTiles,
+        undo_action: &mut UndoAction,
+        so_far: bool,
+    ) {
         let Some(paint) = self.wet else {
             return;
         };
@@ -407,6 +420,12 @@ impl Brush {
         let side = canvas.tile_size();
         for (&key, buffer) in &stroke_tiles.buffers {
             let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if so_far
+                && (buffer.tail.iter().any(Option::is_some)
+                    || !buffer.coverage.iter().any(|&c| c > 0.0))
+            {
+                continue;
+            }
             let k = (key.0 as i32, key.1 as i32);
             crate::canvas::wet::record_undo(undo_action, layer.id, k, wet.tile(k));
             // (The coverage has the stroke's opacity in it already.)
@@ -427,7 +446,91 @@ impl Brush {
                     tile.is_empty = shown.iter().all(|&p| p == Color32::TRANSPARENT);
                 }
             }
+            if so_far {
+                buffer.original = shown;
+                buffer.coverage.fill(0.0);
+                buffer.colors = None;
+            }
             buffer.damage = Some([0, 0, side, side]);
+            stroke_tiles.dirty.insert(key);
+        }
+    }
+
+    /// Wet paint while the pen is down (a step of [`crate::canvas::wet::STEP`]):
+    /// the stroke so far laid wet, then flowing a step, `gravity` down.
+    /// The tiles it reaches join the stroke (and its undo step); wet paint
+    /// elsewhere waits for the pen to lift.
+    pub(crate) fn flow_wet(
+        &self,
+        canvas: &Canvas,
+        stroke_tiles: &mut StrokeTiles,
+        undo_action: &mut UndoAction,
+        gravity: Vec2,
+    ) {
+        let o = &self.brush_options;
+        // Not for erasers, a wash (its opacity cap goes by what was there),
+        // a stroke that may be rewound (the water can't be), or deep paint.
+        if self.wet.is_none()
+            || o.blend_mode == BlendMode::Eraser
+            || o.painting_mode == PaintingMode::Wash
+            || stroke_tiles.holds_checkpoint()
+            || canvas.depth() != crate::canvas::storage::Depth::U8
+        {
+            return;
+        }
+        let idx = canvas.active_layer_idx;
+        let Some(layer) = canvas.layers.get(idx) else {
+            return;
+        };
+        let Some(wet) = layer.wet.as_deref() else {
+            return;
+        };
+        self.lay_wet_tiles(canvas, stroke_tiles, undo_action, true);
+        let ts = canvas.tile_size();
+        let (cols, rows) = (
+            canvas.width().div_ceil(ts) as i32,
+            canvas.height().div_ceil(ts) as i32,
+        );
+        let only: rustc_hash::FxHashSet<(i32, i32)> = (stroke_tiles.buffers.keys())
+            .map(|&(x, y)| (x as i32, y as i32))
+            .collect();
+        // ponytail: one step a call, however long since the last; a big
+        // wash may fall behind the clock (a step budget, as drying between
+        // strokes has, if it shows).
+        let stepped = wet.step(1, ts, gravity, true, Some(&only), |(tx, ty)| {
+            ((0..cols).contains(&tx) && (0..rows).contains(&ty)).then(|| {
+                canvas
+                    .get_layer_tile_data(idx, tx, ty)
+                    .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
+            })
+        });
+        // Where it spread to, as it was (before the pixels change below).
+        let regions: Vec<TileRegion> = (stepped.fresh.iter())
+            .map(|&((tx, ty), _)| TileRegion {
+                tx: tx as usize,
+                ty: ty as usize,
+            })
+            .collect();
+        for &(key, _) in &stepped.fresh {
+            crate::canvas::wet::record_undo(undo_action, layer.id, key, None);
+        }
+        Self::snapshot_tiles(canvas, &regions, undo_action, stroke_tiles, false);
+        for ((tx, ty), pixels) in stepped.shown {
+            let key = (tx as usize, ty as usize);
+            if let Some(tile) = canvas.lock_tile(key.0, key.1) {
+                let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(data) = tile.data_mut()
+                    && data.len() == pixels.len()
+                {
+                    data.copy_from_slice(&pixels);
+                    tile.is_empty = pixels.iter().all(|&p| p == Color32::TRANSPARENT);
+                }
+            }
+            if let Some(buffer) = stroke_tiles.buffers.get(&key) {
+                let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                buffer.original = pixels;
+                buffer.damage = Some([0, 0, ts, ts]);
+            }
             stroke_tiles.dirty.insert(key);
         }
     }

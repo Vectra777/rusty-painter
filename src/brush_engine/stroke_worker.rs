@@ -37,6 +37,8 @@ pub struct StrokeSetup {
     pub wrap: bool,
     /// The enabled perspective assistants, for the Perspective input.
     pub perspective: Vec<crate::brush_engine::dynamics::PerspectiveGrid>,
+    /// Which way wet paint runs (canvas pixels, any length).
+    pub wet_gravity: Vec2,
 }
 
 /// A stroke painted by its own engine, dab after dab, each seeing the last
@@ -199,13 +201,18 @@ impl StrokeWorker {
                 let mut session: Option<Session> = None;
                 let mut sequential: Option<Box<dyn SequentialStroke>> = None;
                 loop {
-                    // An airbrush keeps painting between samples: wake up
-                    // when its next dab is due.
+                    // An airbrush keeps painting between samples, and wet
+                    // paint flowing: wake up when its next dab (or step) is
+                    // due.
+                    let wet = session
+                        .as_ref()
+                        .is_some_and(|s| s.setup.brush.wet.is_some());
                     let airbrush = session
                         .as_ref()
                         .map(|s| s.setup.brush.airbrush_rate)
                         .or_else(|| sequential.as_ref().map(|s| s.airbrush_rate()))
-                        .filter(|&rate| rate > 0.0);
+                        .filter(|&rate| rate > 0.0)
+                        .or(wet.then_some(1.0 / crate::canvas::wet::STEP as f32));
                     let job = match airbrush {
                         None => match receiver.recv() {
                             Ok(job) => job,
@@ -223,6 +230,7 @@ impl StrokeWorker {
                                         std::panic::AssertUnwindSafe(|| {
                                             if let Some(session) = session.as_mut() {
                                                 session.airbrush(&thread_shared, now);
+                                                session.flow_wet(&thread_shared, now);
                                             } else if let Some(stroke) = sequential.as_mut() {
                                                 stroke.airbrush(now);
                                                 hand_over_damage(stroke.as_mut(), &thread_shared);
@@ -566,6 +574,7 @@ fn run_job(
                 stroke.barrel = barrel;
                 stroke.add_sample(brush, pos, pressure, Some(time), context);
             });
+            session.flow_wet(shared, time);
         }
         Job::Task(task) => run_task(task, shared),
         Job::End => {
@@ -650,6 +659,18 @@ fn hand_over_damage(stroke: &mut dyn SequentialStroke, shared: &Shared) {
 }
 
 impl Session {
+    /// Wet paint flowing while the pen is down (not while the stroke may
+    /// still be redrawn: its corrections start again from the canvas).
+    fn flow_wet(&mut self, shared: &Shared, now: f64) {
+        if self.correction.is_some() || self.live.is_some() {
+            return;
+        }
+        let gravity = self.setup.wet_gravity;
+        self.paint(shared, |stroke, brush, context| {
+            stroke.flow_wet(brush, now, gravity, context)
+        });
+    }
+
     /// The airbrush's timer: dabs where the pen rests.
     fn airbrush(&mut self, shared: &Shared, now: f64) {
         if let Some((_, events)) = self.correction.as_mut() {
@@ -941,6 +962,7 @@ mod tests {
             symmetry: Default::default(),
             view_scale: 1.0,
             perspective: Vec::new(),
+            wet_gravity: Vec2::new(0.0, 1.0),
             wrap: false,
         });
         for (pos, pressure) in samples() {
@@ -992,6 +1014,7 @@ mod tests {
             symmetry: Default::default(),
             view_scale: 1.0,
             perspective: Vec::new(),
+            wet_gravity: Vec2::new(0.0, 1.0),
             wrap: false,
         });
         for &(pos, pressure) in samples {
@@ -1169,6 +1192,7 @@ mod tests {
                 symmetry: Default::default(),
                 view_scale: 1.0,
                 perspective: Vec::new(),
+                wet_gravity: Vec2::new(0.0, 1.0),
                 wrap: false,
             });
             worker.sample(Vec2::new(64.0, 64.0), 1.0);

@@ -307,17 +307,30 @@ impl WetLayer {
     /// dry one, and to notice one edited meanwhile; `None` off the canvas);
     /// `side` is the tiles' side; `gravity` which way is down (canvas
     /// pixels, any length: its direction). Water reaches tiles that aren't
-    /// wet only when it may `spread` (when that can be undone).
+    /// wet only when it may `spread` (when that can be undone). With `only`,
+    /// just those tiles go on (and those they spread to); the rest wait.
     pub fn step(
         &self,
         steps: usize,
         side: usize,
         gravity: Vec2,
         spread: bool,
+        only: Option<&rustc_hash::FxHashSet<(i32, i32)>>,
         pixels: impl Fn((i32, i32)) -> Option<Vec<Color32>> + Sync,
     ) -> Stepped {
         let mut out = Stepped::default();
         let mut tiles = self.lock();
+        let mut waiting: FxHashMap<(i32, i32), WetTile> = Default::default();
+        if let Some(only) = only {
+            let keys: Vec<(i32, i32)> = tiles
+                .keys()
+                .filter(|k| !only.contains(k))
+                .copied()
+                .collect();
+            for key in keys {
+                waiting.extend(tiles.remove_entry(&key));
+            }
+        }
         // Edited since it was last shown (a filter, a transform): dry as it
         // is. Off the canvas now (cropped): gone.
         tiles.retain(|&key, t| pixels(key).is_some_and(|p| p == t.shown));
@@ -350,7 +363,12 @@ impl WetLayer {
                 ];
                 for ((dx, dy), wet) in sides {
                     let key = (tx + dx, ty + dy);
-                    if wet && fed.insert(key) && spread && !tiles.contains_key(&key) {
+                    if wet
+                        && fed.insert(key)
+                        && spread
+                        && !tiles.contains_key(&key)
+                        && !waiting.contains_key(&key)
+                    {
                         spill.push((key, t.paint, t.alpha.is_some()));
                     }
                 }
@@ -400,6 +418,7 @@ impl WetLayer {
             }
             out.shown.push((key, pixels));
         }
+        tiles.extend(waiting);
         out
     }
 
@@ -592,7 +611,7 @@ mod tests {
                 pixels(key)
             }
         };
-        let s = wet.step(1, S, Vec2::ZERO, true, layer);
+        let s = wet.step(1, S, Vec2::ZERO, true, None, layer);
         assert!(s.shown.iter().any(|(k, _)| *k == (0, 0)));
         let t = wet.tile((0, 0)).unwrap();
         assert!(
@@ -609,7 +628,7 @@ mod tests {
                     pixels(key)
                 }
             };
-            let s = wet.step(1, S, Vec2::ZERO, true, at);
+            let s = wet.step(1, S, Vec2::ZERO, true, None, at);
             if let Some((_, p)) = s.shown.iter().find(|(k, _)| *k == (0, 0)) {
                 last = p.clone();
             }
@@ -646,7 +665,7 @@ mod tests {
                 None
             }
         };
-        wet.step(3, S, Vec2::ZERO, true, at);
+        wet.step(3, S, Vec2::ZERO, true, None, at);
         let after = total(&wet);
         // (Some reaches past the tile, off the canvas here, and rounding.)
         assert!(
@@ -672,7 +691,7 @@ mod tests {
                 pixels(key)
             }
         };
-        wet.step(20, S, Vec2::new(0.0, 1.0), true, at);
+        wet.step(20, S, Vec2::new(0.0, 1.0), true, None, at);
         let t = wet.tile((0, 0)).unwrap();
         let row = |y: usize| (4..12).map(|x| t.water[y * S + x]).sum::<f32>();
         assert!(
@@ -702,7 +721,7 @@ mod tests {
             "looks the same at first"
         );
         // Edited meanwhile: no longer wet, left as it is.
-        let s = wet.step(1, S, Vec2::ZERO, true, |_| Some(white()));
+        let s = wet.step(1, S, Vec2::ZERO, true, None, |_| Some(white()));
         assert!(wet.is_empty() && s.shown.is_empty());
     }
 }

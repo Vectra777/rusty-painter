@@ -577,9 +577,11 @@ fn bench_wet(c: &mut Criterion) {
                 copy
             },
             |copy| {
-                copy.step(1, 64, Vec2::new(0.0, 1.0), true, |k| shown.get(&k).cloned())
-                    .shown
-                    .len()
+                copy.step(1, 64, Vec2::new(0.0, 1.0), true, None, |k| {
+                    shown.get(&k).cloned()
+                })
+                .shown
+                .len()
             },
             criterion::BatchSize::SmallInput,
         )

@@ -247,7 +247,10 @@ mod tests {
             "only where the tip paints"
         );
         // Shear: hairs further across lean further along.
-        let sheared = Bristles { shear: 0.5, ..b.clone() };
+        let sheared = Bristles {
+            shear: 0.5,
+            ..b.clone()
+        };
         let h = Hair {
             offset: Vec2::new(0.0, 1.0),
             ..hairs[0]

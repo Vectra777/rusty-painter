@@ -116,7 +116,7 @@ impl PainterApp {
         let tracked = self.wet_into_top_step(wet);
         for (idx, layer) in wet {
             let canvas = &self.canvas;
-            let stepped = layer.step(steps, ts, gravity, tracked, |(tx, ty)| {
+            let stepped = layer.step(steps, ts, gravity, tracked, None, |(tx, ty)| {
                 ((0..cols).contains(&tx) && (0..rows).contains(&ty)).then(|| {
                     canvas
                         .get_layer_tile_data(*idx, tx, ty)
@@ -342,6 +342,7 @@ impl PainterApp {
             view_scale: self.viewport.zoom,
             wrap: self.workspace.wrap_around,
             perspective: self.perspective_grids(),
+            wet_gravity: Vec2::from(self.workspace.wet_gravity),
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;
@@ -574,7 +575,10 @@ pub(crate) fn draw_preview(app: &PainterApp, painter: &egui::Painter, map: &Scre
         let n = ((pos - from_pos).length() / step).ceil().max(1.0) as usize;
         for k in 1..=n {
             let t = k as f32 / n as f32;
-            dab((from_pos + (pos - from_pos) * t, from_pressure + (pressure - from_pressure) * t));
+            dab((
+                from_pos + (pos - from_pos) * t,
+                from_pressure + (pressure - from_pressure) * t,
+            ));
         }
         last = (pos, pressure);
     }

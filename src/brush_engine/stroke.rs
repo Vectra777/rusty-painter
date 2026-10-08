@@ -222,6 +222,11 @@ impl StrokeTiles {
     /// Take back everything painted since the checkpoint (which goes): the
     /// tiles get their pixels and buffers as they were then (one first
     /// touched since starts over, keeping its undo snapshot).
+    /// Whether a checkpoint is kept (see [`Self::rewind`]).
+    pub(crate) fn holds_checkpoint(&self) -> bool {
+        self.checkpoint.is_some()
+    }
+
     pub(crate) fn rewind(&mut self, canvas: &Canvas) {
         let Some(checkpoint) = self.checkpoint.take() else {
             return;
@@ -626,6 +631,8 @@ pub struct StrokeState {
     prev_sample_time: Option<f64>,
     /// When the airbrush's next dab is due (seconds), if it has one.
     airbrush_due: Option<f64>,
+    /// Wet paint: when it last flowed while the pen was down (seconds).
+    wet_flowed: Option<f64>,
     /// The next tip of a brush that uses its tips in turn.
     next_tip: usize,
     /// A ribbon brush: the last point of its ribbon.
@@ -696,6 +703,7 @@ impl StrokeState {
             sample_time: None,
             prev_sample_time: None,
             airbrush_due: None,
+            wet_flowed: None,
             next_tip: 0,
             mask_last: None,
             ribbon_last: None,
@@ -808,6 +816,31 @@ impl StrokeState {
     /// brush's rate, so paint builds up while it's held still. Call it with
     /// the time now (seconds, the same clock as the samples); it paints the
     /// dabs due since the last sample or the last call.
+    /// Wet paint flowing while the pen is down: a step when one is due at
+    /// `time` (seconds), `gravity` down (see [`Brush::flow_wet`]).
+    pub fn flow_wet(
+        &mut self,
+        brush: &Brush,
+        time: f64,
+        gravity: Vec2,
+        context: &mut StrokeContext<'_>,
+    ) {
+        if brush.wet.is_none() {
+            return;
+        }
+        let last = *self.wet_flowed.get_or_insert(time);
+        if time - last < crate::canvas::wet::STEP {
+            return;
+        }
+        self.wet_flowed = Some(time);
+        brush.flow_wet(
+            context.canvas,
+            context.stroke_tiles,
+            context.undo_action,
+            gravity,
+        );
+    }
+
     pub fn airbrush(&mut self, brush: &mut Brush, time: f64, context: &mut StrokeContext<'_>) {
         if brush.airbrush_rate <= 0.0 || brush.pixel_perfect {
             return;

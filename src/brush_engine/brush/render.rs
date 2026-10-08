@@ -1215,7 +1215,7 @@ impl Brush {
 
     /// On a tile's first touch this stroke: snapshot it for undo and create
     /// its stroke buffer from the same pre-stroke pixels.
-    fn snapshot_tiles(
+    pub(super) fn snapshot_tiles(
         canvas: &Canvas,
         regions: &[TileRegion],
         undo_action: &mut UndoAction,

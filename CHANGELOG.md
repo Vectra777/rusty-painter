@@ -35,6 +35,7 @@
 - Colour source (Brush → Colour source): a random colour each dab, each pixel, or a pattern pinned to the canvas from the brush colour to the secondary. Krita presets bring their spikes, fades, density, randomness, auto spacing, random colour sources and these sensors.
 - Krita import reads options as Krita does (curve on or off, the common curve) and brings hue, saturation, value, darken, gradient colour source and lightness or gradient map tips; the report names options plainly.
 - Krita presets bring their rotation (stroke direction, random, tilt, barrel, wheel), mirror, pressure spacing, sharpness, blend mode and these texture modes.
+- Wet paint flows while you paint, as Clip Studio's watercolour does: the stroke so far spreads, darkens at its edges and runs, and the dabs after go on top of it; one undo takes it all back.
 - Brushes from 300 px show a quick preview (plain round dabs) of where the stroke is going while the paint catches up with the pen.
 - SVG brush tips (Krita's, or an `.svg` in the brushes folder), drawn again at the size the brush paints so they stay sharp however big; Krita's Stamp Leaves joins the default brushes.
 - Bristle brushes dry along a curve (Krita's ink depletion curve) and can soak up the layer's colour where the stroke starts (Krita's soak ink); Krita's bristle presets bring both, and their ink amount and random offset (both were read under the wrong names).
