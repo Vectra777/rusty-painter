@@ -126,6 +126,26 @@ pub fn stroke(app: &mut PainterApp, path: &[(Vec2, f32)], eraser: bool) {
     app.release_canvas();
 }
 
+/// A brush stroke through the stroke worker, `wait(i)` before sample `i`
+/// (a pen's pace), left running: see [`finish`].
+pub fn stroke_paced(app: &mut PainterApp, path: &[(Vec2, f32)], mut wait: impl FnMut(usize)) {
+    let Some(&(first, pressure)) = path.first() else {
+        return;
+    };
+    app.start_stroke_with_pressure(first, pressure);
+    for (i, &(p, pressure)) in path.iter().enumerate().skip(1) {
+        wait(i);
+        // (What the UI does each frame: take the painted tiles.)
+        app.sync_stroke_worker();
+        app.add_stroke_point(p, pressure);
+    }
+}
+
+/// The pen lifts: wait for the stroke to be painted to the end.
+pub fn finish(app: &mut PainterApp) {
+    app.release_canvas();
+}
+
 /// Colour mixing on the brush, with a speckled
 /// image tip (`tip`) and the Parallel blend mode (`parallel`).
 pub fn set_mixing(app: &mut PainterApp, tip: bool, parallel: bool) {
@@ -464,4 +484,33 @@ pub fn composite_all(app: &PainterApp) -> usize {
 /// QuickShape's guess for a hand-drawn stroke.
 pub fn fit_shape(points: &[Vec2]) -> Option<ShapeKind> {
     crate::app::tools::quickshape::fit_shape(points).map(|(kind, ..)| kind)
+}
+
+/// The presets that come with the app: names and brushes.
+pub fn default_presets() -> Vec<(String, Brush)> {
+    PainterApp::default_brush_presets()
+        .into_iter()
+        .map(|p| (p.name, p.brush))
+        .collect()
+}
+
+/// Paint with `brush` (the Brush tool).
+pub fn use_brush(app: &mut PainterApp, brush: Brush) {
+    app.set_brush_tool(false);
+    app.brush_state.brush = brush;
+    app.brush_state.brush.is_changed = true;
+}
+
+/// `steps` steps of wet paint drying (as between strokes, on the UI
+/// thread); whether any paint is still wet.
+pub fn dry(app: &mut PainterApp, steps: usize) -> bool {
+    let wet: Vec<(usize, Arc<crate::canvas::wet::WetLayer>)> = (app.canvas.layers.iter())
+        .enumerate()
+        .filter_map(|(i, l)| l.wet.clone().filter(|w| !w.is_empty()).map(|w| (i, w)))
+        .collect();
+    if wet.is_empty() {
+        return false;
+    }
+    app.wet_steps(&wet, steps);
+    true
 }

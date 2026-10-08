@@ -52,6 +52,26 @@ impl CurveLut {
         }
     }
 
+    /// [`Self::new`], kept for the next time the same curve comes: an
+    /// engine painting a dab at a time (the Smudge tool, mixing brushes)
+    /// would otherwise tabulate it every dab.
+    pub(crate) fn cached(curve: &SoftnessCurve) -> std::sync::Arc<Self> {
+        use std::sync::{Arc, Mutex};
+        // ponytail: the last few curves, searched in order; a map if many
+        // curves ever paint at once.
+        static CACHE: Mutex<Vec<(SoftnessCurve, Arc<CurveLut>)>> = Mutex::new(Vec::new());
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, lut)) = cache.iter().find(|(c, _)| c == curve) {
+            return lut.clone();
+        }
+        let lut = Arc::new(Self::new(curve));
+        if cache.len() >= 16 {
+            cache.remove(0);
+        }
+        cache.push((curve.clone(), lut.clone()));
+        lut
+    }
+
     #[inline]
     pub(crate) fn at(&self, t: f32) -> f32 {
         let x = t.clamp(0.0, 1.0) * Self::STEPS as f32;

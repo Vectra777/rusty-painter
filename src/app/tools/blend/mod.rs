@@ -2002,23 +2002,32 @@ fn lay_spans<T: PartialEq + Send>(
     mask: &[f32],
     f: impl Fn(usize) -> T + Sync,
 ) -> bool {
+    let lay_row = |ly: usize, row: &mut [T]| {
+        let (first, last) = spans[ly];
+        let mut changed = false;
+        for (lx, px) in row.iter_mut().enumerate().take(last).skip(first) {
+            let i = ly * side + lx;
+            if mask[i] <= 0.0 {
+                continue;
+            }
+            let out = f(i);
+            changed |= out != *px;
+            *px = out;
+        }
+        changed
+    };
+    if side < PARALLEL_SIDE {
+        return (patch.chunks_mut(side).enumerate())
+            .fold(false, |c, (ly, row)| lay_row(ly, row) | c);
+    }
+    let rows = (PARALLEL_PIXELS / side).max(1);
     pool.install(|| {
         patch
-            .par_chunks_mut(side)
+            .par_chunks_mut(side * rows)
             .enumerate()
-            .map(|(ly, row)| {
-                let (first, last) = spans[ly];
-                let mut changed = false;
-                for (lx, px) in row.iter_mut().enumerate().take(last).skip(first) {
-                    let i = ly * side + lx;
-                    if mask[i] <= 0.0 {
-                        continue;
-                    }
-                    let out = f(i);
-                    changed |= out != *px;
-                    *px = out;
-                }
-                changed
+            .map(|(batch, lines)| {
+                (lines.chunks_mut(side).enumerate())
+                    .fold(false, |c, (i, row)| lay_row(batch * rows + i, row) | c)
             })
             .reduce(|| false, |a, b| a || b)
     })

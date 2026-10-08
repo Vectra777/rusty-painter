@@ -129,6 +129,10 @@ bench = []
 # Importing Clip Studio Paint brushes (.sut, SQLite: builds SQLite from C).
 sut-import = ["dep:rusqlite"]
 
+[[example]]
+name = "profile_presets"
+required-features = ["bench"]
+
 [[bench]]
 name = "app_bench"
 harness = false

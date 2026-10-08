@@ -1622,9 +1622,9 @@ impl Brush {
 pub(crate) struct SoftTip<'a> {
     hardness_val: f32,
     softness_selector: SoftnessSelector,
-    curve_lut: Option<crate::brush_engine::hardness::CurveLut>,
+    curve_lut: Option<std::sync::Arc<crate::brush_engine::hardness::CurveLut>>,
     /// Softer dabs (a Softness input): a falloff for each level used.
-    soft_luts: Vec<Option<crate::brush_engine::hardness::CurveLut>>,
+    soft_luts: Vec<Option<std::sync::Arc<crate::brush_engine::hardness::CurveLut>>>,
     tips: std::borrow::Cow<'a, [PixelBrushShape]>,
     anti_aliasing: bool,
     custom: bool,
@@ -1632,7 +1632,26 @@ pub(crate) struct SoftTip<'a> {
     auto_on: bool,
     grainy: bool,
     spikes: Option<crate::brush_engine::brush_options::Spikes>,
+    /// Small supersampled dabs' coverage, worked out once for each
+    /// size, hardness and place within a pixel (see [`SmallKey`]).
+    small: FxHashMap<SmallKey, Box<[f32]>>,
 }
+
+/// A small round or square dab, as [`SoftTip`] keeps its coverage: its
+/// tip, radius, hardness and softness level, and where its centre sits in
+/// its pixel (in 16ths).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SmallKey {
+    tip: u8,
+    r: u32,
+    hardness: u32,
+    soft: u8,
+    at: (u8, u8),
+}
+
+/// Small dabs' centres snap to this fraction of a pixel (well under what
+/// shows), so a stroke's thousands share a few coverages.
+const SMALL_STEPS: f32 = 16.0;
 
 impl<'a> SoftTip<'a> {
     /// For `brush`'s tips, painting `dabs`.
@@ -1642,10 +1661,10 @@ impl<'a> SoftTip<'a> {
         let hardness_val = (o.hardness / 100.0).clamp(0.0, 1.0);
         let softness_selector = o.softness_selector;
         let curve_lut = (softness_selector == SoftnessSelector::Curve)
-            .then(|| crate::brush_engine::hardness::CurveLut::new(&o.softness_curve));
+            .then(|| crate::brush_engine::hardness::CurveLut::cached(&o.softness_curve));
         // Softer dabs (a Softness input): a falloff for each level used.
         let full = crate::brush_engine::dab::SOFT_LEVELS;
-        let soft_luts: Vec<Option<crate::brush_engine::hardness::CurveLut>> =
+        let soft_luts: Vec<Option<std::sync::Arc<crate::brush_engine::hardness::CurveLut>>> =
             if softness_selector == SoftnessSelector::Curve && dabs.iter().any(|d| d.soft < full) {
                 let mut used = [false; crate::brush_engine::dab::SOFT_LEVELS as usize];
                 for d in dabs {
@@ -1658,7 +1677,7 @@ impl<'a> SoftTip<'a> {
                     .map(|(level, &used)| {
                         used.then(|| {
                             let s = level as f32 / full as f32;
-                            crate::brush_engine::hardness::CurveLut::new(
+                            crate::brush_engine::hardness::CurveLut::cached(
                                 &o.softening.falloff(&o.softness_curve, s),
                             )
                         })
@@ -1696,7 +1715,75 @@ impl<'a> SoftTip<'a> {
             auto_on,
             grainy,
             spikes,
+            small: FxHashMap::default(),
         }
+        .with_small(dabs)
+    }
+
+    /// The key a small dab's coverage is kept under, if it's one that's
+    /// worth keeping: a round or square tip taking several samples a pixel,
+    /// upright, its coverage the same wherever it is (no spikes, fades or
+    /// grain).
+    fn small_key(&self, dab: &PlacedDab) -> Option<SmallKey> {
+        let fade = self.auto_on && self.auto.has_fade();
+        if self.custom
+            || self.grainy
+            || fade
+            || self.spikes.is_some()
+            || !dab.upright()
+            || crate::brush_engine::masks::supersamples(dab.r, self.anti_aliasing) == 1
+        {
+            return None;
+        }
+        let hardness = (self.hardness_val + dab.hardness).clamp(0.0, 1.0) * dab.softness();
+        let q = |v: f32| {
+            ((v - v.floor()) * SMALL_STEPS)
+                .round()
+                .min(SMALL_STEPS - 1.0) as u8
+        };
+        Some(SmallKey {
+            tip: dab.tip,
+            r: dab.r.to_bits(),
+            hardness: hardness.to_bits(),
+            soft: dab.soft,
+            at: (q(dab.center.x), q(dab.center.y)),
+        })
+    }
+
+    /// The side of a small dab's kept square, and where it starts relative
+    /// to the pixel holding its centre.
+    fn small_extent(r: f32) -> (usize, i32) {
+        let reach = r.ceil() as i32 + 1;
+        ((2 * reach + 1) as usize, -reach)
+    }
+
+    /// Work out the coverage of `dabs`' small dabs, once each.
+    fn with_small(mut self, dabs: &[PlacedDab]) -> Self {
+        for dab in dabs {
+            let Some(key) = self.small_key(dab) else {
+                continue;
+            };
+            if self.small.contains_key(&key) {
+                continue;
+            }
+            let (side, start) = Self::small_extent(dab.r);
+            // The dab with its centre where the key has it, far enough in
+            // that the square starts on the canvas.
+            let base = (side + 1) as f32;
+            let mut at = *dab;
+            at.center = Vec2::new(
+                base + key.at.0 as f32 / SMALL_STEPS,
+                base + key.at.1 as f32 / SMALL_STEPS,
+            );
+            at.strength = 1.0;
+            let origin = (base as i32 + start) as usize;
+            let mut block = vec![0.0f32; side * side];
+            for (ly, row) in block.chunks_mut(side).enumerate() {
+                self.row_exact(&at, origin + ly, origin, row, 1.0);
+            }
+            self.small.insert(key, block.into_boxed_slice());
+        }
+        self
     }
 
     /// A plain round soft dab (a turn changes nothing, no squash, no auto
@@ -1745,6 +1832,35 @@ impl<'a> SoftTip<'a> {
             }
             return nonzero_span(out);
         }
+        if let Some(block) = self.small_key(dab).and_then(|k| self.small.get(&k)) {
+            let (side, start) = Self::small_extent(dab.r);
+            let ly = gy as i32 - (dab.center.y.floor() as i32 + start);
+            let bx = dab.center.x.floor() as i32 + start;
+            let strength = (strength * dab.strength).min(1.0);
+            out.fill(0.0);
+            if (0..side as i32).contains(&ly) {
+                let row = &block[ly as usize * side..(ly as usize + 1) * side];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    let lx = (x0 + i) as i32 - bx;
+                    if (0..side as i32).contains(&lx) {
+                        *slot = row[lx as usize] * strength;
+                    }
+                }
+            }
+            return nonzero_span(out);
+        }
+        self.row_exact(dab, gy, x0, out, strength)
+    }
+
+    /// [`Self::row`] for any round or square tip, worked out pixel by pixel.
+    fn row_exact(
+        &self,
+        dab: &PlacedDab,
+        gy: usize,
+        x0: usize,
+        out: &mut [f32],
+        strength: f32,
+    ) -> Range<usize> {
         let (hardness_val, softness_selector, anti_aliasing) = (
             self.hardness_val,
             self.softness_selector,
@@ -1850,5 +1966,39 @@ impl<'a> SoftTip<'a> {
             };
         }
         nonzero_span(out)
+    }
+}
+
+#[cfg(test)]
+mod small_dab_tests {
+    use super::*;
+    use crate::brush_engine::dab::calc_dab_bounds;
+
+    /// A small soft dab's rows from its kept coverage, against working it
+    /// out pixel by pixel: the same on the 16ths it snaps to, all but the
+    /// same between them.
+    #[test]
+    fn small_dabs_paint_as_worked_out_pixel_by_pixel() {
+        let brush = Brush::new(3.0, 70.0, Color32::BLACK, 10.0);
+        for (center, tolerance) in [
+            (Vec2::new(10.0 + 5.0 / 16.0, 7.0 + 11.0 / 16.0), 1e-6),
+            (Vec2::new(10.37, 7.71), 0.08),
+        ] {
+            let bounds = calc_dab_bounds(center, 1.5, 64, 64, 64).unwrap();
+            let dab = PlacedDab::new(center, bounds, 1.5);
+            let tip = SoftTip::new(&brush, std::slice::from_ref(&dab));
+            assert_eq!(tip.small.len(), 1, "kept");
+            for gy in 4..12 {
+                let (mut kept, mut exact) = ([0.0f32; 12], [0.0f32; 12]);
+                tip.row(&dab, gy, 5, &mut kept, 1.0);
+                tip.row_exact(&dab, gy, 5, &mut exact, 1.0);
+                for (k, e) in kept.iter().zip(&exact) {
+                    assert!(
+                        (k - e).abs() <= tolerance,
+                        "{center:?} row {gy}: {kept:?} {exact:?}"
+                    );
+                }
+            }
+        }
     }
 }
