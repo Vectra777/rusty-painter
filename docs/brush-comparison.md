@@ -50,7 +50,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ✅ any brush (Colour mixing: smudge length, colour rate, by pressure), or the Smudge tool with a colour rate |
 | Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height, colour dodge, hard mix; turned, moving with the stroke, offset each stroke, or on each dab |
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ✅ multiply, darken, subtract, height |
-| Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ✅ when the pen lifts |
+| Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ✅ shown as you paint (wet paint: its own edge darkening) |
 | Airbrush (keeps painting while held still) | ✅ | ✅ | ⚠️ | ✅ dabs per second |
 | Bristle / hair engine | ✅ | ⚠️ through tips | ❌ | ✅ hairs fan out and run dry |
 | Decoration / ribbon brushes | ✅ | ✅ | ✅ | ✅ colour tips, ribbons |
