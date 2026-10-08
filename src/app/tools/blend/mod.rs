@@ -382,9 +382,11 @@ fn for_rows<T: Send>(
 }
 
 /// Dabs this wide or wider are worked on by rows in parallel, about this
-/// many pixels a task.
-const PARALLEL_SIDE: usize = 64;
-const PARALLEL_PIXELS: usize = 4096;
+/// many pixels a task. (At a pen's pace the pool's threads sleep between
+/// samples, and waking them for each part of a smaller dab cost more than
+/// sharing it saved.)
+const PARALLEL_SIDE: usize = 192;
+const PARALLEL_PIXELS: usize = 32768;
 
 /// The pixels of layer `source` (all visible layers when `None`) over the
 /// `w`×`h` canvas rectangle at `origin`; with `wrap`, what's past an edge
@@ -1762,11 +1764,25 @@ impl BlendSession {
         let (sx, sy) = (x0 + whole.x as i32, y0 + whole.y as i32);
         let around = read_patch_linear(&self.canvas, Some(idx), (sx, sy), side + 1, side + 1, wrap);
         let frac = shift - whole;
+        // (The same part of a pixel off everywhere: each pixel the same
+        // weights of the four round it, only where the tip reaches.)
+        let (fx, fy) = (frac.x, frac.y);
+        let weights = [
+            (1.0 - fx) * (1.0 - fy),
+            fx * (1.0 - fy),
+            (1.0 - fx) * fy,
+            fx * fy,
+        ];
+        let wide = side + 1;
         let mut source = vec![[0.0f32; 4]; side * side];
         for_rows(&pool, &mut source, side, |ly, row| {
-            for (lx, s) in row.iter_mut().enumerate() {
-                let p = Vec2::new(lx as f32 + 0.5, ly as f32 + 0.5) + frac;
-                *s = sample_bilinear(&around, side + 1, p);
+            let (first, last) = spans[ly];
+            let (top, bottom) = (&around[ly * wide..], &around[(ly + 1) * wide..]);
+            for lx in first..last {
+                let (a, b, c, d) = (top[lx], top[lx + 1], bottom[lx], bottom[lx + 1]);
+                row[lx] = std::array::from_fn(|k| {
+                    a[k] * weights[0] + b[k] * weights[1] + c[k] * weights[2] + d[k] * weights[3]
+                });
             }
         });
         // Dulling: one colour, the weighted average (by the tip and the
