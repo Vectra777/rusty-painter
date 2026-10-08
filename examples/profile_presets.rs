@@ -22,9 +22,11 @@ fn run(brush: &rusty_painter::brush_engine::brush::Brush) -> (f64, Option<f64>) 
     let mut app = api::painted_app(SIZE);
     api::use_brush(&mut app, brush.clone());
     let path = api::wavy_path(SIZE as f32, SAMPLES);
+    // RP_PEN_MS: another pace (0: as fast as they're painted).
+    let pen = std::env::var("RP_PEN_MS").map_or(PEN, |v| v.parse::<f64>().unwrap() / 1e3);
     let start = Instant::now();
     api::stroke_paced(&mut app, &path, |i| {
-        let due = start + std::time::Duration::from_secs_f64(i as f64 * PEN);
+        let due = start + std::time::Duration::from_secs_f64(i as f64 * pen);
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
     });
     let t = Instant::now();

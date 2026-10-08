@@ -135,8 +135,20 @@ impl WetTile {
 
     /// The pigment over the dry paint.
     fn show(&self) -> Vec<Color32> {
-        (self.dry.iter().zip(&self.pigment).enumerate())
-            .map(|(i, (&d, p))| self.locked(i, over(*p, d)))
+        let (dec, enc) = (
+            crate::canvas::blend::LinearDecoder::new(),
+            crate::canvas::blend::LinearEncoder::new(),
+        );
+        (0..self.dry.len())
+            .map(|i| {
+                let p = self.pigment[i];
+                let c = if p[3] <= 0.0 {
+                    self.dry[i]
+                } else {
+                    stored_with(enc, over_linear(p, dec.decode(self.dry[i]).to_array()))
+                };
+                self.locked(i, c)
+            })
             .collect()
     }
 
@@ -161,12 +173,18 @@ pub(crate) fn linear(c: Color32) -> [f32; 4] {
 /// Linear-light premultiplied colour back to a stored pixel (its colour
 /// never past its alpha).
 fn stored(v: [f32; 4]) -> Color32 {
+    stored_with(crate::canvas::blend::LinearEncoder::new(), v)
+}
+
+/// [`stored`] with the encoder at hand.
+#[inline]
+fn stored_with(enc: crate::canvas::blend::LinearEncoder, v: [f32; 4]) -> Color32 {
     let a = v[3].clamp(0.0, 1.0);
     if a <= 0.0 {
         return Color32::TRANSPARENT;
     }
     let c = |x: f32| x.clamp(0.0, a);
-    crate::canvas::blend::LinearEncoder::new().encode(eframe::egui::Rgba::from_rgba_premultiplied(
+    enc.encode(eframe::egui::Rgba::from_rgba_premultiplied(
         c(v[0]),
         c(v[1]),
         c(v[2]),
@@ -174,21 +192,35 @@ fn stored(v: [f32; 4]) -> Color32 {
     ))
 }
 
+/// `top` over `under`, both linear-light premultiplied.
+#[inline]
+fn over_linear(top: [f32; 4], under: [f32; 4]) -> [f32; 4] {
+    let k = 1.0 - top[3].min(1.0);
+    std::array::from_fn(|i| top[i] + under[i] * k)
+}
+
 /// A share `f` of suspended pigment `p` settles into `dry`, looking the
 /// same: what's left suspended, and the dry paint now (`p` over `dry` is
 /// what's left over the new dry paint).
-fn settle_share(p: [f32; 4], f: f32, dry: Color32) -> ([f32; 4], Color32) {
+#[inline]
+fn settle_share(
+    dec: crate::canvas::blend::LinearDecoder,
+    enc: crate::canvas::blend::LinearEncoder,
+    p: [f32; 4],
+    f: f32,
+    dry: Color32,
+) -> ([f32; 4], Color32) {
     if f <= 0.0 || p[3] <= 0.0 {
         return (p, dry);
     }
+    let d = dec.decode(dry).to_array();
     if f >= 1.0 {
-        return ([0.0; 4], over(p, dry));
+        return ([0.0; 4], stored_with(enc, over_linear(p, d)));
     }
-    let d = linear(dry);
     let pa = p[3].min(1.0);
-    let below = 1.0 - pa + pa * f;
-    let new: [f32; 4] = std::array::from_fn(|k| (p[k] * f + d[k] * (1.0 - pa)) / below.max(1e-6));
-    (p.map(|v| v * (1.0 - f)), stored(new))
+    let inv_below = 1.0 / (1.0 - pa + pa * f).max(1e-6);
+    let new: [f32; 4] = std::array::from_fn(|k| (p[k] * f + d[k] * (1.0 - pa)) * inv_below);
+    (p.map(|v| v * (1.0 - f)), stored_with(enc, new))
 }
 
 /// `p` (linear premultiplied, 0..1) over `dry`.
@@ -196,9 +228,7 @@ fn over(p: [f32; 4], dry: Color32) -> Color32 {
     if p[3] <= 0.0 {
         return dry;
     }
-    let d = linear(dry);
-    let k = 1.0 - p[3].min(1.0);
-    stored(std::array::from_fn(|i| p[i] + d[i] * k))
+    stored(over_linear(p, linear(dry)))
 }
 
 /// A layer's wet paint.
@@ -389,7 +419,11 @@ impl WetLayer {
                 .par_iter()
                 .map(|(&key, t)| (key, step_tile(old, key, t, side, g)))
                 .collect();
-            for (key, t) in next {
+            for (key, mut t) in next {
+                if let Some(old) = tiles.get_mut(&key) {
+                    t.shown = std::mem::take(&mut old.shown);
+                    t.alpha = old.alpha.take();
+                }
                 changed.insert(key);
                 tiles.insert(key, t);
             }
@@ -444,7 +478,6 @@ fn step_tile(
     side: usize,
     g: Vec2,
 ) -> WetTile {
-    let s = side as i32;
     // The tile's water and pigment with a pixel of its neighbours' round
     // it (none: dry paper), read by index from here on.
     let w2 = side + 2;
@@ -478,10 +511,6 @@ fn step_tile(
             }
         }
     }
-    let at = |x: i32, y: i32| -> (f32, [f32; 4]) {
-        let i = (y + 1) as usize * w2 + (x + 1) as usize;
-        (pad_w[i], pad_p[i])
-    };
     let paint = t.paint;
     let d = paint.flow.clamp(0.0, 1.0) * 0.5;
     // (At most a fifth to each side: never all of it moves.)
@@ -489,33 +518,50 @@ fn step_tile(
     let drip = paint.drips.max(0.0) * 0.5;
     let dt = STEP as f32;
     let evaporate = dt / paint.drying.max(0.1);
-    let mut next = t.clone();
-    const NB: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    let (dec, enc) = (
+        crate::canvas::blend::LinearDecoder::new(),
+        crate::canvas::blend::LinearEncoder::new(),
+    );
+    // (What it shows and its alpha stay as they are: the caller moves them
+    // over.)
+    let mut next = WetTile {
+        water: t.water.clone(),
+        pigment: t.pigment.clone(),
+        dry: t.dry.clone(),
+        shown: Vec::new(),
+        paint: t.paint,
+        alpha: None,
+    };
     // Downhill: the neighbour water runs to, as weights along x and y.
     let down = [
         (g.x.signum() as i32, 0, g.x.abs()),
         (0, g.y.signum() as i32, g.y.abs()),
     ];
-    for y in 0..s {
-        for x in 0..s {
-            let i = (y * s + x) as usize;
-            let (w, p) = (t.water[i], t.pigment[i]);
-            let nbs = NB.map(|(dx, dy)| at(x + dx, y + dy));
-            if w <= DRY && nbs.iter().all(|n| n.0 <= DRY) {
+    for y in 0..side {
+        for x in 0..side {
+            let i = y * side + x;
+            // In the padded tile: the pixel and its neighbours left, right,
+            // up and down.
+            let ip = (y + 1) * w2 + x + 1;
+            let (w, p) = (pad_w[ip], pad_p[ip]);
+            let around = [ip - 1, ip + 1, ip - w2, ip + w2];
+            let waters = around.map(|j| pad_w[j]);
+            if w <= DRY && waters.iter().all(|&n| n <= DRY) {
                 continue;
             }
             // Water evens out with its neighbours, creeping onto dry paper
             // only slowly (it soaks in).
-            let avg_w = nbs
+            let avg_w = waters
                 .iter()
-                .map(|n| if n.0 <= DRY { w * 0.8 } else { n.0 })
+                .map(|&n| if n <= DRY { w * 0.8 } else { n })
                 .sum::<f32>()
                 / 4.0;
             let mut nw = w + d * (avg_w - w);
             // Pigment moves with the water: it evens out where it's wet...
             let wet = |v: f32| (v * 2.0).clamp(0.0, 1.0);
             let mut np = p;
-            for (nwat, npig) in nbs {
+            for (&nwat, &j) in waters.iter().zip(&around) {
+                let npig = pad_p[j];
                 // (Only where both are wet: the water has to get there first.)
                 let k = d * 0.1 * wet(w.min(nwat));
                 for c in 0..4 {
@@ -539,7 +585,9 @@ fn step_tile(
                         continue;
                     }
                     let out = drip * weight * (w - POOLED).max(0.0);
-                    let (uw, up) = at(x - dx, y - dy);
+                    // (Within the padding: one pixel either way.)
+                    let j = (ip as isize - dx as isize - dy as isize * w2 as isize) as usize;
+                    let (uw, up) = (pad_w[j], pad_p[j]);
                     let inn = drip * weight * (uw - POOLED).max(0.0);
                     nw += inn - out;
                     for c in 0..4 {
@@ -559,7 +607,7 @@ fn step_tile(
                 (evaporate / nw.max(evaporate)).clamp(0.0, 1.0) * 0.5
             };
             let np = np.map(|v| v.max(0.0));
-            let (left, dry) = settle_share(np, settle, t.dry[i]);
+            let (left, dry) = settle_share(dec, enc, np, settle, t.dry[i]);
             next.pigment[i] = left;
             next.dry[i] = dry;
         }

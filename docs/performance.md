@@ -116,12 +116,44 @@ result at 4096×4096).
 Brush presets paint a stroke in 0.2–9 ms (`dynamics_tests::preset_stroke_times`);
 bucket fill and colour select at 4096² take 0.15–0.22 s.
 
+## Every brush at a pen's pace
+
+`examples/profile_presets` paints the same 120-sample stroke with every
+built-in preset through the real app (stroke worker, undo, wet paint
+drying), its samples coming every 5 ms as a pen's do, and lists how long
+the paint goes on after the pen stops (the lag), laggiest first:
+
+```sh
+cargo run --release --features bench --example profile_presets
+cargo run --release --features bench --example profile_presets -- "Wet Smear" 5 [size]
+RP_PEN_MS=0 ...   # as fast as they're painted (cost, not lag)
+```
+
+On 16 cores, before and after the last round of changes:
+
+| Preset | Lag before | After |
+|---|---|---|
+| Particle Swarm | 469 ms | 2 ms |
+| Experimental Webs | 221 ms | 5 ms |
+| Blender Rake | 470–500 ms | 90–490 ms |
+| Wet Smear | 245 ms | 13–290 ms |
+
+A brush keeps up while a sample costs it under the pen's 5 ms; at about
+that, a little more or less tips it from no lag to a backlog, which is why
+the smudge brushes swing. What was fixed: small round dabs (particle and
+curve lines, fine pens) took nine to thirty-six samples a pixel each, now
+worked out once per size and place in a pixel; the smudge engine laid each
+dab with a thread task per row; its softness curve was tabulated every dab.
+Blender Rake is left at about 4 ms a sample (99 px dabs every 3 px, the
+smudge's bilinear sampling most of it).
+
 ## Known costs left
 
 - **Wet paint** dries in steps of 1/30 s between strokes (at most four
   a frame, as many as fit 8 ms by the last step's time, at least one: a
   big wash dries slower rather than holding up the frames more): one step
-  over 64 wet tiles takes about 5 ms (`wet_step_64_tiles`). It runs on the
+  over 64 wet tiles takes about 2.8 ms on 16 cores, 23 ms on one
+  (`wet_step_64_tiles`); a 300 px wash's step about 7 ms. It runs on the
   UI thread, so a wash of a thousand tiles still costs a frame about 80 ms.
   A wet tile holds about 100 KB (water, pigment, the dry paint and what it
   shows) until it dries.
