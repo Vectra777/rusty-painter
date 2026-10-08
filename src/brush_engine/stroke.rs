@@ -604,6 +604,9 @@ pub struct StrokeState {
     /// moving in whole pixels gives short segments pointing only 0°, 45°,
     /// 90°…, so each segment's own direction would make a nib wobble.
     heading: Vec2,
+    /// The way the last segment between samples went (a unit vector), for
+    /// the curve through the next.
+    last_chord: Option<Vec2>,
     rng: SmallRng,
     /// The last dabs (at least an end taper's length of the pen), drawn
     /// redrawably until the stroke goes on past them or ends.
@@ -681,6 +684,7 @@ impl StrokeState {
             lean: None,
             prev_lean: None,
             heading: Vec2::ZERO,
+            last_chord: None,
             rng: SmallRng::seed_from_u64(seed),
             tail: Vec::new(),
             newer_from: 0,
@@ -1662,63 +1666,95 @@ impl StrokeState {
                 .brush_options
                 .spacing_px(brush.brush_options.diameter, spacing)
         };
+        let spaced_by_tip = !brush.is_ribbon()
+            && brush.brush_type != crate::brush_engine::brush::BrushType::Bristle;
         let spacing_dist = spacing_dist.max(0.5); // Avoid infinite loops
         let count = brush.dynamics.random.dabs_per_step();
         let defer = scatter_deferred(brush);
 
         if let Some(prev) = self.last_pos {
             let delta = pos - prev;
-            let length = delta.length();
-            let mut dist_left = length;
-
-            if dist_left == 0.0 {
+            let chord = delta.length();
+            if chord == 0.0 {
                 return;
             }
+            let unit_step = delta / chord;
+            let angle = |v: Vec2| (v.length_sq() > 1e-12).then(|| (-v.y).atan2(v.x));
+            // A squashed or long tip, spaced by how far it reaches along
+            // the way it goes.
+            let reach = if spaced_by_tip {
+                reach_along(brush, angle(unit_step).unwrap_or(0.0))
+            } else {
+                1.0
+            };
+            let spacing_dist = (spacing_dist * reach).max(0.5);
+            if reach < 1.0 {
+                // The step owed from before (the first sample's, before the
+                // way was known), no longer than this one.
+                self.dist_until_next_blit = self.dist_until_next_blit.min(spacing_dist);
+            }
+            // The way from the last sample: a curve when samples are far
+            // apart (a fast stroke), as pieces.
+            let path = curve_between(prev, pos, self.last_chord);
+            self.last_chord = Some(unit_step);
+            let length: f32 = (path.windows(2))
+                .map(|w| (w[1] - w[0]).length())
+                .sum::<f32>()
+                .max(1e-6);
+
             // The heading, smoothed over the distance travelled: each dab
-            // gets it at its own point along the segment.
-            let unit_step = delta / dist_left;
-            let reach = (brush.brush_options.diameter * 0.5).max(6.0);
+            // gets it at its own point along the way.
+            let settle = (brush.brush_options.diameter * 0.5).max(6.0);
             let start_heading = if self.heading == Vec2::ZERO {
                 unit_step
             } else {
                 self.heading
             };
-            let heading_at = |walked: f32| {
-                let keep = (-walked / reach).exp();
-                start_heading * keep + unit_step * (1.0 - keep)
+            let heading_at = |walked: f32, towards: Vec2| {
+                let keep = (-walked / settle).exp();
+                start_heading * keep + towards * (1.0 - keep)
             };
-            let angle = |v: Vec2| (v.length_sq() > 1e-12).then(|| (-v.y).atan2(v.x));
-            self.heading = heading_at(length);
-            self.dir = angle(self.heading).or(self.dir);
-            let mut cur_pos = prev;
-
-            while dist_left >= self.dist_until_next_blit {
-                // Take a step to the next blit point.
-                cur_pos += unit_step * self.dist_until_next_blit;
-                dist_left -= self.dist_until_next_blit;
-
-                // Blit.
-                let along = self.travel + (length - dist_left);
-                let dir = angle(heading_at(length - dist_left)).or(self.dir);
-                for _ in 0..count {
-                    let p = if defer {
-                        cur_pos
-                    } else {
-                        self.scatter(brush, cur_pos)
-                    };
-                    self.pending.push(Pending {
-                        pos: p,
-                        t: 1.0 - dist_left / length,
-                        along,
-                        dir,
-                    });
+            let mut walked = 0.0;
+            let mut towards = unit_step;
+            for piece in path.windows(2) {
+                let (from, to) = (piece[0], piece[1]);
+                let piece_len = (to - from).length();
+                if piece_len <= 0.0 {
+                    continue;
                 }
+                towards = (to - from) / piece_len;
+                let mut dist_left = piece_len;
+                let mut cur_pos = from;
+                while dist_left >= self.dist_until_next_blit {
+                    // Take a step to the next blit point.
+                    cur_pos += towards * self.dist_until_next_blit;
+                    dist_left -= self.dist_until_next_blit;
 
-                self.dist_until_next_blit = spacing_dist;
+                    // Blit.
+                    let done = walked + piece_len - dist_left;
+                    let dir = angle(heading_at(done, towards)).or(self.dir);
+                    for _ in 0..count {
+                        let p = if defer {
+                            cur_pos
+                        } else {
+                            self.scatter(brush, cur_pos)
+                        };
+                        self.pending.push(Pending {
+                            pos: p,
+                            t: done / length,
+                            along: self.travel + done,
+                            dir,
+                        });
+                    }
+
+                    self.dist_until_next_blit = spacing_dist;
+                }
+                // Take the partial step to the piece's end.
+                self.dist_until_next_blit -= dist_left;
+                walked += piece_len;
             }
-
-            // Take the partial step to land at the sample.
-            self.dist_until_next_blit -= dist_left;
+            self.heading = heading_at(length, towards);
+            self.dir = angle(self.heading).or(self.dir);
             self.travel += length;
         } else {
             // first point
@@ -1834,6 +1870,65 @@ fn scatter_deferred(brush: &Brush) -> bool {
             .any(|m| m.setting == crate::brush_engine::dynamics::DabSetting::Scatter)
 }
 
+/// How far the tip reaches along a stroke going `dir` (radians,
+/// counter-clockwise), as a share of its diameter: its outline taken as an
+/// ellipse, squashed and turned as the tip is (Krita's anisotropic
+/// spacing). A thin nib dragged edge-on is spaced by its thickness, so it
+/// doesn't leave beads; a round tip is 1.
+fn reach_along(brush: &Brush, dir: f32) -> f32 {
+    let tip = &brush.dynamics.tip;
+    // A turn that isn't known until the dab (random, tilt, barrel): as
+    // round.
+    if tip.random_angle > 0.0 || tip.follow_tilt || tip.follow_barrel {
+        return 1.0;
+    }
+    let (w, h) = match &brush.brush_options.pixel_shape {
+        crate::brush_engine::brush_options::PixelBrushShape::Custom(t) => {
+            let side = t.width.max(t.height).max(1) as f32;
+            (t.width as f32 / side, t.height as f32 / side)
+        }
+        _ => (1.0, 1.0),
+    };
+    let h = h * tip.ratio.clamp(0.02, 1.0);
+    if w >= 1.0 && h >= 1.0 {
+        return 1.0;
+    }
+    // The stroke's way in the tip's own frame.
+    let turn = if brush.follows_stroke() {
+        -tip.angle.to_radians()
+    } else {
+        dir - tip.angle.to_radians()
+    };
+    let (s, c) = turn.sin_cos();
+    (1.0 / ((c / w.max(0.02)).powi(2) + (s / h.max(0.02)).powi(2)).sqrt()).clamp(0.05, 1.0)
+}
+
+/// The way from sample `a` to `b` as points, `a` first and `b` last:
+/// straight, or when they're far apart (a fast stroke, a tablet reporting
+/// slowly) and the stroke came in along `incoming` without a sharp turn, a
+/// curve leaving `a` that way and arriving along `a`→`b` (a Hermite
+/// curve). Each curve starts the way the last one ended, so sparse samples
+/// join smoothly without waiting for the next sample.
+fn curve_between(a: Vec2, b: Vec2, incoming: Option<Vec2>) -> Vec<Vec2> {
+    let chord = b - a;
+    let length = chord.length();
+    let Some(incoming) = incoming.filter(|d| length > 8.0 && d.dot(chord / length) > 0.5) else {
+        return vec![a, b];
+    };
+    let (m0, m1) = (incoming * length, chord);
+    let pieces = (length / 2.0).ceil().clamp(2.0, 64.0) as usize;
+    (0..=pieces)
+        .map(|i| {
+            let t = i as f32 / pieces as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            a * (2.0 * t3 - 3.0 * t2 + 1.0)
+                + m0 * (t3 - 2.0 * t2 + t)
+                + b * (3.0 * t2 - 2.0 * t3)
+                + m1 * (t3 - t2)
+        })
+        .collect()
+}
+
 /// Paint `plans` in runs of equal pressure level, each with its variation.
 fn paint_plans(
     brush: &mut Brush,
@@ -1912,5 +2007,40 @@ fn apply_pressure(brush: &mut Brush, (diameter, opacity, flow): (f32, f32, f32),
 impl Default for StrokeState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod spacing_tests {
+    use super::*;
+
+    #[test]
+    fn a_squashed_tip_reaches_its_thickness_edge_on_and_its_width_along() {
+        let mut b = Brush::new(40.0, 100.0, eframe::egui::Color32::BLACK, 25.0);
+        let up = std::f32::consts::FRAC_PI_2;
+        assert_eq!(reach_along(&b, up), 1.0);
+        b.dynamics.tip.ratio = 0.1;
+        assert!((reach_along(&b, up) - 0.1).abs() < 1e-4);
+        assert!((reach_along(&b, 0.0) - 1.0).abs() < 1e-4);
+        // Turned a quarter, the other way round.
+        b.dynamics.tip.angle = 90.0;
+        assert!((reach_along(&b, 0.0) - 0.1).abs() < 1e-4);
+    }
+
+    #[test]
+    fn far_samples_join_in_a_curve_that_leaves_the_way_the_stroke_came() {
+        let (a, b) = (Vec2::ZERO, Vec2::new(40.0, 40.0));
+        let curve = curve_between(a, b, Some(Vec2::new(1.0, 0.0)));
+        assert_eq!((curve[0], *curve.last().unwrap()), (a, b));
+        // Coming in along x, it bends that way of the straight line.
+        let mid = curve[curve.len() / 2];
+        assert!(mid.x - mid.y > 4.0, "{mid:?}");
+        // A sharp turn, or close samples: straight.
+        assert_eq!(curve_between(a, b, Some(Vec2::new(-1.0, 0.0))), vec![a, b]);
+        let near = Vec2::new(4.0, 4.0);
+        assert_eq!(
+            curve_between(a, near, Some(Vec2::new(1.0, 0.0))),
+            vec![a, near]
+        );
     }
 }

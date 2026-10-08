@@ -209,3 +209,33 @@ fn the_stabiliser_doesnt_depend_on_the_sample_rate() {
         "{pen:.1} vs {mouse:.1}"
     );
 }
+
+#[test]
+fn a_thin_nib_dragged_edge_on_leaves_no_gaps() {
+    // A nib 40 px wide and 4 thick, spaced a quarter of its width (10 px),
+    // drawn straight down: spaced by its width the dabs would stand apart.
+    let mut b = Brush::new(40.0, 100.0, Color32::BLACK, 25.0);
+    b.brush_options.pressure_size = false;
+    b.dynamics.tip = TipShape {
+        ratio: 0.1,
+        ..TipShape::default()
+    };
+    let samples: Vec<Sample> = (0..=27)
+        .map(|i| {
+            (
+                Vec2::new(100.0, 10.0 + i as f32 * 4.0),
+                1.0,
+                i as f64 * 0.01,
+                None,
+            )
+        })
+        .collect();
+    let (canvas, _) = run(&mut b, &samples, (200, 128));
+    let alpha = |y: usize| {
+        canvas
+            .get_layer_tile_data(1, 100 / 64, (y / 64) as i32)
+            .map_or(0, |t| t[(y % 64) * 64 + 100 % 64].a())
+    };
+    let gaps: Vec<usize> = (14..114).filter(|&y| alpha(y) < 128).collect();
+    assert!(gaps.is_empty(), "unpainted rows {gaps:?}");
+}
