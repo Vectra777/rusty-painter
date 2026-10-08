@@ -822,7 +822,7 @@ impl Brush {
 
     /// Watercolour edges, when the pen lifts: thin the middle of the whole
     /// stroke, keeping its rim (see [`crate::brush_engine::wet_edge`]),
-    /// and show the result.
+    /// and show the result. (Wet paint darkens its own edges instead.)
     pub(crate) fn apply_wet_edges(
         &self,
         pool: &ThreadPool,
@@ -830,47 +830,88 @@ impl Brush {
         selection: Option<&SelectionManager>,
         stroke_tiles: &mut StrokeTiles,
     ) {
+        let keys: Vec<(usize, usize)> = stroke_tiles.buffers.keys().copied().collect();
+        self.wet_edge_tiles(pool, canvas, selection, stroke_tiles, &keys, true);
+    }
+
+    /// Watercolour edges while the pen is down: the tiles just painted
+    /// (and those next to them, whose edges they change) shown as they'll
+    /// be when it lifts; the stroke's own coverage is kept as it is.
+    pub(crate) fn wet_edges_live(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        stroke_tiles: &mut StrokeTiles,
+    ) {
+        if self.wet_edge <= 0.0 || self.wet.is_some() || stroke_tiles.dirty.is_empty() {
+            return;
+        }
+        let mut keys: Vec<(usize, usize)> = Vec::new();
+        for &(tx, ty) in &stroke_tiles.dirty {
+            for dy in -1..=1_isize {
+                for dx in -1..=1_isize {
+                    let key = (tx.wrapping_add_signed(dx), ty.wrapping_add_signed(dy));
+                    if stroke_tiles.buffers.contains_key(&key) && !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
+        }
+        self.wet_edge_tiles(pool, canvas, selection, stroke_tiles, &keys, false);
+    }
+
+    /// Watercolour edges on tiles `keys`, from the stroke's coverage; for
+    /// good (`last`: the coverage becomes the thinned one) or only shown.
+    fn wet_edge_tiles(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        stroke_tiles: &mut StrokeTiles,
+        keys: &[(usize, usize)],
+        last: bool,
+    ) {
         use rayon::prelude::*;
-        if self.wet_edge <= 0.0 || stroke_tiles.buffers.is_empty() {
+        if self.wet_edge <= 0.0 || self.wet.is_some() || keys.is_empty() {
             return;
         }
         let ts = canvas.tile_size();
         let radius = (self.wet_edge_width.round() as usize).clamp(1, ts);
         let pad = radius;
         let side = ts + 2 * pad;
-        // Every tile's coverage as the stroke left it, so each tile's blur
-        // reads its neighbours unchanged.
-        let before: FxHashMap<(usize, usize), Vec<f32>> = stroke_tiles
-            .buffers
-            .iter()
-            .map(|(&k, b)| {
-                (
-                    k,
-                    b.lock().unwrap_or_else(|e| e.into_inner()).coverage.clone(),
-                )
-            })
-            .collect();
-        let keys: Vec<_> = before.keys().copied().collect();
+        let buffers = &stroke_tiles.buffers;
         let strength = self.wet_edge;
+        // Each tile's thinned coverage, read from the stroke's coverage
+        // around it (before any of it changes).
         let after: Vec<((usize, usize), Vec<f32>)> = pool.install(|| {
             keys.par_iter()
                 .map(|&(tx, ty)| {
                     let mut patch = vec![0.0f32; side * side];
-                    for py in 0..side {
-                        // Canvas row of this patch row, and its tile.
-                        let gy = (ty * ts + py) as isize - pad as isize;
-                        if gy < 0 {
-                            continue;
-                        }
-                        let (sty, ly) = (gy as usize / ts, gy as usize % ts);
-                        for px in 0..side {
-                            let gx = (tx * ts + px) as isize - pad as isize;
-                            if gx < 0 {
+                    // The tiles under the patch (itself and its neighbours),
+                    // each locked once.
+                    for sty in ty.saturating_sub(1)..=ty + 1 {
+                        for stx in tx.saturating_sub(1)..=tx + 1 {
+                            let Some(buffer) = buffers.get(&(stx, sty)) else {
                                 continue;
-                            }
-                            let (stx, lx) = (gx as usize / ts, gx as usize % ts);
-                            if let Some(c) = before.get(&(stx, sty)) {
-                                patch[py * side + px] = c[ly * ts + lx];
+                            };
+                            let buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                            let c = &buffer.coverage;
+                            // This tile's part of the patch, in patch rows
+                            // and columns.
+                            let (ox, oy) = (
+                                (stx * ts) as isize - (tx * ts) as isize + pad as isize,
+                                (sty * ts) as isize - (ty * ts) as isize + pad as isize,
+                            );
+                            let x0 = ox.max(0) as usize;
+                            let x1 = (ox + ts as isize).min(side as isize).max(0) as usize;
+                            let y0 = oy.max(0) as usize;
+                            let y1 = (oy + ts as isize).min(side as isize).max(0) as usize;
+                            for py in y0..y1 {
+                                let ly = (py as isize - oy) as usize;
+                                let lx0 = (x0 as isize - ox) as usize;
+                                patch[py * side + x0..py * side + x1]
+                                    .copy_from_slice(&c[ly * ts + lx0..ly * ts + lx0 + (x1 - x0)]);
                             }
                         }
                     }
@@ -907,12 +948,15 @@ impl Brush {
                     }
                 })
                 .collect();
-            buffer.coverage = coverage;
+            let raw = std::mem::replace(&mut buffer.coverage, coverage);
             let region = TileRegion {
                 tx: key.0,
                 ty: key.1,
             };
             resolve_spans(&ctx, region, &mut buffer, &spans);
+            if !last {
+                buffer.coverage = raw;
+            }
             stroke_tiles.dirty.insert(key);
         }
     }

@@ -417,6 +417,10 @@ impl Brush {
         }
         // (A brush whose dabs vary in colour lays its own colour wet.)
         let colour = crate::canvas::wet::linear(o.color);
+        let wash_cap = match o.painting_mode {
+            PaintingMode::Wash => o.opacity.clamp(0.0, 1.0),
+            PaintingMode::BuildUp => 1.0,
+        };
         let side = canvas.tile_size();
         for (&key, buffer) in &stroke_tiles.buffers {
             let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
@@ -428,11 +432,19 @@ impl Brush {
             }
             let k = (key.0 as i32, key.1 as i32);
             crate::canvas::wet::record_undo(undo_action, layer.id, k, wet.tile(k));
-            // (The coverage has the stroke's opacity in it already.)
+            // (The coverage has the stroke's opacity in it already, but for
+            // a wash's: that caps it when shown.)
+            let capped: Vec<f32>;
+            let coverage = if wash_cap < 1.0 {
+                capped = buffer.coverage.iter().map(|c| c * wash_cap).collect();
+                &capped
+            } else {
+                &buffer.coverage
+            };
             let shown = wet.lay(
                 k,
                 &buffer.original,
-                &buffer.coverage,
+                coverage,
                 |_| colour,
                 paint,
                 layer.alpha_locked,

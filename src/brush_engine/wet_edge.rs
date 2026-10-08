@@ -1,5 +1,5 @@
-//! Watercolour edges: when the pen lifts, the stroke's paint pulls to its
-//! rim, as a wash does drying on paper (Clip Studio's "watercolor edge").
+//! Watercolour edges: the stroke's paint pulls to its rim (shown as it's
+//! painted), as a wash does drying on paper (Clip Studio's "watercolor edge").
 //!
 //! The stroke's coverage is compared with a blurred copy of itself: in the
 //! middle of a wash the two match, and the paint there thins by the edge's

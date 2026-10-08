@@ -439,3 +439,50 @@ fn wet_paint_flows_while_the_pen_is_down_and_undoes_with_the_stroke() {
     assert!(clear(&canvas), "the layer as it was");
     assert!(wet.is_empty(), "and no water left");
 }
+
+#[test]
+fn watercolour_edges_show_while_painting_so_nothing_changes_when_the_pen_lifts() {
+    let layer = |canvas: &Canvas| -> Vec<Option<Vec<Color32>>> {
+        (0..(H / 64) as i32)
+            .flat_map(|ty| (0..(W / 64) as i32).map(move |tx| (tx, ty)))
+            .map(|(tx, ty)| canvas.get_layer_tile_data(1, tx, ty))
+            .collect()
+    };
+    for wet in [false, true] {
+        let mut brush = wash(0.55);
+        if wet {
+            brush.wet = Some(Default::default());
+        }
+        let canvas = Canvas::new(W, H, Color32::WHITE, 64);
+        let mut canvas = canvas;
+        canvas.active_layer_idx = 1;
+        if wet {
+            canvas.layers[1].wet = Some(Default::default());
+        }
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let mut undo = empty_undo();
+        let mut tiles = StrokeTiles::default();
+        let mut stroke = StrokeState::with_seed(1);
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        for i in 0..20 {
+            let at = Vec2::new(30.0 + i as f32 * 10.0, 64.0);
+            stroke.add_sample(&mut brush, at, 1.0, Some(i as f64 * 0.02), &mut ctx);
+        }
+        let during = layer(&canvas);
+        stroke.finish(&mut brush, &mut ctx);
+        let lifted = layer(&canvas);
+        let differ = (during.iter().zip(&lifted))
+            .flat_map(|(a, b)| {
+                let (a, b) = (a.clone().unwrap_or_default(), b.clone().unwrap_or_default());
+                a.into_iter()
+                    .zip(b)
+                    .map(|(p, q)| p.a().abs_diff(q.a()) as u32)
+            })
+            .max()
+            .unwrap_or(0);
+        // (Only the end, which the tail paints at the lift, may change.)
+        let middle = |l: &[Option<Vec<Color32>>]| l[(W / 64) + 1].as_ref().unwrap()[0].a();
+        assert_eq!(middle(&during), middle(&lifted), "wet {wet}");
+        assert!(differ < 255, "wet {wet}: {differ}");
+    }
+}

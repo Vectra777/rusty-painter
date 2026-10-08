@@ -734,10 +734,17 @@ fn brush_settings_contents(
             }),
         )
         .on_hover_text(
-            "When the pen lifts, the middle of the stroke thins and its paint gathers at the \
-             rim, as a wash does drying (0: off).",
+            "The middle of the stroke thins and its paint gathers at the rim, as a wash does \
+             drying (0: off). With wet paint, its edge darkening does this instead.",
         )
         .changed();
+        if brush.wet.is_some() && brush.wet_edge > 0.0 {
+            ui.label(
+                egui::RichText::new("Off while the brush paints wet (see Edge darkening).")
+                    .small()
+                    .color(TEXT_DIM),
+            );
+        }
         if brush.wet_edge > 0.0 {
             changed |= slider_row(
                 ui,

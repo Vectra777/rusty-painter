@@ -425,6 +425,12 @@ impl<'a> StrokeContext<'a> {
         brush.apply_wet_edges(self.pool, self.canvas, self.selection, self.stroke_tiles);
     }
 
+    /// Watercolour edges on what was just painted, as they'll be when the
+    /// pen lifts (so nothing changes then).
+    fn wet_edges_live(&mut self, brush: &Brush) {
+        brush.wet_edges_live(self.pool, self.canvas, self.selection, self.stroke_tiles);
+    }
+
     /// A ribbon brush's segments, with their mirror copies.
     fn ribbon(&mut self, brush: &Brush, segs: &[RibbonSeg]) {
         let mut all = segs.to_vec();
@@ -801,6 +807,7 @@ impl StrokeState {
                 self.airbrush_due = Some(t + airbrush_interval(brush));
             }
             self.paint_pending(brush, original, from, p, context);
+            context.wet_edges_live(brush);
         }));
 
         let o = &mut brush.brush_options;
@@ -812,10 +819,6 @@ impl StrokeState {
         }
     }
 
-    /// Airbrush: while the pen is down, keep adding dabs where it is at the
-    /// brush's rate, so paint builds up while it's held still. Call it with
-    /// the time now (seconds, the same clock as the samples); it paints the
-    /// dabs due since the last sample or the last call.
     /// Wet paint flowing while the pen is down: a step when one is due at
     /// `time` (seconds), `gravity` down (see [`Brush::flow_wet`]).
     pub fn flow_wet(
@@ -841,6 +844,10 @@ impl StrokeState {
         );
     }
 
+    /// Airbrush: while the pen is down, keep adding dabs where it is at the
+    /// brush's rate, so paint builds up while it's held still. Call it with
+    /// the time now (seconds, the same clock as the samples); it paints the
+    /// dabs due since the last sample or the last call.
     pub fn airbrush(&mut self, brush: &mut Brush, time: f64, context: &mut StrokeContext<'_>) {
         if brush.airbrush_rate <= 0.0 || brush.pixel_perfect {
             return;
@@ -885,6 +892,7 @@ impl StrokeState {
                 });
             }
             self.paint_pending(brush, original, p, p, context);
+            context.wet_edges_live(brush);
         }));
         let o = &mut brush.brush_options;
         (o.diameter, o.opacity, o.flow) = original;
