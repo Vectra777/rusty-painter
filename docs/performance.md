@@ -135,6 +135,14 @@ bucket fill and colour select at 4096² take 0.15–0.22 s.
   (particle, 30 of them), under a millisecond a sample on the stroke
   worker; spray (40 particles a dab) about 25 ms. The grid, chalk and
   tangent normal brushes cost about what a plain brush does.
+- **Large brushes**: a 60-sample pressure stroke of a 600 px brush takes
+  about 135 ms with a soft round tip and 195 ms with an image tip
+  (`large_brush/*`, 16 cores), 2–3 ms a sample. Most of it is resolving
+  the stroke into the layer's pixels (57% soft, 36% image tip); computing
+  the tip itself is 15% and 30%. So a Krita-style dab cache (its precision
+  setting) would save 10–25% and isn't there. Brushes from 300 px show a
+  quick preview of the samples the worker hasn't painted yet, so the
+  stroke keeps up with the pen.
 
 - **Documents with folders, masks, clipping, fill layers, borders or
   adjustment layers** composite through the general per-pixel path, which

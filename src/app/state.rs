@@ -60,6 +60,9 @@ pub struct BrushState {
     pub import_report: Option<Vec<(String, usize, Vec<String>)>>,
     /// The pulled string of the stroke being drawn, shown on the canvas.
     pub string: Option<crate::app::stroke_ops::PulledString>,
+    /// A big brush's samples this stroke (on the layer's pixels, with
+    /// their pressure), for the quick preview of those not painted yet.
+    pub preview: Vec<(eframe::egui::Vec2, f32)>,
     /// Tags, favourites and recent presets, and the pop-up palette.
     pub library: crate::app::brush_library::BrushLibrary,
 }
@@ -109,6 +112,7 @@ impl BrushState {
             blend_stroke: None,
             import_report: None,
             string: None,
+            preview: Vec::new(),
             library: Default::default(),
         };
         state.pick_eraser();

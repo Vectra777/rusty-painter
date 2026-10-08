@@ -520,6 +520,7 @@ impl PainterApp {
         crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
         crate::app::stroke_ops::draw_string(self, ui.painter(), &map);
+        crate::app::stroke_ops::draw_preview(self, ui.painter(), &map);
         // (On a moved layer, shapes and gradients are on its own pixels.)
         crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| {
             map.to_screen(self.to_canvas_space(p))

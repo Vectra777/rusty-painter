@@ -337,6 +337,11 @@ impl StrokeWorker {
     }
 
     /// Whether queued samples are still being painted.
+    /// Jobs queued or running (each sample is one).
+    pub fn pending(&self) -> usize {
+        self.shared.lock().pending
+    }
+
     pub fn is_busy(&self) -> bool {
         self.shared.lock().pending > 0
     }

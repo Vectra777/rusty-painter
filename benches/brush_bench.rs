@@ -166,6 +166,55 @@ fn bench_huge_brush_stroke(c: &mut Criterion) {
     group.finish();
 }
 
+/// 600 px brushes along a 60-sample pressure stroke (sizes and sub-pixel
+/// places change every dab): a soft round tip and an image tip.
+fn bench_large_brushes(c: &mut Criterion) {
+    use rusty_painter::brush_engine::brush_options::PixelBrushShape;
+    use rusty_painter::brush_engine::tip::TipMask;
+    let pool = ThreadPoolBuilder::new().build().unwrap();
+    let canvas = Canvas::new(2048, 2048, Color32::WHITE, 64);
+    let points: Vec<(Vec2, f32)> = (0..60)
+        .map(|i| {
+            let t = i as f32 / 59.0;
+            let pos = Vec2::new(400.0 + t * 1200.0, 1024.0 + (t * 6.0).sin() * 300.3);
+            (pos, 0.6 + 0.4 * (t * std::f32::consts::PI).sin())
+        })
+        .collect();
+    let leaf: Vec<u8> = (0..256 * 256)
+        .map(|i| {
+            let (x, y) = ((i % 256) as f32 - 128.0, (i / 256) as f32 - 128.0);
+            (255.0 * (1.0 - (x * x / 1.6e4 + y * y / 6e3)).clamp(0.0, 1.0)) as u8
+        })
+        .collect();
+    let mut group = c.benchmark_group("large_brush");
+    group.sample_size(10);
+    for (name, image) in [("soft_600px", false), ("image_tip_600px", true)] {
+        let mut brush = Brush::new(600.0, 40.0, Color32::from_rgb(30, 60, 200), 8.0);
+        if image {
+            brush.brush_options.pixel_shape =
+                PixelBrushShape::Custom(TipMask::from_mask(256, 256, leaf.clone()));
+        }
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let mut undo_action = UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                };
+                let mut stroke_tiles = StrokeTiles::default();
+                let mut stroke = StrokeState::new();
+                let mut context =
+                    StrokeContext::new(&pool, &canvas, None, &mut undo_action, &mut stroke_tiles);
+                for &(pos, pressure) in &points {
+                    stroke.add_point(&mut brush, pos, pressure, &mut context);
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Recompositing the ~600 display tiles a 1500 px dab dirties (what one frame
 /// of a huge-brush stroke costs on the display side), across the pool.
 fn bench_composite_dirty_tiles(c: &mut Criterion) {
@@ -1085,6 +1134,7 @@ criterion_group!(
     bench_dynamic_strokes,
     bench_feature_strokes,
     bench_huge_brush_stroke,
+    bench_large_brushes,
     bench_composite_dirty_tiles,
     bench_composite_damaged_rects,
     bench_zoomed_out_preview,

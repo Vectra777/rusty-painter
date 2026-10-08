@@ -345,6 +345,8 @@ impl PainterApp {
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;
+        self.brush_state.preview.clear();
+        self.note_preview(pos, pressure);
         self.stroke_worker.sample_tilted(
             pos,
             pressure,
@@ -372,12 +374,20 @@ impl PainterApp {
                 s.pen = pos;
                 s.tip = crate::brush_engine::stabilizer::pull_string(s.tip, pos, s.length);
             }
+            self.note_preview(pos, pressure);
             self.stroke_worker.sample_tilted(
                 pos,
                 pressure,
                 self.viewport.touch.pen_tilt,
                 self.viewport.touch.pen_barrel,
             );
+        }
+    }
+
+    /// Keep a big brush's sample for the quick preview.
+    fn note_preview(&mut self, pos: Vec2, pressure: f32) {
+        if self.brush_state.brush.brush_options.diameter >= PREVIEW_FROM {
+            self.brush_state.preview.push((pos, pressure));
         }
     }
 
@@ -520,6 +530,54 @@ pub(crate) fn draw_string(app: &PainterApp, painter: &egui::Painter, map: &Scree
         painter.line_segment([tip, pen], Stroke::new(1.0_f32, ink));
     }
     painter.circle_filled(tip, 3.0, ink);
+}
+
+/// Brushes this big (canvas pixels) show a quick preview of the samples
+/// the stroke worker hasn't painted yet.
+const PREVIEW_FROM: f32 = 300.0;
+
+/// A big brush's quick preview: its samples still queued for the stroke
+/// worker, as round dabs of the brush colour, so the stroke keeps up with
+/// the pen while the paint catches up.
+// ponytail: plain round dabs over every layer (no tip, texture or blend
+// mode), shown only until the worker paints them; a Krita-style
+// lower-resolution copy of the layer would show the real brush.
+pub(crate) fn draw_preview(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
+    let samples = &app.brush_state.preview;
+    let behind = app.stroke_worker.pending().min(samples.len());
+    if behind == 0 {
+        return;
+    }
+    let o = &app.brush_state.brush.brush_options;
+    let [r, g, b, a] = o.color.to_srgba_unmultiplied();
+    let ink = Color32::from_rgba_unmultiplied(r, g, b, (a as f32 * o.opacity * 0.5) as u8);
+    let radius = |pressure: f32| {
+        let size = if o.pressure_size {
+            o.pressure_min_size + (1.0 - o.pressure_min_size) * pressure
+        } else {
+            1.0
+        };
+        (o.diameter * 0.5 * size).max(1.0)
+    };
+    let pending = &samples[samples.len() - behind..];
+    // From the last painted sample (where the paint has got to), a dab
+    // every quarter of the brush.
+    let from = samples.len().checked_sub(behind + 1).map(|i| samples[i]);
+    let mut last = from.unwrap_or(pending[0]);
+    let dab = |(pos, pressure): (Vec2, f32)| {
+        let at = map.to_screen(app.to_canvas_space(pos));
+        painter.circle_filled(at, radius(pressure) * map.zoom(), ink);
+    };
+    for &(pos, pressure) in pending {
+        let (from_pos, from_pressure) = last;
+        let step = (radius(pressure) * 0.5).max(1.0);
+        let n = ((pos - from_pos).length() / step).ceil().max(1.0) as usize;
+        for k in 1..=n {
+            let t = k as f32 / n as f32;
+            dab((from_pos + (pos - from_pos) * t, from_pressure + (pressure - from_pressure) * t));
+        }
+        last = (pos, pressure);
+    }
 }
 
 /// The canvas behind `canvas`, which must be unshared: call
