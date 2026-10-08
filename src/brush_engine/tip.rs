@@ -134,6 +134,14 @@ pub struct TipSampler {
     scale_hi: (f32, f32),
 }
 
+/// The longest side an SVG tip is drawn at for a `diameter` brush: a
+/// power of two, 1024 to 4096 (smaller brushes use its mipmaps).
+pub fn svg_side(diameter: f32) -> usize {
+    (diameter.max(1.0).ceil() as usize)
+        .next_power_of_two()
+        .clamp(1024, 4096)
+}
+
 /// A brush tip mask with its mipmaps. Shared (`Arc`) between brushes and
 /// presets.
 #[derive(Debug)]
@@ -149,10 +157,17 @@ pub struct TipMask {
     /// The colours' mipmaps: red, green and blue, premultiplied by the
     /// mask, one set per level of `levels`.
     color_levels: Vec<[Level; 3]>,
+    /// An SVG tip's picture, drawn again (sharp) for a brush bigger than
+    /// the mask.
+    pub svg: Option<Arc<str>>,
 }
 
 impl PartialEq for TipMask {
     fn eq(&self, other: &Self) -> bool {
+        if let (Some(a), Some(b)) = (&self.svg, &other.svg) {
+            // The same picture, whatever size it's drawn at.
+            return a == b;
+        }
         self.width == other.width
             && self.height == other.height
             && self.pixels == other.pixels
@@ -222,7 +237,47 @@ impl TipMask {
             levels,
             colors,
             color_levels,
+            svg: None,
         })
+    }
+
+    /// An SVG picture as a tip (its coverage; colours left out), drawn so
+    /// its longest side is `longest` pixels. `None` if it doesn't parse.
+    pub fn from_svg(src: &str, longest: usize) -> Option<Arc<Self>> {
+        use resvg::{tiny_skia, usvg};
+        let tree = usvg::Tree::from_str(src, &usvg::Options::default()).ok()?;
+        let size = tree.size();
+        let scale = longest as f32 / size.width().max(size.height());
+        let w = (size.width() * scale).ceil().clamp(1.0, 8192.0) as u32;
+        let h = (size.height() * scale).ceil().clamp(1.0, 8192.0) as u32;
+        let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+        let alpha = pixmap.pixels().iter().map(|p| p.alpha()).collect();
+        let mut tip = Arc::into_inner(Self::from_mask(w as usize, h as usize, alpha))?;
+        tip.svg = Some(src.into());
+        Some(Arc::new(tip))
+    }
+
+    /// An SVG picture's own size: its longest side, in its pixels.
+    pub fn svg_longest(src: &str) -> Option<f32> {
+        let tree =
+            resvg::usvg::Tree::from_str(src, &resvg::usvg::Options::default()).ok()?;
+        Some(tree.size().width().max(tree.size().height()))
+    }
+
+    /// An SVG tip drawn again at the size a `diameter` brush paints it,
+    /// when that's bigger than it was drawn (`None`: this one will do).
+    pub fn sharper_for(&self, diameter: f32) -> Option<Arc<Self>> {
+        let svg = self.svg.as_deref()?;
+        // (Trimmed, the mask is a little smaller than it was drawn.)
+        if svg_side(diameter) <= svg_side(self.width.max(self.height) as f32) {
+            return None;
+        }
+        Self::from_svg(svg, svg_side(diameter))
     }
 
     /// Whether the tip has colours of its own.
@@ -815,6 +870,22 @@ fn trim_rect(width: usize, height: usize, pixels: &[u8]) -> [usize; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_svg_tip_is_drawn_sharp_at_the_size_it_paints() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">
+            <rect x="0" y="0" width="50" height="50" fill="black"/></svg>"#;
+        assert_eq!(TipMask::svg_longest(svg), Some(100.0));
+        let tip = TipMask::from_svg(svg, 1024).unwrap();
+        // The square only (trimmed), full in the middle, its edge crisp.
+        assert_eq!((tip.width, tip.height), (512, 512));
+        assert_eq!(tip.pixels[256 * 512 + 256], 255);
+        assert!(tip.sharper_for(900.0).is_none());
+        let big = tip.sharper_for(3000.0).unwrap();
+        assert_eq!((big.width, big.height), (2048, 2048));
+        assert_eq!(*big, *tip, "the same tip");
+        assert!(TipMask::from_svg("not svg", 64).is_none());
+    }
 
     fn disc(size: usize) -> Arc<TipMask> {
         let c = size as f32 / 2.0;

@@ -865,6 +865,32 @@ fn a_picture_tip_comes_from_the_preset_or_its_bundle() {
 }
 
 #[test]
+fn an_svg_tip_is_drawn_from_its_picture_at_its_own_size() {
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100"/></svg>"#;
+    let b64 = base64(svg);
+    let xml = format!(
+        r#"<Preset paintopid="paintbrush" name="Leaves" embedded_resources="1">
+        <resources><resource type="brushes" filename="leaves.svg" name="leaves">{b64}</resource></resources>
+        <param type="string" name="brush_definition"><![CDATA[<Brush scale="0.5" type="svg_brush" spacing="0.24" filename="leaves.svg"/>]]></param>
+        </Preset>"#
+    );
+    let imported = import_kpp(&kpp(&xml), "file").unwrap();
+    assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+    let o = &imported.presets[0].brush.brush_options;
+    let PixelBrushShape::Custom(tip) = &o.pixel_shape else {
+        panic!("the picture");
+    };
+    assert!(tip.svg.is_some());
+    assert_eq!((tip.width, tip.height), (1024, 512));
+    assert_eq!(o.diameter, 100.0, "200 px at half size, as Krita draws it");
+    // Saved and loaded again: the same picture.
+    let preset = &imported.presets[0];
+    let file = crate::brush_engine::preset_file::encode(std::slice::from_ref(preset)).unwrap();
+    let back = crate::brush_engine::preset_file::decode(&file).unwrap();
+    assert_eq!(back[0].brush.brush_options.pixel_shape, o.pixel_shape);
+}
+
+#[test]
 fn other_engines_come_with_a_note_and_damage_is_refused() {
     let dyna = AUTO.replace("paintbrush", "dynabrush");
     let imported = import_kpp(&kpp(&dyna), "file").unwrap();

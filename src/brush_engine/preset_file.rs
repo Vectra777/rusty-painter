@@ -81,6 +81,9 @@ struct StoredTip {
     /// A built-in tip's name: no picture in the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     builtin: Option<String>,
+    /// An SVG tip's picture: no PNG in the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    svg: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -574,6 +577,7 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
                 width: t.width,
                 height: t.height,
                 builtin: builtin_tip_name(t).map(str::to_string),
+                svg: t.svg.as_deref().map(str::to_string),
             })
             .collect(),
         textures: res
@@ -590,7 +594,7 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
     let json = serde_json::to_vec_pretty(&library).map_err(|e| e.to_string())?;
     zip.add(PRESETS_ENTRY, &json)?;
     for (i, tip) in res.tips.iter().enumerate() {
-        if builtin_tip_name(tip).is_some() {
+        if builtin_tip_name(tip).is_some() || tip.svg.is_some() {
             continue;
         }
         let (w, h) = (tip.width as u32, tip.height as u32);
@@ -666,6 +670,12 @@ pub fn decode_with_meta(bytes: &[u8]) -> Result<Vec<(BrushPreset, PresetMeta)>, 
         }
         if stored.width == 0 || stored.height == 0 || stored.width.max(stored.height) > MAX_SIDE {
             return Err(damaged(format!("tip {i} size")));
+        }
+        if let Some(svg) = &stored.svg {
+            let side = crate::brush_engine::tip::svg_side(stored.width.max(stored.height) as f32);
+            res.tips
+                .push(TipMask::from_svg(svg, side).ok_or_else(|| damaged(format!("tip {i}")))?);
+            continue;
         }
         let png = zip::read_entry(bytes, &format!("tips/{i}.png")).map_err(damaged)?;
         let img = image::load_from_memory(png).map_err(|e| damaged(e.to_string()))?;

@@ -573,8 +573,7 @@ mod tests {
     #[ignore = "rewrites the default brushes from an installed Krita"]
     fn regenerate_default_brushes_from_krita() {
         const BUNDLE: &str = "/usr/share/krita/bundles/Krita_4_Default_Resources.bundle";
-        // Engines with no counterpart (experiment, clone, deform, filter)
-        // and an SVG tip.
+        // Engines with no counterpart (experiment, clone, deform, filter).
         const SKIP: &[&str] = &[
             "t)_Shapes_Fill",
             "v)_Clone_Tool",
@@ -583,7 +582,6 @@ mod tests {
             "v)_Distort_Shrink",
             "x)_Filter_Blur",
             "x)_Filter_Sharpen",
-            "z)_Stamp_Leaves",
         ];
         let bytes = std::fs::read(BUNDLE).expect("Krita installed");
         let entries = crate::project::zip::read_all(&bytes).unwrap();

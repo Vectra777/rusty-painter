@@ -40,6 +40,8 @@ wgpu = { version = "22.1", default-features = false, features = ["naga-ir"] }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 # Colour management (ICC profiles, CMYK): Little CMS, built from its source.
 lcms2 = { version = "6.2", features = ["static"] }
+# SVG brush tips (Krita's), drawn at the size they paint at.
+resvg = { version = "0.48", default-features = false }
 
 [dev-dependencies]
 pollster = "0.4"

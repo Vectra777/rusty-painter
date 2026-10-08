@@ -1218,8 +1218,11 @@ fn tip_from_definition(
         mask = levels.apply(&mask);
         extra = extra.iter().map(|t| levels.apply(t)).collect();
     }
-    tip.diameter =
-        (mask.width.max(mask.height) as f32 * attr("scale").unwrap_or(1.0)).clamp(1.0, 3000.0);
+    // (An SVG at its own size, as Krita draws it.)
+    let side = (mask.svg.as_deref())
+        .and_then(TipMask::svg_longest)
+        .unwrap_or(mask.width.max(mask.height) as f32);
+    tip.diameter = (side * attr("scale").unwrap_or(1.0)).clamp(1.0, 3000.0);
     // A colour picture paints its colours unless it's used as a mask
     // (newer presets say how in `brushApplication`: 1 stamps the picture).
     tip.colors = mask.has_colors()
@@ -1370,6 +1373,10 @@ fn picture_tip(
             return None;
         };
         return Some((tip.clone(), o.extra_tips.clone()));
+    }
+    if lower.ends_with(".svg") {
+        let src = std::str::from_utf8(data).ok()?;
+        return Some((TipMask::from_svg(src, 1024)?, Vec::new()));
     }
     let img = image::load_from_memory(data).ok()?;
     if keep_colors {

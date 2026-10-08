@@ -146,6 +146,13 @@ impl PainterApp {
     }
 
     fn try_load_tip(path: &std::path::Path) -> Option<std::sync::Arc<TipMask>> {
+        let svg = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+        if svg && path.is_file() {
+            let src = std::fs::read_to_string(path).ok()?;
+            return TipMask::from_svg(&src, 1024);
+        }
         if !path.is_file() || !Self::is_valid_image_extension(path) {
             return None;
         }

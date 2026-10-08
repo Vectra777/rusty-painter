@@ -5,7 +5,7 @@
 use crate::app::PainterApp;
 use crate::app::view::render::ScreenMap;
 use crate::brush_engine::brush::StabilizerAlgorithm;
-use crate::brush_engine::brush_options::BlendMode;
+use crate::brush_engine::brush_options::{BlendMode, PixelBrushShape};
 use crate::brush_engine::stroke_worker::{Finished, StrokeSetup};
 use crate::canvas::Canvas;
 use crate::selection::SelectionManager;
@@ -299,6 +299,14 @@ impl PainterApp {
         let pos = self.ruler_begin_stroke(pos);
         self.note_curve_start(pos, pressure);
         self.workspace.quickshape.begin(pos);
+        // An SVG tip drawn again when the brush outgrows it (kept for the
+        // strokes after).
+        let o = &mut self.brush_state.brush.brush_options;
+        if let PixelBrushShape::Custom(tip) = &o.pixel_shape
+            && let Some(sharper) = tip.sharper_for(o.diameter)
+        {
+            o.pixel_shape = PixelBrushShape::Custom(sharper);
+        }
         let mut brush = self.brush_state.brush.clone();
         brush.second_color = self.brush_state.secondary_color;
         if self.stroke_on_curve() {
