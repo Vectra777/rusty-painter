@@ -117,6 +117,9 @@ pub struct FinishedStroke {
 /// no faster than a fast display refreshes, and often enough that a low
 /// rate still starts promptly once the pen stops.
 const MIN_AIRBRUSH_WAIT: f32 = 1.0 / 240.0;
+/// While samples queue up, the stroke's pixels are brought up to date at
+/// least this often (about a frame).
+const RESOLVE_EVERY: std::time::Duration = std::time::Duration::from_millis(8);
 const MAX_AIRBRUSH_WAIT: f32 = 0.05;
 
 enum Job {
@@ -412,6 +415,9 @@ struct Session {
     correction: Option<(Brush, Vec<Event>)>,
     /// Post-correction while drawing: how far it's painted for good.
     live: Option<LiveCorrection>,
+    /// When what was painted was last resolved into the pixels (see
+    /// [`StrokeTiles::defer_resolve`]).
+    resolved: std::time::Instant,
 }
 
 /// Post-correction while drawing: the events painted along the smoothed
@@ -537,6 +543,7 @@ fn run_job(
                     layer_action: None,
                 },
                 tiles: StrokeTiles::default(),
+                resolved: std::time::Instant::now(),
             });
         }
         Job::Sample {
@@ -859,6 +866,9 @@ impl Session {
             undo,
             tiles,
             copies,
+            correction,
+            live,
+            resolved,
             ..
         } = self;
         let StrokeSetup {
@@ -870,10 +880,23 @@ impl Session {
             wrap,
             ..
         } = setup;
+        // More samples waiting, and the pixels shown not long ago: what's
+        // painted now would be painted over before it's seen, so it's
+        // resolved with what comes next (corrections start again from the
+        // pixels, so they never wait).
+        let defer = correction.is_none()
+            && live.is_none()
+            && shared.lock().pending > 1
+            && resolved.elapsed() < RESOLVE_EVERY;
         let mut context = StrokeContext::new(pool, canvas, selection.as_ref(), undo, tiles)
             .with_symmetry(symmetry, copies)
             .with_wrap(*wrap);
+        context.defer_resolves(defer);
         f(stroke, brush, &mut context);
+        if !defer {
+            context.flush_resolves(brush);
+            *resolved = std::time::Instant::now();
+        }
         let touched = std::mem::take(&mut tiles.dirty);
         let mut shared = shared.lock();
         for key in touched {

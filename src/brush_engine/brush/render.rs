@@ -352,9 +352,28 @@ fn paint_batch(
                 }
             }
         }
-        resolve_spans(ctx, *region, &mut buffer, &spans);
+        if ctx.defer {
+            merge_spans(&mut buffer.pending, &spans, tile_size);
+        } else {
+            // (With what was left unresolved here.)
+            let mut spans = spans;
+            if let Some(pending) = buffer.pending.take() {
+                for (s, p) in spans.iter_mut().zip(pending) {
+                    *s = (s.0.min(p.0), s.1.max(p.1));
+                }
+            }
+            resolve_spans(ctx, *region, &mut buffer, &spans);
+        }
     };
     dispatch_over_buckets(buckets, pool, work_pixels, draw_tile);
+}
+
+/// Rows' columns `spans` added to those left unresolved in `pending`.
+fn merge_spans(pending: &mut Option<Vec<(usize, usize)>>, spans: &[(usize, usize)], side: usize) {
+    let pending = pending.get_or_insert_with(|| vec![(usize::MAX, 0); side]);
+    for (p, s) in pending.iter_mut().zip(spans) {
+        *p = (p.0.min(s.0), p.1.max(s.1));
+    }
 }
 
 /// Wash: one dab's row of tip coverage `alphas` into `coverage` as an
@@ -1012,7 +1031,53 @@ impl Brush {
             sharpness_softness: self.sharpness_softness.clamp(0.0, 1.0),
             strength: 1.0,
             wash: None,
+            defer: false,
         }
+    }
+
+    /// Resolve what was left unresolved (see [`StrokeTiles::defer_resolve`])
+    /// into the tiles' pixels, and mark them for redrawing.
+    pub(crate) fn flush_resolves(
+        &self,
+        pool: &ThreadPool,
+        canvas: &Canvas,
+        selection: Option<&SelectionManager>,
+        stroke_tiles: &mut StrokeTiles,
+    ) {
+        use rayon::prelude::*;
+        let keys: Vec<(usize, usize)> = (stroke_tiles.buffers.iter())
+            .filter(|(_, b)| {
+                b.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending
+                    .is_some()
+            })
+            .map(|(&k, _)| k)
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let ctx = self.batch_ctx(
+            canvas,
+            selection,
+            &[],
+            &stroke_tiles.buffers,
+            Target::Stroke,
+            stroke_tiles.tail_newer,
+            stroke_tiles.grain,
+        );
+        pool.install(|| {
+            keys.par_iter().for_each(|&(tx, ty)| {
+                let Some(buffer) = ctx.buffers.get(&(tx, ty)) else {
+                    return;
+                };
+                let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(spans) = buffer.pending.take() {
+                    resolve_spans(&ctx, TileRegion { tx, ty }, &mut buffer, &spans);
+                }
+            })
+        });
+        stroke_tiles.dirty.extend(keys);
     }
 
     /// Snapshot and paint dabs already placed on the canvas.
@@ -1133,6 +1198,8 @@ impl Brush {
         );
         ctx.strength = strength;
         ctx.wash = wash.then_some((o.flow / 100.0).clamp(0.0, 1.0));
+        // (A wash's cap goes by the pressure as it's painted: resolved now.)
+        ctx.defer = stroke_tiles.defer_resolve && !wash && target != Target::Mask;
         let work_pixels: usize = dabs
             .iter()
             .map(|d| {
@@ -1336,6 +1403,7 @@ impl Brush {
                     tail_colors: [None, None],
                     mask: None,
                     mask_dirty: None,
+                    pending: None,
                 }),
             );
         }

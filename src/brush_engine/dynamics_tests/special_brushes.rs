@@ -486,3 +486,40 @@ fn watercolour_edges_show_while_painting_so_nothing_changes_when_the_pen_lifts()
         assert!(differ < 255, "wet {wet}: {differ}");
     }
 }
+
+#[test]
+fn a_stroke_resolved_late_ends_with_the_same_pixels() {
+    let paint = |defer: bool, brush: &mut Brush| {
+        let canvas = painted(Color32::from_rgb(200, 180, 40));
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let mut undo = empty_undo();
+        let mut tiles = StrokeTiles::default();
+        let mut stroke = StrokeState::with_seed(3);
+        let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+        for i in 0..30 {
+            ctx.defer_resolves(defer && i % 7 != 6);
+            let at = Vec2::new(20.0 + i as f32 * 7.0, 64.0 + (i as f32 * 0.4).sin() * 30.0);
+            stroke.add_sample(
+                brush,
+                at,
+                0.4 + i as f32 / 50.0,
+                Some(i as f64 * 0.01),
+                &mut ctx,
+            );
+        }
+        stroke.finish(brush, &mut ctx);
+        drop(ctx);
+        pixels_rgba(&canvas)
+    };
+    let mut soft = Brush::new(30.0, 60.0, Color32::from_rgb(20, 60, 200), 10.0);
+    let mut tapered = brush(tapered(0.3, 0.3));
+    let mut wash = wash(0.0);
+    for (name, b) in [
+        ("soft", &mut soft),
+        ("tapered", &mut tapered),
+        ("wash", &mut wash),
+    ] {
+        let (now, late) = (paint(false, b), paint(true, b));
+        assert!(now == late, "{name}");
+    }
+}

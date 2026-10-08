@@ -356,6 +356,8 @@ struct BatchCtx<'a> {
     /// coverage toward its opacity with; its stamped alphas are then the
     /// tip's coverage alone.
     wash: Option<f32>,
+    /// Leave the painted rows unresolved (see [`StrokeTiles::defer_resolve`]).
+    defer: bool,
 }
 
 /// Where a batch of dabs accumulates.

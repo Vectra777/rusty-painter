@@ -56,6 +56,9 @@ pub(crate) struct StrokeBuffer {
     /// since the pixels were last resolved with it.
     pub mask: Option<Vec<f32>>,
     pub mask_dirty: Option<[usize; 4]>,
+    /// Painted but not resolved into the tile's pixels yet (see
+    /// [`StrokeTiles::defer_resolve`]): each row's columns `[min, max]`.
+    pub pending: Option<Vec<(usize, usize)>>,
 }
 
 /// Tiles touched by the current stroke.
@@ -88,6 +91,11 @@ pub struct StrokeTiles {
     /// A soaking bristle brush's hairs' colours, taken where the stroke
     /// started (`None` before its first dab, or where the layer was clear).
     pub(crate) hair_colors: Option<Vec<Option<[f32; 3]>>>,
+    /// Leave what's painted unresolved (pixels not updated) for now: more
+    /// samples are queued, and the pixels would only be painted over again
+    /// before anyone sees them. [`crate::brush_engine::brush::Brush::flush_resolves`]
+    /// resolves them.
+    pub(crate) defer_resolve: bool,
 }
 
 /// A dab as the brush would paint it, for a stroke that lays its dabs down
@@ -428,7 +436,23 @@ impl<'a> StrokeContext<'a> {
     /// Watercolour edges on what was just painted, as they'll be when the
     /// pen lifts (so nothing changes then).
     fn wet_edges_live(&mut self, brush: &Brush) {
+        if brush.wet_edge > 0.0 && brush.wet.is_none() {
+            // (They show the stroke's coverage resolved their way.)
+            self.flush_resolves(brush);
+        }
         brush.wet_edges_live(self.pool, self.canvas, self.selection, self.stroke_tiles);
+    }
+
+    /// Resolve what was painted but left unresolved (see
+    /// [`StrokeTiles::defer_resolve`]).
+    pub(crate) fn flush_resolves(&mut self, brush: &Brush) {
+        brush.flush_resolves(self.pool, self.canvas, self.selection, self.stroke_tiles);
+    }
+
+    /// Whether to leave painted rows unresolved for now (see
+    /// [`StrokeTiles::defer_resolve`]).
+    pub(crate) fn defer_resolves(&mut self, defer: bool) {
+        self.stroke_tiles.defer_resolve = defer;
     }
 
     /// A ribbon brush's segments, with their mirror copies.
@@ -836,6 +860,8 @@ impl StrokeState {
             return;
         }
         self.wet_flowed = Some(time);
+        // (It lays the stroke's pixels as they're resolved.)
+        context.flush_resolves(brush);
         brush.flow_wet(
             context.canvas,
             context.stroke_tiles,
@@ -1280,6 +1306,9 @@ impl StrokeState {
     /// end taper). Every stroke should end with this; without dynamics it
     /// does nothing.
     pub fn finish(&mut self, brush: &mut Brush, context: &mut StrokeContext<'_>) {
+        // Everything resolved from here on (the pixels are the stroke's).
+        context.defer_resolves(false);
+        context.flush_resolves(brush);
         let o = &brush.brush_options;
         let original = (o.diameter, o.opacity, o.flow);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
