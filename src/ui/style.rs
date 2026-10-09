@@ -6,6 +6,7 @@
 //! on the canvas are perceived. The accent is the only saturated color.
 
 use eframe::egui::Color32;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Area around the canvas; darker than the panels so the canvas reads as the focus.
 pub(crate) const BG_CANVAS: Color32 = Color32::from_gray(24);
@@ -29,9 +30,72 @@ pub(crate) const TEXT: Color32 = Color32::from_gray(212);
 pub(crate) const TEXT_DIM: Color32 = Color32::from_gray(140);
 pub(crate) const TEXT_STRONG: Color32 = Color32::from_gray(245);
 
+/// The accent the app starts with, until one is chosen in Settings.
+pub(crate) const DEFAULT_ACCENT: Color32 = Color32::from_rgb(56, 132, 232);
+
+/// The accents offered in Settings, besides any colour picked.
+pub(crate) const ACCENT_PRESETS: [(&str, Color32); 8] = [
+    ("Blue", DEFAULT_ACCENT),
+    ("Purple", Color32::from_rgb(140, 98, 230)),
+    ("Pink", Color32::from_rgb(226, 86, 160)),
+    ("Red", Color32::from_rgb(222, 72, 72)),
+    ("Orange", Color32::from_rgb(234, 128, 40)),
+    ("Yellow", Color32::from_rgb(226, 186, 40)),
+    ("Green", Color32::from_rgb(64, 176, 96)),
+    ("Teal", Color32::from_rgb(32, 170, 170)),
+];
+
+/// The accent as `0x00RRGGBB`: one value read by every panel, so it's a
+/// global rather than threaded through each of them.
+static ACCENT_RGB: AtomicU32 = AtomicU32::new(pack(DEFAULT_ACCENT));
+
+const fn pack(c: Color32) -> u32 {
+    (c.r() as u32) << 16 | (c.g() as u32) << 8 | c.b() as u32
+}
+
 /// The one accent color: selection, active tool, focused outlines.
-pub(crate) const ACCENT: Color32 = Color32::from_rgb(56, 132, 232);
-pub(crate) const ACCENT_DIM: Color32 = Color32::from_rgb(38, 78, 130);
+pub(crate) fn accent() -> Color32 {
+    let v = ACCENT_RGB.load(Ordering::Relaxed);
+    Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+/// The accent sunk toward the panels: fills that shouldn't shout.
+pub(crate) fn accent_dim() -> Color32 {
+    mix(BG_PANEL, accent(), 0.55)
+}
+
+/// Text on an accent fill: dark on a light accent (yellow), light otherwise.
+pub(crate) fn accent_text() -> Color32 {
+    let c = accent();
+    let luma = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+    if luma > 160.0 {
+        Color32::from_gray(16)
+    } else {
+        TEXT_STRONG
+    }
+}
+
+/// Choose the accent (the theme picks it up when rebuilt).
+pub(crate) fn set_accent(c: Color32) {
+    ACCENT_RGB.store(pack(c), Ordering::Relaxed);
+}
+
+/// `a` to `b` by `t` (0..=1), channel by channel.
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// Corner radii, Blender's way: the regions (docks, bars, the canvas) stay
+/// square; what sits in them is rounded, more so the bigger it is.
+/// Swatches and chips.
+pub(crate) const RADIUS_SMALL: f32 = 3.0;
+/// Buttons, text fields, sliders, combo boxes.
+pub(crate) const RADIUS_WIDGET: f32 = 4.0;
+/// Tool buttons, list rows, library cards.
+pub(crate) const RADIUS_CARD: f32 = 6.0;
+/// Windows, menus, popups, tooltips.
+pub(crate) const RADIUS_WINDOW: f32 = 8.0;
 
 /// Height of the top bar's controls.
 pub(crate) const BAR_HEIGHT: f32 = 30.0;

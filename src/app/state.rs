@@ -258,6 +258,15 @@ pub struct FloatSession {
     pub draft_shown: bool,
 }
 
+/// The toolbar buttons that hold more than one tool: which one each shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ToolGroups {
+    /// The Transform button shows Animate.
+    pub animate: bool,
+    /// The Eraser button shows Lasso delete.
+    pub lasso_delete: bool,
+}
+
 /// See [`LayerState::float_overlay`].
 pub struct FloatOverlay {
     pub texture: egui::TextureHandle,
@@ -428,8 +437,12 @@ pub struct WorkspaceState {
     pub fitted_to: Option<egui::Vec2>,
     /// Larger controls and gesture hints for touch screens.
     pub touch_mode: bool,
-    /// The touch mode the egui style was last built for.
-    pub applied_touch_mode: Option<bool>,
+    /// The accent chosen in Settings.
+    pub accent: egui::Color32,
+    /// Which tool each grouped toolbar button shows (and picks on a click).
+    pub tool_groups: ToolGroups,
+    /// The touch mode and accent the egui style was last built for.
+    pub applied_style: Option<(bool, egui::Color32)>,
     /// Let a single finger paint; when off, one finger pans and only a
     /// stylus paints.
     pub finger_painting: bool,
@@ -557,7 +570,9 @@ impl WorkspaceState {
             // Android, or a desktop touchscreen via RUSTY_PAINTER_TOUCH=1.
             touch_mode: cfg!(target_os = "android")
                 || std::env::var_os("RUSTY_PAINTER_TOUCH").is_some(),
-            applied_touch_mode: None,
+            accent: crate::ui::style::DEFAULT_ACCENT,
+            tool_groups: ToolGroups::default(),
+            applied_style: None,
             finger_painting: true,
             autohide_panels: true,
             pressure_curve: crate::brush_engine::hardness::SoftnessCurve {

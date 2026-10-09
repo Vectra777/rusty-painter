@@ -2,6 +2,7 @@
 //! segmented controls, labeled property rows, section headers, icon buttons
 //! and color swatches.
 
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use eframe::egui::{self, Color32, Rect, Response, RichText, Sense, Stroke};
@@ -69,8 +70,10 @@ pub(crate) fn paint_swatch(painter: &egui::Painter, rect: Rect, color: Color32) 
     if color.a() < 255 {
         draw_checkerboard(painter, rect, (rect.height() / 3.0).clamp(3.0, 8.0));
     }
-    painter.rect_filled(rect, 0.0, color);
-    painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, BORDER));
+    // A checkerboard can't be rounded: see-through colours keep square corners.
+    let radius = if color.a() < 255 { 0.0 } else { RADIUS_SMALL };
+    painter.rect_filled(rect, radius, color);
+    painter.rect_stroke(rect, radius, Stroke::new(1.0_f32, BORDER));
 }
 
 /// A gradient's colours left to right across `rect`, over a checkerboard
@@ -111,8 +114,11 @@ pub(crate) fn color_swatch(ui: &mut egui::Ui, color: Color32, size: egui::Vec2) 
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     paint_swatch(ui.painter(), rect, color);
     if response.hovered() {
-        ui.painter()
-            .rect_stroke(rect.expand(1.0), 0.0, Stroke::new(1.0_f32, TEXT_STRONG));
+        ui.painter().rect_stroke(
+            rect.expand(1.0),
+            RADIUS_SMALL,
+            Stroke::new(1.0_f32, TEXT_STRONG),
+        );
     }
     response
 }
@@ -127,7 +133,7 @@ pub(crate) fn icon_button(
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::click());
     let (bg, fg) = if selected {
-        (ACCENT, TEXT_STRONG)
+        (accent(), accent_text())
     } else if response.is_pointer_button_down_on() {
         (WIDGET_ACTIVE, TEXT_STRONG)
     } else if response.hovered() {
@@ -135,7 +141,8 @@ pub(crate) fn icon_button(
     } else {
         (Color32::TRANSPARENT, TEXT)
     };
-    ui.painter().rect_filled(rect, 0.0, bg);
+    ui.painter()
+        .rect_filled(rect, RADIUS_CARD.min(size * 0.2), bg);
     let inset = (size * 0.24).round();
     paint_icon(ui.painter(), rect.shrink(inset), icon, fg);
     if tooltip.is_empty() {
@@ -156,7 +163,7 @@ pub(crate) fn icon_toggle(
     let size = metrics(ui.ctx()).row_toggle;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::click());
     if response.hovered() {
-        ui.painter().rect_filled(rect, 0.0, WIDGET_HOVER);
+        ui.painter().rect_filled(rect, RADIUS_WIDGET, WIDGET_HOVER);
     }
     let (icon, color) = if *on {
         (icon_on, TEXT)
@@ -187,32 +194,51 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 1.0;
-        for (option, label) in options {
+        let last = options.len().saturating_sub(1);
+        for (i, (option, label)) in options.iter().enumerate() {
             let galley = ui
                 .painter()
                 .layout_no_wrap(label.to_string(), font.clone(), TEXT);
+            // Equal shares never wider than the row: a label too long for
+            // its share is cut, rather than pushing the row (and with it
+            // the whole panel) wider.
             let width = if compact {
                 galley.size().x + pad * 2.0
             } else {
-                (equal_width - 1.0).max(galley.size().x + 8.0)
+                (equal_width - 1.0).max(8.0)
             };
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
             let selected = *value == *option;
             let (bg, fg) = if selected {
-                (ACCENT, TEXT_STRONG)
+                (accent(), accent_text())
             } else if response.hovered() {
                 (WIDGET_HOVER, TEXT_STRONG)
             } else {
                 (WIDGET, TEXT)
             };
-            ui.painter().rect_filled(rect, 0.0, bg);
-            ui.painter().galley(
-                rect.center() - galley.size() * 0.5,
-                ui.painter()
-                    .layout_no_wrap(label.to_string(), font.clone(), fg),
-                fg,
+            // Joined: only the row's outer corners are rounded.
+            let (left, right) = (
+                if i == 0 { RADIUS_WIDGET } else { 0.0 },
+                if i == last { RADIUS_WIDGET } else { 0.0 },
             );
+            let rounding = egui::Rounding {
+                nw: left,
+                sw: left,
+                ne: right,
+                se: right,
+            };
+            ui.painter().rect_filled(rect, rounding, bg);
+            let text = ui
+                .painter()
+                .layout_no_wrap(label.to_string(), font.clone(), fg);
+            let at = egui::pos2(
+                (rect.center().x - text.size().x * 0.5).max(rect.left() + 4.0),
+                rect.center().y - text.size().y * 0.5,
+            );
+            ui.painter()
+                .with_clip_rect(rect.shrink2(egui::vec2(3.0, 0.0)))
+                .galley(at, text, fg);
             if response.clicked() && !selected {
                 *value = *option;
                 changed = true;
@@ -236,33 +262,17 @@ fn row_label(ui: &mut egui::Ui, label: &str) {
     );
 }
 
-/// `label  [slider ----------] [value]` on one line, the slider filling
-/// the space left by the label and value box.
+/// `label  [slider ------ value]` on one line, the bar filling the space
+/// the label leaves (a `BarSlider` is exactly `slider_width` plus its
+/// value's room wide in a row, so the row ends at the edge).
 pub(crate) fn slider_row(ui: &mut egui::Ui, label: &str, slider: impl egui::Widget) -> Response {
-    // egui sizes the number box to its text, so a long value ("1000 px")
-    // comes out wider than `value_box_width`. The row must still end at the
-    // edge: a row a few pixels too wide widens an auto-sized window, which
-    // gives the next frame's row more room to overflow again, and the window
-    // grows every time the pointer moves. So the overflow is measured and
-    // taken off the slider next frame.
-    let overflow_id = ui.next_auto_id().with(("slider_row_overflow", label));
-    let extra = ui.data(|d| d.get_temp::<f32>(overflow_id)).unwrap_or(0.0);
+    #[cfg(test)]
+    crate::ui::bar_slider::ROW.with(|r| *r.borrow_mut() = label.to_string());
     ui.horizontal(|ui| {
         row_label(ui, label);
-        let spacing = ui.spacing().item_spacing.x;
         let value_box = metrics(ui.ctx()).value_box_width;
-        let room = ui.available_width();
-        let right_edge = ui.cursor().left() + room;
-        let slider_width = (room - value_box - extra - spacing).max(40.0);
-        ui.spacing_mut().slider_width = slider_width;
-        let response = ui.add(slider);
-        let over = ui.min_rect().right() - right_edge;
-        let next = (extra + over).clamp(0.0, (room - value_box - spacing - 40.0).max(0.0));
-        if (next - extra).abs() > 0.25 {
-            ui.data_mut(|d| d.insert_temp(overflow_id, next));
-            ui.ctx().request_repaint();
-        }
-        response
+        ui.spacing_mut().slider_width = (ui.available_width() - value_box).max(40.0);
+        ui.add(slider)
     })
     .inner
 }
@@ -273,6 +283,8 @@ pub(crate) fn property_row<R>(
     label: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    #[cfg(test)]
+    crate::ui::bar_slider::ROW.with(|r| *r.borrow_mut() = label.to_string());
     ui.horizontal(|ui| {
         row_label(ui, label);
         add_contents(ui)
@@ -281,7 +293,7 @@ pub(crate) fn property_row<R>(
 }
 
 /// Formats a 0..=1 value as a whole percentage and parses it back.
-pub(crate) fn percent_of_unit(slider: egui::Slider) -> egui::Slider {
+pub(crate) fn percent_of_unit(slider: BarSlider<'_>) -> BarSlider<'_> {
     slider
         .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
         .custom_parser(|s| {
@@ -294,6 +306,12 @@ pub(crate) fn percent_of_unit(slider: egui::Slider) -> egui::Slider {
         })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: every section shows open.
+    pub(crate) static SECTIONS_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Collapsible section: a hairline, a small uppercase title with a
 /// disclosure triangle, and an unindented body.
 pub(crate) fn section<R>(
@@ -304,6 +322,10 @@ pub(crate) fn section<R>(
 ) -> Option<R> {
     let id = ui.id().with(("section", title));
     let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(default_open);
+    #[cfg(test)]
+    {
+        open |= SECTIONS_OPEN.with(|o| o.get());
+    }
 
     ui.add_space(4.0);
     let header_height = if metrics(ui.ctx()).touch { 34.0 } else { 22.0 };
@@ -466,7 +488,7 @@ pub(crate) fn new_slider_defaults() {
 pub(crate) fn reset<'a, T, F>(value: &'a mut T, build: F) -> Reset<'a, T, F>
 where
     T: egui::emath::Numeric + Send + Sync + 'static,
-    F: for<'b> FnOnce(&'b mut T) -> egui::Slider<'b>,
+    F: for<'b> FnOnce(&'b mut T) -> BarSlider<'b>,
 {
     Reset { value, build }
 }
@@ -479,7 +501,7 @@ pub(crate) struct Reset<'a, T, F> {
 impl<T, F> egui::Widget for Reset<'_, T, F>
 where
     T: egui::emath::Numeric + Send + Sync + 'static,
-    F: for<'b> FnOnce(&'b mut T) -> egui::Slider<'b>,
+    F: for<'b> FnOnce(&'b mut T) -> BarSlider<'b>,
 {
     fn ui(self, ui: &mut egui::Ui) -> Response {
         let before = *self.value;
@@ -537,9 +559,7 @@ mod reset_tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    rect = ui
-                        .add(reset(value, |v| egui::Slider::new(v, 0.0..=1.0)))
-                        .rect;
+                    rect = ui.add(reset(value, |v| BarSlider::new(v, 0.0..=1.0))).rect;
                 });
             },
         );
@@ -636,13 +656,13 @@ mod growth_tests {
             slider_row(
                 ui,
                 "Radius",
-                egui::Slider::new(&mut a, 0.0..=1000.0).suffix(" px"),
+                BarSlider::new(&mut a, 0.0..=1000.0).suffix(" px"),
             );
             let mut b = 0.5_f32;
             slider_row(
                 ui,
                 "A much longer label",
-                percent_of_unit(egui::Slider::new(&mut b, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(&mut b, 0.0..=1.0)),
             );
         });
         let last = widths[widths.len() - 1];

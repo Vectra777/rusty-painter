@@ -37,7 +37,7 @@ pub(crate) fn paint_diamond(
 fn key_toggle(ui: &mut egui::Ui, keyed_here: bool, has_keys: bool, p: Prop) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
     let color = if keyed_here {
-        ACCENT
+        accent()
     } else if has_keys {
         TEXT
     } else {
@@ -50,7 +50,7 @@ fn key_toggle(ui: &mut egui::Ui, keyed_here: bool, has_keys: bool, p: Prop) -> b
         ui.painter(),
         rect.center(),
         5.0,
-        keyed_here.then_some(ACCENT),
+        keyed_here.then_some(accent()),
         color,
     );
     let tip = if keyed_here {
@@ -408,10 +408,10 @@ pub(crate) fn ease_editor(ui: &mut egui::Ui, curve: Curve, id: egui::Id) -> (Opt
                 to_screen(1.0, 0.0),
                 to_screen(1.0, 1.0),
             ],
-            Stroke::new(2.0_f32, ACCENT),
+            Stroke::new(2.0_f32, accent()),
         ));
     } else {
-        p.add(Shape::line(ys, Stroke::new(2.0_f32, ACCENT)));
+        p.add(Shape::line(ys, Stroke::new(2.0_f32, accent())));
     }
     let [x1, y1, x2, y2] = match curve {
         Curve::Bezier(c) => c,
@@ -436,7 +436,7 @@ pub(crate) fn ease_editor(ui: &mut egui::Ui, curve: Curve, id: egui::Id) -> (Opt
             TEXT
         };
         p.circle_filled(at, 5.0, fill);
-        p.circle_stroke(at, 5.0, Stroke::new(1.5_f32, ACCENT));
+        p.circle_stroke(at, 5.0, Stroke::new(1.5_f32, accent()));
         if r.dragged()
             && let Some(pos) = r.interact_pointer_pos()
         {

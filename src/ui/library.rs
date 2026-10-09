@@ -6,10 +6,13 @@
 use crate::PainterApp;
 use crate::app::files::OpenFor;
 use crate::ui::icons::{Icon, paint_icon};
-use crate::ui::style::{ACCENT, BG_CANVAS, BG_RAISED, TEXT_DIM, metrics};
+use crate::ui::style::{
+    BG_CANVAS, BG_RAISED, RADIUS_CARD, TEXT, TEXT_DIM, TEXT_STRONG, WIDGET_HOVER, accent,
+    accent_text, metrics,
+};
 use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, RichText};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::SystemTime;
@@ -23,6 +26,8 @@ struct Entry {
     modified: SystemTime,
     /// A folder's latest projects (up to 4), shown on its tile.
     previews: Vec<(PathBuf, SystemTime)>,
+    /// A folder: how many projects and folders it holds.
+    count: usize,
 }
 
 /// A project or folder being dragged to another place or into a folder.
@@ -88,6 +93,22 @@ fn rename_in_order(from: &Path, to: &Path) {
 }
 
 /// The latest `n` projects right inside `dir`, newest first.
+/// How many projects and folders `dir` holds (not counting inside them).
+fn count_entries(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let path = e.path();
+            let hidden = path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'));
+            !hidden && (path.is_dir() || is_project(&path))
+        })
+        .count()
+}
+
 fn latest_projects(dir: &Path, n: usize) -> Vec<(PathBuf, SystemTime)> {
     let mut found: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(dir)
         .into_iter()
@@ -125,14 +146,20 @@ enum Leave {
 enum Dialog {
     NewFolder(String),
     Rename(PathBuf, String),
-    Delete(PathBuf),
+    Delete(Vec<PathBuf>),
     /// Name the document to save it into the shown folder.
     SaveAs(String),
     /// The document has unsaved work outside the library.
     Unsaved(Leave),
 }
 
-type Thumb = (PathBuf, SystemTime, Option<egui::ColorImage>);
+/// A project's thumbnail and canvas size, read in the background.
+type Thumb = (
+    PathBuf,
+    SystemTime,
+    Option<egui::ColorImage>,
+    Option<[u32; 2]>,
+);
 
 pub struct LibraryState {
     pub open: bool,
@@ -147,10 +174,16 @@ pub struct LibraryState {
     /// Its contents; `None` until listed again.
     entries: Option<Vec<Entry>>,
     thumbs: HashMap<PathBuf, (SystemTime, Option<egui::TextureHandle>)>,
+    /// Each project's canvas size, read with its thumbnail.
+    sizes: HashMap<PathBuf, [u32; 2]>,
     tx: Sender<Thumb>,
     rx: Receiver<Thumb>,
     dialog: Option<Dialog>,
     drag: DragState,
+    /// Select mode: a tap picks a tile (for Stack, Duplicate, Export,
+    /// Delete) instead of opening it.
+    selecting: bool,
+    selected: HashSet<PathBuf>,
     /// The tiles as last drawn (tests drive drags with them).
     #[cfg(test)]
     drawn: Vec<(PathBuf, egui::Rect, bool)>,
@@ -167,10 +200,13 @@ impl Default for LibraryState {
             folder: root(),
             entries: None,
             thumbs: HashMap::new(),
+            sizes: HashMap::new(),
             tx,
             rx,
             dialog: None,
             drag: DragState::default(),
+            selecting: false,
+            selected: HashSet::new(),
             #[cfg(test)]
             drawn: Vec::new(),
         }
@@ -181,6 +217,14 @@ impl LibraryState {
     /// List the folder again (its contents changed).
     pub fn refresh(&mut self) {
         self.entries = None;
+    }
+
+    /// Show `folder` (leaving Select mode: its picks were in the last one).
+    fn go_to(&mut self, folder: PathBuf) {
+        self.folder = folder;
+        self.selecting = false;
+        self.selected.clear();
+        self.refresh();
     }
 
     /// Ask for a name and save the document into the shown folder.
@@ -267,10 +311,10 @@ fn list(folder: &Path) -> Vec<Entry> {
                 name
             };
             let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let previews = if folder {
-                latest_projects(&path, 4)
+            let (previews, count) = if folder {
+                (latest_projects(&path, 4), count_entries(&path))
             } else {
-                Vec::new()
+                (Vec::new(), 0)
             };
             Some(Entry {
                 path,
@@ -278,6 +322,7 @@ fn list(folder: &Path) -> Vec<Entry> {
                 folder,
                 modified,
                 previews,
+                count,
             })
         })
         .collect();
@@ -454,7 +499,9 @@ enum Act {
     Duplicate(PathBuf),
     MoveTo(PathBuf, PathBuf),
     Export(PathBuf),
-    Delete(PathBuf),
+    Delete(Vec<PathBuf>),
+    /// Make a folder in the shown one and move these into it.
+    Stack(Vec<PathBuf>),
     /// Put the entry at this place in the folder's arrangement (counted
     /// in the arrangement as shown, the entry still in it).
     Reorder(PathBuf, usize),
@@ -468,7 +515,10 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
         lib.entries = Some(list(&lib.folder));
         load_thumbnails(lib, ctx);
     }
-    while let Ok((path, modified, img)) = lib.rx.try_recv() {
+    while let Ok((path, modified, img, size)) = lib.rx.try_recv() {
+        if let Some(size) = size {
+            lib.sizes.insert(path.clone(), size);
+        }
         let tex = img.map(|img| {
             ctx.load_texture(
                 format!("library-{}", path.display()),
@@ -487,6 +537,8 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
     let mut act = None;
     let mut leave = None;
     let mut up = None;
+    // Select mode's Duplicate: these projects.
+    let mut dup: Vec<PathBuf> = Vec::new();
     // Where things were drawn this frame, for a drag's drop.
     let mut crumbs: Vec<(PathBuf, egui::Rect)> = Vec::new();
     let mut tiles: Vec<(PathBuf, egui::Rect, bool)> = Vec::new();
@@ -522,41 +574,91 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
                     crumbs.push((target, r.rect));
                 }
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
+            // Keep only picks still shown (one may have been moved or deleted).
+            if let Some(entries) = &lib.entries {
+                let shown: HashSet<&Path> = entries.iter().map(|e| e.path.as_path()).collect();
+                lib.selected.retain(|p| shown.contains(p.as_path()));
+            }
             ui.horizontal_wrapped(|ui| {
-                let h = m.header_button;
-                let big = |text: &str| egui::Button::new(text).min_size(egui::vec2(0.0, h));
-                if ui.add(big("+ New canvas")).clicked() {
-                    leave = Some(Leave::New);
-                }
-                if ui.add(big("New folder")).clicked() {
-                    lib.dialog = Some(Dialog::NewFolder("New folder".into()));
-                }
-                if ui
-                    .add(big("Import…"))
-                    .on_hover_text("Copy a project (Rusty Painter, Photoshop, Krita, Clip Studio) into this folder")
-                    .clicked()
-                {
-                    leave = Some(Leave::Import);
-                }
-                if !cfg!(target_os = "android")
-                    && ui
-                        .add(big("Open file…"))
-                        .on_hover_text("Open a document from anywhere on disk")
+                let h = m.header_button.max(28.0);
+                if lib.selecting {
+                    let picked: Vec<PathBuf> = lib.selected.iter().cloned().collect();
+                    let n = picked.len();
+                    ui.label(
+                        RichText::new(match n {
+                            0 => "Pick projects and folders".to_string(),
+                            1 => "1 selected".to_string(),
+                            n => format!("{n} selected"),
+                        })
+                        .color(TEXT_DIM),
+                    );
+                    ui.add_space(8.0);
+                    let any = n > 0;
+                    let projects: Vec<PathBuf> =
+                        picked.iter().filter(|p| !p.is_dir()).cloned().collect();
+                    if pill(ui, Some(Icon::NewFolder), "Stack", h, any, false)
+                        .on_hover_text("Put the selected items in a new folder")
                         .clicked()
-                {
-                    leave = Some(Leave::OpenFile);
-                }
-                if lib.has_document
-                    && ui
-                        .add(big("Back to canvas"))
-                        .on_hover_text("Keep working on the open document")
+                    {
+                        act = Some(Act::Stack(picked.clone()));
+                    }
+                    if pill(ui, Some(Icon::Duplicate), "Duplicate", h, !projects.is_empty(), false)
                         .clicked()
-                {
-                    lib.open = false;
+                    {
+                        dup = projects.clone();
+                    }
+                    // A save dialog each: one project at a time.
+                    if pill(ui, Some(Icon::Export), "Export", h, projects.len() == 1 && n == 1, false)
+                        .on_hover_text("Export the selected project (one at a time)")
+                        .clicked()
+                    {
+                        act = projects.first().cloned().map(Act::Export);
+                    }
+                    if pill(ui, Some(Icon::Trash), "Delete", h, any, false).clicked() {
+                        act = Some(Act::Delete(picked.clone()));
+                    }
+                    ui.add_space(8.0);
+                    if pill(ui, None, "Done", h, true, true).clicked() {
+                        lib.selecting = false;
+                        lib.selected.clear();
+                    }
+                } else {
+                    if pill(ui, Some(Icon::Plus), "New canvas", h, true, true).clicked() {
+                        leave = Some(Leave::New);
+                    }
+                    if pill(ui, Some(Icon::NewFolder), "New folder", h, true, false).clicked() {
+                        lib.dialog = Some(Dialog::NewFolder("New folder".into()));
+                    }
+                    if pill(ui, Some(Icon::Import), "Import", h, true, false)
+                        .on_hover_text(
+                            "Copy a project (Rusty Painter, Photoshop, Krita, Clip Studio) into this folder",
+                        )
+                        .clicked()
+                    {
+                        leave = Some(Leave::Import);
+                    }
+                    if !cfg!(target_os = "android")
+                        && pill(ui, Some(Icon::Folder), "Open file", h, true, false)
+                            .on_hover_text("Open a document from anywhere on disk")
+                            .clicked()
+                    {
+                        leave = Some(Leave::OpenFile);
+                    }
+                    let has_entries = lib.entries.as_ref().is_some_and(|e| !e.is_empty());
+                    if pill(ui, Some(Icon::Check), "Select", h, has_entries, false).clicked() {
+                        lib.selecting = true;
+                    }
+                    if lib.has_document
+                        && pill(ui, None, "Back to canvas", h, true, false)
+                            .on_hover_text("Keep working on the open document")
+                            .clicked()
+                    {
+                        lib.open = false;
+                    }
                 }
             });
-            ui.separator();
+            ui.add_space(6.0);
 
             let entries = lib.entries.as_deref().unwrap_or_default();
             if entries.is_empty() {
@@ -564,25 +666,46 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
                 ui.label(RichText::new("Nothing here yet: start a new canvas.").color(TEXT_DIM));
                 return;
             }
-            let cell = if m.touch { 168.0 } else { 148.0 };
+            let cell = if m.touch { 196.0 } else { 172.0 };
             let open_project = lib.project.clone();
-            let (thumbs, drag) = (&lib.thumbs, &mut lib.drag);
+            let selecting = lib.selecting;
+            let (thumbs, sizes, drag, selected) =
+                (&lib.thumbs, &lib.sizes, &mut lib.drag, &mut lib.selected);
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 // A lifted tile follows the finger instead.
                 .drag_to_scroll(drag.item.is_none())
                 .show(ui, |ui| {
+                    ui.add_space(8.0);
                     let rows = egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true);
                     ui.with_layout(rows, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                        ui.spacing_mut().item_spacing = egui::vec2(22.0, 18.0);
                         for entry in entries {
-                            let current = open_project.as_deref() == Some(entry.path.as_path());
-                            let rect = tile(ui, entry, thumbs, cell, current, touch, drag, &mut act);
+                            let shown = Shown {
+                                current: open_project.as_deref() == Some(entry.path.as_path()),
+                                size: sizes.get(&entry.path).copied(),
+                                selecting,
+                            };
+                            let rect =
+                                tile(ui, entry, thumbs, cell, shown, touch, drag, selected, &mut act);
                             tiles.push((entry.path.clone(), rect, entry.folder));
                         }
                     });
                 });
         });
+    if !dup.is_empty() {
+        let lib = &mut app.workspace.library;
+        lib.selecting = false;
+        lib.selected.clear();
+        let mut result = Ok(());
+        for path in dup {
+            result = result.and(duplicate(&path));
+        }
+        app.workspace.library.refresh();
+        if let Err(err) = result {
+            app.report(err);
+        }
+    }
 
     // A drag: where it would land, shown; done when the pointer lets go.
     let lib = &mut app.workspace.library;
@@ -607,7 +730,7 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
             egui::Id::new("library-drag"),
         ));
         if let Some((_, mark)) = &target {
-            painter.rect_stroke(*mark, 4.0, egui::Stroke::new(3.0_f32, ACCENT));
+            painter.rect_stroke(*mark, 4.0, egui::Stroke::new(3.0_f32, accent()));
         }
         if let Some(p) = pos.filter(|_| !touch || lib.drag.moved) {
             let ghost = egui::Rect::from_center_size(p, egui::vec2(72.0, 72.0));
@@ -616,7 +739,7 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
                 Some(tex) => fit_image(&painter, tex, ghost.shrink(4.0)),
                 None => paint_icon(&painter, ghost.shrink(18.0), Icon::Folder, TEXT_DIM),
             }
-            painter.rect_stroke(ghost, 4.0, egui::Stroke::new(2.0_f32, ACCENT));
+            painter.rect_stroke(ghost, 4.0, egui::Stroke::new(2.0_f32, accent()));
         }
         if !down {
             let moved = lib.drag.moved;
@@ -633,9 +756,7 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
     }
 
     if let Some(folder) = up {
-        let lib = &mut app.workspace.library;
-        lib.folder = folder;
-        lib.refresh();
+        app.workspace.library.go_to(folder);
     }
     if let Some(leave) = leave {
         app.leave_asking(leave);
@@ -651,8 +772,7 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
                 Ok(())
             }
             Act::Enter(path) => {
-                app.workspace.library.folder = path;
-                app.workspace.library.refresh();
+                app.workspace.library.go_to(path);
                 Ok(())
             }
             Act::Rename(path, name) => {
@@ -660,13 +780,8 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
                 Ok(())
             }
             Act::Duplicate(path) => {
-                let parent = path.parent().unwrap_or(Path::new("."));
-                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-                let copy = unused_path(parent, &format!("{stem} copy"));
                 app.workspace.library.refresh();
-                std::fs::copy(&path, &copy)
-                    .map(|_| ())
-                    .map_err(|e| format!("Couldn't copy: {e}"))
+                duplicate(&path)
             }
             Act::MoveTo(path, folder) => {
                 let name = path.file_name().unwrap_or_default();
@@ -691,9 +806,25 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
                         .into_owned();
                     app.pick_save(&name, EXTENSION, "application/octet-stream", bytes);
                 }),
-            Act::Delete(path) => {
-                app.workspace.library.dialog = Some(Dialog::Delete(path));
+            Act::Delete(paths) => {
+                app.workspace.library.dialog = Some(Dialog::Delete(paths));
                 Ok(())
+            }
+            Act::Stack(paths) => {
+                let folder = unused_folder(&app.workspace.library.folder, "Stack");
+                let mut result = std::fs::create_dir_all(&folder)
+                    .map_err(|e| format!("Couldn't create the folder: {e}"));
+                for path in paths.iter().filter(|p| **p != folder) {
+                    if result.is_err() {
+                        break;
+                    }
+                    result = app.moved(path, &folder.join(path.file_name().unwrap_or_default()));
+                }
+                let lib = &mut app.workspace.library;
+                lib.selecting = false;
+                lib.selected.clear();
+                lib.refresh();
+                result
             }
             Act::Reorder(path, to) => {
                 let lib = &mut app.workspace.library;
@@ -718,6 +849,71 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
 
     let area = ctx.screen_rect().shrink(8.0);
     crate::app::layout::notices(app, ctx, area);
+}
+
+/// A copy of the project at `path` beside it ("… copy").
+fn duplicate(path: &Path) -> Result<(), String> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let copy = unused_path(parent, &format!("{stem} copy"));
+    std::fs::copy(path, &copy)
+        .map(|_| ())
+        .map_err(|e| format!("Couldn't copy: {e}"))
+}
+
+/// A rounded header button, an icon before its text; `primary` fills it
+/// with the accent.
+fn pill(
+    ui: &mut egui::Ui,
+    icon: Option<Icon>,
+    text: &str,
+    height: f32,
+    enabled: bool,
+    primary: bool,
+) -> egui::Response {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, TEXT);
+    let icon_side = (height * 0.55).round();
+    let pad = height * 0.45;
+    let gap = if icon.is_some() { 6.0 } else { 0.0 };
+    let icon_w = if icon.is_some() { icon_side } else { 0.0 };
+    let width = pad * 2.0 + icon_w + gap + galley.size().x;
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), sense);
+    let hovered = enabled && response.hovered();
+    let (bg, fg) = match (primary, enabled) {
+        (_, false) => (BG_RAISED.gamma_multiply(0.6), TEXT_DIM.gamma_multiply(0.7)),
+        (true, true) => (
+            if hovered {
+                accent().gamma_multiply(1.15)
+            } else {
+                accent()
+            },
+            accent_text(),
+        ),
+        (false, true) => (if hovered { WIDGET_HOVER } else { BG_RAISED }, TEXT_STRONG),
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, height * 0.5, bg);
+    let mut x = rect.left() + pad;
+    if let Some(icon) = icon {
+        let r = egui::Rect::from_center_size(
+            egui::pos2(x + icon_side * 0.5, rect.center().y),
+            egui::Vec2::splat(icon_side),
+        );
+        paint_icon(painter, r, icon, fg);
+        x += icon_side + gap;
+    }
+    painter.galley_with_override_text_color(
+        egui::pos2(x, rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
+    response
 }
 
 /// `names` with `name` moved to place `to` (counted with it still in the
@@ -781,9 +977,7 @@ fn menu_id(path: &Path) -> egui::Id {
 
 /// `tex` as large as fits in `area`, centred, over a checkerboard.
 fn fit_image(painter: &egui::Painter, tex: &egui::TextureHandle, area: egui::Rect) {
-    let size = tex.size_vec2();
-    let k = (area.width() / size.x).min(area.height() / size.y);
-    let r = egui::Rect::from_center_size(area.center(), size * k);
+    let r = fitted(tex.size_vec2(), area);
     crate::ui::widgets::draw_checkerboard(painter, r, 8.0);
     painter.image(
         tex.id(),
@@ -793,84 +987,218 @@ fn fit_image(painter: &egui::Painter, tex: &egui::TextureHandle, area: egui::Rec
     );
 }
 
-/// One project or folder: tap to open, menu (right-click, long-press or
-/// the ... button) for the rest; dragged (on touch, once held still a
-/// moment) to another place or into a folder. Returns its picture's rect.
+/// A picture `size` as large as fits in `area`, its bottom on the area's
+/// (so a row's names line up under pictures of any shape).
+fn fitted(size: egui::Vec2, area: egui::Rect) -> egui::Rect {
+    let k = (area.width() / size.x.max(1.0)).min(area.height() / size.y.max(1.0));
+    let size = size * k;
+    egui::Rect::from_min_size(
+        egui::pos2(area.center().x - size.x * 0.5, area.bottom() - size.y),
+        size,
+    )
+}
+
+/// A card: a soft shadow (deeper as `lift` goes 0 to 1), then the picture
+/// with rounded corners (or a blank card without one).
+fn card(painter: &egui::Painter, rect: egui::Rect, tex: Option<&egui::TextureHandle>, lift: f32) {
+    let shadow = egui::epaint::Shadow {
+        offset: egui::vec2(0.0, 4.0 + 4.0 * lift),
+        blur: 12.0 + 10.0 * lift,
+        spread: 0.0,
+        color: egui::Color32::from_black_alpha((90.0 + 50.0 * lift) as u8),
+    };
+    painter.add(shadow.as_shape(rect, RADIUS_CARD));
+    match tex {
+        Some(tex) => {
+            // See-through paintings over white, as on a canvas.
+            painter.rect_filled(rect, RADIUS_CARD, egui::Color32::WHITE);
+            let mut shape =
+                egui::epaint::RectShape::filled(rect, RADIUS_CARD, egui::Color32::WHITE);
+            shape.fill_texture_id = tex.id();
+            shape.uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.add(shape);
+        }
+        None => {
+            painter.rect_filled(rect, RADIUS_CARD, BG_RAISED);
+        }
+    }
+}
+
+/// How a tile is shown, besides its entry.
+#[derive(Clone, Copy)]
+struct Shown {
+    /// The document open now.
+    current: bool,
+    /// Its canvas size, once read.
+    size: Option<[u32; 2]>,
+    /// Select mode: a tap picks it.
+    selecting: bool,
+}
+
+/// One project or folder: tap to open (in Select mode, to pick), menu
+/// (right-click, long-press or the ... button) for the rest; dragged (on
+/// touch, once held still a moment) to another place or into a folder.
+/// Returns its picture's rect.
 #[allow(clippy::too_many_arguments)]
 fn tile(
     ui: &mut egui::Ui,
     entry: &Entry,
     thumbs: &HashMap<PathBuf, (SystemTime, Option<egui::TextureHandle>)>,
     cell: f32,
-    current: bool,
+    shown: Shown,
     touch: bool,
     drag: &mut DragState,
+    selected: &mut HashSet<PathBuf>,
     act: &mut Option<Act>,
 ) -> egui::Rect {
     let thumb = |path: &Path| thumbs.get(path).and_then(|(_, t)| t.as_ref());
     let mut picture = egui::Rect::NOTHING;
+    let picture_height = (cell * 0.8).round();
     ui.allocate_ui_with_layout(
-        egui::vec2(cell, cell + 44.0),
+        egui::vec2(cell, picture_height + 46.0),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_width(cell);
-            // Touch drags only once lifted (a swipe scrolls the grid).
-            let sense = if touch {
+            // Touch drags only once lifted (a swipe scrolls the grid); in
+            // Select mode nothing drags.
+            let sense = if touch || shown.selecting {
                 egui::Sense::click()
             } else {
                 egui::Sense::click_and_drag()
             };
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(cell, cell), sense);
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(cell, picture_height), sense);
             picture = rect;
             let dragged = drag.item.as_deref() == Some(entry.path.as_path());
+            let is_picked = selected.contains(&entry.path);
+            let lift =
+                ui.ctx()
+                    .animate_bool_with_time(response.id.with("lift"), response.hovered(), 0.12);
             let painter = ui.painter();
-            painter.rect_filled(rect, 4.0, BG_RAISED);
+            // The card(s), raised a little under the pointer.
+            let area = rect.shrink(6.0).translate(egui::vec2(0.0, -2.0 * lift));
+            let mut outline = area;
             if entry.folder {
-                // Its latest projects, two by two, with a folder badge.
-                let shown: Vec<&egui::TextureHandle> = entry
+                // Its latest projects as a stack of cards, the newest on top.
+                let shown_thumbs: Vec<&egui::TextureHandle> = entry
                     .previews
                     .iter()
                     .filter_map(|(p, _)| thumb(p))
+                    .take(3)
                     .collect();
-                if shown.is_empty() {
-                    paint_icon(painter, rect.shrink(cell * 0.3), Icon::Folder, TEXT_DIM);
+                let side = area.height() * 0.86;
+                let step = egui::vec2(area.width() * 0.07, -area.height() * 0.05);
+                let n = shown_thumbs.len().max(1);
+                let base = egui::Rect::from_center_size(
+                    area.center() - step * (n - 1) as f32 * 0.5,
+                    egui::Vec2::splat(side),
+                )
+                .translate(egui::vec2(0.0, (area.height() - side) * 0.5));
+                if shown_thumbs.is_empty() {
+                    card(painter, base, None, lift);
+                    paint_icon(painter, base.shrink(side * 0.3), Icon::Folder, TEXT_DIM);
+                    outline = base;
                 } else {
-                    let inner = rect.shrink(8.0);
-                    let half = (inner.width() - 4.0) / 2.0;
-                    for (k, tex) in shown.iter().enumerate() {
-                        let at = inner.min
-                            + egui::vec2(
-                                (k % 2) as f32 * (half + 4.0),
-                                (k / 2) as f32 * (half + 4.0),
-                            );
-                        fit_image(
-                            painter,
-                            tex,
-                            egui::Rect::from_min_size(at, egui::vec2(half, half)),
-                        );
+                    for (k, tex) in shown_thumbs.iter().enumerate().rev() {
+                        // Further back: up and to the right, a little smaller.
+                        let r = base
+                            .translate(step * k as f32)
+                            .shrink(k as f32 * side * 0.04);
+                        let r = fitted(tex.size_vec2(), r);
+                        card(painter, r, Some(tex), lift);
+                        if k == 0 {
+                            outline = r;
+                        }
                     }
-                    let badge = egui::Rect::from_min_size(
-                        rect.right_bottom() - egui::vec2(30.0, 30.0),
-                        egui::vec2(26.0, 26.0),
-                    );
-                    painter.rect_filled(badge, 4.0, BG_CANVAS);
-                    paint_icon(painter, badge.shrink(4.0), Icon::Folder, TEXT_DIM);
                 }
+                // How many it holds, on a badge.
+                let label = entry.count.to_string();
+                let font = egui::TextStyle::Small.resolve(ui.style());
+                let galley = painter.layout_no_wrap(label, font, TEXT_STRONG);
+                let h = 20.0;
+                let badge = egui::Rect::from_min_size(
+                    outline.right_bottom() - egui::vec2(galley.size().x + h + 10.0, h + 6.0),
+                    egui::vec2(galley.size().x + h + 6.0, h),
+                );
+                painter.rect_filled(badge, h * 0.5, egui::Color32::from_black_alpha(170));
+                paint_icon(
+                    painter,
+                    egui::Rect::from_min_size(
+                        badge.min + egui::vec2(4.0, 3.0),
+                        egui::Vec2::splat(h - 6.0),
+                    ),
+                    Icon::Folder,
+                    TEXT_STRONG,
+                );
+                painter.galley(
+                    egui::pos2(badge.left() + h, badge.center().y - galley.size().y * 0.5),
+                    galley,
+                    TEXT_STRONG,
+                );
             } else if let Some(tex) = thumb(&entry.path) {
-                fit_image(painter, tex, rect.shrink(6.0));
+                outline = fitted(tex.size_vec2(), area);
+                card(painter, outline, Some(tex), lift);
+            } else {
+                // Not read yet: a blank card at the canvas's shape.
+                let size = shown.size.map_or(egui::vec2(4.0, 3.0), |[w, h]| {
+                    egui::vec2(w as f32, h as f32)
+                });
+                outline = fitted(size, area);
+                card(painter, outline, None, lift);
             }
             if dragged {
-                painter.rect_filled(rect, 4.0, BG_CANVAS.gamma_multiply(0.6));
+                painter.rect_filled(outline, RADIUS_CARD, BG_CANVAS.gamma_multiply(0.6));
             }
-            if current || response.hovered() {
-                let width = if current { 3.0_f32 } else { 2.0 };
-                painter.rect_stroke(rect, 4.0, egui::Stroke::new(width, ACCENT));
+            if shown.current {
+                // The open document: an accent glow.
+                let glow = egui::epaint::Shadow {
+                    offset: egui::Vec2::ZERO,
+                    blur: 14.0,
+                    spread: 1.0,
+                    color: accent().gamma_multiply(0.55),
+                };
+                painter.add(glow.as_shape(outline, RADIUS_CARD));
+                painter.rect_stroke(
+                    outline.expand(1.5),
+                    RADIUS_CARD + 1.5,
+                    egui::Stroke::new(2.5_f32, accent()),
+                );
+            } else if is_picked {
+                painter.rect_stroke(
+                    outline.expand(1.5),
+                    RADIUS_CARD + 1.5,
+                    egui::Stroke::new(2.5_f32, accent()),
+                );
             }
-            if !touch && response.drag_started() {
+            if shown.selecting {
+                // A round check at the top right corner.
+                let r = 11.0;
+                let c = outline.right_top() + egui::vec2(-r - 6.0, r + 6.0);
+                if is_picked {
+                    painter.circle_filled(c, r, accent());
+                    paint_icon(
+                        painter,
+                        egui::Rect::from_center_size(c, egui::Vec2::splat(r * 1.3)),
+                        Icon::Check,
+                        accent_text(),
+                    );
+                } else {
+                    painter.circle(
+                        c,
+                        r,
+                        egui::Color32::from_black_alpha(90),
+                        egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
+                    );
+                }
+            }
+            if !touch && !shown.selecting && response.drag_started() {
                 drag.item = Some(entry.path.clone());
                 drag.moved = true;
             }
-            if touch && drag.item.is_none() && response.is_pointer_button_down_on() {
+            if touch
+                && !shown.selecting
+                && drag.item.is_none()
+                && response.is_pointer_button_down_on()
+            {
                 // Held still long enough: lifted.
                 let (now, still) = ui.input(|i| {
                     let still = i
@@ -899,11 +1227,17 @@ fn tile(
                 }
             }
             if response.clicked() && !(touch && drag.lifted_press) {
-                *act = Some(if entry.folder {
-                    Act::Enter(entry.path.clone())
+                if shown.selecting {
+                    if !selected.remove(&entry.path) {
+                        selected.insert(entry.path.clone());
+                    }
                 } else {
-                    Act::Open(entry.path.clone())
-                });
+                    *act = Some(if entry.folder {
+                        Act::Enter(entry.path.clone())
+                    } else {
+                        Act::Open(entry.path.clone())
+                    });
+                }
             }
             if touch {
                 let id = menu_id(&entry.path);
@@ -923,16 +1257,50 @@ fn tile(
             } else {
                 response.context_menu(|ui| entry_menu(ui, entry, act));
             }
+            // Its name, and under it its size and age (a folder: how many).
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.set_width(cell);
-                ui.add(egui::Label::new(RichText::new(&entry.name).strong()).truncate());
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let more = 22.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(cell - more - 4.0, 18.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&entry.name).strong().color(TEXT))
+                                .truncate(),
+                        );
+                    },
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button("...", |ui| entry_menu(ui, entry, act));
+                    let (r, _) =
+                        ui.allocate_exact_size(egui::Vec2::splat(more), egui::Sense::hover());
+                    ui.put(r, |ui: &mut egui::Ui| {
+                        ui.menu_button(" ", |ui| entry_menu(ui, entry, act))
+                            .response
+                    });
+                    let hovered = ui.rect_contains_pointer(r);
+                    paint_icon(
+                        ui.painter(),
+                        r.shrink(4.0),
+                        Icon::More,
+                        if hovered { TEXT_STRONG } else { TEXT_DIM },
+                    );
                 });
             });
-            if !entry.folder {
-                ui.label(RichText::new(ago(entry.modified)).small().color(TEXT_DIM));
-            }
+            let detail = if entry.folder {
+                match entry.count {
+                    1 => "1 item".to_string(),
+                    n => format!("{n} items"),
+                }
+            } else {
+                match shown.size {
+                    Some([w, h]) => format!("{w} × {h} px · {}", ago(entry.modified)),
+                    None => ago(entry.modified),
+                }
+            };
+            ui.add(egui::Label::new(RichText::new(detail).small().color(TEXT_DIM)).truncate());
         },
     );
     picture
@@ -977,9 +1345,20 @@ fn entry_menu(ui: &mut egui::Ui, entry: &Entry, act: &mut Option<Act>) {
     }
     ui.separator();
     if ui.button("Delete…").clicked() {
-        *act = Some(Act::Delete(path.clone()));
+        *act = Some(Act::Delete(vec![path.clone()]));
         ui.close_menu();
     }
+}
+
+/// The canvas size an OpenRaster `stack.xml` gives (`<image w=".." h="..">`).
+fn canvas_size(xml: &str) -> Option<[u32; 2]> {
+    let image = &xml[xml.find("<image")?..];
+    let image = &image[..image.find('>')?];
+    let attr = |name: &str| -> Option<u32> {
+        let at = image.find(&format!(" {name}=\""))? + name.len() + 3;
+        image[at..].split('"').next()?.parse().ok()
+    };
+    Some([attr("w")?, attr("h")?])
 }
 
 /// Read the thumbnails not loaded yet (or changed since) in the background.
@@ -1009,7 +1388,10 @@ fn load_thumbnails(lib: &mut LibraryState, ctx: &egui::Context) {
                     let size = [rgba.width() as usize, rgba.height() as usize];
                     egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())
                 });
-            if tx.send((path, modified, img)).is_err() {
+            let size = crate::project::zip::read_entry_from_file(&path, "stack.xml")
+                .ok()
+                .and_then(|xml| canvas_size(&String::from_utf8_lossy(&xml)));
+            if tx.send((path, modified, img, size)).is_err() {
                 return;
             }
             ctx.request_repaint();
@@ -1072,17 +1454,33 @@ pub fn library_dialogs(app: &mut PainterApp, ctx: &egui::Context) {
                         });
                     }
                 }
-                Dialog::Delete(path) => {
-                    let name = path.file_stem().unwrap_or_default().to_string_lossy();
-                    ui.label(if path.is_dir() {
-                        format!("Delete the folder {name} and everything in it?")
-                    } else {
-                        format!("Delete {name}?")
+                Dialog::Delete(paths) => {
+                    ui.label(match paths.as_slice() {
+                        [path] => {
+                            let name = path.file_stem().unwrap_or_default().to_string_lossy();
+                            if path.is_dir() {
+                                format!("Delete the folder {name} and everything in it?")
+                            } else {
+                                format!("Delete {name}?")
+                            }
+                        }
+                        _ if paths.iter().any(|p| p.is_dir()) => format!(
+                            "Delete these {} items, and everything in the folders?",
+                            paths.len()
+                        ),
+                        _ => format!("Delete these {} projects?", paths.len()),
                     });
                     ui.label(RichText::new("This can't be undone.").color(TEXT_DIM));
                     ui.horizontal(|ui| {
                         if ui.button("Delete").clicked() {
-                            done = Some(app.delete_entry(path));
+                            let mut result = Ok(());
+                            for path in paths.iter() {
+                                result = result.and(app.delete_entry(path));
+                            }
+                            let lib = &mut app.workspace.library;
+                            lib.selected.clear();
+                            lib.selecting = false;
+                            done = Some(result);
                         }
                         if ui.button("Cancel").clicked() {
                             done = Some(Ok(()));

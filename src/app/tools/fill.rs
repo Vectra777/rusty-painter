@@ -150,10 +150,14 @@ impl PainterApp {
     }
 
     /// Delete the selected pixels of the active layer (Delete key). The
-    /// selection stays.
+    /// selection stays. Mid-transform, the transform ends first (what was
+    /// lifted goes back, then is erased): no box is left around nothing.
     pub(crate) fn delete_selection_contents(&mut self) {
         if !self.selection_manager.has_selection() {
             return;
+        }
+        if crate::app::tools::transform::transform_running(self) {
+            crate::app::tools::transform::cancel_floating_layer(self);
         }
         let Some(bounds) = self
             .selection_manager
@@ -325,6 +329,74 @@ mod tests {
         assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert_eq!(alpha(&app, 20, 20), 255, "undone");
+    }
+
+    #[test]
+    fn delete_leaves_everything_outside_the_selection_as_it_was() {
+        let shapes = [
+            SelectionShape::Circle {
+                center: Vec2::new(40.0, 32.0),
+                radius: 20.0,
+            },
+            SelectionShape::Lasso {
+                points: vec![
+                    Vec2::new(10.0, 5.0),
+                    Vec2::new(90.0, 12.0),
+                    Vec2::new(70.0, 55.0),
+                    Vec2::new(15.0, 40.0),
+                ],
+                bbox_min: Vec2::new(10.0, 5.0),
+                bbox_max: Vec2::new(90.0, 55.0),
+            },
+        ];
+        for shape in shapes {
+            let mut app = app();
+            app.selection_manager
+                .apply_shape(shape.clone(), SelectionMode::Replace);
+            let opacity = app.canvas.layers[1].opacity;
+            app.delete_selection_contents();
+            assert_eq!(app.canvas.layers[1].opacity, opacity);
+            for y in 0..64 {
+                for x in 0..128 {
+                    let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                    // Away from the edge (anti-aliased there).
+                    let near = [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5)]
+                        .iter()
+                        .any(|(dx, dy)| app.selection_manager.contains(p + Vec2::new(*dx, *dy)));
+                    if !near && !app.selection_manager.contains(p) {
+                        assert_eq!(alpha(&app, x, y), 255, "{shape:?}: ({x}, {y}) faded");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn delete_leaves_the_picture_outside_the_selection_as_it_was() {
+        use crate::canvas::blend_modes::BlendSpace;
+        for space in [BlendSpace::Linear, BlendSpace::Gamma] {
+            let mut app = app();
+            app.canvas_mut().blend_space = space;
+            let soft = Color32::from_rgba_premultiplied(60, 90, 30, 140);
+            for tx in 0..2 {
+                app.canvas_mut()
+                    .set_layer_tile_data(1, tx, 0, vec![soft; 64 * 64]);
+            }
+            app.mark_all_tiles_dirty();
+            let before = app.canvas.flatten_final();
+            select_rect(&mut app, 10.0, 10.0, 40.0, 40.0);
+            app.delete_selection_contents();
+            let after = app.canvas.flatten_final();
+            for y in 0..64 {
+                for x in 0..128 {
+                    if (9..=41).contains(&x) && (9..=41).contains(&y) {
+                        continue;
+                    }
+                    let i = y * 128 + x;
+                    assert_eq!(after.pixels[i], before.pixels[i], "{space:?} ({x}, {y})");
+                }
+            }
+        }
     }
 
     #[test]

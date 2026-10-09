@@ -3,6 +3,7 @@
 
 use crate::PainterApp;
 use crate::app::tools::Tool;
+use crate::app::tools::fill::FillMode;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use crate::ui::widgets::{icon_button, paint_swatch};
@@ -17,8 +18,8 @@ const MARGIN_Y: f32 = 6.0;
 
 /// Button side that fits every tool (and the colors) in `height`, if any.
 fn fitting_button_size(height: f32, touch: bool, preferred: f32) -> Option<f32> {
-    // The tools and the brush-settings button.
-    let buttons = 16.0;
+    // The tools, and the brush presets and settings buttons.
+    let buttons = 15.0;
     let separators = 3.0;
     // The color pair is about 1.22 buttons tall.
     let fixed = 2.0 * MARGIN_Y
@@ -64,12 +65,14 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 color_pair(app, ui, size);
                 settings_button(app, ui, size);
+                presets_button(app, ui, size, m.touch);
             });
         } else {
             // The colors stay pinned at the bottom; the tools scroll.
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 color_pair(app, ui, size);
                 settings_button(app, ui, size);
+                presets_button(app, ui, size, m.touch);
                 separator(ui, size);
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     let out = egui::ScrollArea::vertical()
@@ -94,7 +97,7 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
                                 c + egui::vec2(6.0, -4.0),
                                 c + egui::vec2(0.0, 3.0),
                             ],
-                            ACCENT,
+                            accent(),
                             Stroke::NONE,
                         ));
                     }
@@ -161,8 +164,32 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     if tool_button(ui, app, Icon::Brush, brush_active, "Brush (B)") {
         app.set_brush_tool(false);
     }
-    if tool_button(ui, app, Icon::Eraser, eraser, "Eraser (E)") {
-        app.set_brush_tool(true);
+    // The Eraser, and Lasso delete (draw around an area to erase it).
+    let lasso_delete =
+        matches!(app.active_tool, Tool::Fill) && app.workspace.fill.mode == FillMode::LassoDelete;
+    let groups = &mut app.workspace.tool_groups;
+    if lasso_delete || eraser {
+        groups.lasso_delete = lasso_delete;
+    }
+    let members = [
+        Member::new(Icon::Eraser, "Eraser", "E", eraser),
+        Member::new(Icon::LassoDelete, "Lasso delete", "", lasso_delete),
+    ];
+    match group_button(
+        ui,
+        "eraser",
+        &members,
+        groups.lasso_delete as usize,
+        size,
+        touch,
+    ) {
+        Some(Pick::Tool(0)) => app.set_brush_tool(true),
+        Some(Pick::Tool(_)) => {
+            app.active_tool = Tool::Fill;
+            app.workspace.fill.mode = FillMode::LassoDelete;
+        }
+        Some(Pick::Again) => app.workspace.show_left_panel = !app.workspace.show_left_panel,
+        None => {}
     }
     let smudge_active = matches!(app.active_tool, Tool::Smudge);
     if tool_button(
@@ -189,14 +216,14 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     // One Select button: it shows the current type, and clicking it
     // slides out the menu to pick another type, the mode and more.
     let select_active = matches!(app.active_tool, Tool::Select(_));
-    let icon = crate::ui::select_menu::icon_for(app.workspace.select_type);
     let response = icon_button(
         ui,
-        icon,
+        Icon::SelectRect,
         size,
         select_active,
         "Selection (M / L): click for types and modes",
     );
+    more_dot(ui, response.rect, select_active);
     if response.clicked() {
         if !select_active {
             app.set_select_tool(app.workspace.select_type);
@@ -206,26 +233,42 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     let select_anchor = Some(response.rect);
     separator(ui, size);
 
+    // Transform, and Animate (moving the layer over time).
     let transform_active = matches!(app.active_tool, Tool::Transform(_));
-    if tool_button(
-        ui,
-        app,
-        Icon::Transform,
-        transform_active,
-        "Transform (V): move, scale, turn or distort the drawing itself (the same on every frame)",
-    ) {
-        app.set_transform_tool();
-    }
     let animate_active = matches!(app.active_tool, Tool::Animate);
-    if tool_button(
+    let groups = &mut app.workspace.tool_groups;
+    if transform_active || animate_active {
+        groups.animate = animate_active;
+    }
+    let members = [
+        Member::new(
+            Icon::Transform,
+            "Transform: move, scale, turn or distort the drawing itself",
+            "V",
+            transform_active,
+        ),
+        Member::new(
+            Icon::Motion,
+            "Animate: move the layer over time, a key at each drag",
+            "A",
+            animate_active,
+        ),
+    ];
+    match group_button(
         ui,
-        app,
-        Icon::Motion,
-        animate_active,
-        "Animate (A): move the layer over time. Each drag sets a key at this frame; between keys the layer moves by itself. (Transform, V, changes the drawing itself.)",
+        "transform",
+        &members,
+        groups.animate as usize,
+        size,
+        touch,
     ) {
-        app.active_tool = Tool::Animate;
-        app.workspace.animation.show_timeline = true;
+        Some(Pick::Tool(0)) => app.set_transform_tool(),
+        Some(Pick::Tool(_)) => {
+            app.active_tool = Tool::Animate;
+            app.workspace.animation.show_timeline = true;
+        }
+        Some(Pick::Again) => app.workspace.show_left_panel = !app.workspace.show_left_panel,
+        None => {}
     }
     let picker_active = matches!(app.active_tool, Tool::Eyedropper);
     if tool_button(
@@ -237,7 +280,7 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     ) {
         app.active_tool = Tool::Eyedropper;
     }
-    let fill_active = matches!(app.active_tool, Tool::Fill);
+    let fill_active = matches!(app.active_tool, Tool::Fill) && !lasso_delete;
     if tool_button(
         ui,
         app,
@@ -246,6 +289,9 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         "Fill (G): bucket or enclose",
     ) {
         app.active_tool = Tool::Fill;
+        if app.workspace.fill.mode == FillMode::LassoDelete {
+            app.workspace.fill.mode = FillMode::Bucket;
+        }
     }
     let gradient_active = matches!(app.active_tool, Tool::Gradient);
     if tool_button(
@@ -278,6 +324,7 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         shape_active,
         "Shapes (U): line, rectangle, ellipse, polygon; click again for options",
     );
+    more_dot(ui, response.rect, shape_active);
     if response.clicked() {
         if shape_active {
             app.modal_state.shape_menu_open = !app.modal_state.shape_menu_open;
@@ -291,11 +338,6 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         app.active_tool = Tool::Liquify;
     }
     separator(ui, size);
-    // Touch mode has the presets on the top bar.
-    let presets_open = app.brush_state.show_presets;
-    if !touch && icon_button(ui, Icon::Presets, size, presets_open, "Brush presets (P)").clicked() {
-        app.brush_state.show_presets = !presets_open;
-    }
     let palette_open = app.workspace.palette.open;
     if icon_button(
         ui,
@@ -326,6 +368,153 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         symmetry: symmetry_anchor,
         shape: shape_anchor,
     }
+}
+
+/// Opens and closes the brush presets, beside the brush settings (touch
+/// mode has them on the top bar).
+fn presets_button(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool) {
+    let open = app.brush_state.show_presets;
+    if !touch && icon_button(ui, Icon::Presets, size, open, "Brush presets (P)").clicked() {
+        app.brush_state.show_presets = !open;
+    }
+}
+
+/// One tool of a grouped button.
+struct Member {
+    icon: Icon,
+    name: &'static str,
+    key: &'static str,
+    active: bool,
+}
+
+impl Member {
+    fn new(icon: Icon, name: &'static str, key: &'static str, active: bool) -> Self {
+        Self {
+            icon,
+            name,
+            key,
+            active,
+        }
+    }
+}
+
+/// What a grouped button was asked for.
+enum Pick {
+    /// This tool (clicked, or chosen in the flyout).
+    Tool(usize),
+    /// Touch: the tool already active was tapped (the settings panel slides).
+    Again,
+}
+
+/// A button holding several tools, like Photoshop's: it shows `members
+/// [shown]`, and a click picks that one; a double-click, right-click or
+/// long press opens the others beside it. A dot in its corner says so.
+fn group_button(
+    ui: &mut egui::Ui,
+    salt: &str,
+    members: &[Member],
+    shown: usize,
+    size: f32,
+    touch: bool,
+) -> Option<Pick> {
+    let any_active = members.iter().any(|m| m.active);
+    let member = &members[shown.min(members.len() - 1)];
+    let tip = if member.key.is_empty() {
+        format!("{} (double-click for more)", member.name)
+    } else {
+        format!("{} ({}; double-click for more)", member.name, member.key)
+    };
+    let response = icon_button(ui, member.icon, size, any_active, &tip);
+    more_dot(ui, response.rect, any_active);
+    let open_id = ui.id().with(("tool_group", salt));
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    let mut pick = None;
+    if response.double_clicked() || response.secondary_clicked() {
+        open = true;
+    } else if response.clicked() {
+        pick = Some(if touch && member.active {
+            Pick::Again
+        } else {
+            Pick::Tool(shown)
+        });
+    }
+    if open {
+        let area = egui::Area::new(open_id.with("flyout"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(response.rect.right_top() + egui::vec2(6.0, 0.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (i, m) in members.iter().enumerate() {
+                        if flyout_row(ui, m) {
+                            pick = Some(Pick::Tool(i));
+                        }
+                    }
+                })
+            });
+        // Picked, or a press anywhere else: closed.
+        let pressed_outside = ui.input(|i| i.pointer.any_pressed())
+            && !area.response.contains_pointer()
+            && !response.contains_pointer();
+        if pick.is_some() || pressed_outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+    pick
+}
+
+/// A row of a grouped button's flyout: icon, name, key. Returns whether
+/// it was clicked.
+fn flyout_row(ui: &mut egui::Ui, m: &Member) -> bool {
+    let height = ui.spacing().interact_size.y.max(26.0);
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let name = m.name.split(':').next().unwrap_or(m.name);
+    let text = ui
+        .painter()
+        .layout_no_wrap(name.to_string(), font.clone(), TEXT);
+    let key = ui
+        .painter()
+        .layout_no_wrap(m.key.to_string(), font, TEXT_DIM);
+    let width = (height + 8.0 + text.size().x + 24.0 + key.size().x).max(160.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
+    let painter = ui.painter();
+    let (bg, fg) = if m.active {
+        (accent(), accent_text())
+    } else if response.hovered() {
+        (WIDGET_HOVER, TEXT_STRONG)
+    } else {
+        (egui::Color32::TRANSPARENT, TEXT)
+    };
+    painter.rect_filled(rect, RADIUS_WIDGET, bg);
+    let icon = egui::Rect::from_min_size(
+        rect.min + egui::vec2(6.0, height * 0.2),
+        egui::Vec2::splat(height * 0.6),
+    );
+    paint_icon(painter, icon, m.icon, fg);
+    painter.galley_with_override_text_color(
+        egui::pos2(icon.right() + 8.0, rect.center().y - text.size().y * 0.5),
+        text,
+        fg,
+    );
+    painter.galley_with_override_text_color(
+        egui::pos2(
+            rect.right() - 8.0 - key.size().x,
+            rect.center().y - key.size().y * 0.5,
+        ),
+        key,
+        if m.active { fg } else { TEXT_DIM },
+    );
+    response.clicked()
+}
+
+/// The tiny dot in a button's lower right corner: it holds more than one
+/// option.
+fn more_dot(ui: &egui::Ui, rect: egui::Rect, selected: bool) {
+    let r = (rect.width() * 0.05).clamp(1.5, 2.5);
+    let c = rect.right_bottom() - egui::vec2(r + 3.0, r + 3.0);
+    let color = if selected { accent_text() } else { TEXT_DIM };
+    ui.painter().circle_filled(c, r, color);
 }
 
 /// Opens and closes the brush (tool settings) panel.
@@ -374,10 +563,18 @@ fn color_pair(app: &mut PainterApp, ui: &mut egui::Ui, width: f32) {
 
     let painter = ui.painter();
     paint_swatch(painter, secondary, app.brush_state.secondary_color);
-    painter.rect_stroke(secondary.expand(1.0), 0.0, Stroke::new(1.0_f32, BG_PANEL));
+    painter.rect_stroke(
+        secondary.expand(1.0),
+        RADIUS_SMALL,
+        Stroke::new(1.0_f32, BG_PANEL),
+    );
     paint_swatch(painter, primary, app.brush_state.brush.brush_options.color);
-    painter.rect_stroke(primary.expand(1.0), 0.0, Stroke::new(1.0_f32, BG_PANEL));
-    painter.rect_stroke(primary, 0.0, Stroke::new(1.0_f32, BORDER_LIGHT));
+    painter.rect_stroke(
+        primary.expand(1.0),
+        RADIUS_SMALL,
+        Stroke::new(1.0_f32, BG_PANEL),
+    );
+    painter.rect_stroke(primary, RADIUS_SMALL, Stroke::new(1.0_f32, BORDER_LIGHT));
     let swap_color = if swap_resp.hovered() {
         TEXT_STRONG
     } else {
@@ -402,5 +599,94 @@ fn color_pair(app: &mut PainterApp, ui: &mut egui::Ui, width: f32) {
         .clicked();
     if swap_clicked || secondary_clicked {
         app.swap_colors();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn button(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Frames of a grouped button; returns its rect and what was picked.
+    struct Harness {
+        ctx: egui::Context,
+        t: f64,
+    }
+
+    impl Harness {
+        fn frame(&mut self, events: Vec<egui::Event>) -> (egui::Rect, Option<usize>) {
+            self.t += 0.05;
+            let (mut rect, mut picked) = (egui::Rect::NOTHING, None);
+            let _ = self.ctx.run(
+                egui::RawInput {
+                    events,
+                    time: Some(self.t),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 300.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let members = [
+                            Member::new(Icon::Transform, "Transform", "V", true),
+                            Member::new(Icon::Motion, "Animate", "A", false),
+                        ];
+                        let top = ui.cursor().min;
+                        if let Some(Pick::Tool(i)) = group_button(ui, "t", &members, 0, 34.0, false)
+                        {
+                            picked = Some(i);
+                        }
+                        rect = egui::Rect::from_min_size(top, egui::Vec2::splat(34.0));
+                    });
+                },
+            );
+            (rect, picked)
+        }
+
+        /// Moved there and pressed at once: no tooltip shows up under the
+        /// pointer first (egui's tooltips take the pointer).
+        fn click(&mut self, at: egui::Pos2) -> Option<usize> {
+            let a = self
+                .frame(vec![egui::Event::PointerMoved(at), button(at, true)])
+                .1;
+            let b = self.frame(vec![button(at, false)]).1;
+            a.or(b)
+        }
+    }
+
+    #[test]
+    fn a_double_click_opens_the_group_and_picks_from_it() {
+        let mut h = Harness {
+            ctx: egui::Context::default(),
+            t: 0.0,
+        };
+        let (rect, _) = h.frame(vec![]);
+        assert_eq!(
+            h.click(rect.center()),
+            Some(0),
+            "a click picks the one shown"
+        );
+        h.t += 1.0;
+        h.click(rect.center());
+        h.click(rect.center());
+        // The flyout sits to the button's right; its second row (Animate)
+        // under the first, inside the popup's margin.
+        let margin = h.ctx.style().spacing.menu_margin.top;
+        let row = rect.right_top() + egui::vec2(6.0 + 40.0, margin + 26.0 + 2.0 + 13.0);
+        // (Its first frame only sizes it.)
+        h.frame(vec![]);
+        assert_eq!(h.click(row), Some(1), "picked from the flyout");
+        // Picked: closed, a click there picks nothing.
+        assert_eq!(h.click(row), None);
     }
 }

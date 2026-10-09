@@ -4,8 +4,9 @@
 use crate::ui::style::*;
 use eframe::egui::{self, Color32, FontId, Margin, Rounding, Shadow, Stroke, TextStyle};
 
-/// Apply the app theme: square corners, neutral grays, a single accent and
-/// compact spacing, so the UI stays quiet and dense around the canvas.
+/// Apply the app theme: rounded widgets and popups in square regions,
+/// neutral grays, a single accent and compact spacing, so the UI stays
+/// quiet and dense around the canvas.
 pub fn apply_global_style(ctx: &egui::Context) {
     apply_style(ctx, false);
 }
@@ -24,12 +25,12 @@ pub fn apply_style(ctx: &egui::Context, touch: bool) {
     visuals.faint_bg_color = BG_RAISED;
     visuals.code_bg_color = BG_INSET;
     visuals.window_stroke = Stroke::new(1.0_f32, BORDER_LIGHT);
-    visuals.window_rounding = Rounding::ZERO;
-    visuals.menu_rounding = Rounding::ZERO;
+    visuals.window_rounding = Rounding::same(RADIUS_WINDOW);
+    visuals.menu_rounding = Rounding::same(RADIUS_WINDOW);
     visuals.window_highlight_topmost = false;
-    visuals.hyperlink_color = ACCENT;
+    visuals.hyperlink_color = accent();
     visuals.slider_trailing_fill = true;
-    visuals.handle_shape = egui::style::HandleShape::Rect { aspect_ratio: 0.5 };
+    visuals.handle_shape = egui::style::HandleShape::Circle;
     visuals.indent_has_left_vline = false;
     visuals.collapsing_header_frame = false;
     visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
@@ -39,17 +40,17 @@ pub fn apply_style(ctx: &egui::Context, touch: bool) {
         bg_fill: bg,
         weak_bg_fill: bg,
         bg_stroke: Stroke::new(1.0_f32, stroke),
-        rounding: Rounding::ZERO,
+        rounding: Rounding::same(RADIUS_WIDGET),
         fg_stroke: Stroke::new(1.0_f32, fg),
         expansion: 0.0,
     };
     visuals.widgets.noninteractive = widget(BG_PANEL, BORDER, TEXT);
     visuals.widgets.inactive = widget(WIDGET, WIDGET, TEXT);
     visuals.widgets.hovered = widget(WIDGET_HOVER, BORDER_LIGHT, TEXT_STRONG);
-    visuals.widgets.active = widget(WIDGET_ACTIVE, ACCENT, TEXT_STRONG);
+    visuals.widgets.active = widget(WIDGET_ACTIVE, accent(), TEXT_STRONG);
     visuals.widgets.open = widget(WIDGET_HOVER, BORDER_LIGHT, TEXT_STRONG);
 
-    visuals.selection.bg_fill = ACCENT;
+    visuals.selection.bg_fill = accent();
     visuals.selection.stroke = Stroke::new(1.0_f32, TEXT_STRONG);
 
     let shadow = Shadow {
@@ -81,9 +82,15 @@ pub fn apply_style(ctx: &egui::Context, touch: bool) {
     style.spacing.indent = 12.0;
     style.spacing.icon_width = 13.0;
     style.spacing.icon_width_inner = 7.0;
-    style.spacing.scroll = egui::style::ScrollStyle::thin();
+    // A bar beside the content, not floating over it: a floating bar hides
+    // the right end of whatever is under it (sliders, number boxes).
+    style.spacing.scroll = egui::style::ScrollStyle {
+        bar_width: 6.0,
+        bar_inner_margin: 2.0,
+        ..egui::style::ScrollStyle::solid()
+    };
     style.interaction.selectable_labels = false;
-    style.animation_time = 0.08;
+    style.animation_time = 0.12;
 
     if touch {
         style.text_styles = [

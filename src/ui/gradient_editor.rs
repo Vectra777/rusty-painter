@@ -6,6 +6,7 @@
 
 use crate::PainterApp;
 use crate::app::tools::gradient_colors::{CustomGradient, StopColor};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{paint_gradient_strip, paint_swatch, percent_of_unit, segmented};
@@ -181,7 +182,7 @@ fn stops_strip(
         let [r, gr, b, _] = color.to_srgba_unmultiplied();
         let a = (stop.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         let selected = i == editor.selected;
-        let outline = if selected { ACCENT } else { TEXT_DIM };
+        let outline = if selected { accent() } else { TEXT_DIM };
         // A notch pointing at the strip, and the stop's colour below it.
         let tip = egui::pos2(x, strip.bottom() + 1.0);
         painter.add(egui::Shape::convex_polygon(
@@ -305,7 +306,7 @@ fn selected_stop(
         ui.label(RichText::new("Opacity").color(TEXT_DIM));
         changed |= ui
             .add(crate::ui::widgets::reset(&mut stop.opacity, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }))
             .changed();
     });
@@ -313,7 +314,7 @@ fn selected_stop(
         ui.label(RichText::new("Position").color(TEXT_DIM));
         let moved = ui
             .add(crate::ui::widgets::reset(&mut stop.pos, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }))
             .changed();
         changed |= moved;

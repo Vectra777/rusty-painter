@@ -2,7 +2,7 @@
 //! [`crate::app::init::LOAD_STEPS`]).
 
 use crate::app::init::LOAD_STEPS;
-use crate::ui::style::{ACCENT, BG_CANVAS, TEXT_DIM, TEXT_STRONG};
+use crate::ui::style::{BG_CANVAS, TEXT_DIM, TEXT_STRONG, accent};
 use eframe::egui::{self, RichText};
 
 /// The app's name, a progress bar and what's loading: `step` of the steps.
@@ -20,7 +20,7 @@ pub fn splash(ctx: &egui::Context, step: usize) {
                 ui.add(
                     egui::ProgressBar::new(step as f32 / total as f32)
                         .desired_width(width)
-                        .fill(ACCENT),
+                        .fill(accent()),
                 );
                 ui.add_space(8.0);
                 ui.label(RichText::new(format!("{label}…")).color(TEXT_DIM));

@@ -94,7 +94,7 @@ fn gradient_slider(
 ) -> bool {
     ui.horizontal(|ui| {
         let touch = metrics(ui.ctx()).touch;
-        let bar_height: f32 = if touch { 26.0 } else { 14.0 };
+        let bar_height: f32 = if touch { 26.0 } else { 16.0 };
         let box_height = bar_height.max(18.0);
         if touch {
             // The number box as tall as the bar, so they line up.
@@ -110,15 +110,28 @@ fn gradient_slider(
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, bar_height), Sense::click_and_drag());
         let painter = ui.painter();
+        // A pill: the gradient between two round ends of its end colours.
+        // The handle travels between the ends' centres, so it never sticks
+        // out past the bar (and every bar is as long as the others).
+        let r = bar_height * 0.5;
+        let track = egui::Rangef::new(rect.left() + r, rect.right() - r);
+        let cap = |x: f32, color: Color32| {
+            if checker {
+                painter.circle_filled(egui::pos2(x, rect.center().y), r, CHECKERBOARD_LIGHT);
+            }
+            painter.circle_filled(egui::pos2(x, rect.center().y), r, color);
+        };
+        cap(track.min, color_at(0.0));
+        cap(track.max, color_at(1.0));
+        let middle = egui::Rect::from_x_y_ranges(track, rect.y_range());
         if checker {
-            draw_checkerboard(painter, rect, 7.0);
+            draw_checkerboard(painter, middle, 7.0);
         }
-
         let steps = 48;
         let mut mesh = egui::Mesh::default();
         for i in 0..=steps {
             let t = i as f32 / steps as f32;
-            let x = egui::lerp(rect.x_range(), t);
+            let x = egui::lerp(track, t);
             let color = color_at(t);
             mesh.colored_vertex(egui::pos2(x, rect.top()), color);
             mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
@@ -129,21 +142,24 @@ fn gradient_slider(
             }
         }
         painter.add(egui::Shape::mesh(mesh));
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, BORDER));
+        painter.rect_stroke(rect, r, Stroke::new(1.0_f32, BORDER));
 
-        let handle_x = egui::lerp(rect.x_range(), value.clamp(0.0, 1.0));
-        let handle = egui::Rect::from_center_size(
-            egui::pos2(handle_x, rect.center().y),
-            egui::vec2(5.0, bar_height + 4.0),
-        );
-        painter.rect_filled(handle, 0.0, Color32::WHITE);
-        painter.rect_stroke(handle, 0.0, Stroke::new(1.0_f32, Color32::BLACK));
+        // A round handle filled with the colour it picks.
+        let center = egui::pos2(egui::lerp(track, value.clamp(0.0, 1.0)), rect.center().y);
+        let knob = r + 2.0;
+        painter.circle_filled(center, knob + 1.0, Color32::from_black_alpha(90));
+        painter.circle_filled(center, knob, Color32::WHITE);
+        let inner = color_at(value.clamp(0.0, 1.0));
+        if checker {
+            painter.circle_filled(center, knob - 2.5, CHECKERBOARD_DARK);
+        }
+        painter.circle_filled(center, knob - 2.5, inner);
 
         let mut changed = false;
         if (response.dragged() || response.clicked())
             && let Some(pos) = response.interact_pointer_pos()
         {
-            let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let t = ((pos.x - track.min) / track.span().max(1.0)).clamp(0.0, 1.0);
             if (t - *value).abs() > f32::EPSILON {
                 *value = t;
                 changed = true;
@@ -181,10 +197,17 @@ fn barycentric(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> (f32, f32, f32) {
     (1.0 - wb - wc, wb, wc)
 }
 
-/// Hue ring with a saturation/value triangle inside. The triangle rotates
-/// so its pure-hue corner points at the selected hue on the ring.
-fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState) -> bool {
-    let side = ui.available_width().min(metrics(ui.ctx()).wheel_max);
+/// The smallest the wheel gets to make room for the rest.
+const MIN_WHEEL: f32 = 120.0;
+
+/// Hue ring with a saturation/value triangle inside, at most `max_side`
+/// across. The triangle rotates so its pure-hue corner points at the
+/// selected hue on the ring.
+fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState, max_side: f32) -> bool {
+    let side = ui
+        .available_width()
+        .min(metrics(ui.ctx()).wheel_max)
+        .min(max_side);
     let (outer_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), side), Sense::hover());
     let rect = egui::Rect::from_center_size(outer_rect.center(), egui::vec2(side, side));
@@ -512,14 +535,24 @@ pub fn color_picker_panel(
     // HSV controls (hex field, recent colors) so HSV must be re-derived.
     let mut new_color: Option<(Color32, bool)> = None;
 
-    egui::ScrollArea::vertical()
+    // The wheel gives way to the rest (sliders, recent colours, swatches)
+    // when the panel is short (shared with the layers): it takes what they
+    // leave, measured the frame before.
+    let rest_id = id.with("below_wheel");
+    let rest: f32 = ui.data(|d| d.get_temp(rest_id)).unwrap_or(0.0);
+    let wheel_cap = (ui.available_height() - rest).max(MIN_WHEEL);
+    let mut wheel_side = 0.0;
+    let scroll = egui::ScrollArea::vertical()
         .id_salt("color_picker_scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             let mut alpha = color.a() as f32 / 255.0;
             match color_model {
                 ColorModel::Rgba => {
-                    if hue_wheel(ui, &mut state) {
+                    let top = ui.cursor().top();
+                    let changed = hue_wheel(ui, &mut state, wheel_cap);
+                    wheel_side = ui.cursor().top() - top;
+                    if changed {
                         new_color = Some((
                             Color32::from_hsva(state.hue, state.sat, state.val, alpha),
                             false,
@@ -619,6 +652,11 @@ pub fn color_picker_panel(
             }
             brush_state.swatches_dirty |= changed;
         });
+    let below = scroll.content_size.y - wheel_side;
+    if (below - rest).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(rest_id, below));
+        ui.ctx().request_repaint();
+    }
 
     if let Some((c, external)) = new_color {
         brush_state.brush.brush_options.color = c;

@@ -2,6 +2,7 @@
 
 use crate::PainterApp;
 use crate::brush_engine::symmetry::{MAX_COUNT, SymmetryMode};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::{segmented, slider_row};
 use eframe::egui::{self, RichText};
@@ -34,7 +35,7 @@ pub(crate) fn symmetry_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
         slider_row(
             ui,
             "Copies",
-            crate::ui::widgets::reset(&mut s.count, |v| egui::Slider::new(v, 2..=MAX_COUNT)),
+            crate::ui::widgets::reset(&mut s.count, |v| BarSlider::new(v, 2..=MAX_COUNT)),
         );
         ui.checkbox(&mut s.mirrored, "Mirror each copy (kaleidoscope)");
     }
@@ -44,7 +45,7 @@ pub(crate) fn symmetry_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
             ui,
             "Angle",
             crate::ui::widgets::reset(&mut degrees, |v| {
-                egui::Slider::new(v, -180.0..=180.0)
+                BarSlider::new(v, -180.0..=180.0)
                     .suffix("°")
                     .max_decimals(1)
             }),

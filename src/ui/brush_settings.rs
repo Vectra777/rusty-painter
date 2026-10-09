@@ -6,6 +6,7 @@ use crate::brush_engine::brush_options::{
     BlendMode, PaintingMode, PixelBrushShape, Placement, TipOrder,
 };
 use crate::brush_engine::hardness::SoftnessSelector;
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::{percent_of_unit, property_row, section, segmented, slider_row};
 use crate::ui::{
@@ -52,16 +53,19 @@ fn tip_swatch(
     draw_shape: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    ui.painter().rect_filled(rect, 0.0, BG_INSET);
+    ui.painter().rect_filled(rect, RADIUS_SMALL, BG_INSET);
     draw_shape(ui.painter(), rect);
     let stroke = if is_selected {
-        egui::Stroke::new(2.0_f32, ACCENT)
+        egui::Stroke::new(2.0_f32, accent())
     } else if response.hovered() {
         egui::Stroke::new(1.0_f32, TEXT_DIM)
     } else {
         egui::Stroke::new(1.0_f32, BORDER_LIGHT)
     };
-    ui.painter().rect_stroke(rect, 0.0, stroke);
+    // Inside the swatch: the tips scroll, and a ring on the edge would be
+    // cut off by the scroll area at the first and last columns.
+    ui.painter()
+        .rect_stroke(rect.shrink(stroke.width * 0.5), RADIUS_SMALL, stroke);
     response.on_hover_text(hover_text)
 }
 
@@ -105,10 +109,12 @@ fn brush_settings_contents(
     let mut mask_changed = false;
     let mut size_changed = false;
 
-    // Preview strip, re-rendered at the panel's width.
+    // Preview strip, re-rendered at the panel's width. Compared with the
+    // scale last asked for, not the one last shown: until a strip arrives
+    // they differ, and asking again every frame would drop each strip drawn.
     let width = ((ui.available_width() as usize) / 8 * 8).clamp(120, 480);
     if preview.size != [width, PREVIEW_HEIGHT]
-        || preview.pixels_per_point != ui.ctx().pixels_per_point()
+        || preview.pending_pixels_per_point != ui.ctx().pixels_per_point()
     {
         preview.size = [width, PREVIEW_HEIGHT];
         preview.dirty = true;
@@ -268,7 +274,7 @@ fn brush_settings_contents(
 
                     let selected = matches!(shape, PixelBrushShape::Square);
                     if tip_swatch(ui, size, selected, "Square", |painter, rect| {
-                        painter.rect_filled(rect.shrink(rect.width() * 0.2), 0.0, TEXT);
+                        painter.rect_filled(rect.shrink(rect.width() * 0.2), RADIUS_SMALL, TEXT);
                     })
                     .clicked()
                     {
@@ -314,7 +320,7 @@ fn brush_settings_contents(
                                     egui::Align2::RIGHT_BOTTOM,
                                     format!("×{set}"),
                                     egui::FontId::proportional(10.0),
-                                    ACCENT,
+                                    accent(),
                                 );
                             }
                         });
@@ -436,7 +442,7 @@ fn brush_settings_contents(
             ui,
             "Size",
             crate::ui::widgets::reset(&mut brush.brush_options.diameter, |v| {
-                egui::Slider::new(v, 1.0..=3000.0)
+                BarSlider::new(v, 1.0..=3000.0)
                     .logarithmic(true)
                     .max_decimals(0)
                     .suffix(" px")
@@ -462,9 +468,7 @@ fn brush_settings_contents(
                         ui,
                         "Hardness",
                         crate::ui::widgets::reset(&mut brush.brush_options.hardness, |v| {
-                            egui::Slider::new(v, 0.0..=100.0)
-                                .max_decimals(0)
-                                .suffix("%")
+                            BarSlider::new(v, 0.0..=100.0).max_decimals(0).suffix("%")
                         }),
                     )
                     .changed();
@@ -484,7 +488,7 @@ fn brush_settings_contents(
             ui,
             "Opacity",
             crate::ui::widgets::reset(&mut brush.brush_options.opacity, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .changed();
@@ -492,9 +496,7 @@ fn brush_settings_contents(
             ui,
             "Flow",
             crate::ui::widgets::reset(&mut brush.brush_options.flow, |v| {
-                egui::Slider::new(v, 0.0..=100.0)
-                    .max_decimals(0)
-                    .suffix("%")
+                BarSlider::new(v, 0.0..=100.0).max_decimals(0).suffix("%")
             }),
         )
         .changed();
@@ -505,7 +507,7 @@ fn brush_settings_contents(
                     ui,
                     "Spacing",
                     crate::ui::widgets::reset(coeff, |v| {
-                        egui::Slider::new(v, 0.1..=10.0)
+                        BarSlider::new(v, 0.1..=10.0)
                             .logarithmic(true)
                             .max_decimals(2)
                             .suffix("× √size")
@@ -522,9 +524,7 @@ fn brush_settings_contents(
                     ui,
                     "Spacing",
                     crate::ui::widgets::reset(&mut o.spacing, |v| {
-                        egui::Slider::new(v, 1.0..=200.0)
-                            .max_decimals(0)
-                            .suffix("%")
+                        BarSlider::new(v, 1.0..=200.0).max_decimals(0).suffix("%")
                     }),
                 )
                 .on_hover_text("Distance between dabs, as a percentage of the brush size.")
@@ -544,7 +544,7 @@ fn brush_settings_contents(
             ui,
             "Jitter",
             crate::ui::widgets::reset(&mut brush.jitter, |v| {
-                egui::Slider::new(v, 0.0..=50.0).max_decimals(0).suffix("%")
+                BarSlider::new(v, 0.0..=50.0).max_decimals(0).suffix("%")
             }),
         )
         .on_hover_text("Random dab offset, as a percentage of the brush size.")
@@ -553,7 +553,7 @@ fn brush_settings_contents(
             ui,
             "Airbrush",
             crate::ui::widgets::reset(&mut brush.airbrush_rate, |v| {
-                egui::Slider::new(v, 0.0..=100.0)
+                BarSlider::new(v, 0.0..=100.0)
                     .max_decimals(0)
                     .suffix("/s")
                     .logarithmic(true)
@@ -569,7 +569,7 @@ fn brush_settings_contents(
             ui,
             "Hard edges",
             crate::ui::widgets::reset(&mut brush.sharpness, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text(
@@ -582,7 +582,7 @@ fn brush_settings_contents(
                 ui,
                 "Edge softness",
                 crate::ui::widgets::reset(&mut brush.sharpness_softness, |v| {
-                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                 }),
             )
             .on_hover_text(
@@ -660,7 +660,7 @@ fn brush_settings_contents(
             ui,
             "Smudge length",
             crate::ui::widgets::reset(&mut m.smudge_length, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text("How far the brush drags the paint it picks up.")
@@ -669,7 +669,7 @@ fn brush_settings_contents(
             ui,
             "Colour rate",
             crate::ui::widgets::reset(&mut m.color_rate, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text(
@@ -685,7 +685,7 @@ fn brush_settings_contents(
             ui,
             "Paint load",
             crate::ui::widgets::reset(&mut m.load, |v| {
-                egui::Slider::new(v, 0.0..=100.0)
+                BarSlider::new(v, 0.0..=100.0)
                     .max_decimals(0)
                     .suffix(" widths")
             }),
@@ -751,7 +751,7 @@ fn brush_settings_contents(
                 ui,
                 "Paint thickness",
                 crate::ui::widgets::reset(&mut k.thickness, |v| {
-                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                 }),
             )
             .on_hover_text(
@@ -774,7 +774,7 @@ fn brush_settings_contents(
                     ui,
                     "Sample radius",
                     crate::ui::widgets::reset(&mut k.radius, |v| {
-                        percent_of_unit(egui::Slider::new(v, 0.0..=most))
+                        percent_of_unit(BarSlider::new(v, 0.0..=most))
                     }),
                 )
                 .on_hover_text(
@@ -790,7 +790,7 @@ fn brush_settings_contents(
             ui,
             "Wet edges",
             crate::ui::widgets::reset(&mut brush.wet_edge, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=0.95))
+                percent_of_unit(BarSlider::new(v, 0.0..=0.95))
             }),
         )
         .on_hover_text(
@@ -810,9 +810,7 @@ fn brush_settings_contents(
                 ui,
                 "Edge width",
                 crate::ui::widgets::reset(&mut brush.wet_edge_width, |v| {
-                    egui::Slider::new(v, 1.0..=32.0)
-                        .max_decimals(0)
-                        .suffix(" px")
+                    BarSlider::new(v, 1.0..=32.0).max_decimals(0).suffix(" px")
                 }),
             )
             .changed();
@@ -850,9 +848,7 @@ fn brush_settings_contents(
                 ui,
                 "Drying",
                 crate::ui::widgets::reset(&mut w.drying, |v| {
-                    egui::Slider::new(v, 0.5..=60.0)
-                        .logarithmic(true)
-                        .suffix(" s")
+                    BarSlider::new(v, 0.5..=60.0).logarithmic(true).suffix(" s")
                 }),
             )
             .changed();
@@ -902,7 +898,7 @@ fn brush_settings_contents(
                 ui,
                 "Depth",
                 crate::ui::widgets::reset(&mut imp.depth, |v| {
-                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                 }),
             )
             .changed();
@@ -940,7 +936,7 @@ fn brush_settings_contents(
                 ui,
                 "Min size",
                 crate::ui::widgets::reset(&mut o.pressure_min_size, |v| {
-                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                 }),
             )
             .on_hover_text("Brush size at the lightest pressure, as a share of the full size.")
@@ -951,7 +947,7 @@ fn brush_settings_contents(
             ui,
             "Tilt → size",
             crate::ui::widgets::reset(&mut tilt.size, |v| {
-                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+                percent_of_unit(BarSlider::new(v, -1.0..=1.0))
             }),
         )
         .on_hover_text("Above 0: the stroke widens as the pen leans, like a pencil on its side.")
@@ -960,7 +956,7 @@ fn brush_settings_contents(
             ui,
             "Tilt → opacity",
             crate::ui::widgets::reset(&mut tilt.opacity, |v| {
-                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+                percent_of_unit(BarSlider::new(v, -1.0..=1.0))
             }),
         )
         .on_hover_text("Above 0: stronger as the pen leans; below 0: lighter.")
@@ -1014,7 +1010,7 @@ fn brush_settings_contents(
                     ui,
                     "Length",
                     crate::ui::widgets::reset(&mut modes.string_length, |v| {
-                        egui::Slider::new(v, 2.0..=300.0).suffix(" pt")
+                        BarSlider::new(v, 2.0..=300.0).suffix(" pt")
                     }),
                 )
                 .on_hover_text(
@@ -1032,7 +1028,7 @@ fn brush_settings_contents(
                     ui,
                     "Strength",
                     crate::ui::widgets::reset(&mut modes.correction, |v| {
-                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                        percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                     }),
                 )
                 .on_hover_text(
@@ -1053,7 +1049,7 @@ fn brush_settings_contents(
                     ui,
                     "Strength",
                     crate::ui::widgets::reset(&mut modes.filter_strength, |v| {
-                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                        percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                     }),
                 )
                 .on_hover_text("How much shake is taken out of slow, careful lines.")
@@ -1062,7 +1058,7 @@ fn brush_settings_contents(
                     ui,
                     "Speed",
                     crate::ui::widgets::reset(&mut modes.filter_speed, |v| {
-                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                        percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                     }),
                 )
                 .on_hover_text(
@@ -1076,7 +1072,7 @@ fn brush_settings_contents(
                     ui,
                     "Strength",
                     crate::ui::widgets::reset(&mut brush.stabilizer, |v| {
-                        percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                        percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                     }),
                 )
                 .changed();
@@ -1086,7 +1082,7 @@ fn brush_settings_contents(
                     ui,
                     "Mass",
                     crate::ui::widgets::reset(&mut brush.stabilizer_mass, |v| {
-                        egui::Slider::new(v, 0.01..=1.0)
+                        BarSlider::new(v, 0.01..=1.0)
                     }),
                 )
                 .changed();
@@ -1094,7 +1090,7 @@ fn brush_settings_contents(
                     ui,
                     "Drag",
                     crate::ui::widgets::reset(&mut brush.stabilizer_drag, |v| {
-                        egui::Slider::new(v, 0.0..=1.0)
+                        BarSlider::new(v, 0.0..=1.0)
                     }),
                 )
                 .changed();
@@ -1161,7 +1157,7 @@ fn dynamics_sections(
             ui,
             "Angle",
             crate::ui::widgets::reset(&mut t.angle, |v| {
-                egui::Slider::new(v, -180.0..=180.0)
+                BarSlider::new(v, -180.0..=180.0)
                     .max_decimals(0)
                     .suffix("°")
             }),
@@ -1172,7 +1168,7 @@ fn dynamics_sections(
             ui,
             "Squash",
             crate::ui::widgets::reset(&mut t.ratio, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.05..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.05..=1.0))
             }),
         )
         .on_hover_text("Tip height as a share of its width: low values make a flat nib.")
@@ -1181,9 +1177,7 @@ fn dynamics_sections(
             ui,
             "Random angle",
             crate::ui::widgets::reset(&mut t.random_angle, |v| {
-                egui::Slider::new(v, 0.0..=180.0)
-                    .max_decimals(0)
-                    .suffix("°")
+                BarSlider::new(v, 0.0..=180.0).max_decimals(0).suffix("°")
             }),
         )
         .on_hover_text("Each dab turns randomly by up to this much either way.")
@@ -1271,7 +1265,7 @@ fn dynamics_sections(
                 ui,
                 "Tip",
                 crate::ui::widgets::reset(&mut t.min, |v| {
-                    percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                    percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                 }),
             )
             .on_hover_text("Size / opacity at the very end of a taper.")
@@ -1282,7 +1276,7 @@ fn dynamics_sections(
             ui,
             "Speed → size",
             crate::ui::widgets::reset(&mut s.size, |v| {
-                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+                percent_of_unit(BarSlider::new(v, -1.0..=1.0))
             }),
         )
         .on_hover_text("Below 0: fast strokes get thinner (ink). Above 0: thicker.")
@@ -1291,7 +1285,7 @@ fn dynamics_sections(
             ui,
             "Speed → opacity",
             crate::ui::widgets::reset(&mut s.opacity, |v| {
-                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+                percent_of_unit(BarSlider::new(v, -1.0..=1.0))
             }),
         )
         .on_hover_text("Below 0: fast strokes get lighter (dry brush). Above 0: stronger.")
@@ -1303,7 +1297,7 @@ fn dynamics_sections(
             ui,
             "Size",
             crate::ui::widgets::reset(&mut r.size, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text("Each dab is randomly smaller, by up to this much.")
@@ -1312,7 +1306,7 @@ fn dynamics_sections(
             ui,
             "Opacity",
             crate::ui::widgets::reset(&mut r.opacity, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text("Each dab is randomly lighter, by up to this much.")
@@ -1321,9 +1315,7 @@ fn dynamics_sections(
             ui,
             "Hue",
             crate::ui::widgets::reset(&mut r.hue, |v| {
-                egui::Slider::new(v, 0.0..=180.0)
-                    .max_decimals(0)
-                    .suffix("°")
+                BarSlider::new(v, 0.0..=180.0).max_decimals(0).suffix("°")
             }),
         )
         .on_hover_text("Each dab's hue turns randomly by up to this much either way.")
@@ -1332,7 +1324,7 @@ fn dynamics_sections(
             ui,
             "Saturation",
             crate::ui::widgets::reset(&mut r.saturation, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .changed();
@@ -1340,7 +1332,7 @@ fn dynamics_sections(
             ui,
             "Value",
             crate::ui::widgets::reset(&mut r.value, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text("Each dab is randomly lighter or darker by up to this much.")
@@ -1349,7 +1341,7 @@ fn dynamics_sections(
             ui,
             "Purity",
             crate::ui::widgets::reset(&mut r.purity, |v| {
-                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+                percent_of_unit(BarSlider::new(v, -1.0..=1.0))
             }),
         )
         .on_hover_text(
@@ -1361,7 +1353,7 @@ fn dynamics_sections(
         if slider_row(
             ui,
             "Dabs per step",
-            crate::ui::widgets::reset(&mut count, |v| egui::Slider::new(v, 1..=16)),
+            crate::ui::widgets::reset(&mut count, |v| BarSlider::new(v, 1..=16)),
         )
         .on_hover_text("Several dabs at each step, spread by Jitter: spray, foliage, grain.")
         .changed()
@@ -1445,7 +1437,7 @@ fn inputs_section(
                     changed |= slider_row(
                         ui,
                         "Amount",
-                        percent_of_unit(egui::Slider::new(&mut m.amount, -max..=max)),
+                        percent_of_unit(BarSlider::new(&mut m.amount, -max..=max)),
                     )
                     .on_hover_text(
                         "Size, opacity and texture strength: above 0 a high input keeps them \
@@ -1473,7 +1465,7 @@ fn inputs_section(
                     changed |= slider_row(
                         ui,
                         "Over",
-                        egui::Slider::new(&mut m.length, range)
+                        BarSlider::new(&mut m.length, range)
                             .logarithmic(true)
                             .suffix(suffix),
                     )
@@ -1553,7 +1545,7 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
             ui,
             "Reach",
             crate::ui::widgets::reset(&mut s.reach, |v| {
-                egui::Slider::new(v, 5.0..=300.0)
+                BarSlider::new(v, 5.0..=300.0)
                     .logarithmic(true)
                     .max_decimals(0)
                     .suffix(" px")
@@ -1565,7 +1557,7 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
             ui,
             "Density",
             crate::ui::widgets::reset(&mut s.density, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text("How likely each point in reach is joined.")
@@ -1574,7 +1566,7 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
             ui,
             "Line opacity",
             crate::ui::widgets::reset(&mut s.opacity, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .changed();
@@ -1582,7 +1574,7 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
             ui,
             "Line width",
             crate::ui::widgets::reset(&mut s.thickness, |v| {
-                egui::Slider::new(v, 0.5..=100.0)
+                BarSlider::new(v, 0.5..=100.0)
                     .logarithmic(true)
                     .max_decimals(1)
                     .suffix(" px")
@@ -1593,7 +1585,7 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
             ui,
             "Line offset",
             crate::ui::widgets::reset(&mut s.offset, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=2.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=2.0))
             }),
         )
         .on_hover_text(
@@ -1609,20 +1601,16 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
 /// A share, 0 to `max`, as a percentage.
 /// A taper's length: pixels, or a percentage of the stroke (the whole
 /// stroke redrawn tapered when the pen lifts).
-fn taper_slider(v: &mut f32, percent: bool) -> egui::Slider<'_> {
+fn taper_slider(v: &mut f32, percent: bool) -> BarSlider<'_> {
     if percent {
-        egui::Slider::new(v, 0.0..=100.0)
-            .max_decimals(0)
-            .suffix("%")
+        BarSlider::new(v, 0.0..=100.0).max_decimals(0).suffix("%")
     } else {
-        egui::Slider::new(v, 0.0..=400.0)
-            .max_decimals(0)
-            .suffix(" px")
+        BarSlider::new(v, 0.0..=400.0).max_decimals(0).suffix(" px")
     }
 }
 
-fn unit(v: &mut f32, max: f32) -> egui::Slider<'_> {
-    percent_of_unit(egui::Slider::new(v, 0.0..=max))
+fn unit(v: &mut f32, max: f32) -> BarSlider<'_> {
+    percent_of_unit(BarSlider::new(v, 0.0..=max))
 }
 
 /// A slider row with a reset (double-click), for the engines' settings.
@@ -1630,13 +1618,13 @@ fn engine_row<T: egui::emath::Numeric + Send + Sync + 'static>(
     ui: &mut egui::Ui,
     label: &str,
     value: &mut T,
-    slider: impl for<'b> FnOnce(&'b mut T) -> egui::Slider<'b>,
+    slider: impl for<'b> FnOnce(&'b mut T) -> BarSlider<'b>,
 ) -> bool {
     slider_row(ui, label, crate::ui::widgets::reset(value, slider)).changed()
 }
 
-fn px(v: &mut f32, range: std::ops::RangeInclusive<f32>) -> egui::Slider<'_> {
-    egui::Slider::new(v, range)
+fn px(v: &mut f32, range: std::ops::RangeInclusive<f32>) -> BarSlider<'_> {
+    BarSlider::new(v, range)
         .logarithmic(true)
         .max_decimals(1)
         .suffix(" px")
@@ -1648,7 +1636,7 @@ fn spray_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::engines::Spray)
     let mut changed = false;
     section(ui, "Spray", true, |ui| {
         changed |= engine_row(ui, "Particles", &mut s.amount, |v| {
-            egui::Slider::new(v, 1..=500).logarithmic(true)
+            BarSlider::new(v, 1..=500).logarithmic(true)
         });
         changed |= segmented(
             ui,
@@ -1661,10 +1649,10 @@ fn spray_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::engines::Spray)
             true,
         );
         changed |= engine_row(ui, "Particle size", &mut s.particle_size, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.01..=1.0).logarithmic(true))
+            percent_of_unit(BarSlider::new(v, 0.01..=1.0).logarithmic(true))
         });
         changed |= engine_row(ui, "Size randomness", &mut s.size_random, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= ui
             .checkbox(&mut s.random_rotation, "Turned at random")
@@ -1682,33 +1670,31 @@ fn spray_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::engines::Spray)
         }
         if density {
             changed |= engine_row(ui, "Coverage", &mut s.coverage, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.001..=1.0).logarithmic(true))
+                percent_of_unit(BarSlider::new(v, 0.001..=1.0).logarithmic(true))
             });
         }
         changed |= engine_row(ui, "Aspect", &mut s.aspect, |v| {
-            egui::Slider::new(v, 0.1..=10.0)
+            BarSlider::new(v, 0.1..=10.0)
                 .logarithmic(true)
                 .max_decimals(2)
         });
         changed |= engine_row(ui, "Area turn", &mut s.rotation, |v| {
-            egui::Slider::new(v, -180.0..=180.0)
+            BarSlider::new(v, -180.0..=180.0)
                 .max_decimals(0)
                 .suffix("°")
         });
         changed |= engine_row(ui, "Jitter", &mut s.jitter, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=2.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=2.0))
         });
         ui.label("Each particle's colour");
         changed |= engine_row(ui, "Hue", &mut s.random_hsv[0], |v| {
-            egui::Slider::new(v, 0.0..=180.0)
-                .max_decimals(0)
-                .suffix("°")
+            BarSlider::new(v, 0.0..=180.0).max_decimals(0).suffix("°")
         });
         changed |= engine_row(ui, "Saturation", &mut s.random_hsv[1], |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= engine_row(ui, "Value", &mut s.random_hsv[2], |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= ui
             .checkbox(&mut s.random_opacity, "Random opacity")
@@ -1725,7 +1711,7 @@ fn chalk_section(ui: &mut egui::Ui, c: &mut crate::brush_engine::engines::Chalk)
     let mut changed = false;
     section(ui, "Chalk", true, |ui| {
         changed |= engine_row(ui, "Grain", &mut c.grain, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= engine_row(ui, "Grain size", &mut c.scale, |v| px(v, 0.5..=16.0));
     });
@@ -1737,13 +1723,13 @@ fn curve_section(ui: &mut egui::Ui, c: &mut crate::brush_engine::engines::CurveL
     let mut changed = false;
     section(ui, "Curves", true, |ui| {
         changed |= engine_row(ui, "Reach back", &mut c.history, |v| {
-            egui::Slider::new(v, 3..=200)
+            BarSlider::new(v, 3..=200)
                 .logarithmic(true)
                 .suffix(" points")
         });
         changed |= engine_row(ui, "Line width", &mut c.line_width, |v| px(v, 0.5..=50.0));
         changed |= engine_row(ui, "Line opacity", &mut c.opacity, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= ui
             .checkbox(&mut c.connection, "Straight lines too")
@@ -1758,25 +1744,19 @@ fn grid_section(ui: &mut egui::Ui, g: &mut crate::brush_engine::engines::Grid) -
     section(ui, "Grid", true, |ui| {
         changed |= engine_row(ui, "Cell size", &mut g.cell, |v| px(v, 2.0..=500.0));
         changed |= engine_row(ui, "Shape size", &mut g.scale, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.05..=1.5))
+            percent_of_unit(BarSlider::new(v, 0.05..=1.5))
         });
         changed |= engine_row(ui, "Offset x", &mut g.offset[0], |v| {
-            egui::Slider::new(v, 0.0..=500.0)
-                .max_decimals(0)
-                .suffix(" px")
+            BarSlider::new(v, 0.0..=500.0).max_decimals(0).suffix(" px")
         });
         changed |= engine_row(ui, "Offset y", &mut g.offset[1], |v| {
-            egui::Slider::new(v, 0.0..=500.0)
-                .max_decimals(0)
-                .suffix(" px")
+            BarSlider::new(v, 0.0..=500.0).max_decimals(0).suffix(" px")
         });
         changed |= engine_row(ui, "Hue randomness", &mut g.hue_jitter, |v| {
-            egui::Slider::new(v, 0.0..=180.0)
-                .max_decimals(0)
-                .suffix("°")
+            BarSlider::new(v, 0.0..=180.0).max_decimals(0).suffix("°")
         });
         changed |= engine_row(ui, "Cell height", &mut g.cell_height, |v| {
-            egui::Slider::new(v, 0.0..=500.0)
+            BarSlider::new(v, 0.0..=500.0)
                 .max_decimals(0)
                 .suffix(" px")
                 .custom_formatter(|v, _| {
@@ -1788,13 +1768,13 @@ fn grid_section(ui: &mut egui::Ui, g: &mut crate::brush_engine::engines::Grid) -
                 })
         });
         changed |= engine_row(ui, "Divisions", &mut g.divisions, |v| {
-            egui::Slider::new(v, 1..=16)
+            BarSlider::new(v, 1..=16)
         });
         changed |= ui
             .checkbox(&mut g.divide_by_pressure, "Divided by pressure")
             .changed();
         changed |= engine_row(ui, "Random border", &mut g.random_border, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= ui
             .checkbox(&mut g.repaint, "Repaint cells")
@@ -1811,7 +1791,7 @@ fn normal_section(ui: &mut egui::Ui, n: &mut crate::brush_engine::engines::Tange
         changed |= ui.checkbox(&mut n.flip_x, "Flip red").changed();
         changed |= ui.checkbox(&mut n.flip_y, "Flip green (DirectX)").changed();
         changed |= engine_row(ui, "Mouse elevation", &mut n.elevation, |v| {
-            egui::Slider::new(v, 0.0..=90.0).max_decimals(0).suffix("°")
+            BarSlider::new(v, 0.0..=90.0).max_decimals(0).suffix("°")
         });
     });
     changed
@@ -1822,29 +1802,29 @@ fn particle_section(ui: &mut egui::Ui, p: &mut crate::brush_engine::engines::Par
     let mut changed = false;
     section(ui, "Particles", true, |ui| {
         changed |= engine_row(ui, "Count", &mut p.count, |v| {
-            egui::Slider::new(v, 1..=200).logarithmic(true)
+            BarSlider::new(v, 1..=200).logarithmic(true)
         });
         changed |= engine_row(ui, "Pull", &mut p.weight, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= engine_row(ui, "Drag", &mut p.drag, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= engine_row(ui, "Gravity x", &mut p.gravity[0], |v| {
-            egui::Slider::new(v, -10.0..=10.0).max_decimals(1)
+            BarSlider::new(v, -10.0..=10.0).max_decimals(1)
         });
         changed |= engine_row(ui, "Gravity y", &mut p.gravity[1], |v| {
-            egui::Slider::new(v, -10.0..=10.0).max_decimals(1)
+            BarSlider::new(v, -10.0..=10.0).max_decimals(1)
         });
         changed |= engine_row(ui, "Line width", &mut p.line_width, |v| px(v, 0.5..=50.0));
         changed |= engine_row(ui, "Spread", &mut p.spread, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=2.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=2.0))
         });
         changed |= engine_row(ui, "Pull variation", &mut p.weight_spread, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         });
         changed |= engine_row(ui, "Steps per dab", &mut p.iterations, |v| {
-            egui::Slider::new(v, 1..=30)
+            BarSlider::new(v, 1..=30)
         });
         changed |= ui.checkbox(&mut p.dots, "Dots, not lines").changed();
     });
@@ -1859,9 +1839,7 @@ fn hatching_section(ui: &mut egui::Ui, h: &mut crate::brush_engine::hatching::Ha
             ui,
             "Angle",
             crate::ui::widgets::reset(&mut h.angle, |v| {
-                egui::Slider::new(v, -90.0..=90.0)
-                    .max_decimals(0)
-                    .suffix("°")
+                BarSlider::new(v, -90.0..=90.0).max_decimals(0).suffix("°")
             }),
         )
         .changed();
@@ -1869,9 +1847,7 @@ fn hatching_section(ui: &mut egui::Ui, h: &mut crate::brush_engine::hatching::Ha
             ui,
             "Spacing",
             crate::ui::widgets::reset(&mut h.separation, |v| {
-                egui::Slider::new(v, 2.0..=40.0)
-                    .max_decimals(1)
-                    .suffix(" px")
+                BarSlider::new(v, 2.0..=40.0).max_decimals(1).suffix(" px")
             }),
         )
         .changed();
@@ -1879,9 +1855,7 @@ fn hatching_section(ui: &mut egui::Ui, h: &mut crate::brush_engine::hatching::Ha
             ui,
             "Line width",
             crate::ui::widgets::reset(&mut h.thickness, |v| {
-                egui::Slider::new(v, 0.5..=10.0)
-                    .max_decimals(1)
-                    .suffix(" px")
+                BarSlider::new(v, 0.5..=10.0).max_decimals(1).suffix(" px")
             }),
         )
         .changed();
@@ -1901,7 +1875,7 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
             ui,
             "Hairs",
             crate::ui::widgets::reset(&mut b.count, |v| {
-                egui::Slider::new(v, 1..=crate::brush_engine::bristle::MAX_HAIRS)
+                BarSlider::new(v, 1..=crate::brush_engine::bristle::MAX_HAIRS)
             }),
         )
         .changed();
@@ -1909,7 +1883,7 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
             ui,
             "Thickness",
             crate::ui::widgets::reset(&mut b.thickness, |v| {
-                egui::Slider::new(v, 0.5..=20.0)
+                BarSlider::new(v, 0.5..=20.0)
                     .logarithmic(true)
                     .max_decimals(1)
                     .suffix(" px")
@@ -1920,7 +1894,7 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
             ui,
             "Spread",
             crate::ui::widgets::reset(&mut b.spread, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.1..=2.0))
+                percent_of_unit(BarSlider::new(v, 0.1..=2.0))
             }),
         )
         .on_hover_text("How far the hairs fan out, as a share of the brush size.")
@@ -1929,7 +1903,7 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
             ui,
             "Paint lasts",
             crate::ui::widgets::reset(&mut b.ink, |v| {
-                egui::Slider::new(v, 0.0..=4000.0)
+                BarSlider::new(v, 0.0..=4000.0)
                     .logarithmic(true)
                     .smallest_positive(50.0)
                     .max_decimals(0)
@@ -1954,7 +1928,7 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
             ui,
             "Variation",
             crate::ui::widgets::reset(&mut b.variation, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text("How much the hairs differ in thickness and strength.")
@@ -1992,7 +1966,7 @@ fn bristle_section(ui: &mut egui::Ui, b: &mut crate::brush_engine::bristle::Bris
             changed |= slider_row(
                 ui,
                 label,
-                crate::ui::widgets::reset(value, |v| percent_of_unit(egui::Slider::new(v, range))),
+                crate::ui::widgets::reset(value, |v| percent_of_unit(BarSlider::new(v, range))),
             )
             .on_hover_text(hint)
             .changed();
@@ -2086,7 +2060,7 @@ fn dual_section(
             ui,
             "Size",
             crate::ui::widgets::reset(&mut d.size, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.05..=2.0).logarithmic(true))
+                percent_of_unit(BarSlider::new(v, 0.05..=2.0).logarithmic(true))
             }),
         )
         .on_hover_text("As a share of the brush size.")
@@ -2096,9 +2070,7 @@ fn dual_section(
                 ui,
                 "Hardness",
                 crate::ui::widgets::reset(&mut d.hardness, |v| {
-                    egui::Slider::new(v, 0.0..=100.0)
-                        .max_decimals(0)
-                        .suffix("%")
+                    BarSlider::new(v, 0.0..=100.0).max_decimals(0).suffix("%")
                 }),
             )
             .changed();
@@ -2107,9 +2079,7 @@ fn dual_section(
             ui,
             "Spacing",
             crate::ui::widgets::reset(&mut d.spacing, |v| {
-                egui::Slider::new(v, 5.0..=300.0)
-                    .max_decimals(0)
-                    .suffix("%")
+                BarSlider::new(v, 5.0..=300.0).max_decimals(0).suffix("%")
             }),
         )
         .changed();
@@ -2117,16 +2087,14 @@ fn dual_section(
             ui,
             "Scatter",
             crate::ui::widgets::reset(&mut d.scatter, |v| {
-                egui::Slider::new(v, 0.0..=300.0)
-                    .max_decimals(0)
-                    .suffix("%")
+                BarSlider::new(v, 0.0..=300.0).max_decimals(0).suffix("%")
             }),
         )
         .changed();
         changed |= slider_row(
             ui,
             "Count",
-            crate::ui::widgets::reset(&mut d.count, |v| egui::Slider::new(v, 1..=16)),
+            crate::ui::widgets::reset(&mut d.count, |v| BarSlider::new(v, 1..=16)),
         )
         .changed();
         changed |= ui
@@ -2141,7 +2109,7 @@ fn auto_tip_rows(ui: &mut egui::Ui, t: &mut crate::brush_engine::brush_options::
     let mut changed = slider_row(
         ui,
         "Spikes",
-        crate::ui::widgets::reset(&mut t.spikes, |v| egui::Slider::new(v, 2..=50)),
+        crate::ui::widgets::reset(&mut t.spikes, |v| BarSlider::new(v, 2..=50)),
     )
     .on_hover_text(
         "The tip's shape repeated round its centre: squash the tip (Ratio) for a star with \
@@ -2153,7 +2121,7 @@ fn auto_tip_rows(ui: &mut egui::Ui, t: &mut crate::brush_engine::brush_options::
             ui,
             label,
             crate::ui::widgets::reset(&mut t.fade[i], |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .on_hover_text(
@@ -2166,7 +2134,7 @@ fn auto_tip_rows(ui: &mut egui::Ui, t: &mut crate::brush_engine::brush_options::
         ui,
         "Density",
         crate::ui::widgets::reset(&mut t.density, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         }),
     )
     .on_hover_text("Share of the tip's pixels painted, the rest left out at random.")
@@ -2175,7 +2143,7 @@ fn auto_tip_rows(ui: &mut egui::Ui, t: &mut crate::brush_engine::brush_options::
         ui,
         "Randomness",
         crate::ui::widgets::reset(&mut t.randomness, |v| {
-            percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
         }),
     )
     .on_hover_text("How much each pixel's strength varies at random: a grainy, rough tip.")
@@ -2241,7 +2209,7 @@ fn color_source_section(
                 ui,
                 "Scale",
                 crate::ui::widgets::reset(scale, |v| {
-                    egui::Slider::new(v, 0.25..=4.0)
+                    BarSlider::new(v, 0.25..=4.0)
                         .logarithmic(true)
                         .max_decimals(2)
                         .suffix("×")
@@ -2322,7 +2290,7 @@ fn texture_section(
             ui,
             "Strength",
             crate::ui::widgets::reset(&mut t.strength, |v| {
-                percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
             }),
         )
         .changed();
@@ -2330,7 +2298,7 @@ fn texture_section(
             ui,
             "Scale",
             crate::ui::widgets::reset(&mut t.scale, |v| {
-                egui::Slider::new(v, 0.25..=4.0)
+                BarSlider::new(v, 0.25..=4.0)
                     .logarithmic(true)
                     .max_decimals(2)
                     .suffix("×")
@@ -2343,7 +2311,7 @@ fn texture_section(
             ui,
             "Angle",
             crate::ui::widgets::reset(&mut place.angle, |v| {
-                egui::Slider::new(v, -180.0..=180.0)
+                BarSlider::new(v, -180.0..=180.0)
                     .max_decimals(0)
                     .suffix("°")
             }),
@@ -2435,4 +2403,62 @@ fn curve_row(
         );
     }
     changed
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    /// Every section open, in a narrow dock: no slider runs past its edge.
+    #[test]
+    fn sliders_stay_inside_a_narrow_panel() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_global_style(&ctx);
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap(),
+        );
+        let mut brush = Brush::new(24.0, 20.0, Color32::BLACK, 25.0);
+        let mut preview = BrushPreviewState::default();
+        crate::ui::widgets::SECTIONS_OPEN.with(|o| o.set(true));
+        for frame in 0..4 {
+            crate::ui::bar_slider::DRAWN.with(|d| d.borrow_mut().clear());
+            let mut edge = 0.0;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 3000.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::SidePanel::left("p")
+                        .exact_width(240.0)
+                        .resizable(false)
+                        .show(ctx, |ui| {
+                            edge = ui.max_rect().right();
+                            brush_settings_panel(ui, &mut brush, &mut preview, &pool, &[], &[]);
+                        });
+                },
+            );
+            // (Once settled: the first frame has no scroll bar yet.)
+            if frame < 3 {
+                continue;
+            }
+            crate::ui::bar_slider::DRAWN.with(|d| {
+                let d = d.borrow();
+                assert!(!d.is_empty());
+                for (label, rect, _) in d.iter() {
+                    assert!(
+                        rect.right() <= edge + 0.5,
+                        "{label:?} at {rect:?} past {edge}"
+                    );
+                }
+            });
+        }
+        crate::ui::widgets::SECTIONS_OPEN.with(|o| o.set(false));
+    }
 }

@@ -4,6 +4,7 @@
 
 use crate::PainterApp;
 use crate::app::input::keymap::{self, Action};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::widgets::FitScreen;
 use eframe::egui;
 use rayon::ThreadPoolBuilder;
@@ -17,7 +18,7 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
     let threads_changed = ui
         .add(crate::ui::widgets::reset(
             &mut app.workspace.thread_count,
-            |v| egui::Slider::new(v, 1..=app.workspace.max_threads).text("Brush threads"),
+            |v| BarSlider::new(v, 1..=app.workspace.max_threads).text("Brush threads"),
         ))
         .changed();
     if threads_changed
@@ -28,6 +29,8 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.workspace.pool = std::sync::Arc::new(pool);
     }
     keyboard_layout_row(app, ui);
+    ui.separator();
+    appearance_settings(app, ui);
     ui.separator();
     ui.label(
         egui::RichText::new("DOCUMENT")
@@ -67,6 +70,64 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
         if ui.button("Refresh Brushes").clicked() {
             let ctx = ui.ctx().clone();
             app.load_brush_tips(ctx);
+        }
+    });
+}
+
+/// The accent colour: a preset, or any colour picked.
+fn appearance_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
+    use crate::ui::style::{ACCENT_PRESETS, DEFAULT_ACCENT, RADIUS_SMALL, TEXT_DIM, TEXT_STRONG};
+    ui.label(
+        egui::RichText::new("APPEARANCE")
+            .small()
+            .strong()
+            .color(TEXT_DIM),
+    );
+    let accent = &mut app.workspace.accent;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Accent");
+        let side = ui.spacing().interact_size.y;
+        for (name, color) in ACCENT_PRESETS {
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+            let painter = ui.painter();
+            painter.rect_filled(rect.shrink(2.0), RADIUS_SMALL, color);
+            if *accent == color {
+                painter.rect_stroke(
+                    rect,
+                    RADIUS_SMALL + 2.0,
+                    egui::Stroke::new(2.0_f32, TEXT_STRONG),
+                );
+            } else if response.hovered() {
+                painter.rect_stroke(
+                    rect,
+                    RADIUS_SMALL + 2.0,
+                    egui::Stroke::new(1.0_f32, TEXT_DIM),
+                );
+            }
+            if response.on_hover_text(name).clicked() {
+                *accent = color;
+            }
+        }
+        let custom = !ACCENT_PRESETS.iter().any(|(_, c)| c == accent);
+        let mut picked = *accent;
+        let response = egui::color_picker::color_edit_button_srgba(
+            ui,
+            &mut picked,
+            egui::color_picker::Alpha::Opaque,
+        );
+        if custom {
+            ui.painter().rect_stroke(
+                response.rect.expand(2.0),
+                RADIUS_SMALL + 2.0,
+                egui::Stroke::new(2.0_f32, TEXT_STRONG),
+            );
+        }
+        if response.on_hover_text("Any colour").changed() {
+            *accent = egui::Color32::from_rgb(picked.r(), picked.g(), picked.b());
+        }
+        if *accent != DEFAULT_ACCENT && ui.small_button("Reset").clicked() {
+            *accent = DEFAULT_ACCENT;
         }
     });
 }
@@ -151,7 +212,11 @@ fn calibration_pad(ui: &mut egui::Ui, ws: &mut crate::app::state::WorkspaceState
     );
     calibration.pad = Some(rect);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    painter.rect_filled(
+        rect,
+        crate::ui::style::RADIUS_WIDGET,
+        ui.visuals().extreme_bg_color,
+    );
     let ink = ui.visuals().strong_text_color();
     for stroke in &calibration.strokes {
         for w in stroke.windows(2) {

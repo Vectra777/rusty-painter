@@ -4,6 +4,7 @@
 use crate::PainterApp;
 use crate::app::tools::select::SelectionModify;
 use crate::selection::SelectionMode;
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{property_row, slider_row};
 use eframe::egui::{self, Key};
@@ -127,7 +128,7 @@ pub fn select_dialog(app: &mut PainterApp, ctx: &egui::Context) {
                     slider_row(
                         ui,
                         op.radius_label(),
-                        egui::Slider::new(radius, 1..=500)
+                        BarSlider::new(radius, 1..=500)
                             .logarithmic(true)
                             .suffix(" px"),
                     );

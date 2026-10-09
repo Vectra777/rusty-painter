@@ -4,6 +4,7 @@
 use crate::PainterApp;
 use crate::canvas::blend_modes::LayerBlend;
 use crate::canvas::storage::{LayerId, LayerKind};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use crate::ui::widgets::{draw_checkerboard, icon_button, icon_toggle, percent_of_unit};
@@ -388,10 +389,14 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 } else {
                     BG_PANEL
                 };
-                ui.painter().rect_filled(row, 0.0, bg);
+                ui.painter()
+                    .rect_filled(row.shrink2(egui::vec2(2.0, 1.0)), RADIUS_CARD, bg);
                 if is_active {
-                    let bar = egui::Rect::from_min_size(row.min, egui::vec2(3.0, row.height()));
-                    ui.painter().rect_filled(bar, 0.0, ACCENT);
+                    let bar = egui::Rect::from_min_size(
+                        row.min + egui::vec2(4.0, 8.0),
+                        egui::vec2(3.0, (row.height() - 16.0).max(4.0)),
+                    );
+                    ui.painter().rect_filled(bar, 1.5, accent());
                 }
 
                 let indent = depth as f32 * INDENT;
@@ -499,54 +504,54 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         }
                         ui.horizontal(|ui| {
                             if clipped {
-                                ui.label(RichText::new("↓").color(ACCENT))
+                                ui.label(RichText::new("↓").color(accent()))
                                     .on_hover_text("Clipped to the layer below");
                             }
                             if is_text {
-                                ui.label(RichText::new("T").strong().color(ACCENT))
+                                ui.label(RichText::new("T").strong().color(accent()))
                                     .on_hover_text("Text layer: double-click to edit the text");
                             }
                             if is_shader {
-                                ui.label(RichText::new("fx").strong().color(ACCENT))
+                                ui.label(RichText::new("fx").strong().color(accent()))
                                     .on_hover_text("Shader layer: double-click to edit its shader");
                             }
                             ui.add(egui::Label::new(text).truncate());
                             if blend != LayerBlend::Normal {
-                                ui.label(RichText::new(blend.label()).small().color(ACCENT));
+                                ui.label(RichText::new(blend.label()).small().color(accent()));
                             }
                             if adjustment {
-                                ui.label(egui::RichText::new("◐").color(ACCENT))
+                                ui.label(egui::RichText::new("◐").color(accent()))
                                     .on_hover_text("Adjustment layer: double-click to change it");
                             }
                             if fill {
-                                ui.label(RichText::new("fill").small().color(ACCENT))
+                                ui.label(RichText::new("fill").small().color(accent()))
                                     .on_hover_text("Fill layer: double-click to change it");
                             }
                             if bordered {
-                                ui.label(RichText::new("border").small().color(ACCENT))
+                                ui.label(RichText::new("border").small().color(accent()))
                                     .on_hover_text("Has a border (Layer → Border…)");
                             }
                             if is_vector {
-                                ui.label(RichText::new("vec").small().color(ACCENT))
+                                ui.label(RichText::new("vec").small().color(accent()))
                                     .on_hover_text(
                                         "Vector layer: lines stay editable (Layer → Vector); \
                                          the eraser takes lines out",
                                     );
                             }
                             if alpha_locked {
-                                ui.label(RichText::new("α").small().color(ACCENT))
+                                ui.label(RichText::new("α").small().color(accent()))
                                     .on_hover_text("Transparency locked");
                             }
                             if position_locked {
-                                ui.label(RichText::new("pos").small().color(ACCENT))
+                                ui.label(RichText::new("pos").small().color(accent()))
                                     .on_hover_text("Position locked: can't be moved or transformed");
                             }
                             if draft {
-                                ui.label(RichText::new("draft").small().color(ACCENT))
+                                ui.label(RichText::new("draft").small().color(accent()))
                                     .on_hover_text("Draft: left out of export, merging and \"all layers\"");
                             }
                             if reference {
-                                ui.label(RichText::new("ref").small().color(ACCENT))
+                                ui.label(RichText::new("ref").small().color(accent()))
                                     .on_hover_text("Reference layer for fills and the magic wand");
                             }
                         });
@@ -557,7 +562,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         }
                         ui.spacing_mut().slider_width = (width - 44.0).max(40.0);
                         let before = *opacity;
-                        let response = ui.add(crate::ui::widgets::reset(&mut *opacity, |v| percent_of_unit(egui::Slider::new(v, 0.0..=1.0))));
+                        let response = ui.add(crate::ui::widgets::reset(&mut *opacity, |v| percent_of_unit(BarSlider::new(v, 0.0..=1.0))));
                         // A right-click opens the row's menu; it doesn't set the opacity.
                         let secondary = ui.input(|i| {
                             i.pointer.button_down(egui::PointerButton::Secondary)
@@ -904,17 +909,17 @@ fn thumbnail(ui: &mut egui::Ui, app: &PainterApp, idx: usize, targeted: bool) ->
             Color32::WHITE,
         );
         let stroke = if targeted {
-            Stroke::new(2.0_f32, ACCENT)
+            Stroke::new(2.0_f32, accent())
         } else {
             Stroke::new(1.0_f32, BORDER)
         };
         ui.painter().rect_stroke(
             img_rect.expand(if targeted { 1.0 } else { 0.0 }),
-            0.0,
+            RADIUS_SMALL,
             stroke,
         );
     } else {
-        ui.painter().rect_filled(thumb_box, 0.0, BG_INSET);
+        ui.painter().rect_filled(thumb_box, RADIUS_SMALL, BG_INSET);
     }
     response
 }
@@ -976,18 +981,24 @@ fn color_tag_picker(ui: &mut egui::Ui, current: &mut Color32) -> bool {
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
             if color == UNTAGGED {
-                ui.painter()
-                    .rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(1.0_f32, TEXT_DIM));
+                ui.painter().rect_stroke(
+                    rect.shrink(1.0),
+                    RADIUS_SMALL,
+                    Stroke::new(1.0_f32, TEXT_DIM),
+                );
                 ui.painter().line_segment(
                     [rect.left_bottom(), rect.right_top()],
                     Stroke::new(1.0_f32, TEXT_DIM),
                 );
             } else {
-                ui.painter().rect_filled(rect, 0.0, color);
+                ui.painter().rect_filled(rect, RADIUS_SMALL, color);
             }
             if *current == color || response.hovered() {
-                ui.painter()
-                    .rect_stroke(rect.expand(1.5), 0.0, Stroke::new(1.5_f32, TEXT_STRONG));
+                ui.painter().rect_stroke(
+                    rect.expand(1.5),
+                    RADIUS_SMALL + 1.5,
+                    Stroke::new(1.5_f32, TEXT_STRONG),
+                );
             }
             if response.on_hover_text(name).clicked() {
                 *current = color;
@@ -1118,7 +1129,7 @@ fn paint_drag_feedback(
     };
     let from_rect = dragged.rect;
     let painter = ui.painter();
-    painter.rect_filled(from_rect, 0.0, BG_CANVAS.gamma_multiply(0.7));
+    painter.rect_filled(from_rect, RADIUS_CARD, BG_CANVAS.gamma_multiply(0.7));
 
     let name_of = |idx: usize| {
         app.canvas
@@ -1135,19 +1146,19 @@ fn paint_drag_feedback(
                 DropKind::Into { row: pos } => {
                     painter.rect_stroke(
                         rows[pos].rect.shrink(1.0),
-                        0.0,
-                        Stroke::new(2.0_f32, ACCENT),
+                        RADIUS_CARD,
+                        Stroke::new(2.0_f32, accent()),
                     );
                     format!("into {}", name_of(row.idx))
                 }
                 DropKind::Gap { y, depth } => {
                     let left = from_rect.left() + 8.0 + depth as f32 * INDENT;
                     let x = egui::Rangef::new(left, from_rect.right());
-                    painter.hline(x, y, Stroke::new(3.0_f32, ACCENT));
+                    painter.hline(x, y, Stroke::new(3.0_f32, accent()));
                     for end in [x.min, x.max] {
                         let marker =
                             egui::Rect::from_center_size(egui::pos2(end, y), egui::vec2(7.0, 9.0));
-                        painter.rect_filled(marker, 0.0, ACCENT);
+                        painter.rect_filled(marker, 2.0, accent());
                     }
                     format!("above {}", name_of(row.idx))
                 }
@@ -1164,8 +1175,8 @@ fn paint_drag_feedback(
         egui::pos2(from_rect.left() + 12.0, pointer.y - row_height * 0.5),
         egui::vec2(from_rect.width() - 12.0, row_height),
     );
-    painter.rect_filled(ghost, 0.0, BG_RAISED.gamma_multiply(0.95));
-    painter.rect_stroke(ghost, 0.0, Stroke::new(1.0_f32, ACCENT));
+    painter.rect_filled(ghost, RADIUS_CARD, BG_RAISED.gamma_multiply(0.95));
+    painter.rect_stroke(ghost, RADIUS_CARD, Stroke::new(1.0_f32, accent()));
     painter.text(
         ghost.left_center() + egui::vec2(12.0, -8.0),
         egui::Align2::LEFT_CENTER,
@@ -1178,7 +1189,7 @@ fn paint_drag_feedback(
         egui::Align2::LEFT_CENTER,
         caption,
         egui::TextStyle::Small.resolve(ui.style()),
-        if moves { ACCENT } else { TEXT_DIM },
+        if moves { accent() } else { TEXT_DIM },
     );
 }
 

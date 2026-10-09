@@ -7,6 +7,7 @@
 
 use crate::PainterApp;
 use crate::app::view::viewport::{MAX_ZOOM, MIN_ZOOM};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
@@ -194,7 +195,7 @@ pub fn navigator_window(app: &mut PainterApp, ctx: &egui::Context) {
             }
             ui.horizontal(|ui| {
                 let mut percent = app.viewport.zoom * 100.0;
-                let slider = egui::Slider::new(&mut percent, MIN_ZOOM * 100.0..=MAX_ZOOM * 100.0)
+                let slider = BarSlider::new(&mut percent, MIN_ZOOM * 100.0..=MAX_ZOOM * 100.0)
                     .logarithmic(true)
                     .suffix("%")
                     .max_decimals(0);

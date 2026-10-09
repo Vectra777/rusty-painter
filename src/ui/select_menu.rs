@@ -5,6 +5,7 @@ use crate::PainterApp;
 use crate::app::tools::Tool;
 use crate::app::tools::select::SampleSource;
 use crate::selection::{SelectionMode, SelectionType};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use crate::ui::widgets::{segmented, slider_row, vdivider};
@@ -36,13 +37,6 @@ pub(crate) const TYPES: [(SelectionType, Icon, &str, &str); 8] = [
         "",
     ),
 ];
-
-pub(crate) fn icon_for(kind: SelectionType) -> Icon {
-    TYPES
-        .iter()
-        .find(|t| t.0 == kind)
-        .map_or(Icon::SelectRect, |t| t.1)
-}
 
 /// Whether a selection type has settings (the menu stays open to show them).
 fn has_settings(kind: SelectionType) -> bool {
@@ -104,7 +98,7 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 compact,
                 "Size",
                 crate::ui::widgets::reset(&mut sel.brush_radius, |v| {
-                    egui::Slider::new(v, 1.0..=500.0)
+                    BarSlider::new(v, 1.0..=500.0)
                         .logarithmic(true)
                         .max_decimals(0)
                         .suffix(" px")
@@ -115,7 +109,7 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 compact,
                 "Hardness",
                 crate::ui::widgets::reset(&mut sel.brush_hardness, |v| {
-                    egui::Slider::new(v, 0.0..=1.0)
+                    BarSlider::new(v, 0.0..=1.0)
                 }),
             );
             smoothing(app, ui, compact);
@@ -132,7 +126,7 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 ui,
                 compact,
                 "Tolerance",
-                crate::ui::widgets::reset(&mut w.tolerance, |v| egui::Slider::new(v, 0..=255)),
+                crate::ui::widgets::reset(&mut w.tolerance, |v| BarSlider::new(v, 0..=255)),
             );
             rerun |= ui
                 .checkbox(&mut w.contiguous, "Contiguous")
@@ -143,16 +137,14 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 ui,
                 compact,
                 "Close gaps",
-                crate::ui::widgets::reset(&mut w.gap, |v| {
-                    egui::Slider::new(v, 0..=40).suffix(" px")
-                }),
+                crate::ui::widgets::reset(&mut w.gap, |v| BarSlider::new(v, 0..=40).suffix(" px")),
             );
             rerun |= setting(
                 ui,
                 compact,
                 "Grow",
                 crate::ui::widgets::reset(&mut w.grow, |v| {
-                    egui::Slider::new(v, -40..=40).suffix(" px")
+                    BarSlider::new(v, -40..=40).suffix(" px")
                 }),
             );
             rerun |= ui.checkbox(&mut w.antialias, "Smooth edge").changed();
@@ -164,7 +156,7 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 compact,
                 "Tolerance",
                 crate::ui::widgets::reset(&mut c.tolerance, |v| {
-                    egui::Slider::new(v, 0.0..=60.0).max_decimals(1)
+                    BarSlider::new(v, 0.0..=60.0).max_decimals(1)
                 }),
             );
             rerun |= setting(
@@ -172,7 +164,7 @@ pub(crate) fn mode_and_brush_controls(app: &mut PainterApp, ui: &mut egui::Ui, c
                 compact,
                 "Softness",
                 crate::ui::widgets::reset(&mut c.softness, |v| {
-                    egui::Slider::new(v, 0.0..=40.0).max_decimals(1)
+                    BarSlider::new(v, 0.0..=40.0).max_decimals(1)
                 }),
             );
             rerun |= source_picker(ui, &mut c.source, compact);
@@ -220,7 +212,7 @@ fn smoothing(app: &mut PainterApp, ui: &mut egui::Ui, compact: bool) {
         compact,
         "Smoothing",
         crate::ui::widgets::reset(&mut app.selection_manager.smoothing, |v| {
-            egui::Slider::new(v, 0.0..=1.0)
+            BarSlider::new(v, 0.0..=1.0)
         }),
     );
 }
@@ -228,22 +220,29 @@ fn smoothing(app: &mut PainterApp, ui: &mut egui::Ui, compact: bool) {
 /// Select all / Invert / Deselect.
 pub(crate) fn selection_actions(app: &mut PainterApp, ui: &mut egui::Ui) {
     let has = app.selection_manager.has_selection();
+    let button = |ui: &egui::Ui, icon: Icon, text: &str| {
+        let side = ui.text_style_height(&egui::TextStyle::Button) + 2.0;
+        match crate::ui::icons::icon_image(ui.ctx(), icon, side, TEXT) {
+            Some(image) => egui::Button::image_and_text(image, text),
+            None => egui::Button::new(text),
+        }
+    };
     if ui
-        .button("All")
+        .add(button(ui, Icon::SelectAll, "All"))
         .on_hover_text("Select all (Ctrl+A)")
         .clicked()
     {
         app.select_all();
     }
     if ui
-        .button("Invert")
+        .add(button(ui, Icon::SelectInvert, "Invert"))
         .on_hover_text("Invert selection (Ctrl+Shift+I)")
         .clicked()
     {
         app.invert_selection();
     }
     if ui
-        .add_enabled(has, egui::Button::new("Deselect"))
+        .add_enabled(has, button(ui, Icon::Deselect, "Deselect"))
         .on_hover_text("Ctrl+D")
         .clicked()
     {
@@ -318,13 +317,13 @@ fn menu_contents(app: &mut PainterApp, ui: &mut egui::Ui, touch: bool) {
             ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click());
         let selected = current == Some(kind);
         let bg = if selected {
-            ACCENT
+            accent()
         } else if resp.hovered() {
             WIDGET_HOVER
         } else {
             BG_PANEL
         };
-        ui.painter().rect_filled(rect, 0.0, bg);
+        ui.painter().rect_filled(rect, RADIUS_WIDGET, bg);
         let icon_rect = egui::Rect::from_min_size(
             rect.min + egui::vec2(6.0, (row_h - 18.0) / 2.0),
             egui::vec2(18.0, 18.0),

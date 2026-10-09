@@ -308,11 +308,14 @@ impl eframe::App for PainterApp {
 
 /// Stages of `update`, in the order it runs them.
 impl PainterApp {
-    /// Rebuild the style when touch mode changes (and on the first frame).
+    /// Rebuild the style when touch mode or the accent changes (and on
+    /// the first frame).
     fn apply_touch_mode(&mut self, ctx: &egui::Context, touch: bool) {
-        if self.workspace.applied_touch_mode != Some(touch) {
+        let wanted = (touch, self.workspace.accent);
+        if self.workspace.applied_style != Some(wanted) {
+            crate::ui::style::set_accent(wanted.1);
             crate::ui::theme::apply_style(ctx, touch);
-            self.workspace.applied_touch_mode = Some(touch);
+            self.workspace.applied_style = Some(wanted);
         }
     }
 

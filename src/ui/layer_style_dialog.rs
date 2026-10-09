@@ -5,6 +5,7 @@ use crate::PainterApp;
 use crate::canvas::gradient::GradientShape;
 use crate::canvas::layer_style::{Border, LayerFill, MAX_BORDER};
 use crate::canvas::storage::LayerId;
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{percent_of_unit, segmented, slider_row};
@@ -120,7 +121,7 @@ fn fill_settings(ui: &mut egui::Ui, fill: &mut LayerFill, size: [f32; 2], brush:
             let turned = slider_row(
                 ui,
                 "Angle",
-                egui::Slider::new(&mut angle, -180.0..=180.0).suffix("°"),
+                BarSlider::new(&mut angle, -180.0..=180.0).suffix("°"),
             )
             .changed();
             if turned || new_shape != *shape {
@@ -173,14 +174,14 @@ pub fn border_dialog(app: &mut PainterApp, ctx: &egui::Context) {
                 slider_row(
                     ui,
                     "Width",
-                    egui::Slider::new(&mut border.width, 1.0..=MAX_BORDER)
+                    BarSlider::new(&mut border.width, 1.0..=MAX_BORDER)
                         .logarithmic(true)
                         .suffix(" px"),
                 );
                 slider_row(
                     ui,
                     "Opacity",
-                    percent_of_unit(egui::Slider::new(&mut border.opacity, 0.0..=1.0)),
+                    percent_of_unit(BarSlider::new(&mut border.opacity, 0.0..=1.0)),
                 );
                 ui.horizontal(|ui| {
                     ui.label("Colour");
@@ -229,7 +230,7 @@ pub fn line_width_dialog(app: &mut PainterApp, ctx: &egui::Context) {
             slider_row(
                 ui,
                 "Width",
-                egui::Slider::new(&mut new_scale, 0.1..=5.0)
+                BarSlider::new(&mut new_scale, 0.1..=5.0)
                     .logarithmic(true)
                     .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                     .custom_parser(|t| {

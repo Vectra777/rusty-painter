@@ -1,4 +1,5 @@
 //! egui panels that configure the canvas, brushes, colors, and layers.
+pub(crate) mod bar_slider;
 pub(crate) mod brush_list;
 pub(crate) mod brush_preview;
 pub(crate) mod brush_settings;

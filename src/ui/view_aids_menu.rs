@@ -2,6 +2,7 @@
 //! snapping, the reference image and the navigator; and the Guides window.
 
 use crate::PainterApp;
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{segmented, slider_row};
@@ -75,7 +76,7 @@ pub(crate) fn grid_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
         ui,
         "Spacing",
         crate::ui::widgets::reset(&mut g.spacing, |v| {
-            egui::Slider::new(v, 2.0..=1000.0)
+            BarSlider::new(v, 2.0..=1000.0)
                 .logarithmic(true)
                 .suffix(" px")
                 .max_decimals(0)
@@ -84,7 +85,7 @@ pub(crate) fn grid_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     slider_row(
         ui,
         "Divisions",
-        crate::ui::widgets::reset(&mut g.subdivisions, |v| egui::Slider::new(v, 1..=16)),
+        crate::ui::widgets::reset(&mut g.subdivisions, |v| BarSlider::new(v, 1..=16)),
     );
     segmented(
         ui,
@@ -100,7 +101,7 @@ pub(crate) fn grid_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
             g.color = [color.r(), color.g(), color.b()];
         }
         ui.add(
-            egui::Slider::new(&mut g.opacity, 0.05..=1.0)
+            BarSlider::new(&mut g.opacity, 0.05..=1.0)
                 .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                 .custom_parser(|s| {
                     s.trim_end_matches('%')

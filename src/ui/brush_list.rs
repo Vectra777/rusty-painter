@@ -433,7 +433,7 @@ fn preset_tile(
     let painter = ui.painter();
     painter.rect_filled(
         rect,
-        0.0,
+        RADIUS_CARD,
         if response.hovered() {
             BG_RAISED
         } else {
@@ -462,17 +462,17 @@ fn preset_tile(
         rect.min + egui::vec2(4.0, 4.0),
         galley.size() + egui::vec2(8.0, 4.0),
     );
-    painter.rect_filled(chip, 0.0, Color32::from_black_alpha(150));
+    painter.rect_filled(chip, RADIUS_SMALL, Color32::from_black_alpha(150));
     painter.galley(chip.min + egui::vec2(4.0, 2.0), galley, TEXT_STRONG);
 
     let stroke = if active {
-        Stroke::new(2.0_f32, ACCENT)
+        Stroke::new(2.0_f32, accent())
     } else if response.hovered() {
         Stroke::new(1.0_f32, TEXT_DIM)
     } else {
         Stroke::new(1.0_f32, BORDER)
     };
-    painter.rect_stroke(rect, 0.0, stroke);
+    painter.rect_stroke(rect, RADIUS_CARD, stroke);
 
     // The star: always shown on a favourite, on hover otherwise.
     let star_size = (height * 0.3).clamp(14.0, 24.0);

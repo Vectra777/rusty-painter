@@ -488,6 +488,16 @@ pub type ChannelLut = [[u8; 256]; 3];
 pub const MAX_REACH: i32 = 200;
 
 impl Filter {
+    /// The submenus [`Self::MENU`]'s groups go in (a group of one goes in
+    /// the menu itself).
+    pub const MENU_GROUPS: [&'static str; 5] = [
+        "Adjustments",
+        "Blur & Sharpen",
+        "Stylize",
+        "Noise & Render",
+        "Line Art",
+    ];
+
     /// The Filter menu: groups of filters with their default settings.
     pub const MENU: [&'static [Filter]; 5] = [
         &[

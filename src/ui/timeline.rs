@@ -22,6 +22,7 @@ use crate::app::input::keymap::Action;
 use crate::canvas::motion::{Ease, Prop};
 use crate::canvas::rig::Curve;
 use crate::canvas::storage::{Anim, LayerId, LayerKind};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::motion_panel::paint_diamond;
 use crate::ui::style::*;
@@ -459,13 +460,13 @@ fn transport(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, s
             ui.set_min_width(180.0);
             onion_changed |= ui.checkbox(&mut onion.enabled, "Onion skin").changed();
             onion_changed |= ui
-                .add(egui::Slider::new(&mut onion.before, 0..=5).text("before"))
+                .add(BarSlider::new(&mut onion.before, 0..=5).text("before"))
                 .changed();
             onion_changed |= ui
-                .add(egui::Slider::new(&mut onion.after, 0..=5).text("after"))
+                .add(BarSlider::new(&mut onion.after, 0..=5).text("after"))
                 .changed();
             onion_changed |= ui
-                .add(egui::Slider::new(&mut onion.opacity, 0.05..=1.0).text("opacity"))
+                .add(BarSlider::new(&mut onion.opacity, 0.05..=1.0).text("opacity"))
                 .changed();
         })
         .response
@@ -632,7 +633,7 @@ fn glyph_button(
         ui.allocate_exact_size(vec2(size, size.min(30.0).max(size * 0.9)), Sense::click());
     let enabled = ui.is_enabled();
     let bg = if on {
-        ACCENT
+        accent()
     } else if !enabled {
         Color32::TRANSPARENT
     } else if response.is_pointer_button_down_on() {
@@ -1431,13 +1432,13 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
             let has = motion.is_some_and(|m| !m.keys(p).is_empty());
             let c = pos2(row.left() + 30.0 + indent, row.center().y);
             let edge = if keyed {
-                ACCENT
+                accent()
             } else if has {
                 TEXT
             } else {
                 TEXT_DIM
             };
-            paint_diamond(&head_painter, c, 5.0, keyed.then_some(ACCENT), edge);
+            paint_diamond(&head_painter, c, 5.0, keyed.then_some(accent()), edge);
             head_painter.text(
                 pos2(row.left() + 44.0 + indent, row.center().y),
                 egui::Align2::LEFT_CENTER,
@@ -1477,7 +1478,7 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
             continue;
         }
         let fill = if selected {
-            ACCENT_DIM
+            accent_dim()
         } else if hovered {
             BG_RAISED
         } else {
@@ -1595,7 +1596,7 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
         }
     }
     let now = Rect::from_x_y_ranges(x_of(time)..=x_of(time + 1), grid.y_range());
-    gp.rect_filled(now, 0.0, ACCENT.gamma_multiply(0.14));
+    gp.rect_filled(now, 0.0, accent().gamma_multiply(0.14));
     for r in &rows {
         let rr = row_rect(r);
         if !rr.intersects(grid) {
@@ -1667,7 +1668,7 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
             let size = if r.prop.is_some() { 5.5 } else { 4.5 };
             let curve = key_curve(app, r, k).unwrap_or(Curve::Linear);
             let (fill, edge) = if picked {
-                (ACCENT, TEXT_STRONG)
+                (accent(), TEXT_STRONG)
             } else {
                 (Color32::from_gray(200), Color32::BLACK)
             };
@@ -1697,8 +1698,12 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
         for r in rows.iter().filter(|r| sel.rows.contains(&r.id)) {
             let area =
                 Rect::from_x_y_ranges(x0..=x1, row_rect(r).y_range()).shrink2(vec2(0.0, 1.0));
-            gp.rect_filled(area, 2.0, ACCENT.gamma_multiply(0.18));
-            gp.rect_stroke(area, 2.0, Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.8)));
+            gp.rect_filled(area, 2.0, accent().gamma_multiply(0.18));
+            gp.rect_stroke(
+                area,
+                2.0,
+                Stroke::new(1.0_f32, accent().gamma_multiply(0.8)),
+            );
         }
     }
     // ...the frames outside the range played dimmed...
@@ -1765,7 +1770,7 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
         }
     }
     for x in [x_of(timeline.start), x_of(timeline.end + 1)] {
-        rp.vline(x, ruler.y_range(), Stroke::new(2.0_f32, ACCENT_DIM));
+        rp.vline(x, ruler.y_range(), Stroke::new(2.0_f32, accent_dim()));
     }
     rp.hline(
         ruler.x_range(),
@@ -1779,14 +1784,14 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
         pos2(head_x, ruler.center().y - 1.0),
         vec2(tag_w, s.ruler - 8.0),
     );
-    rp.rect_filled(tag, 3.0, ACCENT);
+    rp.rect_filled(tag, 3.0, accent());
     rp.add(Shape::convex_polygon(
         vec![
             pos2(head_x - 4.0, tag.bottom()),
             pos2(head_x + 4.0, tag.bottom()),
             pos2(head_x, tag.bottom() + 4.0),
         ],
-        ACCENT,
+        accent(),
         Stroke::NONE,
     ));
     rp.text(
@@ -1796,7 +1801,7 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
         egui::FontId::proportional(11.0),
         TEXT_STRONG,
     );
-    gp.vline(head_x, grid.y_range(), Stroke::new(1.5_f32, ACCENT));
+    gp.vline(head_x, grid.y_range(), Stroke::new(1.5_f32, accent()));
 
     // ...the scrollbar, and the zoom over the names.
     let bp = ui.painter_at(bar);
@@ -1828,7 +1833,7 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
             ui.label(RichText::new("Zoom").small().color(TEXT_DIM));
             ui.spacing_mut().slider_width = ui.available_width() - 4.0;
             ui.add(
-                egui::Slider::new(&mut view.cell, MIN_CELL..=MAX_CELL)
+                BarSlider::new(&mut view.cell, MIN_CELL..=MAX_CELL)
                     .logarithmic(true)
                     .show_value(false),
             )
@@ -1864,7 +1869,7 @@ fn paint_block(
     hovered: bool,
 ) {
     let (fill, edge) = if active {
-        (ACCENT_DIM, ACCENT)
+        (accent_dim(), accent())
     } else if hovered {
         (Color32::from_gray(72), Color32::from_gray(96))
     } else {
@@ -1884,7 +1889,7 @@ fn paint_block(
         let stroke = Stroke::new(
             1.5_f32,
             if active {
-                ACCENT
+                accent()
             } else {
                 Color32::from_gray(150)
             },
@@ -1905,7 +1910,7 @@ fn paint_thumb(
     let inner = block.shrink(3.0);
     if inner.width() < 6.0 {
         // Too narrow for a picture: a dot where it starts.
-        p.circle_filled(block.center(), 2.5, if active { ACCENT } else { TEXT });
+        p.circle_filled(block.center(), 2.5, if active { accent() } else { TEXT });
         return block.right();
     }
     let aspect = thumb.map_or(4.0 / 3.0, |t| {
@@ -1971,7 +1976,7 @@ fn paint_still(
         Stroke::new(
             1.0_f32,
             if active {
-                ACCENT_DIM
+                accent_dim()
             } else {
                 Color32::from_gray(58)
             },

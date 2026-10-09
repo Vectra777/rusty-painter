@@ -5,6 +5,7 @@
 use crate::PainterApp;
 use crate::app::tools::Tool;
 use crate::selection::{SelectionMode, SelectionType};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use eframe::egui::{self, Stroke};
 
@@ -22,7 +23,7 @@ pub(crate) fn bar_sliders(app: &mut PainterApp, ui: &mut egui::Ui, slider_width:
     let options = &mut app.brush_state.brush.brush_options;
     let size = ui
         .add(
-            egui::Slider::new(&mut options.diameter, MIN_SIZE..=MAX_SIZE)
+            BarSlider::new(&mut options.diameter, MIN_SIZE..=MAX_SIZE)
                 .logarithmic(true)
                 .max_decimals(0)
                 .suffix(" px"),
@@ -35,7 +36,7 @@ pub(crate) fn bar_sliders(app: &mut PainterApp, ui: &mut egui::Ui, slider_width:
     let options = &mut app.brush_state.brush.brush_options;
     let opacity = ui
         .add(
-            egui::Slider::new(&mut options.opacity, 0.0..=1.0)
+            BarSlider::new(&mut options.opacity, 0.0..=1.0)
                 .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                 .custom_parser(|s| {
                     s.trim_end_matches('%')

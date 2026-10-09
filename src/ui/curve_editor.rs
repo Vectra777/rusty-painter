@@ -186,7 +186,7 @@ pub(crate) fn curve_editor_with(
     ui.data_mut(|d| d.insert_temp(state_id, state));
 
     // --- Drawing ---
-    painter.rect_filled(outer, 0.0, BG_INSET);
+    painter.rect_filled(outer, RADIUS_WIDGET, BG_INSET);
     for q in [0.25, 0.5, 0.75] {
         let x = egui::lerp(rect.x_range(), q);
         let y = egui::lerp(rect.y_range(), q);
@@ -217,10 +217,10 @@ pub(crate) fn curve_editor_with(
         painter.add(egui::Shape::Path(egui::epaint::PathShape {
             points: fill,
             closed: true,
-            fill: ACCENT.gamma_multiply(0.12),
+            fill: accent().gamma_multiply(0.12),
             stroke: egui::epaint::PathStroke::NONE,
         }));
-        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, ACCENT)));
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, accent())));
     }
 
     let hovered_point = response.hover_pos().and_then(|p| nearest(curve, p));
@@ -235,7 +235,7 @@ pub(crate) fn curve_editor_with(
         let fill = if grabbed && delete_pending {
             Color32::from_rgb(214, 76, 76)
         } else if grabbed {
-            ACCENT
+            accent()
         } else {
             TEXT_STRONG
         };

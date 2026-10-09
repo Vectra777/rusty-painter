@@ -190,18 +190,18 @@ pub fn radial_palette(app: &mut PainterApp, ctx: &egui::Context) {
                 let texture = crate::ui::brush_list::preset_preview(bs, index, &pool, ctx);
                 let thumb =
                     egui::Rect::from_center_size(centre + dir * mid, egui::vec2(side, side));
-                painter.rect_filled(thumb, 0.0, BG_INSET);
+                painter.rect_filled(thumb, RADIUS_CARD, BG_INSET);
                 let uv = egui::Rect::from_min_max(egui::pos2(0.4, 0.0), egui::pos2(0.6, 1.0));
                 if let Some(texture) = texture {
                     painter.image(texture, thumb, uv, Color32::WHITE);
                 }
                 let active = bs.active_preset.as_deref() == Some(name.as_str());
                 let outline = if active {
-                    Stroke::new(2.0_f32, ACCENT)
+                    Stroke::new(2.0_f32, accent())
                 } else {
                     Stroke::new(1.0_f32, if hovered { TEXT_DIM } else { BORDER })
                 };
-                painter.rect_stroke(thumb, 0.0, outline);
+                painter.rect_stroke(thumb, RADIUS_CARD, outline);
                 slice_label(ui, centre + dir * (outer + 6.0), dir, name, hovered);
             }
         });
@@ -235,7 +235,7 @@ fn slice_highlight(
         let a1 = middle - half + 2.0 * half * (k + 1) as f32 / ARC_STEPS as f32;
         painter.add(egui::Shape::convex_polygon(
             vec![at(a0, inner), at(a0, outer), at(a1, outer), at(a1, inner)],
-            ACCENT_DIM,
+            accent_dim(),
             Stroke::NONE,
         ));
     }
@@ -259,11 +259,11 @@ fn slice_label(ui: &egui::Ui, pos: egui::Pos2, dir: egui::Vec2, name: &str, hove
     let galley = painter.layout_no_wrap(name.to_string(), font, colour);
     let chip = align.anchor_size(pos, galley.size() + egui::vec2(8.0, 4.0));
     let fill = if hovered {
-        ACCENT_DIM
+        accent_dim()
     } else {
         Color32::from_black_alpha(170)
     };
-    painter.rect_filled(chip, 0.0, fill);
+    painter.rect_filled(chip, RADIUS_SMALL, fill);
     painter.galley(chip.min + egui::vec2(4.0, 2.0), galley, colour);
 }
 

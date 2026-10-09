@@ -6,7 +6,7 @@
 use crate::PainterApp;
 use crate::canvas::motion::{Motion, Prop};
 use crate::canvas::rig::Affine;
-use crate::ui::style::{ACCENT, TEXT_STRONG};
+use crate::ui::style::{TEXT_STRONG, accent};
 use eframe::egui::{self, Color32, Pos2, Stroke, Vec2};
 
 /// What a press on the canvas grabbed.
@@ -263,7 +263,7 @@ pub(crate) fn draw_animate(
         return;
     };
     let shadow = Stroke::new(3.0_f32, Color32::from_black_alpha(120));
-    let line = Stroke::new(1.25_f32, ACCENT);
+    let line = Stroke::new(1.25_f32, accent());
     // The path: where the anchor is each frame, a diamond at each key.
     if let Some(motion) = app.canvas.layers[target].motion.as_deref()
         && motion.keys(Prop::Position).len() > 1
@@ -277,7 +277,7 @@ pub(crate) fn draw_animate(
         let points: Vec<Pos2> = (first..=last.min(first + 2000)).map(at).collect();
         painter.add(egui::Shape::line(
             points.clone(),
-            Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.6)),
+            Stroke::new(1.0_f32, accent().gamma_multiply(0.6)),
         ));
         for (k, p) in points.iter().enumerate() {
             let t = first + k as u32;
@@ -291,11 +291,11 @@ pub(crate) fn draw_animate(
                 ];
                 painter.add(egui::Shape::convex_polygon(
                     diamond,
-                    ACCENT,
+                    accent(),
                     Stroke::new(1.0_f32, Color32::BLACK),
                 ));
             } else {
-                painter.circle_filled(*p, 1.8, ACCENT.gamma_multiply(0.8));
+                painter.circle_filled(*p, 1.8, accent().gamma_multiply(0.8));
             }
         }
     }
@@ -311,11 +311,11 @@ pub(crate) fn draw_animate(
     let rotate = to_screen(h.rotate);
     painter.line_segment([top, rotate], line);
     painter.circle_filled(rotate, 5.0, Color32::WHITE);
-    painter.circle_stroke(rotate, 5.0, Stroke::new(1.5_f32, ACCENT));
+    painter.circle_stroke(rotate, 5.0, Stroke::new(1.5_f32, accent()));
     for c in &corners {
         let r = egui::Rect::from_center_size(*c, egui::vec2(8.0, 8.0));
         painter.rect_filled(r, 1.0, Color32::WHITE);
-        painter.rect_stroke(r, 1.0, Stroke::new(1.5_f32, ACCENT));
+        painter.rect_stroke(r, 1.0, Stroke::new(1.5_f32, accent()));
     }
     let a = to_screen(h.anchor);
     painter.circle_stroke(a, 6.0, shadow);

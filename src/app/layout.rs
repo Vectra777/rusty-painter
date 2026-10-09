@@ -164,7 +164,7 @@ fn colour_button(app: &PainterApp, ui: &mut egui::Ui, size: f32, open: bool) -> 
         app.brush_state.brush.brush_options.color,
     );
     let ring = if open {
-        ACCENT
+        accent()
     } else if response.hovered() {
         TEXT_STRONG
     } else {
@@ -420,7 +420,7 @@ fn resize_edge(
                 ui.painter().vline(
                     rect.center().x,
                     rect.y_range(),
-                    Stroke::new(2.0_f32, ACCENT),
+                    Stroke::new(2.0_f32, accent()),
                 );
             }
             if response.dragged() {
@@ -556,9 +556,10 @@ fn brush_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
 fn right_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
     if app.workspace.show_color {
         panel_title(ui, "COLOUR");
-        // Sharing with the layers, the colours take at most about half.
+        // Sharing with the layers, the colours take at most a little over
+        // half (the wheel shrinks so the recent colours and swatches show).
         let height = if app.workspace.show_layers {
-            (ui.available_height() * 0.5).clamp(160.0, 520.0)
+            (ui.available_height() * 0.6).clamp(160.0, 560.0)
         } else {
             ui.available_height()
         };

@@ -992,7 +992,7 @@ pub(crate) fn draw_line_edit(
     let Some((_, line)) = app.picked_line() else {
         return;
     };
-    let accent = crate::ui::style::ACCENT;
+    let accent = crate::ui::style::accent();
     let path: Vec<_> = (line.smoothed().iter())
         .map(|&[x, y, _]| map.to_screen(Vec2::new(x, y)))
         .collect();

@@ -2,6 +2,7 @@
 //! and recolour a layer with it.
 
 use crate::PainterApp;
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{color_swatch, segmented};
@@ -26,7 +27,7 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
             segmented(ui, &mut p.from_layer, &[(false, "Whole picture"), (true, "Selected layer")], false);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Colours").color(TEXT_DIM));
-                ui.add(crate::ui::widgets::reset(&mut p.count, |v| egui::Slider::new(v, 2..=64)));
+                ui.add(crate::ui::widgets::reset(&mut p.count, |v| BarSlider::new(v, 2..=64)));
             });
             ui.horizontal(|ui| {
                 if ui.button("Extract palette").clicked() {

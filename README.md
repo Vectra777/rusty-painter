@@ -202,5 +202,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
 ## License
 GPL-3.0-only: see [LICENSE](LICENSE).
 
+The UI's icons are [Phosphor Icons](https://phosphoricons.com) (v2.0.8), MIT: see
+[assets/icons/phosphor/LICENSE](assets/icons/phosphor/LICENSE).
+
 ## Contributing
 The project is early-stage and focused on performance experiments. If you have ideas for improving brush quality, tiling performance, or UI/UX, feel free to open an issue or directly contact me. Tests and benchmarks are especially welcome.

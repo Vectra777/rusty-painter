@@ -3,6 +3,7 @@
 
 use crate::PainterApp;
 use crate::app::input::keymap::Action;
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::bar_frame;
 use eframe::egui::{self, Key, Modifiers, RichText};
@@ -102,8 +103,11 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
     // A phone held upright can't fit it all on one row: the sliders and
     // the view toggles go on a second.
     let two_rows = m.touch && ctx.screen_rect().width() < TWO_ROW_WIDTH;
+    // Too many tool options for one row (found the frame before): more.
+    let rows_id = egui::Id::new("top_bar_option_rows");
+    let rows = ctx.data(|d| d.get_temp::<u8>(rows_id)).unwrap_or(1);
     egui::TopBottomPanel::top("top_bar")
-        .exact_height(m.menu_height)
+        .exact_height(m.menu_height * rows as f32)
         .frame(bar_frame(BG_PANEL))
         .show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -134,10 +138,21 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                         if m.touch {
                             // On two rows the second has them.
                             if !two_rows {
-                                crate::ui::canvas_sliders::bar_sliders(app, ui, None);
+                                let id = ui.id().with("top_bar_sliders");
+                                crate::ui::bar_slider::fitted_row(
+                                    ui,
+                                    id,
+                                    middle,
+                                    m.menu_height,
+                                    |ui| crate::ui::canvas_sliders::bar_sliders(app, ui, None),
+                                );
                             }
                         } else {
-                            crate::ui::tool_options::options_inline(app, ui);
+                            let wanted = crate::ui::tool_options::options_inline(app, ui);
+                            if wanted != rows {
+                                ui.data_mut(|d| d.insert_temp(rows_id, wanted));
+                                ui.ctx().request_repaint();
+                            }
                         }
                     },
                 );
@@ -414,14 +429,14 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
                     ("Light height", &mut light.elevation, 5.0..=90.0),
                 ] {
                     changed |= ui
-                        .add(egui::Slider::new(value, range).suffix("°").text(label))
+                        .add(BarSlider::new(value, range).suffix("°").text(label))
                         .changed();
                 }
                 changed |= ui
-                    .add(egui::Slider::new(&mut light.strength, 0.0..=2.0).text("Strength"))
+                    .add(BarSlider::new(&mut light.strength, 0.0..=2.0).text("Strength"))
                     .changed();
                 changed |= ui
-                    .add(egui::Slider::new(&mut light.gloss, 0.0..=1.0).text("Gloss"))
+                    .add(BarSlider::new(&mut light.gloss, 0.0..=1.0).text("Gloss"))
                     .changed();
                 if changed {
                     app.canvas_mut().layers[active].style.impasto = Some(light);
@@ -453,7 +468,7 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         let mut angle = x.atan2(y).to_degrees();
         if ui
             .add(
-                egui::Slider::new(&mut angle, -180.0..=180.0)
+                BarSlider::new(&mut angle, -180.0..=180.0)
                     .suffix("°")
                     .text("Drips run"),
             )
@@ -522,11 +537,10 @@ fn select_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
 
 /// Filters on the active layer (inside the selection, if any).
 fn filter_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
-    for (i, group) in crate::canvas::filters::Filter::MENU.iter().enumerate() {
-        if i > 0 {
-            ui.separator();
-        }
-        for filter in *group {
+    use crate::canvas::filters::Filter;
+    // One submenu a group: all of them in one list runs off the screen.
+    let items = |app: &mut PainterApp, ui: &mut egui::Ui, group: &[Filter]| {
+        for filter in group {
             let label = if filter.has_settings() {
                 format!("{}…", filter.name())
             } else {
@@ -535,6 +549,14 @@ fn filter_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
             if menu_item(ui, &label, None) {
                 app.filter_open(*filter);
             }
+        }
+    };
+    for (group, name) in Filter::MENU.iter().zip(Filter::MENU_GROUPS) {
+        if group.len() == 1 {
+            ui.separator();
+            items(app, ui, group);
+        } else {
+            ui.menu_button(name, |ui| items(app, ui, group));
         }
     }
 }
@@ -718,7 +740,7 @@ fn sheet_tabs(app: &mut PainterApp, ui: &mut egui::Ui) {
             let selected = app.modal_state.menu_sheet_section == section;
             let text = RichText::new(title).color(if selected { TEXT_STRONG } else { TEXT });
             let button = egui::Button::new(text)
-                .fill(if selected { ACCENT } else { BG_RAISED })
+                .fill(if selected { accent() } else { BG_RAISED })
                 .min_size(egui::vec2(width, 40.0));
             if ui.add(button).clicked() {
                 app.modal_state.menu_sheet_section = section;
@@ -810,4 +832,75 @@ fn export_timelapse_dialog(app: &mut PainterApp) {
 #[cfg(target_os = "android")]
 fn export_timelapse_dialog(app: &mut PainterApp) {
     app.export_timelapse(crate::android::cache_dir().join("timelapse.gif"));
+}
+
+#[cfg(test)]
+mod top_bar_tests {
+    use super::*;
+    use crate::app::tools::{Tool, shape::ShapeKind};
+    use crate::selection::SelectionType;
+
+    /// However many options a tool has, they stay left of the view controls
+    /// and no bar sizes itself to the scroll area's endless width.
+    #[test]
+    fn tool_options_fit_the_top_bar() {
+        let tools = [
+            Tool::Brush,
+            Tool::Smudge,
+            Tool::Blur,
+            Tool::Fill,
+            Tool::Liquify,
+            Tool::Gradient,
+            Tool::Text,
+            Tool::Eyedropper,
+            Tool::Animate,
+            Tool::VectorEdit,
+            Tool::Select(SelectionType::Wand),
+            Tool::Select(SelectionType::Brush),
+            Tool::Select(SelectionType::Magnetic),
+            Tool::Select(SelectionType::ColorRange),
+            Tool::Shape(ShapeKind::Rectangle),
+            Tool::Shape(ShapeKind::Curve),
+        ];
+        for width in [900.0, 1400.0] {
+            for tool in tools {
+                let mut app = crate::project::tests::test_app_pub(crate::canvas::Canvas::new(
+                    64,
+                    64,
+                    egui::Color32::WHITE,
+                    64,
+                ));
+                app.workspace.library.open = false;
+                app.active_tool = tool;
+                let ctx = egui::Context::default();
+                crate::ui::theme::apply_global_style(&ctx);
+                let mut widest = 0.0_f32;
+                for _ in 0..8 {
+                    crate::ui::bar_slider::DRAWN.with(|d| d.borrow_mut().clear());
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 800.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| top_bar(&mut app, ctx),
+                    );
+                    // A bar cut off by the edge of the row it's in.
+                    widest = crate::ui::bar_slider::DRAWN.with(|d| {
+                        d.borrow()
+                            .iter()
+                            .filter(|(_, r, c)| r.right() > c.right() + 0.5)
+                            .map(|(_, r, _)| r.right())
+                            .fold(0.0, f32::max)
+                    });
+                }
+                assert_eq!(
+                    widest, 0.0,
+                    "{tool:?} at {width}: a bar is cut off at {widest}"
+                );
+            }
+        }
+    }
 }

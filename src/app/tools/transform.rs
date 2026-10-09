@@ -980,6 +980,38 @@ mod tests {
     }
 
     #[test]
+    fn deleting_mid_transform_erases_it_and_ends_the_transform() {
+        let mut app = app();
+        app.selection_manager.apply_shape(
+            SelectionShape::Rectangle {
+                start: Vec2::new(10.0, 10.0),
+                end: Vec2::new(30.0, 30.0),
+            },
+            SelectionMode::Replace,
+        );
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        transform_press(&mut app, Vec2::new(20.0, 20.0));
+        transform_drag(&mut app, Vec2::new(40.0, 20.0), false);
+        transform_release(&mut app);
+        assert!(transform_running(&app));
+        app.delete_selection_contents();
+        assert!(!transform_running(&app), "the transform ended");
+        assert!(
+            matches!(app.active_tool, Tool::Transform(i) if i.bounds.is_none()),
+            "no box left"
+        );
+        assert_eq!(pixel(&app, 1, 20, 20), Color32::TRANSPARENT, "erased");
+        assert_eq!(
+            pixel(&app, 1, 40, 20),
+            Color32::TRANSPARENT,
+            "not moved there"
+        );
+        // One step: undone, the square is back where it was.
+        app.apply_history(false);
+        assert_eq!(pixel(&app, 1, 20, 20), RED);
+    }
+
+    #[test]
     fn cancelling_a_selection_transform_keeps_the_selection() {
         let mut app = app();
         select_rect(&mut app, (40.0, 20.0), (60.0, 40.0));

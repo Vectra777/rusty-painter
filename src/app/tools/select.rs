@@ -759,7 +759,7 @@ pub(crate) fn draw_magnetic(
         painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, color)));
     };
     line(&session.points, egui::Color32::WHITE);
-    line(&session.preview, crate::ui::style::ACCENT);
+    line(&session.preview, crate::ui::style::accent());
     for p in session.anchor_points() {
         let r = egui::Rect::from_center_size(to_screen(p), egui::vec2(6.0, 6.0));
         painter.rect_filled(r.expand(1.0), 0.0, egui::Color32::BLACK);

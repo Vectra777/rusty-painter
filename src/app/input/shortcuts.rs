@@ -407,10 +407,13 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     } else if delete && app.workspace.shapes.session.is_some() {
         app.shape_undo_point();
         repaint = true;
-    } else if delete && app.layer_state.floating_layer_idx.is_none() {
+    } else if delete
+        && (app.layer_state.floating_layer_idx.is_none() || app.selection_manager.has_selection())
+    {
         // Delete (or Backspace, the Mac delete key) erases the selected
-        // pixels, or with nothing selected deletes the selected layer; a
-        // floating transform is left alone.
+        // pixels (mid-transform too: it ends it), or with nothing selected
+        // deletes the selected layer; a whole layer being transformed is
+        // left alone.
         if app.selection_manager.has_selection() {
             app.delete_selection_contents();
         } else {

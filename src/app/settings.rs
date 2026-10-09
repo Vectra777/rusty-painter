@@ -45,6 +45,8 @@ pub struct AppSettings {
     use_masked_brush: bool,
     pressure_curve: SoftnessCurve,
     touch_mode: bool,
+    /// The UI's accent colour, chosen in Settings.
+    accent: [u8; 3],
     finger_painting: bool,
     autohide_panels: bool,
     show_left_panel: bool,
@@ -139,6 +141,7 @@ impl AppSettings {
             use_masked_brush: bs.use_masked_brush,
             pressure_curve: ws.pressure_curve.clone(),
             touch_mode: ws.touch_mode,
+            accent: [ws.accent.r(), ws.accent.g(), ws.accent.b()],
             finger_painting: ws.finger_painting,
             autohide_panels: ws.autohide_panels,
             show_left_panel: ws.show_left_panel,
@@ -202,6 +205,8 @@ impl AppSettings {
         }
         ws.pressure_curve = self.pressure_curve;
         ws.touch_mode = self.touch_mode;
+        let [r, g, b] = self.accent;
+        ws.accent = Color32::from_rgb(r, g, b);
         ws.finger_painting = self.finger_painting;
         ws.autohide_panels = self.autohide_panels;
         // A tablet starts with the canvas clear: the panels stay closed.

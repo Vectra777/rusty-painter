@@ -304,7 +304,7 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
                                 continue;
                             }
                             let painter = ui.painter();
-                            painter.rect_filled(rect, 0.0, BG_RAISED);
+                            painter.rect_filled(rect, RADIUS_CARD, BG_RAISED);
                             if let Some(tex) = &item.texture {
                                 // Fit inside the square, keeping proportions.
                                 let size = tex.size_vec2();
@@ -317,7 +317,11 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
                                 painter.image(tex.id(), r, uv, egui::Color32::WHITE);
                             }
                             if response.hovered() {
-                                painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0_f32, ACCENT));
+                                painter.rect_stroke(
+                                    rect,
+                                    RADIUS_CARD,
+                                    egui::Stroke::new(2.0_f32, accent()),
+                                );
                             }
                             if response.on_hover_text(&item.image.name).clicked() {
                                 pick = Some(item.image.clone());

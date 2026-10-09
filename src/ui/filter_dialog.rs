@@ -3,6 +3,7 @@
 
 use crate::PainterApp;
 use crate::canvas::filters::{Filter, GradientMap, MAP_STOPS, MAX_REACH, ToneCurve};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::curve_editor::{CurvePreset, curve_editor_with};
 use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{paint_gradient_strip, percent_of_unit, segmented, slider_row};
@@ -51,12 +52,12 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Brightness",
-                percent_of_unit(egui::Slider::new(brightness, -1.0..=1.0)),
+                percent_of_unit(BarSlider::new(brightness, -1.0..=1.0)),
             );
             slider_row(
                 ui,
                 "Contrast",
-                percent_of_unit(egui::Slider::new(contrast, -1.0..=1.0)),
+                percent_of_unit(BarSlider::new(contrast, -1.0..=1.0)),
             );
         }
         Filter::HueSaturation {
@@ -64,20 +65,16 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             saturation,
             lightness,
         } => {
-            slider_row(
-                ui,
-                "Hue",
-                egui::Slider::new(hue, -180.0..=180.0).suffix("°"),
-            );
+            slider_row(ui, "Hue", BarSlider::new(hue, -180.0..=180.0).suffix("°"));
             slider_row(
                 ui,
                 "Saturation",
-                percent_of_unit(egui::Slider::new(saturation, -1.0..=1.0)),
+                percent_of_unit(BarSlider::new(saturation, -1.0..=1.0)),
             );
             slider_row(
                 ui,
                 "Lightness",
-                percent_of_unit(egui::Slider::new(lightness, -1.0..=1.0)),
+                percent_of_unit(BarSlider::new(lightness, -1.0..=1.0)),
             );
         }
         Filter::Levels {
@@ -88,35 +85,35 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Black point",
-                percent_of_unit(egui::Slider::new(black, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(black, 0.0..=1.0)),
             );
             slider_row(
                 ui,
                 "White point",
-                percent_of_unit(egui::Slider::new(white, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(white, 0.0..=1.0)),
             );
             slider_row(
                 ui,
                 "Midtones",
-                egui::Slider::new(gamma, 0.1..=5.0).logarithmic(true),
+                BarSlider::new(gamma, 0.1..=5.0).logarithmic(true),
             );
             *white = white.max(*black + 0.01);
         }
         Filter::Posterize { levels } => {
-            slider_row(ui, "Levels", egui::Slider::new(levels, 2..=32));
+            slider_row(ui, "Levels", BarSlider::new(levels, 2..=32));
         }
         Filter::Threshold { level } => {
             slider_row(
                 ui,
                 "Level",
-                percent_of_unit(egui::Slider::new(level, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(level, 0.0..=1.0)),
             );
         }
         Filter::GaussianBlur { radius } => {
             slider_row(
                 ui,
                 "Radius",
-                egui::Slider::new(radius, 0.0..=reach / 3.0)
+                BarSlider::new(radius, 0.0..=reach / 3.0)
                     .logarithmic(true)
                     .smallest_positive(0.3)
                     .max_decimals(1)
@@ -127,12 +124,12 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Angle",
-                egui::Slider::new(angle, -180.0..=180.0).suffix("°"),
+                BarSlider::new(angle, -180.0..=180.0).suffix("°"),
             );
             slider_row(
                 ui,
                 "Distance",
-                egui::Slider::new(distance, 0.0..=reach)
+                BarSlider::new(distance, 0.0..=reach)
                     .logarithmic(true)
                     .smallest_positive(1.0)
                     .max_decimals(0)
@@ -143,7 +140,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Radius",
-                egui::Slider::new(radius, 0.3..=reach / 6.0)
+                BarSlider::new(radius, 0.3..=reach / 6.0)
                     .logarithmic(true)
                     .max_decimals(1)
                     .suffix(" px"),
@@ -151,19 +148,19 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Amount",
-                percent_of_unit(egui::Slider::new(amount, 0.0..=5.0)),
+                percent_of_unit(BarSlider::new(amount, 0.0..=5.0)),
             );
         }
         Filter::Noise { amount, mono, size } => {
             slider_row(
                 ui,
                 "Amount",
-                percent_of_unit(egui::Slider::new(amount, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(amount, 0.0..=1.0)),
             );
             slider_row(
                 ui,
                 "Size",
-                egui::Slider::new(size, 1.0..=64.0)
+                BarSlider::new(size, 1.0..=64.0)
                     .logarithmic(true)
                     .max_decimals(1)
                     .suffix(" px"),
@@ -175,7 +172,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Cell size",
-                egui::Slider::new(size, 1..=MAX_REACH as u32)
+                BarSlider::new(size, 1..=MAX_REACH as u32)
                     .logarithmic(true)
                     .suffix(" px"),
             );
@@ -189,13 +186,13 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Lines up to",
-                percent_of_unit(egui::Slider::new(black, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(black, 0.0..=1.0)),
             )
             .on_hover_text("As dark as this or darker stays fully opaque");
             slider_row(
                 ui,
                 "Paper from",
-                percent_of_unit(egui::Slider::new(white, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(white, 0.0..=1.0)),
             )
             .on_hover_text("As light as this or lighter disappears");
             *white = white.max(*black + 0.01);
@@ -236,7 +233,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
                 ui.horizontal(|ui| {
                     ui.add_sized([56.0, 18.0], egui::Label::new(from));
                     ui.add(
-                        egui::Slider::new(value, -1.0..=1.0)
+                        BarSlider::new(value, -1.0..=1.0)
                             .custom_formatter(|v, _| format!("{:+.0}", v * 100.0))
                             .custom_parser(|t| t.trim().parse::<f64>().ok().map(|v| v / 100.0)),
                     );
@@ -251,7 +248,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Exposure",
-                egui::Slider::new(stops, -4.0..=4.0)
+                BarSlider::new(stops, -4.0..=4.0)
                     .suffix(" stops")
                     .max_decimals(2),
             );
@@ -260,19 +257,19 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Cool ↔ Warm",
-                percent_of_unit(egui::Slider::new(temperature, -1.0..=1.0)),
+                percent_of_unit(BarSlider::new(temperature, -1.0..=1.0)),
             );
             slider_row(
                 ui,
                 "Magenta ↔ Green",
-                percent_of_unit(egui::Slider::new(tint, -1.0..=1.0)),
+                percent_of_unit(BarSlider::new(tint, -1.0..=1.0)),
             );
         }
         Filter::Vibrance { amount } => {
             slider_row(
                 ui,
                 "Vibrance",
-                percent_of_unit(egui::Slider::new(amount, -1.0..=1.0)),
+                percent_of_unit(BarSlider::new(amount, -1.0..=1.0)),
             )
             .on_hover_text("Saturation that lifts dull colours most and leaves rich ones");
         }
@@ -280,14 +277,14 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Amount",
-                percent_of_unit(egui::Slider::new(amount, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(amount, 0.0..=1.0)),
             );
         }
         Filter::Solarize { level } => {
             slider_row(
                 ui,
                 "From",
-                percent_of_unit(egui::Slider::new(level, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(level, 0.0..=1.0)),
             )
             .on_hover_text("Tones brighter than this are inverted");
         }
@@ -299,7 +296,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Radius",
-                egui::Slider::new(radius, 1.0..=reach / 3.0)
+                BarSlider::new(radius, 1.0..=reach / 3.0)
                     .logarithmic(true)
                     .max_decimals(1)
                     .suffix(" px"),
@@ -307,12 +304,12 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Strength",
-                percent_of_unit(egui::Slider::new(strength, 0.0..=2.0)),
+                percent_of_unit(BarSlider::new(strength, 0.0..=2.0)),
             );
             slider_row(
                 ui,
                 "From brightness",
-                percent_of_unit(egui::Slider::new(threshold, 0.0..=0.95)),
+                percent_of_unit(BarSlider::new(threshold, 0.0..=0.95)),
             )
             .on_hover_text("Only what's brighter than this glows");
         }
@@ -320,7 +317,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Amount",
-                egui::Slider::new(amount, 0.0..=40.0)
+                BarSlider::new(amount, 0.0..=40.0)
                     .max_decimals(1)
                     .suffix(" px"),
             )
@@ -334,27 +331,23 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Dot size",
-                egui::Slider::new(size, 2.0..=64.0)
+                BarSlider::new(size, 2.0..=64.0)
                     .logarithmic(true)
                     .suffix(" px"),
             );
-            slider_row(
-                ui,
-                "Angle",
-                egui::Slider::new(angle, 0.0..=90.0).suffix("°"),
-            );
+            slider_row(ui, "Angle", BarSlider::new(angle, 0.0..=90.0).suffix("°"));
             ui.checkbox(colour, "Coloured dots");
         }
         Filter::Emboss { angle, depth } => {
             slider_row(
                 ui,
                 "Light from",
-                egui::Slider::new(angle, -180.0..=180.0).suffix("°"),
+                BarSlider::new(angle, -180.0..=180.0).suffix("°"),
             );
             slider_row(
                 ui,
                 "Depth",
-                egui::Slider::new(depth, 0.2..=10.0).logarithmic(true),
+                BarSlider::new(depth, 0.2..=10.0).logarithmic(true),
             );
         }
         Filter::Clouds { scale, detail } => {
@@ -362,37 +355,33 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Scale",
-                egui::Slider::new(scale, 8.0..=1024.0)
+                BarSlider::new(scale, 8.0..=1024.0)
                     .logarithmic(true)
                     .suffix(" px"),
             );
-            slider_row(ui, "Detail", egui::Slider::new(detail, 1..=8));
+            slider_row(ui, "Detail", BarSlider::new(detail, 1..=8));
         }
         Filter::Median { radius } => {
-            slider_row(
-                ui,
-                "Radius",
-                egui::Slider::new(radius, 1..=12).suffix(" px"),
-            );
+            slider_row(ui, "Radius", BarSlider::new(radius, 1..=12).suffix(" px"));
         }
         Filter::OilPaint { radius } => {
             slider_row(
                 ui,
                 "Brush size",
-                egui::Slider::new(radius, 1..=16).suffix(" px"),
+                BarSlider::new(radius, 1..=16).suffix(" px"),
             );
         }
         Filter::Vignette { amount, size, .. } => {
             slider_row(
                 ui,
                 "Amount",
-                percent_of_unit(egui::Slider::new(amount, -1.0..=1.0)),
+                percent_of_unit(BarSlider::new(amount, -1.0..=1.0)),
             )
             .on_hover_text("Darker edges; below zero, lighter");
             slider_row(
                 ui,
                 "Starts at",
-                percent_of_unit(egui::Slider::new(size, 0.0..=0.95)),
+                percent_of_unit(BarSlider::new(size, 0.0..=0.95)),
             )
             .on_hover_text("How far from the middle it begins");
         }
@@ -400,18 +389,14 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             slider_row(
                 ui,
                 "Amount",
-                percent_of_unit(egui::Slider::new(amount, 0.0..=1.0)),
+                percent_of_unit(BarSlider::new(amount, 0.0..=1.0)),
             );
         }
         Filter::SpinBlur { angle, .. } => {
-            slider_row(
-                ui,
-                "Angle",
-                egui::Slider::new(angle, 0.0..=90.0).suffix("°"),
-            );
+            slider_row(ui, "Angle", BarSlider::new(angle, 0.0..=90.0).suffix("°"));
         }
         Filter::Dither { levels } => {
-            slider_row(ui, "Levels", egui::Slider::new(levels, 2..=16))
+            slider_row(ui, "Levels", BarSlider::new(levels, 2..=16))
                 .on_hover_text("Shades per channel");
         }
         Filter::Invert | Filter::Desaturate | Filter::FindEdges => {}
@@ -485,7 +470,7 @@ pub(crate) fn gradient_map_settings(ui: &mut egui::Ui, map: &mut GradientMap) {
             let (pos, color) = &mut map.stops[i];
             ui.color_edit_button_srgb(color);
             ui.add(
-                egui::Slider::new(pos, 0.0..=1.0)
+                BarSlider::new(pos, 0.0..=1.0)
                     .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                     .custom_parser(|t| {
                         t.trim()
