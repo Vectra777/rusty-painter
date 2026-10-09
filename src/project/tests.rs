@@ -497,20 +497,24 @@ fn smudge_drags_paint_and_blur_softens_edges() {
     app.apply_history(false);
     assert_eq!(layer_pixels(&app, 1), original);
 
-    // Blur across the bottom edge: the hard edge becomes a ramp.
+    // Blur across the bottom edge: the hard edge becomes a ramp (keeping
+    // the paint, only outwards).
     app.set_blend_tool(false);
-    app.blend_press(Vec2::new(80.0, 128.0), 1.0);
-    app.blend_drag(Vec2::new(110.0, 128.0), 1.0);
-    app.blend_release();
-    app.settle_strokes();
-    let inside = app.canvas.get_layer_tile_data(1, 1, 1).unwrap()[62 * TILE_SIZE + 30];
-    let outside = app.canvas.get_layer_tile_data(1, 1, 2).unwrap()[TILE_SIZE + 30];
-    assert!(
-        inside.a() < 255 && outside.a() > 0,
-        "{inside:?} {outside:?}"
-    );
-    app.apply_history(false);
-    assert_eq!(layer_pixels(&app, 1), original);
+    for keep_paint in [false, true] {
+        app.workspace.blend.keep_paint = keep_paint;
+        app.blend_press(Vec2::new(80.0, 128.0), 1.0);
+        app.blend_drag(Vec2::new(110.0, 128.0), 1.0);
+        app.blend_release();
+        app.settle_strokes();
+        let inside = app.canvas.get_layer_tile_data(1, 1, 1).unwrap()[62 * TILE_SIZE + 30];
+        let outside = app.canvas.get_layer_tile_data(1, 1, 2).unwrap()[TILE_SIZE + 30];
+        assert!(
+            (inside.a() < 255) != keep_paint && outside.a() > 0,
+            "keep paint {keep_paint}: {inside:?} {outside:?}"
+        );
+        app.apply_history(false);
+        assert_eq!(layer_pixels(&app, 1), original);
+    }
 }
 
 #[test]

@@ -273,6 +273,8 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
             ui.add_space(6.0);
             ui.checkbox(&mut b.smudge_merged, "All layers")
                 .on_hover_text("Smear what's visible onto this layer, not only this layer");
+            ui.checkbox(&mut b.keep_paint, "Keep paint")
+                .on_hover_text("Empty parts of the layer don't wear the paint away");
             "Drag to smear the paint  ·  Length: how far colour is carried  ·  Colour above 0: a wet brush mixing in the brush colour"
         }
         (true, SmudgeMode::Deform, _) => {
@@ -314,6 +316,9 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                     percent_of_unit(egui::Slider::new(v, 0.05..=1.0))
                 }),
             );
+            ui.add_space(6.0);
+            ui.checkbox(&mut b.keep_paint, "Keep paint")
+                .on_hover_text("Empty parts of the layer don't wear the paint away");
             "Paint over edges to soften them  ·  uses the brush's spacing & pressure"
         }
         (false, _, FilterMode::Sharpen) => {

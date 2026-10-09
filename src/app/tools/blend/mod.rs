@@ -66,6 +66,9 @@ pub struct BlendToolSettings {
     pub clone_merged: bool,
     /// Smudge: pick up what's visible (all layers), laying it on this one.
     pub smudge_merged: bool,
+    /// Smudge and Blur: empty (transparent) parts of the layer don't wear
+    /// the paint away: what they lay goes over the paint, never thinning it.
+    pub keep_paint: bool,
     /// Clone: the offset kept while aligned, from the first stroke.
     #[serde(skip)]
     clone_offset: Option<Vec2>,
@@ -90,6 +93,7 @@ impl Default for BlendToolSettings {
             clone_aligned: true,
             clone_merged: false,
             smudge_merged: false,
+            keep_paint: true,
             clone_offset: None,
         }
     }
@@ -247,6 +251,9 @@ pub struct BlendSession {
     /// A mixing brush that stays inside the lines: where it went down
     /// (see [`crate::brush_engine::stroke_worker::clip_inside_lines`]).
     inside: Option<(Vec2, crate::canvas::fill::FillSettings)>,
+    /// Smudge or blur laid over the paint, never thinning it (see
+    /// [`BlendToolSettings::keep_paint`]).
+    keep_paint: bool,
 }
 
 /// The dabs of a smudge, placed and varied as the brush's own strokes'
@@ -1000,8 +1007,12 @@ impl PainterApp {
         } else {
             None
         };
+        let keep_paint = !mix.from_brush
+            && self.workspace.blend.keep_paint
+            && matches!(kind, BlendKind::Smudge | BlendKind::Blur);
         let session = BlendSession {
             inside,
+            keep_paint,
             canvas: Arc::clone(&self.canvas),
             pool: Arc::clone(&self.workspace.pool),
             selection: self.selection_manager.has_selection().then(|| {
@@ -1575,7 +1586,9 @@ impl BlendSession {
                 // ponytail: all of them only under the dab, not swept
                 // along the way as one layer is.
                 let picked = if sample_all {
-                    self.read_merged((x0, y0), side)
+                    let mut merged = self.read_merged((x0, y0), side);
+                    self.only_selected((x0, y0), side, &mut merged);
+                    merged
                 } else {
                     picked
                 };
@@ -1603,7 +1616,9 @@ impl BlendSession {
                 let step = self.brush.brush_options.spacing_px(diameter, 1.0).max(1.0);
                 let margin = (r * amount * 0.6).max(step).ceil() as i32 + 2;
                 let big_side = side + 2 * margin as usize;
-                let (_, big) = self.read_layer((x0 - margin, y0 - margin), big_side, big_side);
+                let origin = (x0 - margin, y0 - margin);
+                let (_, mut big) = self.read_layer(origin, big_side, big_side);
+                self.only_selected(origin, big_side, &mut big);
                 let local_center = center - Vec2::new(x0 as f32, y0 as f32);
                 let moved = |i: usize| {
                     let m = mask[i];
@@ -1709,6 +1724,14 @@ impl BlendSession {
             BlendKind::Adjust(hsv) => under.iter().map(|&u| adjust_hsv(codec, u, hsv)).collect(),
             BlendKind::Smudge => {
                 let picked = soft.take().unwrap_or_else(|| under.clone());
+                // A brush that carries nothing yet starts with the paint
+                // under it (inside the selection).
+                let fresh =
+                    (!self.stroke.carries.get(copy).is_some_and(Option::is_some)).then(|| {
+                        let mut px = under.clone();
+                        self.only_selected((x0, y0), side, &mut px);
+                        px
+                    });
                 // The carried paint, resized if pressure changed the tip size.
                 let carries = &mut self.stroke.carries;
                 if carries.len() <= copy {
@@ -1727,7 +1750,7 @@ impl BlendSession {
                     },
                     None => Carry {
                         side,
-                        px: under.clone(),
+                        px: fresh.unwrap_or_else(|| under.clone()),
                     },
                 };
                 // The brush picks up the paint it passed over, keeping the
@@ -1752,7 +1775,10 @@ impl BlendSession {
             BlendKind::Blur => soft.take().unwrap_or_else(|| under.clone()),
         };
 
-        // Pixel `i` under the dab: the target mixed into what's there.
+        let keep_paint = self.keep_paint;
+        // Pixel `i` under the dab: the target mixed into what's there (or,
+        // keeping the paint, laid over it: an empty or thin target adds
+        // what it has without wearing away what's there).
         let mixed = |i: usize| {
             let (u, t) = (under[i], target[i]);
             let m = if weights_are_mask { mask[i] } else { 1.0 };
@@ -1766,6 +1792,12 @@ impl BlendSession {
                 crate::canvas::blend_modes::composite(paint_blend, rgba(t), rgba(u), 0.0).to_array()
             };
             let mut v = [0.0; 4];
+            if keep_paint {
+                for c in 0..4 {
+                    v[c] = t[c] * m + u[c] * (1.0 - t[3] * m);
+                }
+                return v;
+            }
             for c in 0..4 {
                 v[c] = u[c] + (t[c] - u[c]) * m;
             }
@@ -1813,7 +1845,8 @@ impl BlendSession {
         let n = back.x.abs().max(back.y.abs()).round() as usize;
         if n <= 1 || moved.length() > side as f32 {
             let (stored, under) = self.read_layer(origin, side, side);
-            let picked = under.clone();
+            let mut picked = under.clone();
+            self.only_selected(origin, side, &mut picked);
             return (stored, under, picked);
         }
         // Read once, with the margin it swept through on the side it came
@@ -1827,7 +1860,8 @@ impl BlendSession {
             back.y.max(0.0).ceil() as i32 + 2,
         );
         let (w, h) = (side + (hi_x - lo_x) as usize, side + (hi_y - lo_y) as usize);
-        let (stored, around) = self.read_layer((origin.0 + lo_x, origin.1 + lo_y), w, h);
+        let wide_origin = (origin.0 + lo_x, origin.1 + lo_y);
+        let (stored, mut around) = self.read_layer(wide_origin, w, h);
         let inside = ((-lo_x) as usize, (-lo_y) as usize, side, side);
         let stored = if stored.is_empty() {
             stored
@@ -1835,6 +1869,8 @@ impl BlendSession {
             patch_block(&stored, w, inside).into_owned()
         };
         let under = patch_block(&around, w, inside).into_owned();
+        // (What it picks up: only the paint inside the selection.)
+        self.only_selected(wide_origin, w, &mut around);
         // Each pixel picks up the `n` places a pixel apart back along the
         // way it came. The paths of all the pixels are the same line
         // shifted: walking the patch along lines that slope as the way does
@@ -1953,8 +1989,15 @@ impl BlendSession {
     ) -> (Vec<Color32>, Vec<[f32; 4]>, Vec<[f32; 4]>) {
         let pad = radius as i32;
         let wide = side + 2 * radius;
-        let (stored, paint) = self.read_layer((x0 - pad, y0 - pad), wide, wide);
-        let soft = box_blur_inside(&self.pool, &paint, wide, radius, radius);
+        let origin = (x0 - pad, y0 - pad);
+        let (stored, paint) = self.read_layer(origin, wide, wide);
+        let soft = if self.selection.is_some() {
+            let mut selected = paint.clone();
+            self.only_selected(origin, wide, &mut selected);
+            box_blur_inside(&self.pool, &selected, wide, radius, radius)
+        } else {
+            box_blur_inside(&self.pool, &paint, wide, radius, radius)
+        };
         let inside = (radius, radius, side, side);
         let stored = if stored.is_empty() {
             stored
@@ -1969,6 +2012,28 @@ impl BlendSession {
     fn read_merged(&self, origin: (i32, i32), side: usize) -> Vec<[f32; 4]> {
         let patch = read_patch(&self.canvas, None, origin, side, side, self.wrap);
         patch.into_iter().map(|c| self.codec.to_f(c)).collect()
+    }
+
+    /// `paint` (a `w`-wide rectangle at `origin`) with what's outside the
+    /// selection taken away, as off the canvas: the stroke smears and
+    /// blurs only the paint inside it.
+    fn only_selected(&self, (x0, y0): (i32, i32), w: usize, paint: &mut [[f32; 4]]) {
+        let Some(selection) = self.selection.as_ref() else {
+            return;
+        };
+        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let wrap = self.wrap;
+        for_rows(&self.pool, paint, w, |row, line| {
+            let mut sel = vec![0.0f32; w];
+            if let Some(y) = canvas_row(y0 + row as i32, ch, wrap) {
+                for (sx, dx, pw) in wrap_pieces_or_clip(x0, w, cw, wrap) {
+                    selection.row_coverage(y, sx as usize, &mut sel[dx..dx + pw]);
+                }
+            }
+            for (p, s) in line.iter_mut().zip(sel) {
+                *p = p.map(|c| c * s);
+            }
+        });
     }
 
     /// The layer over the `w`×`h` rectangle at `origin` (round the edges

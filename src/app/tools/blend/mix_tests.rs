@@ -1117,3 +1117,69 @@ fn smudging_all_layers_lays_what_shows_on_this_one() {
     let p = smudged(true);
     assert!(p.a() > 200 && p.r() > 200, "red from below: {p:?}");
 }
+
+fn sweep(app: &mut crate::PainterApp, smudge: bool, from: f32, to: f32) {
+    app.active_tool = if smudge {
+        crate::app::tools::Tool::Smudge
+    } else {
+        crate::app::tools::Tool::Blur
+    };
+    app.brush_state.brush.brush_options.diameter = 30.0;
+    app.blend_press(Vec2::new(from, 32.0), 1.0);
+    for i in 1..=10 {
+        app.blend_drag(Vec2::new(from + (to - from) * i as f32 / 10.0, 32.0), 1.0);
+    }
+    app.blend_release();
+    app.settle_strokes();
+}
+
+#[test]
+fn empty_parts_of_the_layer_dont_wear_the_paint_away() {
+    let red = Color32::from_rgb(230, 30, 20);
+    for smudge in [true, false] {
+        let mut app = app(None);
+        app.canvas_mut()
+            .set_layer_tile_data(1, 0, 0, vec![red; 64 * 64]);
+        // From the empty half into the red.
+        sweep(&mut app, smudge, 100.0, 50.0);
+        for x in [50, 55, 60, 63] {
+            assert_eq!(pixel(&app, x), red, "smudge {smudge}, x {x}");
+        }
+        if !smudge {
+            // The edge still softens outwards.
+            assert!(pixel(&app, 66).a() > 0, "blur spreads the paint");
+        }
+    }
+    // Without: the empty part thins it.
+    let mut app = app(None);
+    app.workspace.blend.keep_paint = false;
+    app.canvas_mut()
+        .set_layer_tile_data(1, 0, 0, vec![red; 64 * 64]);
+    sweep(&mut app, true, 100.0, 50.0);
+    assert!(pixel(&app, 60).a() < 128);
+}
+
+#[test]
+fn smudge_and_blur_dont_take_the_paint_outside_the_selection() {
+    let red = Color32::from_rgb(230, 30, 20);
+    for smudge in [true, false] {
+        let mut app = app(None);
+        app.canvas_mut()
+            .set_layer_tile_data(1, 0, 0, vec![red; 64 * 64]);
+        app.canvas_mut()
+            .set_layer_tile_data(1, 1, 0, vec![Color32::BLUE; 64 * 64]);
+        app.selection_manager.apply_shape(
+            crate::selection::SelectionShape::Rectangle {
+                start: Vec2::ZERO,
+                end: Vec2::splat(64.0),
+            },
+            crate::selection::SelectionMode::Replace,
+        );
+        // From the blue outside into the red inside.
+        sweep(&mut app, smudge, 90.0, 40.0);
+        for x in [45, 55, 62] {
+            assert_eq!(pixel(&app, x), red, "smudge {smudge}, x {x}");
+        }
+        assert_eq!(pixel(&app, 66), Color32::BLUE, "outside untouched");
+    }
+}
