@@ -54,11 +54,13 @@ impl PainterApp {
             bs.brush.is_changed = true;
             bs.brush_preview.dirty = true;
         }
-        bs.brush.brush_options.blend_mode = if eraser {
-            BlendMode::Eraser
-        } else {
-            BlendMode::Normal
-        };
+        // (A brush painting behind keeps doing so.)
+        let mode = &mut bs.brush.brush_options.blend_mode;
+        if eraser {
+            *mode = BlendMode::Eraser;
+        } else if *mode == BlendMode::Eraser {
+            *mode = BlendMode::Normal;
+        }
     }
 
     pub(crate) fn is_eraser_active(&self) -> bool {

@@ -121,6 +121,7 @@ impl DualTip {
             self.spacing,
         );
         b.anti_aliasing = main.anti_aliasing;
+        b.antialias_width = main.antialias_width;
         let o = &mut b.brush_options;
         o.pixel_shape = self.shape.clone();
         o.blend_mode = BlendMode::Normal;

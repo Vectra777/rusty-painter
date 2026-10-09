@@ -117,8 +117,9 @@ struct GaussianTip {
 }
 
 impl GaussianTip {
-    fn new(r: f32, hardness: f32) -> Self {
-        let fade_start = (r - 1.0).max(0.0);
+    /// `edge`: how many pixels the edge fades over.
+    fn new(r: f32, hardness: f32, edge: f32) -> Self {
+        let fade_start = (r - edge).max(0.0);
         let inv_radius = if r > 0.0 { 1.0 / r } else { 0.0 };
         Self {
             r_ceil: r.ceil() as i32,
@@ -233,6 +234,9 @@ pub struct Brush {
     pub brush_type: BrushType,
     pub pixel_perfect: bool,
     pub anti_aliasing: bool,
+    /// Anti-aliased round and square tips: how many pixels their edge
+    /// fades over (1, Krita's, to 3: Clip Studio's weak to strong).
+    pub antialias_width: f32,
     pub jitter: f32,
     pub stabilizer: f32, // 0..1 (0 = off, 1 = max smoothing) - Used for Simple
     pub stabilizer_algorithm: StabilizerAlgorithm,
@@ -283,6 +287,10 @@ pub struct Brush {
     /// their edges and dry (see [`crate::canvas::wet`]); `None` for paint
     /// that's dry at once.
     pub wet: Option<crate::canvas::wet::WetPaint>,
+    /// Stay inside the lines: the stroke paints only the area the pen went
+    /// down in, as the Fill tool finds it on the reference layers (Clip
+    /// Studio's "don't go over the reference layer's lines").
+    pub stay_inside: bool,
     /// Hard edges: tip coverage below this share
     /// (0..1) is dropped and the rest painted at full strength (0 = off).
     pub sharpness: f32,
@@ -650,6 +658,7 @@ impl Brush {
             brush_type: BrushType::Soft,
             pixel_perfect: false,
             anti_aliasing: true,
+            antialias_width: 1.0,
             jitter: 0.0,
             stabilizer: 0.0,
             stabilizer_algorithm: StabilizerAlgorithm::None,
@@ -672,6 +681,7 @@ impl Brush {
             engines: Default::default(),
             impasto: None,
             wet: None,
+            stay_inside: false,
             sharpness: 0.0,
             sharpness_softness: 0.0,
             mixing: None,
@@ -687,6 +697,7 @@ impl Brush {
             brush_type: BrushType::Pixel,
             pixel_perfect: true,
             anti_aliasing: false,
+            antialias_width: 1.0,
             jitter: 0.0,
             stabilizer: 0.0,
             stabilizer_algorithm: StabilizerAlgorithm::None,
@@ -709,6 +720,7 @@ impl Brush {
             engines: Default::default(),
             impasto: None,
             wet: None,
+            stay_inside: false,
             sharpness: 0.0,
             sharpness_softness: 0.0,
             mixing: None,

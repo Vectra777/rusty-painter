@@ -263,7 +263,7 @@ impl PainterApp {
 }
 
 /// Keep only what of `mask` is inside `selection` (soft edges fade).
-fn clip_to(selection: &SelectionManager, mask: &mut SelectionMask) {
+pub(crate) fn clip_to(selection: &SelectionManager, mask: &mut SelectionMask) {
     let bounds = [
         mask.x0,
         mask.y0,

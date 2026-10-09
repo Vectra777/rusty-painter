@@ -534,7 +534,8 @@ fn resolve_spans_in(
     let mut combined_colors: Vec<[f32; 3]> = Vec::new();
     // The same for the whole tile: decided once, not per row.
     let has_tail = buffer.tail.iter().any(Option::is_some);
-    let general = ctx.general && ctx.blend_mode == BlendMode::Normal;
+    let behind = ctx.blend_mode == BlendMode::Behind;
+    let general = (ctx.general && ctx.blend_mode == BlendMode::Normal) || behind;
     // Impasto: the rows' heights, written to the layer's heights at once.
     let mut height_rows: Vec<(usize, Vec<u16>)> = Vec::new();
     for (row, &(min_x, max_x)) in spans.iter().enumerate() {
@@ -580,8 +581,14 @@ fn resolve_spans_in(
         // A deeper document: the stroke at full depth, rounded to 8 bits.
         if let (Some(deep), Some(original)) = (deep.as_deref_mut(), &buffer.original_deep) {
             let stroke = match ctx.blend_mode {
-                BlendMode::Eraser if ctx.alpha_lock => continue,
+                BlendMode::Eraser | BlendMode::Behind if ctx.alpha_lock => continue,
                 BlendMode::Eraser => DeepStroke::Erase,
+                BlendMode::Behind => DeepStroke::Behind {
+                    colors: ctx.colored.then(|| {
+                        stroke_colors(buffer, range.clone(), ctx.tail_newer, &mut combined_colors);
+                        &combined_colors[..]
+                    }),
+                },
                 BlendMode::Normal => DeepStroke::Paint {
                     mode: if general {
                         ctx.mode
@@ -610,6 +617,10 @@ fn resolve_spans_in(
             continue;
         }
         if general {
+            // Under the pixels, where their alpha is locked: nothing shows.
+            if behind && ctx.alpha_lock {
+                continue;
+            }
             let colors = ctx.colored.then(|| {
                 stroke_colors(buffer, range.clone(), ctx.tail_newer, &mut combined_colors);
                 &combined_colors[..]
@@ -622,6 +633,7 @@ fn resolve_spans_in(
                 ctx.color,
                 ctx.cap,
                 ctx.mode,
+                behind,
                 ctx.space,
                 origin,
             );
@@ -663,7 +675,9 @@ fn resolve_spans_in(
                     )
                 }
             }
-            BlendMode::Eraser if ctx.alpha_lock => {}
+            // (Painting behind always goes the general way.)
+            BlendMode::Eraser | BlendMode::Behind if ctx.alpha_lock => {}
+            BlendMode::Behind => {}
             BlendMode::Eraser => resolve_stroke_erase(
                 original,
                 coverage,
@@ -1572,7 +1586,8 @@ impl Brush {
             && !auto_on
             && source_stamp.is_none()
         {
-            let tip_for = GaussianTip::new;
+            let edge = self.antialias_width.max(0.5);
+            let tip_for = |r, hardness| GaussianTip::new(r, hardness, edge);
             let batch_tip = tip_for(ctx.r, hardness_val);
             let stamp = |dab: &PlacedDab, gy: usize, x0: usize, out: &mut [f32]| {
                 // Turning a round tip changes nothing; squashing it does.
@@ -1695,6 +1710,9 @@ pub(crate) struct SoftTip<'a> {
     soft_luts: Vec<Option<std::sync::Arc<crate::brush_engine::hardness::CurveLut>>>,
     tips: std::borrow::Cow<'a, [PixelBrushShape]>,
     anti_aliasing: bool,
+    /// How many pixels an anti-aliased round or square tip's edge fades
+    /// over.
+    edge: f32,
     custom: bool,
     auto: crate::brush_engine::brush_options::AutoTip,
     auto_on: bool,
@@ -1778,6 +1796,7 @@ impl<'a> SoftTip<'a> {
             soft_luts,
             tips,
             anti_aliasing,
+            edge: brush.antialias_width.max(0.5),
             custom,
             auto,
             auto_on,
@@ -1986,7 +2005,7 @@ impl<'a> SoftTip<'a> {
                         matches!(shape, PixelBrushShape::Square),
                         softness_selector,
                         falloff,
-                        anti_aliasing,
+                        if anti_aliasing { self.edge } else { 0.0 },
                     );
                     if fade && a > 0.0 {
                         a * crate::brush_engine::brush_options::AutoTip::fade_with(

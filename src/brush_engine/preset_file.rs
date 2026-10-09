@@ -236,6 +236,7 @@ struct StoredBrush {
     pressure_curves: PressureCurves,
     pixel_perfect: bool,
     anti_aliasing: bool,
+    antialias_width: f32,
     jitter: f32,
     stabilizer: f32,
     stabilizer_algorithm: StabilizerAlgorithm,
@@ -267,6 +268,7 @@ struct StoredBrush {
     engines: crate::brush_engine::engines::Engines,
     impasto: Option<crate::canvas::impasto::Impasto>,
     wet: Option<crate::canvas::wet::WetPaint>,
+    stay_inside: bool,
     sharpness: f32,
     sharpness_softness: f32,
     mixing: Option<crate::brush_engine::brush_options::Mixing>,
@@ -357,6 +359,7 @@ impl StoredBrush {
             pressure_curves: o.pressure_curves.clone(),
             pixel_perfect: b.pixel_perfect,
             anti_aliasing: b.anti_aliasing,
+            antialias_width: b.antialias_width,
             jitter: b.jitter,
             stabilizer: b.stabilizer,
             stabilizer_algorithm: b.stabilizer_algorithm,
@@ -386,6 +389,7 @@ impl StoredBrush {
             engines: b.engines,
             impasto: b.impasto,
             wet: b.wet,
+            stay_inside: b.stay_inside,
             sharpness: b.sharpness,
             sharpness_softness: b.sharpness_softness,
             mixing: b.mixing,
@@ -454,6 +458,7 @@ impl StoredBrush {
         };
         b.pixel_perfect = self.pixel_perfect;
         b.anti_aliasing = self.anti_aliasing;
+        b.antialias_width = self.antialias_width;
         b.jitter = self.jitter;
         b.stabilizer = self.stabilizer;
         b.stabilizer_algorithm = self.stabilizer_algorithm;
@@ -490,6 +495,7 @@ impl StoredBrush {
         b.engines = self.engines;
         b.impasto = self.impasto;
         b.wet = self.wet;
+        b.stay_inside = self.stay_inside;
         b.sharpness = self.sharpness.clamp(0.0, 1.0);
         b.sharpness_softness = self.sharpness_softness.clamp(0.0, 1.0);
         b.mixing = self.mixing;
@@ -1003,8 +1009,16 @@ mod tests {
                 radius: 0.3,
                 ..Default::default()
             }),
+            load: 12.0,
+            keep_dirty: true,
+            sample_all: true,
         };
         brush.mixing = Some(mixing);
+        brush.antialias_width = 3.0;
+        brush.brush_options.blend_mode = BlendMode::Behind;
+        brush.dynamics.taper.percent = true;
+        brush.dynamics.random.purity = -0.5;
+        brush.stay_inside = true;
         brush.sharpness = 0.4;
         brush.brush_options.pressure_spacing = true;
         brush.dynamics.tip.random_flip_x = true;
@@ -1024,6 +1038,11 @@ mod tests {
         let back = decode(&encode(&[preset]).unwrap()).unwrap();
         let b = &back[0].brush;
         assert_eq!(b.mixing, Some(mixing));
+        assert_eq!(b.antialias_width, 3.0);
+        assert_eq!(b.brush_options.blend_mode, BlendMode::Behind);
+        assert!(b.dynamics.taper.percent);
+        assert_eq!(b.dynamics.random.purity, -0.5);
+        assert!(b.stay_inside);
         assert_eq!(b.sharpness, 0.4);
         assert!(b.brush_options.pressure_spacing);
         assert!(b.dynamics.tip.random_flip_x && !b.dynamics.tip.random_flip_y);

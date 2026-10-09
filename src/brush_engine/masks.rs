@@ -20,18 +20,19 @@ pub(crate) fn gaussian_falloff(t: f32, hardness_val: f32) -> f32 {
 /// A round or square tip's alpha at `(dx, dy)` from its centre, edged as
 /// Krita's auto brush tips are (`KisAntialiasingFadeMaker`). Anti-aliased,
 /// the last pixel inside the edge fades linearly from the falloff's value
-/// one pixel in to nothing at the edge (a square fades each side on its own);
-/// without, the falloff is cut off at the edge. `falloff` is the tip's
-/// alpha at a distance from 0 (centre) to 1 (edge).
+/// `edge` pixels in to nothing at the edge (a square fades each side on its
+/// own); without (`edge` 0), the falloff is cut off at the edge. `falloff`
+/// is the tip's alpha at a distance from 0 (centre) to 1 (edge).
 pub(super) fn auto_tip_alpha(
     (dx, dy): (f32, f32),
     radius: f32,
     square: bool,
     softness_selector: SoftnessSelector,
     falloff: impl Fn(f32) -> f32,
-    antialias: bool,
+    edge: f32,
 ) -> f32 {
-    let fade_start = (radius - 1.0).max(0.0);
+    let antialias = edge > 0.0;
+    let fade_start = (radius - edge).max(0.0);
     let fade_width = radius - fade_start;
     if square {
         let (ax, ay) = (dx.abs(), dy.abs());
@@ -82,7 +83,8 @@ mod tests {
 
     fn round(dx: f32, r: f32, aa: bool) -> f32 {
         let hard = |t| gaussian_falloff(t, 1.0);
-        auto_tip_alpha((dx, 0.0), r, false, SoftnessSelector::Gaussian, hard, aa)
+        let edge = if aa { 1.0 } else { 0.0 };
+        auto_tip_alpha((dx, 0.0), r, false, SoftnessSelector::Gaussian, hard, edge)
     }
 
     #[test]
@@ -97,7 +99,7 @@ mod tests {
         // A square fades each side on its own; the corner gets both.
         let sq = |dx, dy| {
             let hard = |t| gaussian_falloff(t, 1.0);
-            auto_tip_alpha((dx, dy), 10.0, true, SoftnessSelector::Gaussian, hard, true)
+            auto_tip_alpha((dx, dy), 10.0, true, SoftnessSelector::Gaussian, hard, 1.0)
         };
         assert!((sq(9.5, 0.0) - 0.5).abs() < 1e-6);
         assert!((sq(9.5, 9.5) - 0.25).abs() < 1e-6);
@@ -118,8 +120,27 @@ mod tests {
             false,
             SoftnessSelector::Gaussian,
             soft,
-            false,
+            0.0,
         );
         assert!(a > 0.0 && a < 1.0);
+    }
+
+    #[test]
+    fn a_stronger_anti_aliasing_fades_a_wider_edge() {
+        let hard = |t| gaussian_falloff(t, 1.0);
+        let at = |dx, edge| {
+            auto_tip_alpha(
+                (dx, 0.0),
+                10.0,
+                false,
+                SoftnessSelector::Gaussian,
+                hard,
+                edge,
+            )
+        };
+        // Three pixels: solid to 7, half way at 8.5.
+        assert_eq!(at(6.9, 3.0), 1.0);
+        assert!((at(8.5, 3.0) - 0.5).abs() < 1e-6);
+        assert!(at(8.5, 3.0) < at(8.5, 1.0));
     }
 }

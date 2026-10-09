@@ -101,6 +101,20 @@ fn several_tips_are_taken_in_turn() {
 }
 
 #[test]
+fn round_trip_tips_go_there_and_back() {
+    use crate::brush_engine::brush_options::TipOrder;
+    let used = tips_used(
+        &mut multi_tip(TipOrder::RoundTrip),
+        &along_x(40.0, 200.0, 20),
+        1,
+    );
+    assert!(used.len() >= 6);
+    for (i, &t) in used.iter().enumerate() {
+        assert_eq!(t as usize, [0, 1, 2, 1][i % 4], "{used:?}");
+    }
+}
+
+#[test]
 fn random_tips_use_every_tip_and_repeat_with_the_seed() {
     use crate::brush_engine::brush_options::TipOrder;
     let mut b = multi_tip(TipOrder::Random);

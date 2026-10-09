@@ -592,6 +592,7 @@ fn krita_paint_thickness_and_grey_levels_come_across() {
             ("PaintThicknessValue", "0.6"),
             ("PaintThicknessThicknessMode", "1"),
             ("PaintThicknessSensor", PRESSURE),
+            ("MergedPaint", "true"),
         ],
     );
     let imported = import_kpp(&brush, "file").unwrap();
@@ -599,6 +600,7 @@ fn krita_paint_thickness_and_grey_levels_come_across() {
     let b = &imported.presets[0].brush;
     let k = b.mixing.unwrap().krita.unwrap();
     assert_eq!((k.thickness, k.overwrite), (0.6, true));
+    assert!(b.mixing.unwrap().sample_all, "overlay mode");
     assert!(
         b.inputs
             .iter()

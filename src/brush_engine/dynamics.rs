@@ -82,6 +82,9 @@ pub struct Taper {
     pub opacity: bool,
     /// Size / opacity at the very tip of the taper (0..1).
     pub min: f32,
+    /// `start` and `end` are percentages of the stroke's length (Clip
+    /// Studio's): the whole stroke is redrawn tapered when the pen lifts.
+    pub percent: bool,
 }
 
 impl Default for Taper {
@@ -92,6 +95,7 @@ impl Default for Taper {
             size: true,
             opacity: false,
             min: 0.0,
+            percent: false,
         }
     }
 }
@@ -99,6 +103,17 @@ impl Default for Taper {
 impl Taper {
     pub fn is_active(&self) -> bool {
         (self.start > 0.0 || self.end > 0.0) && (self.size || self.opacity)
+    }
+
+    /// The start and end tapers' lengths in pixels, on a stroke `travel`
+    /// pixels long.
+    pub fn lengths(&self, travel: f32) -> (f32, f32) {
+        if self.percent {
+            let share = |p: f32| p.clamp(0.0, 100.0) / 100.0 * travel;
+            (share(self.start), share(self.end))
+        } else {
+            (self.start, self.end)
+        }
     }
 
     /// The factor at `along` pixels from the taper's far end (0 = the tip,
@@ -188,6 +203,9 @@ pub struct Randomness {
     pub saturation: f32,
     /// Value (lightness) randomness, 0..1.
     pub value: f32,
+    /// Purity: every dab's saturation moved by this much, -1 (grey) to 1
+    /// (full), as Photoshop's colour dynamics (not random).
+    pub purity: f32,
 }
 
 impl Randomness {
@@ -196,7 +214,7 @@ impl Randomness {
     }
 
     pub fn has_color(&self) -> bool {
-        self.hue > 0.0 || self.saturation > 0.0 || self.value > 0.0
+        self.hue > 0.0 || self.saturation > 0.0 || self.value > 0.0 || self.purity != 0.0
     }
 
     /// Dabs placed per step.
@@ -1012,6 +1030,14 @@ mod tests {
         let mid = taper.factor(25.0, 50.0);
         assert!(mid > 0.6 && mid < 1.0, "eased: {mid}");
         assert_eq!(taper.factor(10.0, 0.0), 1.0, "no taper");
+        // A share of a 400 px stroke.
+        let pct = Taper {
+            start: 10.0,
+            end: 25.0,
+            percent: true,
+            ..Taper::default()
+        };
+        assert_eq!(pct.lengths(400.0), (40.0, 100.0));
     }
 
     #[test]

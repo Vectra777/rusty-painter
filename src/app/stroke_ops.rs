@@ -424,6 +424,7 @@ impl PainterApp {
         if self.brush_state.brush.pixel_perfect {
             symmetry.center = (symmetry.center * 2.0).round() / 2.0;
         }
+        let inside = self.inside_lines(pos);
         self.stroke_worker.begin(StrokeSetup {
             canvas: Arc::clone(&self.canvas),
             brush,
@@ -435,6 +436,7 @@ impl PainterApp {
             wrap: self.workspace.wrap_around,
             perspective: self.perspective_grids(),
             wet_gravity: Vec2::from(self.workspace.wet_gravity),
+            inside,
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;
@@ -497,6 +499,30 @@ impl PainterApp {
             .layers
             .get(self.canvas.active_layer_idx)
             .is_some_and(|l| l.kind == crate::canvas::storage::LayerKind::Group)
+    }
+
+    /// For a brush that stays inside the lines, a stroke starting at `pos`:
+    /// where, and how the Fill tool finds areas. None without a reference
+    /// layer (with a note) or on a moved layer.
+    pub(crate) fn inside_lines(
+        &mut self,
+        pos: Vec2,
+    ) -> Option<(Vec2, crate::canvas::fill::FillSettings)> {
+        if !self.brush_state.brush.stay_inside {
+            return None;
+        }
+        if !self.canvas.has_reference_layer() {
+            self.export_state.message =
+                Some("Stay inside the lines: mark a reference layer in the Layers panel".into());
+            return None;
+        }
+        // ponytail: a moved (posed) layer paints unclipped; its area would
+        // need taking into the layer's own space, as its selection is.
+        let idx = self.canvas.active_layer_idx;
+        if self.canvas.layers.get(idx).is_some_and(|l| l.is_posed()) {
+            return None;
+        }
+        Some((pos, self.workspace.fill.settings))
     }
 
     fn is_active_layer_locked(&self) -> bool {

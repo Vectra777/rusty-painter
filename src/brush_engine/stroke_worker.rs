@@ -39,6 +39,43 @@ pub struct StrokeSetup {
     pub perspective: Vec<crate::brush_engine::dynamics::PerspectiveGrid>,
     /// Which way wet paint runs (canvas pixels, any length).
     pub wet_gravity: Vec2,
+    /// Stay inside the lines: where the pen went down and how the Fill
+    /// tool finds areas (see [`clip_inside_lines`]).
+    pub inside: Option<(Vec2, crate::canvas::fill::FillSettings)>,
+}
+
+/// Clip `selection` to the area at `pos` on the canvas's reference layers,
+/// as the Fill tool finds it with `settings` (a brush that stays inside
+/// the lines). Worked out on the stroke worker: a big area takes a while.
+pub fn clip_inside_lines(
+    canvas: &Canvas,
+    pool: &ThreadPool,
+    (pos, settings): (Vec2, crate::canvas::fill::FillSettings),
+    selection: &mut Option<SelectionManager>,
+) {
+    let reference = |x, y, w, h| {
+        canvas.render_sample(crate::canvas::storage::SampleLayers::Reference, x, y, w, h)
+    };
+    let seed = (pos.x.floor() as i32, pos.y.floor() as i32);
+    let area = pool.install(|| {
+        crate::canvas::fill::bucket_fill(
+            &reference,
+            canvas.width(),
+            canvas.height(),
+            seed,
+            &settings,
+        )
+    });
+    // (Off the canvas: nothing to stay in.)
+    let Some(mut area) = area else {
+        return;
+    };
+    if let Some(selection) = selection.as_ref() {
+        crate::app::tools::fill::clip_to(selection, &mut area);
+    }
+    *selection = Some(SelectionManager::with_shape(Some(
+        crate::selection::SelectionShape::Mask(Arc::new(area)),
+    )));
 }
 
 /// A stroke painted by its own engine, dab after dab, each seeing the last
@@ -513,7 +550,10 @@ fn run_job(
             hand_over_damage(stroke.as_mut(), shared);
             *sequential = Some(stroke);
         }
-        Job::Begin(setup) => {
+        Job::Begin(mut setup) => {
+            if let Some(inside) = setup.inside.take() {
+                clip_inside_lines(&setup.canvas, &setup.pool, inside, &mut setup.selection);
+            }
             let copies = setup.symmetry.copies();
             let seed = match tests_seed() {
                 Some(seed) => seed,
@@ -981,6 +1021,7 @@ mod tests {
             view_scale: 1.0,
             perspective: Vec::new(),
             wet_gravity: Vec2::new(0.0, 1.0),
+            inside: None,
             wrap: false,
         });
         for (pos, pressure) in samples() {
@@ -1033,6 +1074,7 @@ mod tests {
             view_scale: 1.0,
             perspective: Vec::new(),
             wet_gravity: Vec2::new(0.0, 1.0),
+            inside: None,
             wrap: false,
         });
         for &(pos, pressure) in samples {
@@ -1211,6 +1253,7 @@ mod tests {
                 view_scale: 1.0,
                 perspective: Vec::new(),
                 wet_gravity: Vec2::new(0.0, 1.0),
+                inside: None,
                 wrap: false,
             });
             worker.sample(Vec2::new(64.0, 64.0), 1.0);

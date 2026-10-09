@@ -1486,6 +1486,41 @@ mod merge_tests {
     }
 
     #[test]
+    fn a_brush_can_stay_inside_the_reference_lines() {
+        let mut app = test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        // Line art on layer 1: a square outline from 10 to 40.
+        let mut lines = vec![Color32::TRANSPARENT; 64 * 64];
+        for i in 10..=40 {
+            for (x, y) in [(i, 10), (i, 40), (10, i), (40, i)] {
+                lines[y * 64 + x] = Color32::BLACK;
+            }
+        }
+        app.canvas_mut().set_layer_tile_data(1, 0, 0, lines);
+        app.canvas_mut().layers[1].reference = true;
+        app.canvas_mut()
+            .insert_new_layer(2, "Colours".into(), LayerKind::Paint, None);
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        app.canvas_mut().active_layer_idx = 2;
+        app.workspace.fill.settings.expand = 0;
+        let b = &mut app.brush_state.brush;
+        b.stay_inside = true;
+        b.brush_options.color = Color32::GREEN;
+        b.brush_options.diameter = 12.0;
+        b.brush_options.hardness = 100.0;
+        b.brush_options.pressure_size = false;
+        // From inside the square right across its side.
+        app.start_stroke_with_pressure(Vec2::new(30.0, 25.0), 1.0);
+        app.add_stroke_point(Vec2::new(55.0, 25.0), 1.0);
+        app.finish_stroke();
+        app.settle_strokes();
+        let colours = app.canvas.get_layer_tile_data(2, 0, 0).unwrap();
+        assert_eq!(colours[25 * 64 + 35].a(), 255, "inside the lines");
+        assert_eq!(colours[25 * 64 + 50].a(), 0, "past the line");
+    }
+
+    #[test]
     fn layer_flags_survive_saving_and_opening() {
         let mut app = app();
         app.canvas_mut().layers[1].position_locked = true;

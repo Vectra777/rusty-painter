@@ -14,6 +14,15 @@
 - Filters, merges (down, visible, flatten) and fills run on the stroke worker, in order with the strokes: the window keeps drawing while a big blur works (the filter dialog closes at once), and undo, the layer panel and saving wait their turn.
 - The Smudge and Blur tools and mixing brushes paint big dabs across all cores and convert colours without a table lookup per pixel: a 200 px smudge stroke about 40% faster, blur 45%, deform, clone and sharpen 15–20%.
 
+### Brushes: what Clip Studio and Photoshop had
+- Stay inside the lines (Brush → Options), as Clip Studio's: a stroke paints only the area the pen goes down in, found on the reference layers as the Fill tool finds it (its tolerance, gap closing and spread), within the selection. Mixing brushes too.
+- Mixing brushes, as Photoshop's mixer: a paint load (the brush colour lasts so many brush widths, then the stroke runs dry and only smears what it carries), keeping the picked-up paint between strokes rather than cleaning the brush, and sampling all layers. The Smudge tool can smudge all layers too, and Krita's colour smudge presets bring their overlay mode.
+- Paint behind (Brush → Blend): the paint goes under what's on the layer, showing where it's see-through.
+- Tapers by percentage of the stroke (Clip Studio's): the whole stroke redrawn tapered when the pen lifts.
+- Several tips taken there and back (first to last and back again), as Clip Studio's round trip.
+- Purity (Brush → Randomness): every dab duller or purer, as Photoshop's.
+- Anti-aliasing off, weak, medium or strong: round and square tips' edges fading over one to three pixels, as Clip Studio's levels.
+
 ### Brushes: Krita's missing options
 - Colour mixing for any brush (Brush → Colour mixing), like Krita's Colour Smudge: smudge length and colour rate, each optionally by pressure. Krita's colour smudge presets import as mixing brushes.
 - Tips flipped at random (left-right, top-bottom), like Krita's Mirror option.

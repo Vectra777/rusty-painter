@@ -270,6 +270,9 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                     percent_of_unit(egui::Slider::new(v, 0.0..=1.0))
                 }),
             );
+            ui.add_space(6.0);
+            ui.checkbox(&mut b.smudge_merged, "All layers")
+                .on_hover_text("Smear what's visible onto this layer, not only this layer");
             "Drag to smear the paint  ·  Length: how far colour is carried  ·  Colour above 0: a wet brush mixing in the brush colour"
         }
         (true, SmudgeMode::Deform, _) => {

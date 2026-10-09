@@ -1047,3 +1047,73 @@ fn a_smudge_fades_smoothly_without_steps_at_each_dab() {
         .collect();
     assert!(dips.is_empty(), "steps {dips:?} in {row:?}");
 }
+
+#[test]
+fn a_mixing_brush_with_a_paint_load_runs_dry() {
+    use crate::brush_engine::brush_options::Mixing;
+    let end = |load: f32| {
+        let mut app = app(None);
+        app.active_tool = crate::app::tools::Tool::Brush;
+        app.brush_state.brush.mixing = Some(Mixing {
+            smudge_length: 0.5,
+            color_rate: 0.6,
+            load,
+            ..Default::default()
+        });
+        brush_drag(&mut app, 10.0, 110.0);
+        (pixel(&app, 20), pixel(&app, 100))
+    };
+    let (start, full) = end(0.0);
+    let (loaded, dry) = end(2.0);
+    assert!(start.a() > 120 && full.a() > 150, "{start:?} {full:?}");
+    // Two brush widths of colour: painted at the start, dry by the end.
+    assert!(loaded.a() > 100, "{loaded:?}");
+    assert!(dry.a() < 20, "ran dry: {dry:?}");
+}
+
+#[test]
+fn a_dirty_brush_starts_with_the_paint_it_picked_up() {
+    use crate::brush_engine::brush_options::Mixing;
+    let red = Color32::from_rgb(230, 30, 20);
+    let second = |keep_dirty: bool| {
+        let mut app = app(Some(red));
+        app.active_tool = crate::app::tools::Tool::Brush;
+        app.brush_state.brush.mixing = Some(Mixing {
+            smudge_length: 0.9,
+            color_rate: 0.2,
+            keep_dirty,
+            ..Default::default()
+        });
+        brush_drag(&mut app, 10.0, 110.0);
+        // A clean layer for the next stroke.
+        for tx in 0..2 {
+            app.canvas_mut()
+                .set_layer_tile_data(1, tx, 0, vec![Color32::TRANSPARENT; 64 * 64]);
+        }
+        brush_drag(&mut app, 10.0, 110.0);
+        pixel(&app, 20)
+    };
+    let (clean, dirty) = (second(false), second(true));
+    assert!(
+        dirty.r() > clean.r() + 40,
+        "red carried over: {dirty:?} vs {clean:?}"
+    );
+}
+
+#[test]
+fn smudging_all_layers_lays_what_shows_on_this_one() {
+    let red = Color32::from_rgb(230, 30, 20);
+    let smudged = |merged: bool| {
+        let mut app = app(None);
+        for tx in 0..2 {
+            app.canvas_mut()
+                .set_layer_tile_data(0, tx, 0, vec![red; 64 * 64]);
+        }
+        app.workspace.blend.smudge_merged = merged;
+        drag(&mut app);
+        pixel(&app, 60)
+    };
+    assert_eq!(smudged(false).a(), 0, "this layer has nothing to smudge");
+    let p = smudged(true);
+    assert!(p.a() > 200 && p.r() > 200, "red from below: {p:?}");
+}

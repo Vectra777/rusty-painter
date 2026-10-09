@@ -121,7 +121,7 @@ fn chord_never_cuts_off_covered_pixels() {
     // sub-pixel offsets and rows: every non-zero pixel must be inside the
     // chord, and the values inside must be identical.
     for &r in &[0.6_f32, 1.0, 2.3, 7.5, 31.0, 120.25] {
-        let tip = GaussianTip::new(r, 0.4);
+        let tip = GaussianTip::new(r, 0.4, 1.0);
         let len = (2 * tip.r_ceil + 3) as usize;
         for step in 0..7 {
             let frac = step as f32 / 7.0;
@@ -549,7 +549,7 @@ fn pixel_brush_honors_opacity_and_flow() {
 fn gaussian_tip_matches_soft_brush_formula() {
     let r = 12.0;
     let hardness = 0.2;
-    let tip = GaussianTip::new(r, hardness);
+    let tip = GaussianTip::new(r, hardness, 1.0);
     let (frac_x, frac_y) = (0.25, 0.5);
     let my = 12usize;
     let pdy = my as f32 - 12.0 + 0.5 - frac_y;
@@ -565,7 +565,7 @@ fn gaussian_tip_matches_soft_brush_formula() {
             false,
             SoftnessSelector::Gaussian,
             soft,
-            true,
+            1.0,
         );
         assert!((alpha - expected).abs() <= 1e-5, "mx={mx}");
     }
@@ -575,7 +575,7 @@ fn gaussian_tip_matches_soft_brush_formula() {
 fn gaussian_tip_kernels_match_scalar_reference() {
     for hardness in [0.0, 0.2, 0.5, 0.99, 1.0] {
         for r in [0.6_f32, 3.0, 12.0, 40.5] {
-            let tip = GaussianTip::new(r, hardness);
+            let tip = GaussianTip::new(r, hardness, 1.0);
             let side = (2 * tip.r_ceil + 1) as usize;
             for (frac_x, frac_y) in [(0.0, 0.0), (0.3125, 0.9375), (0.5, 0.0625)] {
                 for my in 0..side {
@@ -703,4 +703,49 @@ fn a_tile_painted_in_bands_matches_it_painted_whole() {
         assert!(whole.iter().any(|t| t.is_some()), "it painted");
         assert!(whole == paint(false));
     }
+}
+
+#[test]
+fn painting_behind_fills_only_what_shows_through() {
+    use crate::brush_engine::stroke::{StrokeContext, StrokeState, StrokeTiles};
+    use crate::canvas::history::UndoAction;
+    let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    // Red line art down the left half, half see-through at column 31.
+    let mut px = vec![Color32::TRANSPARENT; 64 * 64];
+    for y in 0..64 {
+        for x in 0..32 {
+            px[y * 64 + x] = if x == 31 {
+                Color32::from_rgba_premultiplied(100, 0, 0, 128)
+            } else {
+                Color32::from_rgb(200, 0, 0)
+            };
+        }
+    }
+    canvas.set_layer_tile_data(1, 0, 0, px.clone());
+    let mut brush = Brush::new(40.0, 100.0, Color32::from_rgb(0, 0, 255), 10.0);
+    brush.brush_options.blend_mode = BlendMode::Behind;
+    let mut undo = UndoAction {
+        tiles: Vec::new(),
+        selection: None,
+        transform: None,
+        layer_action: None,
+    };
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::new();
+    let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+    stroke.add_point(&mut brush, Vec2::new(32.0, 32.0), 1.0, &mut ctx);
+    stroke.finish(&mut brush, &mut ctx);
+    let out = canvas.get_layer_tile_data(1, 0, 0).unwrap();
+    assert_eq!(out[32 * 64 + 20], px[32 * 64 + 20], "opaque line art kept");
+    assert_eq!(
+        out[32 * 64 + 40],
+        Color32::from_rgb(0, 0, 255),
+        "blue behind"
+    );
+    // Half see-through: the red stays as it was, blue fills the rest.
+    let edge = out[32 * 64 + 31];
+    assert_eq!(edge.a(), 255);
+    assert!((99..=101).contains(&edge.r()) && edge.b() > 100, "{edge:?}");
 }

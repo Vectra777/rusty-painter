@@ -12,7 +12,7 @@ Engines not here yet
 
 Krita engines that came across approximately (from reading Krita's source)
 
-- Colour smudge, legacy algorithm: Krita presets default to it (SmudgeRateUseNewEngine off); here every preset uses the new one's formulas, so older smudge presets mix differently. Also missing: the overlay mode (smudging all layers).
+- Colour smudge, legacy algorithm: Krita presets default to it (SmudgeRateUseNewEngine off); here every preset uses the new one's formulas, so older smudge presets mix differently.
 - Spray: per-particle colour sampled from the layer, particle shapes other than the tip, particles turning with the cursor or the drawing angle.
 - Grid: line shapes.
 - Curve: Krita's cubic mode; its connection line is the pen's own segment, here from the curve's start to the pen.

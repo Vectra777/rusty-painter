@@ -27,6 +27,21 @@ fn tapers_thin_both_ends() {
 }
 
 #[test]
+fn tapers_by_percentage_thin_both_ends_when_the_pen_lifts() {
+    let mut d = tapered(30.0, 30.0);
+    d.taper.percent = true;
+    let mut b = brush(d);
+    let (drawing, _) = paint(&mut b, &line(64.0, 0.5), 1, false);
+    let (done, _) = paint(&mut b, &line(64.0, 0.5), 1, true);
+    let mid = thickness(&done, 128);
+    assert!((18..=21).contains(&mid), "full width in the middle: {mid}");
+    // The stroke's length is only known once it's down.
+    assert_eq!(thickness(&drawing, 26), mid, "untapered while drawing");
+    assert!(thickness(&done, 26) < mid / 2, "thin start");
+    assert!(thickness(&done, 230) < mid / 2, "thin end");
+}
+
+#[test]
 fn the_end_reaches_the_pen_until_it_lifts() {
     let mut b = brush(tapered(0.0, 60.0));
     let (drawing, _) = paint(&mut b, &line(64.0, 0.5), 1, false);
@@ -285,6 +300,7 @@ fn the_general_resolve_matches_the_fast_one_in_normal_mode() {
         color,
         0.8,
         LayerBlend::Normal,
+        false,
         BlendSpace::Linear,
         [3, 7],
     );

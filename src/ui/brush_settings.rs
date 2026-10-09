@@ -2,7 +2,9 @@
 //! stabiliser.
 
 use crate::brush_engine::brush::{Brush, BrushType, StabilizerAlgorithm};
-use crate::brush_engine::brush_options::{PaintingMode, PixelBrushShape, Placement, TipOrder};
+use crate::brush_engine::brush_options::{
+    BlendMode, PaintingMode, PixelBrushShape, Placement, TipOrder,
+};
 use crate::brush_engine::hardness::SoftnessSelector;
 use crate::ui::style::*;
 use crate::ui::widgets::{percent_of_unit, property_row, section, segmented, slider_row};
@@ -611,6 +613,25 @@ fn brush_settings_contents(
                      Screen and Add (Linear Dodge) lighten and glow, Overlay adds contrast.",
                 );
         });
+        let mode = &mut brush.brush_options.blend_mode;
+        if *mode != BlendMode::Eraser {
+            let mut behind = *mode == BlendMode::Behind;
+            if ui
+                .checkbox(&mut behind, "Paint behind")
+                .on_hover_text(
+                    "The paint goes under what's on the layer, showing only where it's \
+                     see-through: colouring under line art on the same layer.",
+                )
+                .changed()
+            {
+                *mode = if behind {
+                    BlendMode::Behind
+                } else {
+                    BlendMode::Normal
+                };
+                changed = true;
+            }
+        }
     });
 
     changed |= color_source_section(ui, &mut brush.brush_options.color_source, textures);
@@ -660,6 +681,36 @@ fn brush_settings_contents(
             changed |= ui.toggle_value(&mut m.pressure_length, "Length").changed();
             changed |= ui.toggle_value(&mut m.pressure_color, "Colour").changed();
         });
+        changed |= slider_row(
+            ui,
+            "Paint load",
+            crate::ui::widgets::reset(&mut m.load, |v| {
+                egui::Slider::new(v, 0.0..=100.0)
+                    .max_decimals(0)
+                    .suffix(" widths")
+            }),
+        )
+        .on_hover_text(
+            "How far the brush's own colour lasts, in brush widths: the stroke runs dry \
+             on the way and only smears what it carries (0: never runs out).",
+        )
+        .changed();
+        changed |= ui
+            .checkbox(&mut m.sample_all, "Sample all layers")
+            .on_hover_text(
+                "Pick up the paint every visible layer shows, not only this layer's (it's \
+                 still laid on this layer): blending on a layer of its own.",
+            )
+            .changed();
+        if m.krita.is_none() {
+            changed |= ui
+                .checkbox(&mut m.keep_dirty, "Keep the paint between strokes")
+                .on_hover_text(
+                    "The paint the brush picked up stays on it for the next stroke, rather \
+                     than the brush being cleaned after each.",
+                )
+                .changed();
+        }
         let mut krita = m.krita.is_some();
         if ui
             .checkbox(&mut krita, "Krita's colour smudge")
@@ -1053,19 +1104,40 @@ fn brush_settings_contents(
 
     section(ui, "Options", false, |ui| {
         changed |= ui
+            .checkbox(&mut brush.stay_inside, "Stay inside the lines")
+            .on_hover_text(
+                "Paint only the area the pen goes down in, as the Fill tool finds it on the \
+                 reference layers (with its tolerance, gap closing and spread): colouring \
+                 line art without going over.",
+            )
+            .changed();
+        changed |= ui
             .checkbox(&mut brush.pixel_perfect, "Pixel-perfect lines")
             .on_hover_text(
                 "For thin pixel-art lines: drops the extra pixel at each corner so a \
                  1-px line never doubles up into L-shaped clumps.",
             )
             .changed();
-        changed |= ui
-            .checkbox(&mut brush.anti_aliasing, "Anti-aliasing")
-            .on_hover_text(
-                "Smooth, partly transparent edge pixels (on), or hard all-or-nothing \
-                 edges (off). Soft brushes want it on; pixel art usually off.",
-            )
-            .changed();
+        property_row(ui, "Anti-aliasing", |ui| {
+            // Hard all-or-nothing edges (pixel art), or a round or square
+            // tip's edge fading over 1, 2 or 3 pixels.
+            let level = if brush.anti_aliasing {
+                brush.antialias_width.round().clamp(1.0, 3.0) as u8
+            } else {
+                0
+            };
+            let mut picked = level;
+            changed |= segmented(
+                ui,
+                &mut picked,
+                &[(0, "Off"), (1, "Weak"), (2, "Medium"), (3, "Strong")],
+                false,
+            );
+            if picked != level {
+                brush.anti_aliasing = picked > 0;
+                brush.antialias_width = picked.max(1) as f32;
+            }
+        });
     });
 
     if size_changed {
@@ -1150,14 +1222,25 @@ fn dynamics_sections(
     });
     section(ui, "Taper & speed", false, |ui| {
         let t = &mut d.taper;
+        property_row(ui, "Taper by", |ui| {
+            let was = t.percent;
+            changed |= segmented(
+                ui,
+                &mut t.percent,
+                &[(false, "Length"), (true, "% of stroke")],
+                false,
+            );
+            if t.percent != was {
+                // Keep the sliders in range.
+                t.start = t.start.min(100.0);
+                t.end = t.end.min(100.0);
+            }
+        });
+        let percent = t.percent;
         changed |= slider_row(
             ui,
             "Taper in",
-            crate::ui::widgets::reset(&mut t.start, |v| {
-                egui::Slider::new(v, 0.0..=400.0)
-                    .max_decimals(0)
-                    .suffix(" px")
-            }),
+            crate::ui::widgets::reset(&mut t.start, |v| taper_slider(v, percent)),
         )
         .on_hover_text("Length over which the stroke's start grows to full.")
         .changed();
@@ -1166,11 +1249,7 @@ fn dynamics_sections(
                 slider_row(
                     ui,
                     "Taper out",
-                    crate::ui::widgets::reset(&mut t.end, |v| {
-                        egui::Slider::new(v, 0.0..=400.0)
-                            .max_decimals(0)
-                            .suffix(" px")
-                    }),
+                    crate::ui::widgets::reset(&mut t.end, |v| taper_slider(v, percent)),
                 )
                 .on_hover_text(
                     "Length over which the stroke's end thins out when the pen lifts. The \
@@ -1265,6 +1344,18 @@ fn dynamics_sections(
             }),
         )
         .on_hover_text("Each dab is randomly lighter or darker by up to this much.")
+        .changed();
+        changed |= slider_row(
+            ui,
+            "Purity",
+            crate::ui::widgets::reset(&mut r.purity, |v| {
+                percent_of_unit(egui::Slider::new(v, -1.0..=1.0))
+            }),
+        )
+        .on_hover_text(
+            "Every dab's colour made duller (below 0, grey at -100%) or purer (above 0), \
+             as Photoshop's Purity. Not random.",
+        )
         .changed();
         let mut count = r.count.max(1);
         if slider_row(
@@ -1516,6 +1607,20 @@ fn sketch_section(ui: &mut egui::Ui, s: &mut crate::brush_engine::sketch::Sketch
 }
 
 /// A share, 0 to `max`, as a percentage.
+/// A taper's length: pixels, or a percentage of the stroke (the whole
+/// stroke redrawn tapered when the pen lifts).
+fn taper_slider(v: &mut f32, percent: bool) -> egui::Slider<'_> {
+    if percent {
+        egui::Slider::new(v, 0.0..=100.0)
+            .max_decimals(0)
+            .suffix("%")
+    } else {
+        egui::Slider::new(v, 0.0..=400.0)
+            .max_decimals(0)
+            .suffix(" px")
+    }
+}
+
 fn unit(v: &mut f32, max: f32) -> egui::Slider<'_> {
     percent_of_unit(egui::Slider::new(v, 0.0..=max))
 }

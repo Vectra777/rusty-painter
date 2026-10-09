@@ -38,11 +38,14 @@ pub enum TipOrder {
     Pressure,
     /// By the direction the stroke goes, the turn split between the tips.
     Direction,
+    /// First to last and back again (Clip Studio's round trip).
+    RoundTrip,
 }
 
 impl TipOrder {
-    pub const ALL: [TipOrder; 4] = [
+    pub const ALL: [TipOrder; 5] = [
         Self::Sequence,
+        Self::RoundTrip,
         Self::Random,
         Self::Pressure,
         Self::Direction,
@@ -54,6 +57,7 @@ impl TipOrder {
             Self::Random => "Random",
             Self::Pressure => "Pressure",
             Self::Direction => "Direction",
+            Self::RoundTrip => "There and back",
         }
     }
 }
@@ -153,6 +157,17 @@ pub struct Mixing {
     pub pressure_length: bool,
     /// Pen pressure scales the colour rate.
     pub pressure_color: bool,
+    /// Paint load: how many brush widths the brush's own colour lasts,
+    /// the colour rate running down to nothing on the way, so the stroke
+    /// runs dry (Photoshop's Load); 0 never runs out.
+    pub load: f32,
+    /// The paint picked up stays on the brush for the next stroke, rather
+    /// than the brush being cleaned after each (Photoshop's).
+    pub keep_dirty: bool,
+    /// Pick up paint from every visible layer, not only this one (it's
+    /// still laid on this one): Photoshop's sample all layers, Krita's
+    /// overlay mode.
+    pub sample_all: bool,
     /// An imported brush's own colour smudge, instead of this app's:
     /// `smudge_length` is then its smudge rate.
     pub krita: Option<KritaSmudge>,
@@ -165,6 +180,9 @@ impl Default for Mixing {
             color_rate: 0.5,
             pressure_length: false,
             pressure_color: false,
+            load: 0.0,
+            keep_dirty: false,
+            sample_all: false,
             krita: None,
         }
     }
@@ -418,6 +436,9 @@ impl ColorSource {
 pub enum BlendMode {
     Normal,
     Eraser,
+    /// Paint only shows through where the layer is see-through, as if
+    /// painted on the back of it (colouring under line art).
+    Behind,
 }
 
 /// How a stroke's dabs combine.

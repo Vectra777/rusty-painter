@@ -64,6 +64,8 @@ pub struct BlendToolSettings {
     pub clone_aligned: bool,
     /// Clone: copy what's visible (all layers) rather than this layer.
     pub clone_merged: bool,
+    /// Smudge: pick up what's visible (all layers), laying it on this one.
+    pub smudge_merged: bool,
     /// Clone: the offset kept while aligned, from the first stroke.
     #[serde(skip)]
     clone_offset: Option<Vec2>,
@@ -87,6 +89,7 @@ impl Default for BlendToolSettings {
             clone_source: None,
             clone_aligned: true,
             clone_merged: false,
+            smudge_merged: false,
             clone_offset: None,
         }
     }
@@ -193,10 +196,22 @@ struct SmudgeMix {
     from_brush: bool,
     /// An imported brush's own colour smudge, instead of this app's.
     krita: Option<crate::brush_engine::brush_options::KritaSmudge>,
+    /// Pick up from all visible layers.
+    sample_all: bool,
+    /// Brush widths the brush colour lasts (0: for ever).
+    load: f32,
+    /// Where the brush's paint is kept from stroke to stroke, when it
+    /// isn't cleaned after each.
+    dirty: Option<Arc<DirtyBrush>>,
 }
 
+/// The paint a mixing brush still carries from its last stroke.
+#[derive(Default)]
+pub struct DirtyBrush(std::sync::Mutex<Vec<Option<Carry>>>);
+
 /// A patch of carried paint (linear premultiplied, 0..1 per channel).
-struct Carry {
+#[derive(Clone)]
+pub struct Carry {
     side: usize,
     px: Vec<[f32; 4]>,
 }
@@ -229,6 +244,9 @@ pub struct BlendSession {
     dabber: Option<Box<Dabber>>,
     /// The space the paint is mixed in.
     codec: Codec,
+    /// A mixing brush that stays inside the lines: where it went down
+    /// (see [`crate::brush_engine::stroke_worker::clip_inside_lines`]).
+    inside: Option<(Vec2, crate::canvas::fill::FillSettings)>,
 }
 
 /// The dabs of a smudge, placed and varied as the brush's own strokes'
@@ -276,6 +294,10 @@ struct BlendStroke {
     /// itself), and where its last dab was.
     carries: Vec<Option<Carry>>,
     smudge_last: Vec<Option<Vec2>>,
+    /// What the brush carried when the stroke started (a dirty brush).
+    carries_at_start: Vec<Option<Carry>>,
+    /// Brush widths of colour spent (a paint load).
+    spent: f32,
     /// Mirror painting for this stroke.
     symmetry: crate::brush_engine::symmetry::Symmetry,
     copies: Vec<crate::brush_engine::symmetry::Copy2>,
@@ -301,6 +323,22 @@ struct BlendStroke {
     /// 16-bit copy of the layer: a faint dab builds up rather than each
     /// rounding away.
     precise: HashMap<(i32, i32), Vec<[f32; 4]>>,
+}
+
+impl BlendStroke {
+    /// The share of a paint load left for a dab of the stroke (1 without
+    /// one), counting the brush widths of a dab `spacing`% apart as spent.
+    fn paint_left(&mut self, copy: usize, spacing: f32) -> f32 {
+        if self.mix.load <= 0.0 {
+            return 1.0;
+        }
+        let left = (1.0 - self.spent / self.mix.load).max(0.0);
+        // (Mirror copies share the stroke's.)
+        if copy == 0 {
+            self.spent += spacing.max(1.0) / 100.0;
+        }
+        left
+    }
 }
 
 #[inline]
@@ -825,6 +863,9 @@ impl PainterApp {
             blend: crate::canvas::blend_modes::LayerBlend::Normal,
             from_brush: false,
             krita: None,
+            sample_all: b.smudge_merged,
+            load: 0.0,
+            dirty: None,
         };
         self.blend_begin(pos, pressure, None, mix);
     }
@@ -844,6 +885,11 @@ impl PainterApp {
             blend: brush.paint_blend,
             from_brush: true,
             krita: m.krita,
+            sample_all: m.sample_all,
+            load: m.load.max(0.0),
+            dirty: m
+                .keep_dirty
+                .then(|| Arc::clone(&self.brush_state.dirty_brush)),
         };
         self.blend_begin(pos, pressure, Some(BlendKind::Smudge), mix);
     }
@@ -944,7 +990,18 @@ impl PainterApp {
                 first: (pos, pressure),
             })
         });
+        // A dirty brush starts with what it carried.
+        let carries = match &mix.dirty {
+            Some(d) => std::mem::take(&mut *d.0.lock().unwrap_or_else(|e| e.into_inner())),
+            None => Vec::new(),
+        };
+        let inside = if mix.from_brush {
+            self.inside_lines(pos)
+        } else {
+            None
+        };
         let session = BlendSession {
+            inside,
             canvas: Arc::clone(&self.canvas),
             pool: Arc::clone(&self.workspace.pool),
             selection: self.selection_manager.has_selection().then(|| {
@@ -965,8 +1022,10 @@ impl PainterApp {
                 last: Some(pos),
                 last_pressure: pressure,
                 travelled: 0.0,
-                carries: Vec::new(),
+                carries: carries.clone(),
                 smudge_last: Vec::new(),
+                carries_at_start: carries,
+                spent: 0.0,
                 symmetry: self.workspace.symmetry,
                 copies: self.workspace.symmetry.copies(),
                 filtered: HashMap::new(),
@@ -1010,6 +1069,14 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
         let Some(pos) = self.stroke.last else {
             return;
         };
+        if let Some(inside) = self.inside.take() {
+            crate::brush_engine::stroke_worker::clip_inside_lines(
+                &self.canvas,
+                &self.pool,
+                inside,
+                &mut self.selection,
+            );
+        }
         let pressure = self.stroke.last_pressure;
         if self.dabber.is_some() {
             let dabs = self.place(|stroke, brush, context| {
@@ -1094,6 +1161,10 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
             self.correct();
             let dabs = self.place(|stroke, brush, context| stroke.finish(brush, context));
             self.lay(dabs);
+        }
+        if let Some(d) = &self.stroke.mix.dirty {
+            *d.0.lock().unwrap_or_else(|e| e.into_inner()) =
+                std::mem::take(&mut self.stroke.carries);
         }
         if self.stroke.before.is_empty() && self.stroke.lightness_before.is_empty() {
             return None;
@@ -1265,8 +1336,9 @@ impl BlendSession {
                 self.damage.push([x, y, x + ts as i32, y + ts as i32]);
             }
         }
-        self.stroke.carries.clear();
+        self.stroke.carries = self.stroke.carries_at_start.clone();
         self.stroke.smudge_last.clear();
+        self.stroke.spent = 0.0;
         self.stroke.krita_last.clear();
         self.stroke.precise.clear();
         self.stroke.random = 0x9e37_79b9;
@@ -1474,6 +1546,7 @@ impl BlendSession {
         };
         // A mixing brush's inputs scale its smudge length and colour rate.
         let (by_length, by_rate) = placed.map_or((1.0, 1.0), |p| (p.dab.smudge, p.dab.color_rate));
+        let left = self.stroke.paint_left(copy, o.spacing);
         let mix = &self.stroke.mix;
         let by_pressure = |on: bool| if on { pressure.clamp(0.0, 1.0) } else { 1.0 };
         // (Per dab: the dabs overlapping pick up again the paint the brush
@@ -1483,8 +1556,9 @@ impl BlendSession {
         // Brush colour added per brush width travelled, whatever the
         // spacing: per dab, the share that compounds to it over one width.
         let rate = (mix.color_rate * by_pressure(mix.pressure_color) * by_rate).clamp(0.0, 1.0);
-        let color_rate = 1.0 - (1.0 - rate).powf(gap);
+        let color_rate = 1.0 - (1.0 - rate * left).powf(gap);
         let paint_blend = mix.blend;
+        let sample_all = mix.sample_all;
 
         // The pixels as stored (kept exactly where the dab doesn't reach),
         // and as paint; blurring, also blurred.
@@ -1497,6 +1571,14 @@ impl BlendSession {
             }
             BlendKind::Smudge => {
                 let (stored, under, picked) = self.smudge_patch((x0, y0), side, center, copy);
+                // What the brush picks up: this layer, or all of them.
+                // ponytail: all of them only under the dab, not swept
+                // along the way as one layer is.
+                let picked = if sample_all {
+                    self.read_merged((x0, y0), side)
+                } else {
+                    picked
+                };
                 (stored, under, Some(picked))
             }
             _ => {
@@ -1882,6 +1964,13 @@ impl BlendSession {
         (stored, patch_block(&paint, wide, inside).into_owned(), soft)
     }
 
+    /// What all the visible layers show over the `side`² patch at
+    /// `origin`, as paint in the stroke's space.
+    fn read_merged(&self, origin: (i32, i32), side: usize) -> Vec<[f32; 4]> {
+        let patch = read_patch(&self.canvas, None, origin, side, side, self.wrap);
+        patch.into_iter().map(|c| self.codec.to_f(c)).collect()
+    }
+
     /// The layer over the `w`×`h` rectangle at `origin` (round the edges
     /// with wrap-around): its pixels as stored (an 8-bit document's, else
     /// none), and as paint in the stroke's space. What the stroke has
@@ -1949,7 +2038,8 @@ impl BlendSession {
         let legacy = k.legacy && !brush.lays_lightness();
         let by = |on: bool| if on { p } else { 1.0 };
         let rate = m.smudge_length * by(m.pressure_length) * placed.dab.smudge;
-        let color_rate = m.color_rate * by(m.pressure_color) * placed.dab.color_rate;
+        let left = self.stroke.paint_left(copy, brush.brush_options.spacing);
+        let color_rate = m.color_rate * by(m.pressure_color) * placed.dab.color_rate * left;
         // How much of what's picked up goes over the layer, how much brush
         // colour then, and how much of the result is put down.
         let (smear, colour, laid) = if legacy {
@@ -1993,7 +2083,12 @@ impl BlendSession {
         let spans = spans_of(&mask, side);
         let (stored, under) = self.read_layer((x0, y0), side, side);
         let from = (x0 + last.0 - at.0, y0 + last.1 - at.1);
-        let source = self.read_layer(from, side, side).1;
+        // (Overlay mode: what all the layers show there.)
+        let source = if self.stroke.mix.sample_all {
+            self.read_merged(from, side)
+        } else {
+            self.read_layer(from, side, side).1
+        };
         // Dulling: one colour sampled where the last dab was.
         let dulled = k.dulling.then(|| {
             if legacy {

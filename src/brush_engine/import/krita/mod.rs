@@ -257,6 +257,9 @@ fn read_kpp(
                 },
                 pressure_length: yes("PressureSmudgeRate") && by_pressure("SmudgeRateSensor"),
                 pressure_color: yes("PressureColorRate") && by_pressure("ColorRateSensor"),
+                // Overlay mode: smudging what all the layers show.
+                sample_all: param("MergedPaint") == Some("true"),
+                ..Default::default()
             });
             // Any sensor but pressure alone: all of them as inputs (and
             // together as the preset combines them).

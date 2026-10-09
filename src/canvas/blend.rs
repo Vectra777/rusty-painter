@@ -483,7 +483,8 @@ pub(crate) fn resolve_stroke_normal(
 /// (`colors[i]`, unmultiplied in the document's blend space, or `color`'s
 /// everywhere) blended onto them with `mode` at each pixel's `coverage` ×
 /// `cap`. Slower than [`resolve_stroke_normal`]; for brushes with a blend
-/// mode or colour randomness. Pixels with no coverage are left untouched.
+/// mode or colour randomness. `behind`: the stroke goes under the pixels
+/// instead (`mode` unused). Pixels with no coverage are left untouched.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_stroke_general(
     original: &[Color32],
@@ -493,10 +494,11 @@ pub(crate) fn resolve_stroke_general(
     color: StrokeColor,
     cap: f32,
     mode: crate::canvas::blend_modes::LayerBlend,
+    behind: bool,
     space: crate::canvas::blend_modes::BlendSpace,
     origin: [u32; 2],
 ) {
-    use crate::canvas::blend_modes::{BlendSpace, composite, pixel_noise};
+    use crate::canvas::blend_modes::{BlendSpace, LayerBlend, composite, pixel_noise};
     let luts = Luts::get();
     let dither = dither_table();
     let linear = space == BlendSpace::Linear;
@@ -515,7 +517,11 @@ pub(crate) fn resolve_stroke_general(
             gamma.read(src)
         };
         let x = origin[0] + i as u32;
-        let mixed = composite(mode, stroke, below, pixel_noise(x, origin[1]));
+        let mixed = if behind {
+            composite(LayerBlend::Normal, below, stroke, 0.0)
+        } else {
+            composite(mode, stroke, below, pixel_noise(x, origin[1]))
+        };
         *dst = if linear {
             // Opaque stays exactly opaque; soft alpha is dithered (see
             // `dither_at`).
@@ -544,6 +550,10 @@ pub(crate) enum DeepStroke<'a> {
     /// differ: unmultiplied, in the document's blend space).
     Paint {
         mode: crate::canvas::blend_modes::LayerBlend,
+        colors: Option<&'a [[f32; 3]]>,
+    },
+    /// Painting under the pixels (see [`resolve_stroke_general`]).
+    Behind {
         colors: Option<&'a [[f32; 3]]>,
     },
     Erase,
@@ -586,6 +596,16 @@ pub(crate) fn resolve_stroke_deep(
             // Erasing fades the alpha and keeps the colour (scaling the
             // premultiplied pixel, in either space).
             DeepStroke::Erase => below.map(|v| v * (1.0 - a)),
+            DeepStroke::Behind { colors } => {
+                let c = colors.map_or(base, |c| c[k]);
+                let k = a * (1.0 - below[3]);
+                [
+                    below[0] + c[0] * k,
+                    below[1] + c[1] * k,
+                    below[2] + c[2] * k,
+                    below[3] + k,
+                ]
+            }
             DeepStroke::Paint { mode, colors } => {
                 let c = colors.map_or(base, |c| c[k]);
                 if mode == LayerBlend::Normal {

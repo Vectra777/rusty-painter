@@ -1322,10 +1322,16 @@ impl StrokeState {
             }
             let taper = brush.dynamics.taper;
             let end = self.travel;
+            let (start_len, end_len) = taper.lengths(end);
             let mut tail = std::mem::take(&mut self.tail);
             self.newer_from = 0;
             for plan in &mut tail {
-                let f = taper.factor(end - plan.along, taper.end);
+                let mut f = taper.factor(end - plan.along, end_len);
+                // By percentage, the whole stroke is the tail: its start
+                // too, now that its length is known.
+                if taper.percent {
+                    f *= taper.factor(plan.along, start_len);
+                }
                 if taper.size {
                     plan.var.scale *= f;
                 }
@@ -1439,7 +1445,7 @@ impl StrokeState {
             pressure,
             ..DabVar::default()
         };
-        if d.taper.is_active() && d.taper.start > 0.0 {
+        if d.taper.is_active() && d.taper.start > 0.0 && !d.taper.percent {
             let f = d.taper.factor(dab.along, d.taper.start);
             if d.taper.size {
                 v.scale *= f;
@@ -1472,6 +1478,7 @@ impl StrokeState {
         if r.has_color() {
             let mut spread = |amount: f32| (self.rng.random::<f32>() * 2.0 - 1.0) * amount;
             v.hsv = [spread(r.hue), spread(r.saturation), spread(r.value)];
+            v.hsv[1] += r.purity;
         }
         if brush.brush_options.color_source
             == crate::brush_engine::brush_options::ColorSource::UniformRandom
@@ -1587,6 +1594,12 @@ impl StrokeState {
                 self.next_tip = self.next_tip.wrapping_add(1);
                 tip
             }
+            TipOrder::RoundTrip => {
+                // 0 1 2 1 0 1 …: a period of 2n - 2.
+                let k = self.next_tip % (2 * n - 2);
+                self.next_tip = self.next_tip.wrapping_add(1);
+                k.min(2 * n - 2 - k)
+            }
             TipOrder::Random => self.rng.random_range(0..n),
             TipOrder::Pressure => share(pressure.clamp(0.0, 1.0)),
             TipOrder::Direction => {
@@ -1678,7 +1691,15 @@ impl StrokeState {
             }
         }
         let taper = brush.dynamics.taper;
-        let end = if taper.is_active() { taper.end } else { 0.0 };
+        // ponytail: by percentage the whole stroke stays redrawable (its
+        // length is only known when the pen lifts), so a long stroke's
+        // lift redraws all of it; the tail's two segments would need
+        // sizing as the stroke grows to do better.
+        let end = match taper.is_active() {
+            true if taper.percent => f32::INFINITY,
+            true => taper.end,
+            false => 0.0,
+        };
         if end <= 0.0 {
             paint_plans(brush, original, &plans, Target::Stroke, context);
             return;

@@ -62,6 +62,9 @@ pub struct BrushState {
     pub string: Option<crate::app::stroke_ops::PulledString>,
     /// Tags, favourites and recent presets, and the pop-up palette.
     pub library: crate::app::brush_library::BrushLibrary,
+    /// The paint a mixing brush that isn't cleaned after each stroke
+    /// still carries.
+    pub dirty_brush: Arc<crate::app::tools::blend::DirtyBrush>,
 }
 
 /// A tip in the brush settings' tip list: one tip, or a set the dabs take
@@ -110,6 +113,7 @@ impl BrushState {
             import_report: None,
             string: None,
             library: Default::default(),
+            dirty_brush: Default::default(),
         };
         state.pick_eraser();
         state

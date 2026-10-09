@@ -17,13 +17,14 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Image tips (custom shapes) | ✅ PNG, GBR, ABR import | ✅ | ✅ brush patterns | ✅ PNGs in `brushes/`, imported, or made from the selection |
 | Image tips sampled cleanly when small (mipmaps) | ✅ | ✅ | ✅ | ✅ trilinear |
 | Image tips keep their proportions | ✅ | ✅ | ✅ | ✅ |
-| Several tips per brush (random or in sequence) | ✅ animated GIH | ✅ | ⚠️ | ✅ in turn, random, pressure, direction |
+| Several tips per brush (random or in sequence) | ✅ animated GIH | ✅ | ⚠️ | ✅ in turn, there and back, random, pressure, direction |
 | Tip squash (ratio) and fixed angle | ✅ | ✅ | ✅ | ✅ |
 | Tip turns with the stroke direction | ✅ | ✅ | ✅ start/end angle | ✅ |
 | Random tip rotation | ✅ | ✅ | ✅ | ✅ |
 | Tip flip (mirror) | ✅ | ✅ | ⚠️ | ✅ left-right, top-bottom; at random or by any input |
 | Hard edges from a soft tip (sharpness threshold) | ✅ | ⚠️ | ❌ | ✅ |
 | Aliased pixel brush | ✅ | ✅ | ✅ | ✅ |
+| Anti-aliasing levels | ⚠️ on/off | ✅ none to strong | ⚠️ on/off | ✅ off, weak, medium, strong |
 | Pixel-perfect lines | ❌ | ❌ | ❌ | ✅ |
 
 ## What drives the brush (dynamics)
@@ -35,7 +36,7 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Any input → any setting, with a curve | ✅ sensors | ⚠️ fixed pairs | ❌ | ✅ 14 inputs (incl. fade in dabs and perspective from the perspective assistants) → size, opacity, angle, squash, hue, saturation, value, texture strength, hardness, softness, mirror, scatter, secondary colour mix, smudge length, colour rate; several inputs on one setting combine as Krita's do (multiply, add, highest, lowest, difference) |
 | Pen tilt / barrel rotation | ✅ | ✅ | ⚠️ barrel roll (Apple Pencil Pro) | ✅ tilt → size, opacity, tip angle; barrel rotation and an airbrush's wheel turn the tip or drive any setting (where the tablet reports them: Wayland, X11) |
 | Stroke speed | ✅ | ✅ | ✅ Dynamic tab | ✅ size and opacity |
-| Taper at the start / end of a stroke | ✅ fade | ✅ | ✅ Fade tab | ✅ size and/or opacity, no lag |
+| Taper at the start / end of a stroke | ✅ fade | ✅ by length or % | ✅ Fade tab | ✅ size and/or opacity, no lag; by length or % of the stroke |
 | Random size / opacity | ✅ | ✅ | ✅ Jitter tab | ✅ |
 | Scatter (random position) | ✅ | ✅ spray | ✅ | ✅ position jitter only |
 | Particles / several dabs per step | ✅ spray engine | ✅ | ✅ particle density | ✅ up to 16 per step |
@@ -46,8 +47,9 @@ features vary by version, so treat ⚠️ there as "check before relying on it".
 | Feature | Krita | Clip Studio | ibisPaint | Rusty Painter |
 |---|---|---|---|---|
 | Build-up vs wash | ✅ | ✅ | ⚠️ "Constant Opacity" | ✅ |
-| Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ✅ all 28 layer modes (with Krita's Parallel) |
-| Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ✅ any brush (Colour mixing: smudge length, colour rate, by pressure), or the Smudge tool with a colour rate |
+| Brush blend modes (multiply, add, glow…) | ✅ every layer mode | ✅ | ✅ | ✅ all 28 layer modes (with Krita's Parallel), and paint behind |
+| Wet paint / colour mixing while painting | ✅ Color Smudge engine | ✅ colour mixing | ✅ Water type | ✅ any brush (Colour mixing: smudge length, colour rate, by pressure; a paint load that runs dry, a brush kept dirty between strokes, sampling all layers), or the Smudge tool with a colour rate |
+| Stay inside the reference layer's lines | ❌ | ✅ | ⚠️ | ✅ the area found as the Fill tool finds it |
 | Paper / grain texture | ✅ | ✅ | ✅ | ✅ 5 built-in + your own; multiply, subtract, height, colour dodge, hard mix; turned, moving with the stroke, offset each stroke, or on each dab |
 | Dual brush (a second tip as a mask) | ✅ masked brush | ✅ | ❌ | ✅ multiply, darken, subtract, height |
 | Watercolour edges | ⚠️ through presets | ✅ | ⚠️ Wet Edge filter | ✅ shown as you paint (wet paint: its own edge darkening) |
