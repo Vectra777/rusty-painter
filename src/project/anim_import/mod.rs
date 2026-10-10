@@ -198,13 +198,23 @@ mod fuzz_tests {
     #[ignore = "fuzzing"]
     fn fuzz_spine() {
         let files = spine::tests::files();
-        crate::fuzz::fuzz("spine", spine::tests::SKELETON.as_bytes(), std::time::Duration::from_secs(2), |b| {
-            let _ = import(b, "arm", &files);
-        });
+        crate::fuzz::fuzz(
+            "spine",
+            spine::tests::SKELETON.as_bytes(),
+            std::time::Duration::from_secs(2),
+            |b| {
+                let _ = import(b, "arm", &files);
+            },
+        );
         let atlas = b"page.png\nsize:64,64\nhead\nbounds:2,4,10,20\noffsets:1,2,12,24\nrotate:90\n";
-        crate::fuzz::fuzz("spine-atlas", atlas, std::time::Duration::from_secs(2), |b| {
-            let _ = spine::parse_atlas(&String::from_utf8_lossy(b));
-        });
+        crate::fuzz::fuzz(
+            "spine-atlas",
+            atlas,
+            std::time::Duration::from_secs(2),
+            |b| {
+                let _ = spine::parse_atlas(&String::from_utf8_lossy(b));
+            },
+        );
     }
 
     #[test]
