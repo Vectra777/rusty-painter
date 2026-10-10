@@ -66,6 +66,7 @@ impl eframe::App for PainterApp {
         self.save_settings(false);
         self.finish_jobs_on_exit();
         self.autosave_on_exit();
+        self.autosave_tabs_on_exit();
         // The settings and presets just written: on disk before quitting.
         crate::app::jobs::flush_writes();
     }
@@ -141,6 +142,7 @@ impl eframe::App for PainterApp {
         // Tablets have the menus in a sheet over the bottom bar, and adjust
         // size/opacity with sliders on the top bar instead of the tool options.
         ui::menus::top_bar(self, ctx);
+        crate::app::tabs::tab_strip(self, ctx);
         if touch {
             ui::menus::menu_sheet(self, ctx);
             layout::show_dropdowns(self, ctx);

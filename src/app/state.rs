@@ -703,6 +703,8 @@ pub struct WorkspaceState {
     pub recording_shortcut: Option<(crate::app::input::keymap::Action, bool)>,
     /// The settings as last written (`None` until they're loaded).
     pub settings_saved: Option<crate::app::settings::Saved>,
+    /// The documents open in tabs.
+    pub tabs: crate::app::tabs::Tabs,
 }
 
 impl WorkspaceState {
@@ -786,6 +788,7 @@ impl WorkspaceState {
             keymap: Default::default(),
             recording_shortcut: None,
             settings_saved: None,
+            tabs: Default::default(),
         }
     }
 }

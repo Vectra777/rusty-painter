@@ -256,6 +256,7 @@ impl PainterApp {
     ) -> Result<(), String> {
         self.leave_document();
         self.open_document(doc);
+        self.set_title_from(name);
         match purpose {
             OpenFor::Library(folder) => {
                 let stem = std::path::Path::new(name)

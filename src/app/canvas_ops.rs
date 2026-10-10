@@ -141,6 +141,8 @@ impl PainterApp {
     /// 3. the canvas, fresh per-layer state and render cache are installed;
     /// 4. the selection is cleared and the view refits.
     pub(crate) fn replace_document(&mut self, canvas: Canvas, history: History) {
+        // 0. A document with work in it stays open, in its own tab.
+        self.keep_document_in_tab();
         // 1. Background work.
         self.release_canvas();
         self.patch_abandon();

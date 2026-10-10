@@ -47,6 +47,7 @@ pub(crate) mod settings;
 pub(crate) mod shader_ops;
 pub(crate) mod state;
 pub(crate) mod stroke_ops;
+pub(crate) mod tabs;
 pub(crate) mod timelapse;
 pub(crate) mod tools;
 #[cfg(test)]

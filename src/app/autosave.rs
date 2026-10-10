@@ -33,27 +33,88 @@ pub struct AutosaveState {
     /// The window had the focus last frame (iOS: the app was in front).
     #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     focused: bool,
+    /// Which autosave file is this document's: each tab has its own.
+    slot: usize,
 }
 
 impl AutosaveState {
-    /// Checks for a file left by the last session.
+    /// Checks for files left by the last session (the first tab's, or
+    /// another's).
     pub fn new(path: &std::path::Path) -> Self {
+        let recovery = match path.exists() {
+            true => Some(path.to_path_buf()),
+            false => tab_autosaves(path).into_iter().next(),
+        };
+        Self {
+            recovery,
+            ..Self::tab(0)
+        }
+    }
+
+    /// A new tab's, saving to autosave file `slot`.
+    pub fn tab(slot: usize) -> Self {
         Self {
             saved: (0, 0, 0),
             autosaved: (0, 0, 0),
             last_activity: Instant::now(),
             last_write: None,
-            recovery: path.exists().then(|| path.to_path_buf()),
+            recovery: None,
             focused: true,
+            slot,
         }
+    }
+
+    pub fn slot(&self) -> usize {
+        self.slot
+    }
+
+    /// Whether the document at `version` is as it was saved.
+    pub fn matches_saved(&self, version: Version) -> bool {
+        version == self.saved
+    }
+}
+
+/// The other tabs' autosave files beside the first tab's `path`
+/// (`autosave-2.rpainter`...), in slot order.
+fn tab_autosaves(path: &std::path::Path) -> Vec<PathBuf> {
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    let mut found: Vec<(usize, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|p| Some((slot_of(&p)?, p)))
+        .filter(|&(n, _)| n > 0)
+        .collect();
+    found.sort();
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The slot of an autosave file's `path` (0 for `autosave.rpainter`).
+fn slot_of(path: &std::path::Path) -> Option<usize> {
+    if path.extension()? != "rpainter" {
+        return None;
+    }
+    match path.file_stem()?.to_str()? {
+        "autosave" => Some(0),
+        stem => stem.strip_prefix("autosave-")?.parse().ok(),
     }
 }
 
 impl PainterApp {
     pub(crate) fn autosave_path(&self) -> PathBuf {
-        self.brush_state
-            .brushes_path
-            .with_file_name("autosave.rpainter")
+        self.autosave_path_for(self.workspace.autosave.slot)
+    }
+
+    /// Autosave file `slot`'s path (a tab's).
+    pub(crate) fn autosave_path_for(&self, slot: usize) -> PathBuf {
+        let name = match slot {
+            0 => "autosave.rpainter".to_string(),
+            n => format!("autosave-{n}.rpainter"),
+        };
+        self.brush_state.brushes_path.with_file_name(name)
     }
 
     pub(crate) fn doc_version(&self) -> Version {
@@ -223,28 +284,50 @@ impl PainterApp {
         }
     }
 
-    /// Open the file left by the last session as the document.
+    /// Open the files left by the last session: the first as the
+    /// document, the other tabs' each in a tab of its own.
     pub(crate) fn recover_autosave(&mut self) {
         let Some(path) = self.workspace.autosave.recovery.take() else {
             return;
         };
+        let mut rest = tab_autosaves(&self.autosave_path_for(0));
+        rest.retain(|p| *p != path);
+        rest.reverse();
+        self.recover_file(path, rest);
+    }
+
+    /// Open autosave file `path`, then the `rest` (last first).
+    fn recover_file(&mut self, path: PathBuf, mut rest: Vec<PathBuf>) {
         // Read and decoded on another thread; then the library project it
         // belongs to, to save it back there.
         let source = path.with_extension("source");
+        let slot = slot_of(&path).unwrap_or(0);
         self.open_project_in_background(&path, move |app| {
             app.mark_unsaved();
+            // It keeps its file: written again, or gone once saved.
+            app.workspace.autosave.slot = slot;
             app.workspace.library.open = false;
             app.workspace.library.project = std::fs::read_to_string(&source)
                 .ok()
                 .map(std::path::PathBuf::from)
                 .filter(|p| p.exists());
+            if let Some(project) = app.workspace.library.project.clone() {
+                app.set_title_from(&project.to_string_lossy());
+            }
+            if let Some(next) = rest.pop() {
+                app.recover_file(next, rest);
+            }
         });
     }
 
-    /// Drop the file left by the last session.
+    /// Drop the files left by the last session.
     pub(crate) fn discard_autosave(&mut self) {
-        if let Some(path) = self.workspace.autosave.recovery.take() {
-            let _ = std::fs::remove_file(path);
+        if self.workspace.autosave.recovery.take().is_some() {
+            let first = self.autosave_path_for(0);
+            for path in tab_autosaves(&first).into_iter().chain([first]) {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path.with_extension("source"));
+            }
         }
     }
 }

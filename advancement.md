@@ -91,7 +91,7 @@ Selection and transform
 
 Workflow
 
-- Several documents open at once, in tabs.
+- Tabs: switching re-uploads the shown document to the GPU (no atlases kept per tab), waits while anything runs in the background, and applies a running transform, liquify, shape or text first; tabs can't be dragged into their own windows.
 - Saved workspaces.
 - Actions / macros (C auto actions, PS) and scripting or plugins (K Python).
 

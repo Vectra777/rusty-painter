@@ -270,6 +270,7 @@ impl PainterApp {
         let path = path.as_ref();
         let doc = read_document(path)?;
         self.open_document(doc);
+        self.set_title_from(&path.to_string_lossy());
         self.workspace.library.project = crate::ui::library::is_project(path).then(|| path.into());
         Ok(())
     }

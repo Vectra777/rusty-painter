@@ -421,6 +421,8 @@ impl PainterApp {
         self.leave_document();
         self.apply_new_canvas();
         self.workspace.library.project = None;
+        let name = self.modal_state.new_canvas.name.clone();
+        self.set_title_from(&name);
         if self.workspace.library.open || cfg!(mobile) {
             let name = self.modal_state.new_canvas.name.clone();
             if let Err(err) = self.save_to_library(&name) {
