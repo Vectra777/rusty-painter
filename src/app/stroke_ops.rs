@@ -66,7 +66,7 @@ impl PainterApp {
 
     /// Wet paint dries on (between strokes): each layer's, by the time
     /// passed, in steps of [`crate::canvas::wet::STEP`] (at most four a
-    /// frame, and fewer when they're slow: see [`WET_BUDGET`]). Returns
+    /// frame, worked out off the UI thread). Returns
     /// whether any is still wet (to keep the frames coming).
     pub(crate) fn wet_tick(&mut self) -> bool {
         let wet: Vec<(usize, std::sync::Arc<crate::canvas::wet::WetLayer>)> =

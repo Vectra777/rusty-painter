@@ -844,7 +844,7 @@ impl StrokeState {
     }
 
     /// Wet paint flowing while the pen is down: a step when one is due at
-    /// `time` (seconds), `gravity` down (see [`Brush::flow_wet`]).
+    /// `time` (seconds), `gravity` down (see `Brush::flow_wet`).
     pub fn flow_wet(
         &mut self,
         brush: &Brush,

@@ -658,7 +658,7 @@ fn box_blur(pool: &rayon::ThreadPool, src: &[[f32; 4]], side: usize, r: usize) -
     box_blur_inside(pool, src, side, r, 0)
 }
 
-/// [`box_blur`]'s output inside the `side`-wide patch's margin `pad` (the
+/// `box_blur`'s output inside the `side`-wide patch's margin `pad` (the
 /// middle `side - 2 pad` square): the second pass works out only that, and
 /// the rows the last one reads.
 fn box_blur_inside(
