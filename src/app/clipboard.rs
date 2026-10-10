@@ -42,6 +42,7 @@ pub struct ClipboardState {
 
 impl Clip {
     /// Unmultiplied RGBA bytes, row-major.
+    #[cfg_attr(mobile, allow(dead_code))]
     fn to_rgba(&self) -> Vec<u8> {
         self.pixels.iter().flat_map(|p| p.unmultiplied()).collect()
     }
@@ -80,6 +81,7 @@ impl Clip {
     }
 }
 
+#[cfg_attr(mobile, allow(dead_code))]
 fn fingerprint(bytes: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -332,7 +334,7 @@ impl PainterApp {
     }
 
     /// Put `clip` on the system clipboard (desktop), from another thread.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     fn export_clip(&mut self, clip: &Clip) {
         let clip = clip.clone();
         self.workspace.clipboard.exported = None;
@@ -354,13 +356,13 @@ impl PainterApp {
         });
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     fn export_clip(&mut self, _clip: &Clip) {}
 }
 
 /// An image on the system clipboard that isn't our own last copy
 /// (`exported`, when `has_ours`).
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 fn import_clip(exported: Option<(usize, usize, u64)>, has_ours: bool) -> Option<image::RgbaImage> {
     let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
     let ours = exported.is_some_and(|(w, h, fp)| {
@@ -376,7 +378,7 @@ fn import_clip(exported: Option<(usize, usize, u64)>, has_ours: bool) -> Option<
     )
 }
 
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn import_clip(
     _exported: Option<(usize, usize, u64)>,
     _has_ours: bool,

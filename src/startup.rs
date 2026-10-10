@@ -1,11 +1,16 @@
-//! Start-up diagnostics for the desktop app: logging (to a file on
-//! Windows, where release builds have no console) and panics logged with
-//! their backtrace before the app goes down.
+//! Start-up diagnostics for the desktop and iOS app: logging (to a file on
+//! Windows, where release builds have no console, and on iOS, where the
+//! Files app shows it) and panics logged with their backtrace before the
+//! app goes down.
 
 use std::path::{Path, PathBuf};
 
-/// Where the log goes on Windows: next to the app's other data.
+/// Where the log goes on Windows (next to the app's other data) and iOS
+/// (the app's Documents folder, in the Files app under On My iPad).
 pub(crate) fn log_path() -> PathBuf {
+    if cfg!(target_os = "ios") {
+        return crate::app::init::ios_documents().join("rusty-painter.log");
+    }
     crate::app::init::data_dir().join("rusty-painter.log")
 }
 
@@ -19,7 +24,7 @@ pub(crate) fn init_logging() {
     let mut builder = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("warn,rusty_painter=info"),
     );
-    if cfg!(windows)
+    if cfg!(any(windows, target_os = "ios"))
         && let Some(file) = open_log(&log_path())
     {
         builder.target(env_logger::Target::Pipe(Box::new(file)));

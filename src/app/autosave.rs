@@ -30,6 +30,9 @@ pub struct AutosaveState {
     last_write: Option<Instant>,
     /// A file left by the last session, offered for recovery.
     pub recovery: Option<PathBuf>,
+    /// The window had the focus last frame (iOS: the app was in front).
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    focused: bool,
 }
 
 impl AutosaveState {
@@ -41,6 +44,7 @@ impl AutosaveState {
             last_activity: Instant::now(),
             last_write: None,
             recovery: path.exists().then(|| path.to_path_buf()),
+            focused: true,
         }
     }
 }
@@ -106,6 +110,8 @@ impl PainterApp {
 
     /// Once a frame: autosave when there are changes and the app is idle.
     pub(crate) fn autosave_tick(&mut self, ctx: &eframe::egui::Context) {
+        #[cfg(target_os = "ios")]
+        self.save_on_leaving(ctx);
         let now = Instant::now();
         let active = ctx.input(|i| !i.events.is_empty() || i.pointer.any_down());
         let state = &mut self.workspace.autosave;
@@ -134,6 +140,21 @@ impl PainterApp {
             return;
         }
         self.autosave_in_background();
+    }
+
+    /// iOS ends apps in the background without warning (no `on_exit`):
+    /// what quitting writes is written as the app leaves the front, the
+    /// window losing the focus (the patched winit's doing).
+    #[cfg(target_os = "ios")]
+    fn save_on_leaving(&mut self, ctx: &eframe::egui::Context) {
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        if !std::mem::replace(&mut self.workspace.autosave.focused, focused) || focused {
+            return;
+        }
+        self.save_active_preset(false);
+        self.save_settings(false);
+        self.autosave_on_exit();
+        crate::app::jobs::flush_writes();
     }
 
     /// Copy the document, then encode and write it on another thread.

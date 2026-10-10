@@ -73,7 +73,7 @@ impl ExportFormat {
     }
 
     /// MIME type, e.g. for Android's MediaStore.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(mobile), allow(dead_code))]
     pub fn mime_type(&self) -> &'static str {
         match self {
             ExportFormat::Png | ExportFormat::Png16 => "image/png",

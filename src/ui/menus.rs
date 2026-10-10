@@ -229,12 +229,12 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         save_project_as(app);
     }
     // Android's Save As goes to the library already.
-    if !cfg!(target_os = "android") && menu_item(ui, "Save to Library…", None) {
+    if !cfg!(mobile) && menu_item(ui, "Save to Library…", None) {
         app.workspace
             .library
             .ask_save_name(&app.modal_state.new_canvas.name);
     }
-    if cfg!(target_os = "android") && menu_item(ui, "Export Project File…", None) {
+    if cfg!(mobile) && menu_item(ui, "Export Project File…", None) {
         export_project_file(app);
     }
     ui.separator();
@@ -251,7 +251,7 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     {
         crate::ui::timeline::pick_export(app);
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     {
         if menu_item(ui, "Import Animation (Spine, DragonBones, Lottie)…", None) {
             crate::ui::timeline::pick_animation(app);
@@ -779,7 +779,7 @@ pub(crate) fn save_project(app: &mut PainterApp) {
 
 /// Ask where to save (the dialog doesn't hold up the window), then save
 /// there in the background.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 pub(crate) fn save_project_as(app: &mut PainterApp) {
     let dialog = crate::app::settings::file_dialog()
         .add_filter("Rusty Painter", &["rpainter"])
@@ -792,7 +792,7 @@ pub(crate) fn save_project_as(app: &mut PainterApp) {
 }
 
 /// No file system to save to on Android: into the library.
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 pub(crate) fn save_project_as(app: &mut PainterApp) {
     let name = app.modal_state.new_canvas.name.clone();
     app.workspace.library.ask_save_name(&name);
@@ -800,7 +800,7 @@ pub(crate) fn save_project_as(app: &mut PainterApp) {
 
 /// The document as a project file, saved where the user picks (Android:
 /// to share or back up outside the app).
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(not(mobile), allow(dead_code))]
 fn export_project_file(app: &mut PainterApp) {
     let name = app.workspace.library.project.as_ref().map_or_else(
         || format!("{}.rpainter", app.modal_state.new_canvas.name),
@@ -817,7 +817,7 @@ fn export_project_file(app: &mut PainterApp) {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 fn export_timelapse_dialog(app: &mut PainterApp) {
     let dialog = crate::app::settings::file_dialog()
         .add_filter("Video (MP4)", &["mp4"])
@@ -829,9 +829,9 @@ fn export_timelapse_dialog(app: &mut PainterApp) {
 }
 
 /// Android: a GIF (no ffmpeg there), moved to Pictures once written.
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn export_timelapse_dialog(app: &mut PainterApp) {
-    app.export_timelapse(crate::android::cache_dir().join("timelapse.gif"));
+    app.export_timelapse(crate::platform::cache_dir().join("timelapse.gif"));
 }
 
 #[cfg(test)]

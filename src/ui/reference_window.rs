@@ -172,7 +172,7 @@ fn shrink_reference(img: image::RgbaImage) -> image::RgbaImage {
     crate::app::import::downscale(&img, w, h)
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 fn open_dialog(app: &mut PainterApp) {
     let dialog = crate::app::settings::file_dialog().add_filter(
         "Images",
@@ -187,6 +187,12 @@ fn open_dialog(app: &mut PainterApp) {
 #[cfg(target_os = "android")]
 fn open_dialog(app: &mut PainterApp) {
     app.workspace.gallery.open_for_reference();
+}
+
+/// iOS: the system's photo picker.
+#[cfg(target_os = "ios")]
+fn open_dialog(app: &mut PainterApp) {
+    app.pick_open(crate::app::files::OpenFor::Reference);
 }
 
 pub fn reference_window(app: &mut PainterApp, ctx: &egui::Context) {

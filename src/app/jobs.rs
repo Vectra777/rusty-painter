@@ -378,7 +378,7 @@ fn writer() -> &'static std::sync::Mutex<mpsc::Sender<WriterJob>> {
 }
 
 /// What a file dialog picks.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 #[derive(Clone, Copy)]
 pub(crate) enum Pick {
     File,
@@ -386,7 +386,7 @@ pub(crate) enum Pick {
     Save,
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 impl PainterApp {
     /// Show `dialog` without holding up the frames (the window would stop
     /// answering while it's open); `then` gets the paths picked, on the UI

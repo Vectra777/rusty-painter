@@ -739,7 +739,7 @@ impl From<&AnyObject> for WindowId {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PlatformSpecificWindowAttributes {
     pub scale_factor: Option<f64>,
     pub valid_orientations: ValidOrientations,
@@ -747,4 +747,21 @@ pub struct PlatformSpecificWindowAttributes {
     pub prefers_status_bar_hidden: bool,
     pub preferred_status_bar_style: StatusBarStyle,
     pub preferred_screen_edges_deferring_system_gestures: ScreenEdge,
+}
+
+// rusty-painter patch: a full-screen painting app by default (eframe doesn't
+// expose `WindowAttributesExtIOS`): no status bar or home indicator over the
+// canvas, and a stroke starting at the screen's edge stays a stroke rather
+// than becoming a system swipe on the first try.
+impl Default for PlatformSpecificWindowAttributes {
+    fn default() -> Self {
+        Self {
+            scale_factor: None,
+            valid_orientations: ValidOrientations::default(),
+            prefers_home_indicator_hidden: true,
+            prefers_status_bar_hidden: true,
+            preferred_status_bar_style: StatusBarStyle::default(),
+            preferred_screen_edges_deferring_system_gestures: ScreenEdge::ALL,
+        }
+    }
 }

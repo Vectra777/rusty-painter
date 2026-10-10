@@ -4,6 +4,7 @@ mod app_state;
 mod event_loop;
 mod monitor;
 mod notification_center;
+mod pen;
 mod view;
 mod view_controller;
 mod window;
@@ -22,6 +23,7 @@ pub(crate) use crate::cursor::{
     NoCustomCursor as PlatformCustomCursor, NoCustomCursor as PlatformCustomCursorSource,
 };
 pub(crate) use crate::icon::NoIcon as PlatformIcon;
+pub(crate) use self::pen::take_pen_samples;
 pub(crate) use crate::platform_impl::Fullscreen;
 
 /// There is no way to detect which device that performed a certain event in

@@ -31,7 +31,8 @@ pub(crate) fn data_dir() -> PathBuf {
         return crate::ANDROID_DATA.get().cloned().unwrap_or_default();
     } else if cfg!(windows) {
         var("APPDATA")
-    } else if cfg!(target_os = "macos") {
+    } else if cfg!(any(target_os = "macos", target_os = "ios")) {
+        // On iOS, `HOME` is the app's container.
         home().map(|h| h.join("Library/Application Support"))
     } else {
         var("XDG_DATA_HOME").or_else(|| home().map(|h| h.join(".local/share")))
@@ -40,6 +41,15 @@ pub(crate) fn data_dir() -> PathBuf {
         || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         |b| b.join("rusty-painter"),
     )
+}
+
+/// The app's Documents folder on iOS: what the Files app shows (Info.plist's
+/// `UIFileSharingEnabled`), where exports and the log go.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub(crate) fn ios_documents() -> PathBuf {
+    std::env::var_os("HOME")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join("Documents")
 }
 
 type LoadStep = fn(&mut PainterApp, &eframe::egui::Context);

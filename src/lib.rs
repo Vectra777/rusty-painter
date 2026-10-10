@@ -1,8 +1,16 @@
 //! Rusty Painter: a tiled, multithreaded painting app on egui/wgpu.
-//! The desktop binary calls [`run`]; Android enters at `android_main`.
+//! The desktop and iOS binary calls [`run`]; Android enters at
+//! `android_main`.
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "ios")]
+mod ios;
+/// The system's file pickers, sharing and shared storage, on Android and iOS.
+#[cfg(target_os = "android")]
+use android as platform;
+#[cfg(target_os = "ios")]
+use ios as platform;
 mod app;
 #[cfg(feature = "bench")]
 #[doc(hidden)]
@@ -27,7 +35,8 @@ use winit::platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp}
 /// The window title (desktop) and app name.
 pub(crate) const APP_NAME: &str = "Rusty Painter";
 
-/// Launch the desktop app (the binary's `main`).
+/// Launch the app (the binary's `main`): a window on the desktop, the whole
+/// screen on iOS.
 #[cfg(not(target_os = "android"))]
 pub fn run() -> eframe::Result<()> {
     startup::init_logging();
@@ -37,10 +46,15 @@ pub fn run() -> eframe::Result<()> {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
+    let viewport = if cfg!(target_os = "ios") {
+        eframe::egui::ViewportBuilder::default().with_fullscreen(true)
+    } else {
+        eframe::egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([480.0, 360.0]),
+            .with_min_inner_size([480.0, 360.0])
+    };
+    let options = eframe::NativeOptions {
+        viewport,
         // The canvas is drawn by a custom wgpu pipeline (GPU mipmaps).
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()

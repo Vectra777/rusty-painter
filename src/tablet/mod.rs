@@ -5,15 +5,15 @@
 //! The same pen also reaches egui as pointer (or touch) events, which the
 //! canvas must then ignore: see [`TabletInput::pen_active`].
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 use octotablet::{
     builder::Builder,
     events::{Event, ToolEvent},
     tool,
 };
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 use std::collections::HashMap;
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 use std::panic::{self, AssertUnwindSafe};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -22,8 +22,8 @@ pub enum TabletPhase {
     Move,
     Up,
     /// The system cancelled the contact (palm rejection, a system gesture):
-    /// whatever it drew should be taken back. Only Android reports it.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    /// whatever it drew should be taken back. Android and iOS report it.
+    #[cfg_attr(not(mobile), allow(dead_code))]
     Cancel,
 }
 
@@ -47,7 +47,7 @@ pub struct TabletSample {
 }
 
 /// A lean vector from angles from perpendicular along x and y (radians).
-#[cfg_attr(target_os = "android", allow(dead_code))]
+#[cfg_attr(mobile, allow(dead_code))]
 fn lean_from_xy([ax, ay]: [f32; 2]) -> [f32; 2] {
     let (x, y) = (ax.sin(), ay.sin());
     let len = (x * x + y * y).sqrt();
@@ -62,7 +62,7 @@ fn lean_from_xy([ax, ay]: [f32; 2]) -> [f32; 2] {
 /// converts to pixels at the window's DPI (`GetDpiForWindow`), which under
 /// winit's per-monitor awareness are physical pixels; Wayland reports
 /// logical ones, which differ from points only by the UI zoom.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 fn pose_scale(native_pixels_per_point: Option<f32>, zoom: f32) -> f32 {
     let native = if cfg!(windows) {
         native_pixels_per_point.filter(|p| p.is_finite() && *p > 0.0)
@@ -78,7 +78,7 @@ fn pose_scale(native_pixels_per_point: Option<f32>, zoom: f32) -> f32 {
 }
 
 /// Per-tool contact tracking.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 #[derive(Default)]
 struct ToolState {
     /// Last pose, in egui points.
@@ -98,7 +98,7 @@ struct ToolState {
     in_range: bool,
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 impl ToolState {
     /// Track one tool event, adding the contact samples it produces.
     fn apply(
@@ -172,7 +172,7 @@ impl ToolState {
 
 /// Pumps octotablet events into contact samples, and on X11 the patched
 /// winit's pen samples.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 pub struct TabletInput {
     /// `None` where octotablet has no backend (X11) or is turned off.
     manager: Option<octotablet::Manager>,
@@ -224,7 +224,7 @@ fn x11_sample(s: winit::platform::x11::PenSample, scale: f32, phase: TabletPhase
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 impl TabletInput {
     /// Create a tablet input manager using the eframe creation context for a window handle.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
@@ -389,7 +389,65 @@ impl TabletInput {
     }
 }
 
-#[cfg(all(test, not(target_os = "android")))]
+/// Drains the Apple Pencil samples the patched winit queues (every
+/// coalesced sample, with its pressure, tilt and roll).
+#[cfg(target_os = "ios")]
+pub struct TabletInput {
+    down: bool,
+}
+
+#[cfg(target_os = "ios")]
+impl TabletInput {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Option<Self> {
+        Some(Self { down: false })
+    }
+
+    pub fn poll(&mut self, ctx: &eframe::egui::Context) -> Vec<TabletSample> {
+        use winit::platform::ios::PenPhase;
+        let scale = ctx.pixels_per_point();
+        let samples: Vec<TabletSample> = winit::platform::ios::take_pen_samples()
+            .into_iter()
+            .map(|s| TabletSample {
+                pos: [s.x / scale, s.y / scale],
+                pressure: s.pressure,
+                // As on Android: angle from perpendicular, and the direction
+                // the pen points (0 up, clockwise).
+                tilt: Some({
+                    let lean = s.tilt.clamp(0.0, std::f32::consts::FRAC_PI_2).sin();
+                    [s.orientation.sin() * lean, -s.orientation.cos() * lean]
+                }),
+                roll: s.roll,
+                wheel: None,
+                // The Pencil has no eraser end.
+                is_eraser: false,
+                phase: match s.phase {
+                    PenPhase::Down => TabletPhase::Down,
+                    PenPhase::Move => TabletPhase::Move,
+                    PenPhase::Up => TabletPhase::Up,
+                    PenPhase::Cancel => TabletPhase::Cancel,
+                },
+            })
+            .collect();
+        if let Some(last) = samples.last() {
+            self.down = matches!(last.phase, TabletPhase::Down | TabletPhase::Move);
+        }
+        samples
+    }
+
+    /// Whether the Pencil is touching: any finger on the screen is then the
+    /// hand holding it.
+    pub fn pen_active(&self) -> bool {
+        self.down
+    }
+
+    /// The Pencil is the pointer: egui-winit makes the first touch, the
+    /// Pencil's too, the mouse.
+    pub fn pen_is_pointer(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(all(test, not(mobile)))]
 mod tests {
     use super::*;
 

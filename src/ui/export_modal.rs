@@ -40,7 +40,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
             ui.separator();
             ui.heading("Destination");
             // Android: into shared storage, by type (see `publish_file`).
-            if cfg!(target_os = "android") {
+            if cfg!(mobile) {
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.text_edit_singleline(&mut settings.base_name);
@@ -73,10 +73,10 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
             if let Some(msg) = &app.export_state.message {
                 ui.label(msg);
             }
-            #[cfg(target_os = "android")]
+            #[cfg(mobile)]
             if let Some((uri, mime)) = &app.export_state.share
                 && ui.button("Share…").clicked()
-                && let Err(err) = crate::android::share_uri(uri, mime, "Share image")
+                && let Err(err) = crate::platform::share_uri(uri, mime, "Share image")
             {
                 app.export_state.message = Some(err);
             }
@@ -175,7 +175,7 @@ fn start_export(app: &mut PainterApp, target: PathBuf, format: ExportFormat) {
     }));
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 fn choose_file(app: &mut PainterApp) {
     let dialog = crate::app::settings::file_dialog()
         .set_file_name(app.export_state.settings.default_file_name());
@@ -184,7 +184,7 @@ fn choose_file(app: &mut PainterApp) {
     });
 }
 
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn choose_file(_app: &mut PainterApp) {}
 
 /// Export settings tracked by the app.
@@ -216,7 +216,7 @@ impl ExportSettings {
 
     pub fn output_path(&self) -> PathBuf {
         // Written to the cache, then moved to shared storage.
-        if cfg!(target_os = "android") {
+        if cfg!(mobile) {
             return android_cache().join(self.default_file_name());
         }
         if let Some(path) = &self.chosen_path {
@@ -245,7 +245,7 @@ pub struct ExportProgress {
 }
 
 /// The written export's message, and what to share it by.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 fn published(
     path: &Path,
     _format: ExportFormat,
@@ -254,21 +254,21 @@ fn published(
 }
 
 /// Android: moved from the cache into shared storage.
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn published(
     path: &Path,
     format: ExportFormat,
 ) -> Result<(String, Option<(String, String)>), String> {
-    let done = crate::android::publish_file(path, format.mime_type())?;
+    let done = crate::platform::publish_file(path, format.mime_type())?;
     Ok((done.message, done.share_uri.zip(done.share_mime)))
 }
 
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn android_cache() -> PathBuf {
-    crate::android::cache_dir()
+    crate::platform::cache_dir()
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 fn android_cache() -> PathBuf {
     unreachable!("only on Android")
 }

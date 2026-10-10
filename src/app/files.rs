@@ -1,6 +1,6 @@
 //! Picking files to open and places to save, on every platform: the
-//! desktop's file dialogs answer at once, Android's system picker later
-//! (polled each frame), and both end in [`PainterApp::open_picked`] or a
+//! desktop's file dialogs answer at once, Android's and iOS's system pickers
+//! later (polled each frame), and both end in [`PainterApp::open_picked`] or a
 //! write of the bytes waiting to be saved.
 
 use crate::PainterApp;
@@ -20,6 +20,13 @@ pub(crate) enum OpenFor {
     Palette,
     /// An ICC profile, for what [`ProfileUse`] says.
     Profile(ProfileUse),
+    /// A picture to import as a layer (iOS: from Photos; Android has its
+    /// own gallery, the desktop its file dialog).
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    Image,
+    /// A picture for the reference window (iOS, as [`OpenFor::Image`]).
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    Reference,
 }
 
 /// What a picked ICC profile is for.
@@ -35,8 +42,8 @@ pub(crate) enum ProfileUse {
     Print,
 }
 
-/// A picker open on Android, and what its answer is for.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+/// A system picker open (Android, iOS), and what its answer is for.
+#[cfg_attr(not(mobile), allow(dead_code))]
 pub(crate) enum PendingPick {
     Open(OpenFor),
     Save(Vec<u8>),
@@ -44,7 +51,7 @@ pub(crate) enum PendingPick {
 
 impl OpenFor {
     /// (filter name, lower-case extensions) for the desktop dialog.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
+    #[cfg_attr(mobile, allow(dead_code))]
     fn filter(&self) -> (&'static str, Vec<&'static str>) {
         let documents = || {
             let mut e = vec!["rpainter"];
@@ -61,17 +68,19 @@ impl OpenFor {
                 e.extend(crate::brush_engine::import::EXTENSIONS);
                 ("Brushes", e)
             }
-            OpenFor::Palette => ("Images", vec!["png", "jpg", "jpeg", "bmp", "tif", "tiff"]),
+            OpenFor::Palette | OpenFor::Image | OpenFor::Reference => {
+                ("Images", vec!["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
+            }
             OpenFor::Profile(_) => ("ICC profiles", vec!["icc", "icm"]),
         }
     }
 
-    /// MIME types for Android's picker. Our own formats have none, so
-    /// documents and brushes list every file.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    /// MIME types for the system picker (iOS shows Photos for images).
+    /// Our own formats have none, so documents and brushes list every file.
+    #[cfg_attr(not(mobile), allow(dead_code))]
     fn mimes(&self) -> &'static [&'static str] {
         match self {
-            OpenFor::Palette => &["image/*"],
+            OpenFor::Palette | OpenFor::Image | OpenFor::Reference => &["image/*"],
             _ => &["*/*"],
         }
     }
@@ -81,7 +90,7 @@ impl PainterApp {
     /// Ask for a file (several for brushes) to open for `purpose`. The
     /// dialog doesn't hold up the window, and the file is read and decoded
     /// on another thread.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     pub(crate) fn pick_open(&mut self, purpose: OpenFor) {
         let (label, extensions) = purpose.filter();
         // Upper-case too: file dialogs on Linux match case.
@@ -104,10 +113,10 @@ impl PainterApp {
         });
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     pub(crate) fn pick_open(&mut self, purpose: OpenFor) {
         let multiple = matches!(purpose, OpenFor::Brushes);
-        match crate::android::picker_open(purpose.mimes(), multiple) {
+        match crate::platform::picker_open(purpose.mimes(), multiple) {
             Ok(()) => self.workspace.file_pick = Some(PendingPick::Open(purpose)),
             Err(err) => self.report(err),
         }
@@ -115,7 +124,7 @@ impl PainterApp {
 
     /// Ask where to save `bytes` as `name` (extension `ext`), and write them
     /// there (the dialog and the write on other threads).
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     pub(crate) fn pick_save(&mut self, name: &str, ext: &str, _mime: &str, bytes: Vec<u8>) {
         let dialog = crate::app::settings::file_dialog()
             .add_filter(ext, &[ext])
@@ -134,27 +143,27 @@ impl PainterApp {
         });
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     pub(crate) fn pick_save(&mut self, name: &str, _ext: &str, mime: &str, bytes: Vec<u8>) {
-        match crate::android::picker_create(mime, name) {
+        match crate::platform::picker_create(mime, name) {
             Ok(()) => self.workspace.file_pick = Some(PendingPick::Save(bytes)),
             Err(err) => self.report(err),
         }
     }
 
-    /// Once a frame: act on the Android picker's answer when it comes.
-    #[cfg(target_os = "android")]
+    /// Once a frame: act on the system picker's answer when it comes.
+    #[cfg(mobile)]
     pub(crate) fn poll_file_pick(&mut self) {
         if self.workspace.file_pick.is_none() {
             return;
         }
-        let Some(uris) = crate::android::picker_poll() else {
+        let Some(uris) = crate::platform::picker_poll() else {
             return;
         };
         match self.workspace.file_pick.take() {
             Some(PendingPick::Open(purpose)) => {
                 for uri in uris {
-                    match crate::android::picker_read(&uri) {
+                    match crate::platform::picker_read(&uri) {
                         Ok((name, bytes)) => {
                             self.open_picked(&purpose, name, FileSource::Bytes(bytes.into()), None)
                         }
@@ -164,8 +173,11 @@ impl PainterApp {
             }
             Some(PendingPick::Save(bytes)) => {
                 if let Some(uri) = uris.first() {
-                    match crate::android::picker_write(uri, &bytes) {
-                        Ok(()) => self.report("Saved".to_string()),
+                    match crate::platform::picker_write(uri, &bytes) {
+                        // iOS's picker opens after the write, and says itself
+                        // when the file is in place.
+                        Ok(()) if cfg!(target_os = "android") => self.report("Saved".to_string()),
+                        Ok(()) => {}
                         Err(err) => self.report(err),
                     }
                 }
@@ -174,7 +186,7 @@ impl PainterApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     pub(crate) fn poll_file_pick(&mut self) {}
 
     /// Use a picked file (`name`, its bytes from `source`, its `path` where
@@ -213,6 +225,13 @@ impl PainterApp {
                     .map_or_else(|| "Image".into(), |s| s.to_string_lossy().into_owned());
                 self.palette_from_image_in_background(stem, source);
             }
+            OpenFor::Image => {
+                let stem = std::path::Path::new(&name)
+                    .file_stem()
+                    .map_or_else(|| "Image".into(), |s| s.to_string_lossy().into_owned());
+                self.import_image_in_background(stem, source);
+            }
+            OpenFor::Reference => self.open_reference_in_background(name, source),
             OpenFor::Profile(target) => {
                 let stem = std::path::Path::new(&name).file_stem().map_or_else(
                     || "ICC profile".into(),

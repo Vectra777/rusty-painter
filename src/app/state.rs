@@ -388,7 +388,7 @@ pub struct ExportState {
     pub progress_rx: Option<mpsc::Receiver<ExportProgress>>,
     pub show_modal: bool,
     /// Android: the last export's (URI, MIME type), for Share.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(mobile), allow(dead_code))]
     pub share: Option<(String, String)>,
 }
 
@@ -523,7 +523,7 @@ pub struct WorkspaceState {
     /// The project library, and the file the document saves to.
     pub library: crate::ui::library::LibraryState,
     /// Android's file picker is open for this.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(mobile), allow(dead_code))]
     pub file_pick: Option<crate::app::files::PendingPick>,
     /// Textures dropped this frame, kept until the next one. egui-wgpu frees
     /// a texture before submitting the frame's uploads, so one updated and
@@ -568,8 +568,7 @@ impl WorkspaceState {
             auto_fit: true,
             fitted_to: None,
             // Android, or a desktop touchscreen via RUSTY_PAINTER_TOUCH=1.
-            touch_mode: cfg!(target_os = "android")
-                || std::env::var_os("RUSTY_PAINTER_TOUCH").is_some(),
+            touch_mode: cfg!(mobile) || std::env::var_os("RUSTY_PAINTER_TOUCH").is_some(),
             accent: crate::ui::style::DEFAULT_ACCENT,
             tool_groups: ToolGroups::default(),
             applied_style: None,

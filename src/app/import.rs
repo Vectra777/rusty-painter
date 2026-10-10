@@ -279,7 +279,7 @@ pub(crate) fn downscale(src: &image::RgbaImage, w: u32, h: u32) -> image::RgbaIm
     image::RgbaImage::from_raw(w as u32, h as u32, out).expect("sized to w×h")
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 pub(crate) fn import_image_dialog(app: &mut PainterApp) {
     let dialog = crate::app::settings::file_dialog()
         .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"]);
@@ -296,6 +296,12 @@ pub(crate) fn import_image_dialog(app: &mut PainterApp) {
 #[cfg(target_os = "android")]
 pub(crate) fn import_image_dialog(app: &mut PainterApp) {
     app.workspace.gallery.open();
+}
+
+/// iOS: the system's photo picker.
+#[cfg(target_os = "ios")]
+pub(crate) fn import_image_dialog(app: &mut PainterApp) {
+    app.pick_open(crate::app::files::OpenFor::Image);
 }
 
 /// The `w`×`h` pixels `pixel(x, y)` returns (premultiplied), placed with

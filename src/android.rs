@@ -7,7 +7,7 @@ use jni::objects::{JObject, JString, JValue};
 use jni::sys::jobject;
 
 #[derive(Clone, Debug)]
-pub struct AndroidExport {
+pub struct PublishedFile {
     pub message: String,
     pub share_uri: Option<String>,
     pub share_mime: Option<String>,
@@ -89,7 +89,7 @@ fn media_collection(mime: &str) -> (&'static str, &'static str) {
 /// Move the file at `path` into the shared storage (Pictures, Movies or
 /// Download, under "Rusty Painter"), where other apps see it.
 #[cfg(target_os = "android")]
-pub fn publish_file(path: &std::path::Path, mime: &str) -> Result<AndroidExport, String> {
+pub fn publish_file(path: &std::path::Path, mime: &str) -> Result<PublishedFile, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read the export: {e}"))?;
     let file_name = path
         .file_name()
@@ -136,7 +136,7 @@ pub fn publish_file(path: &std::path::Path, mime: &str) -> Result<AndroidExport,
         env.call_method(&out, "write", "([B)V", &[JValue::Object(&array)])
             .map_err(jerr)?;
         env.call_method(&out, "close", "()V", &[]).map_err(jerr)?;
-        Ok(AndroidExport {
+        Ok(PublishedFile {
             message: format!("Saved to {dir}/{file_name}"),
             share_uri: Some(uri_to_string(env, &uri)?),
             share_mime: Some(mime.to_string()),

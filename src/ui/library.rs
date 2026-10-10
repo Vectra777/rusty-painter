@@ -421,7 +421,7 @@ impl PainterApp {
         self.leave_document();
         self.apply_new_canvas();
         self.workspace.library.project = None;
-        if self.workspace.library.open || cfg!(target_os = "android") {
+        if self.workspace.library.open || cfg!(mobile) {
             let name = self.modal_state.new_canvas.name.clone();
             if let Err(err) = self.save_to_library(&name) {
                 self.report(err);
@@ -638,7 +638,7 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
                     {
                         leave = Some(Leave::Import);
                     }
-                    if !cfg!(target_os = "android")
+                    if !cfg!(mobile)
                         && pill(ui, Some(Icon::Folder), "Open file", h, true, false)
                             .on_hover_text("Open a document from anywhere on disk")
                             .clicked()

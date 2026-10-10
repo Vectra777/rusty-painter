@@ -95,7 +95,7 @@ fn last_dir() -> Option<PathBuf> {
 }
 
 /// A file dialog opening in the folder used last.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 pub fn file_dialog() -> rfd::AsyncFileDialog {
     let dialog = rfd::AsyncFileDialog::new();
     match last_dir() {
@@ -105,6 +105,7 @@ pub fn file_dialog() -> rfd::AsyncFileDialog {
 }
 
 /// `path` was picked in a file dialog: the next one opens in its folder.
+#[cfg_attr(mobile, allow(dead_code))]
 pub fn remember_dir(path: &Path) {
     if let (Some(dir), Ok(mut last)) = (path.parent(), LAST_DIR.lock()) {
         *last = Some(dir.to_path_buf());

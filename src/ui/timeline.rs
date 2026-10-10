@@ -2468,7 +2468,7 @@ fn rig_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
 }
 
 /// Ask for a Spine, DragonBones or Lottie JSON to bring in as a rig layer.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 pub fn pick_animation(app: &mut PainterApp) {
     let dialog = crate::app::settings::file_dialog()
         .add_filter("Spine, DragonBones or Lottie", &["json", "JSON"]);
@@ -2481,7 +2481,7 @@ pub fn pick_animation(app: &mut PainterApp) {
 
 /// Ask for a video, GIF or animated picture to bring in as an animated
 /// layer.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 pub fn pick_video(app: &mut PainterApp) {
     let dialog = crate::app::settings::file_dialog().add_filter(
         "Videos and animated pictures",
@@ -2498,7 +2498,7 @@ pub fn pick_video(app: &mut PainterApp) {
 
 /// Ask where to export the animation (its format from the name).
 pub fn pick_export(app: &mut PainterApp) {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(mobile))]
     {
         use crate::project::video::VideoFormat;
         let dialog = crate::app::settings::file_dialog()
@@ -2514,7 +2514,7 @@ pub fn pick_export(app: &mut PainterApp) {
             }
         });
     }
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     {
         // No file dialog: a GIF in the cache, published to Pictures.
         let path = std::env::temp_dir().join("animation.gif");

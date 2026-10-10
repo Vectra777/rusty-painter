@@ -56,7 +56,7 @@ impl eframe::App for PainterApp {
         raw_input.events.extend(typed);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         // Closed while starting: what's on disk wasn't read yet, so
         // nothing here may be written over it.
         if self.workspace.loading.is_some() {

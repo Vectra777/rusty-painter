@@ -181,9 +181,9 @@ impl PainterApp {
         state.task = Some(std::thread::spawn(move || {
             write_frames(&frames, &path)?;
             // Android: from the cache into Pictures.
-            #[cfg(target_os = "android")]
-            return crate::android::publish_file(&path, "image/gif").map(|done| done.message);
-            #[cfg(not(target_os = "android"))]
+            #[cfg(mobile)]
+            return crate::platform::publish_file(&path, "image/gif").map(|done| done.message);
+            #[cfg(not(mobile))]
             Ok(format!("Time-lapse saved to {}", path.display()))
         }));
     }

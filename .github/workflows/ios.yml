@@ -1,0 +1,65 @@
+name: iOS
+
+# The iPad build, on a macOS runner (no Mac needed): lint, a Simulator run
+# with a screenshot and the app's log, and an unsigned .ipa to sideload
+# with SideStore. Kept out of CI's own workflow: macOS minutes cost ten
+# Linux ones on private repositories.
+on:
+  pull_request:
+  push:
+    branches: [main, master, pre-release]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ios:
+    name: iPad build & Simulator run
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+
+      - name: Clippy (aarch64-apple-ios)
+        run: cargo clippy --locked --target aarch64-apple-ios --all-targets -- -D warnings
+
+      - name: Simulator run
+        run: |
+          APP="$(scripts/build-ios.sh aarch64-apple-ios-sim debug | tail -n 1)"
+          # The newest iPad the runner's Simulator has.
+          UDID="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          ipads = [d for rt in sorted(devices) if "iOS" in rt for d in devices[rt] if d["name"].startswith("iPad")]
+          print(ipads[-1]["udid"])')"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" "$APP"
+          xcrun simctl launch "$UDID" io.vectra.rustypainter
+          sleep 30
+          mkdir -p smoke
+          xcrun simctl io "$UDID" screenshot smoke/ipad.png
+          DATA="$(xcrun simctl get_app_container "$UDID" io.vectra.rustypainter data)"
+          cp "$DATA/Documents/rusty-painter.log" smoke/ || true
+          cat smoke/rusty-painter.log || true
+          # Still running, and no panic in the log.
+          xcrun simctl spawn "$UDID" launchctl list | grep -q io.vectra.rustypainter
+          ! grep -q "panicked" smoke/rusty-painter.log
+
+      - name: Unsigned .ipa (for SideStore)
+        run: |
+          IPA="$(scripts/build-ios.sh aarch64-apple-ios release | tail -n 1)"
+          cp "$IPA" smoke/rusty-painter-ios-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios
+          path: smoke/

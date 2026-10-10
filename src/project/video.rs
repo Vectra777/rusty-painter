@@ -45,6 +45,7 @@ impl VideoFormat {
     }
 
     /// From a file name's extension (`.png` is an animated PNG).
+    #[cfg_attr(mobile, allow(dead_code))]
     pub fn from_path(path: &Path) -> Option<Self> {
         let e = path.extension()?.to_str()?.to_ascii_lowercase();
         Some(match e.as_str() {

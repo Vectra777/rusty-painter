@@ -57,6 +57,8 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
     touch_and_pen_settings(app, ui);
     ui.separator();
     ui.horizontal(|ui| {
+        // Mobile apps can't open another app on a folder.
+        #[cfg(not(mobile))]
         if ui.button("Open Brush Folder").clicked() {
             let _ = app.brush_state.brushes_path.canonicalize().map(|path| {
                 #[cfg(target_os = "linux")]
