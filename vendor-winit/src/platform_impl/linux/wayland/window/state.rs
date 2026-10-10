@@ -688,6 +688,18 @@ impl WindowState {
     }
 
     /// Set the cursor icon.
+    /// The cursor a pen over the window shows (rusty-painter patch): the
+    /// mouse's, `None` when hidden; a custom cursor's place the default.
+    pub fn pen_cursor(&self) -> Option<CursorIcon> {
+        if !self.cursor_visible {
+            return None;
+        }
+        match &self.selected_cursor {
+            SelectedCursor::Named(icon) => Some(*icon),
+            SelectedCursor::Custom(_) => Some(CursorIcon::Default),
+        }
+    }
+
     pub fn set_cursor(&mut self, cursor_icon: CursorIcon) {
         self.selected_cursor = SelectedCursor::Named(cursor_icon);
 

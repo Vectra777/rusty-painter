@@ -1,7 +1,7 @@
 fn main() {
-    // `x11_pen`: the desktop Unix builds, where the patched winit reports an
-    // X11 tablet pen's pressure (see `src/tablet/mod.rs`).
-    println!("cargo::rustc-check-cfg=cfg(x11_pen)");
+    // `winit_pen`: the desktop Unix builds, where the patched winit reports a
+    // tablet pen's pressure, on X11 and Wayland (see `src/tablet/mod.rs`).
+    println!("cargo::rustc-check-cfg=cfg(winit_pen)");
     // `mobile`: Android and iOS, touch-first and sandboxed (no file dialogs,
     // no subprocesses; files come and go through the system's pickers).
     println!("cargo::rustc-check-cfg=cfg(mobile)");
@@ -12,6 +12,6 @@ fn main() {
         println!("cargo::rustc-cfg=mobile");
     }
     if unix && !matches!(os.as_str(), "android" | "macos" | "ios") {
-        println!("cargo::rustc-cfg=x11_pen");
+        println!("cargo::rustc-cfg=winit_pen");
     }
 }

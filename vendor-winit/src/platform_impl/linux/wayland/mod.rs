@@ -13,6 +13,7 @@ pub use crate::platform_impl::platform::{OsError, WindowId};
 pub use event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 pub use output::{MonitorHandle, VideoModeHandle};
 pub use window::Window;
+pub(crate) use seat::take_pen_samples;
 
 mod dnd;
 mod event_loop;

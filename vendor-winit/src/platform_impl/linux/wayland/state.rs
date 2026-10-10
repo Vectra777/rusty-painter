@@ -29,7 +29,7 @@ use crate::platform_impl::wayland::event_loop::sink::EventSink;
 use crate::platform_impl::wayland::output::MonitorHandle;
 use crate::platform_impl::wayland::seat::{
     PointerConstraintsState, RelativePointerState, TextInputState, WinitPointerData,
-    WinitPointerDataExt, WinitSeatState,
+    WinitPointerDataExt, WinitSeatState, TabletState,
 };
 use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
 use crate::platform_impl::wayland::types::wp_fractional_scaling::FractionalScalingManager;
@@ -91,6 +91,9 @@ pub struct WinitState {
 
     /// The state of the text input on the client.
     pub text_input_state: Option<TextInputState>,
+
+    /// Pens (rusty-painter patch: see `seat::tablet`).
+    pub tablet_state: Option<TabletState>,
 
     /// Observed monitors.
     pub monitors: Arc<Mutex<Vec<MonitorHandle>>>,
@@ -156,6 +159,8 @@ impl WinitState {
             seats.insert(seat.id(), WinitSeatState::new());
         }
 
+        let tablet_state = TabletState::new(globals, queue_handle, seat_state.seats()).ok();
+
         let data_device_manager = DataDeviceManagerState::bind(globals, queue_handle).ok();
         let data_devices = seat_state
             .seats()
@@ -200,6 +205,7 @@ impl WinitState {
             data_device_manager,
             data_devices,
             text_input_state: TextInputState::new(globals, queue_handle).ok(),
+            tablet_state,
 
             relative_pointer: RelativePointerState::new(globals, queue_handle).ok(),
             pointer_constraints: PointerConstraintsState::new(globals, queue_handle)

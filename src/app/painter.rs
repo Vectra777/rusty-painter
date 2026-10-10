@@ -121,6 +121,11 @@ impl eframe::App for PainterApp {
             crate::app::autosave::recovery_dialog(self, ctx);
             self.autosave_tick(ctx);
             self.save_settings(false);
+            // The pen's samples are the canvas's: taps on the library (the
+            // pen is the pointer there) mustn't paint once a canvas opens.
+            if let Some(tablet) = &mut self.tablet {
+                tablet.poll(ctx);
+            }
             return;
         }
 
