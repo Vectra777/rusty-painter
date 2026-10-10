@@ -44,13 +44,16 @@ pub struct BrushState {
     pub swatches: Vec<Color32>,
     /// The swatches changed: saved at the end of the frame.
     pub swatches_dirty: bool,
-    /// Brush and eraser keep separate settings: `brush` is the active tool's,
-    /// this is the other one's, swapped in when the tool changes.
-    pub stashed_brush: Brush,
-    pub eraser_active: bool,
-    /// Name of the preset the active tool's brush came from, and the other tool's.
+    /// Brush, eraser, smudge and blur keep separate settings (tip, size,
+    /// preset...): `brush` is the active slot's, these are the others' with
+    /// their presets, swapped in when the tool changes. `None` for the
+    /// active slot, and for smudge and blur until first used (they start
+    /// as a copy of the brush).
+    pub parked: [Option<(Brush, Option<String>)>; 4],
+    /// Whose brush `brush` is.
+    pub slot: BrushSlot,
+    /// Name of the preset the active slot's brush came from.
     pub active_preset: Option<String>,
-    pub stashed_preset: Option<String>,
     /// The floating presets window is open.
     pub show_presets: bool,
     /// The smudge / blur stroke in progress.
@@ -65,6 +68,32 @@ pub struct BrushState {
     /// The paint a mixing brush that isn't cleaned after each stroke
     /// still carries.
     pub dirty_brush: Arc<crate::app::tools::blend::DirtyBrush>,
+}
+
+/// Which tool a brush belongs to: each keeps its own (Clip Studio's
+/// sub-tools), while the colour and the stabiliser follow the hand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BrushSlot {
+    #[default]
+    Brush,
+    Eraser,
+    Smudge,
+    Blur,
+}
+
+impl BrushSlot {
+    pub const ALL: [Self; 4] = [Self::Brush, Self::Eraser, Self::Smudge, Self::Blur];
+}
+
+/// Give `to` what's the artist's rather than the brush's: `from`'s colour
+/// and stabiliser.
+pub fn keep_hand(to: &mut Brush, from: &Brush) {
+    to.brush_options.color = from.brush_options.color;
+    to.stabilizer_algorithm = from.stabilizer_algorithm;
+    to.stabilizer = from.stabilizer;
+    to.stabilizer_mass = from.stabilizer_mass;
+    to.stabilizer_drag = from.stabilizer_drag;
+    to.stabilizer_modes = from.stabilizer_modes;
 }
 
 /// A tip in the brush settings' tip list: one tip, or a set the dabs take
@@ -104,10 +133,9 @@ impl BrushState {
             recent_colors: Vec::new(),
             swatches: vec![Color32::BLACK, Color32::WHITE],
             swatches_dirty: false,
-            stashed_brush: brush.clone(),
-            eraser_active: false,
+            parked: Default::default(),
+            slot: BrushSlot::Brush,
             active_preset: None,
-            stashed_preset: None,
             show_presets: false,
             blend_stroke: None,
             import_report: None,
@@ -121,13 +149,60 @@ impl BrushState {
 
     /// The eraser starts from the first eraser preset, else from the brush.
     pub fn pick_eraser(&mut self) {
+        if self.slot == BrushSlot::Eraser {
+            return;
+        }
         let eraser =
             (self.presets.iter()).find(|p| p.brush.brush_options.blend_mode == BlendMode::Eraser);
-        self.stashed_preset = eraser.map(|p| p.name.clone());
+        let preset = eraser.map(|p| p.name.clone());
         let mut eraser_brush = eraser.map_or_else(|| self.brush.clone(), |p| p.brush.clone());
         eraser_brush.brush_options.blend_mode = BlendMode::Eraser;
         eraser_brush.brush_options.color = self.brush.brush_options.color;
-        self.stashed_brush = eraser_brush;
+        self.parked[BrushSlot::Eraser as usize] = Some((eraser_brush, preset));
+    }
+
+    pub fn eraser_active(&self) -> bool {
+        self.slot == BrushSlot::Eraser
+    }
+
+    /// `slot`'s brush and preset, active or parked (smudge and blur not
+    /// used yet: the brush's).
+    pub fn slot_brush(&self, slot: BrushSlot) -> (&Brush, &Option<String>) {
+        if slot == self.slot {
+            return (&self.brush, &self.active_preset);
+        }
+        match &self.parked[slot as usize] {
+            Some((brush, preset)) => (brush, preset),
+            None if slot == BrushSlot::Brush => (&self.brush, &self.active_preset),
+            None => self.slot_brush(BrushSlot::Brush),
+        }
+    }
+
+    /// Make `slot`'s brush the active one, parking the current one. Returns
+    /// whether it changed.
+    pub fn switch_slot(&mut self, slot: BrushSlot) -> bool {
+        if self.slot == slot {
+            return false;
+        }
+        let (mut brush, preset) = match self.parked[slot as usize].take() {
+            Some(parked) => parked,
+            None => {
+                let (b, p) = self.slot_brush(BrushSlot::Brush);
+                let mut b = b.clone();
+                if b.brush_options.blend_mode == BlendMode::Eraser {
+                    b.brush_options.blend_mode = BlendMode::Normal;
+                }
+                (b, p.clone())
+            }
+        };
+        keep_hand(&mut brush, &self.brush);
+        let old = std::mem::replace(&mut self.brush, brush);
+        let old_preset = std::mem::replace(&mut self.active_preset, preset);
+        self.parked[self.slot as usize] = Some((old, old_preset));
+        self.slot = slot;
+        self.brush.is_changed = true;
+        self.brush_preview.dirty = true;
+        true
     }
 
     /// Remember `color` at the front of the recent-colors strip.
@@ -246,6 +321,9 @@ impl RenderCache {
 
 /// A transform session's starting point: the source layer and its tiles
 /// (the ones the float lifted pixels from) as they were, plus the selection.
+/// Whole tiles by coordinate.
+pub type Tiles = HashMap<(i32, i32), Vec<Color32>>;
+
 pub struct FloatSession {
     pub source_id: crate::canvas::storage::LayerId,
     pub source_tiles: HashMap<(i32, i32), Vec<Color32>>,
@@ -256,6 +334,34 @@ pub struct FloatSession {
     pub src_bounds: Option<egui::Rect>,
     /// The floating layer shows a quick (draft) preview right now.
     pub draft_shown: bool,
+}
+
+/// A transform of several layers, each redrawn in place (see
+/// `transform::lift_in_place`).
+pub struct InPlaceTransform {
+    /// The selected layer.
+    pub source_id: crate::canvas::storage::LayerId,
+    pub layers: Vec<InPlaceLayer>,
+    pub selection: Option<crate::selection::SelectionShape>,
+    /// The layers show a quick (draft) preview right now.
+    pub draft_shown: bool,
+    /// A full-quality redraw took too long for a drag: drags show the
+    /// quick preview.
+    pub slow: bool,
+}
+
+/// One layer of an [`InPlaceTransform`].
+pub struct InPlaceLayer {
+    pub id: crate::canvas::storage::LayerId,
+    /// The pixels moving (taken out of the layer at the start).
+    pub lifted: Tiles,
+    pub src_bounds: Option<egui::Rect>,
+    /// The layer's tiles under `lifted` as they were.
+    pub before: Tiles,
+    /// What the layer has besides the moving pixels, where redraws went.
+    pub left: Tiles,
+    /// Tiles the last redraw wrote.
+    pub drawn: Vec<(i32, i32)>,
 }
 
 /// The toolbar buttons that hold more than one tool: which one each shows.
@@ -288,10 +394,26 @@ pub struct LayerState {
     /// Only counts while it holds the selected row (see
     /// `PainterApp::selected_indices`).
     pub selected: Vec<crate::canvas::storage::LayerId>,
+    /// The layers' settings as a layers panel edit started (see
+    /// `PainterApp::settings_watch`).
+    /// Alt+right-click's menu of the layers with paint under the pointer
+    /// (top first), at this screen position.
+    pub pick_menu: Option<(egui::Pos2, Vec<crate::canvas::storage::LayerId>)>,
+    pub settings_before: Option<
+        Vec<(
+            crate::canvas::storage::LayerId,
+            crate::canvas::history::LayerSettings,
+        )>,
+    >,
     pub floating_layer_idx: Option<usize>,
     pub floating_buffer: Option<HashMap<(i32, i32), Vec<Color32>>>,
     /// What the running transform session needs to undo or cancel itself.
     pub float_session: Option<FloatSession>,
+    /// The layers the Transform tool's idle box was fitted to (see
+    /// `transform::idle_box_key`).
+    pub idle_box_for: Vec<crate::canvas::storage::LayerId>,
+    /// The running transform of several layers, if any.
+    pub in_place: Option<InPlaceTransform>,
     /// Transforming the selection outline alone (it had no pixels to
     /// lift): the selection as it was, applied on commit.
     pub selection_transform: Option<crate::selection::SelectionShape>,
@@ -327,9 +449,13 @@ impl LayerState {
             layer_ui_colors: vec![Color32::from_gray(40); layer_count],
             layer_dragging: None,
             selected: Vec::new(),
+            settings_before: None,
+            pick_menu: None,
             floating_layer_idx: None,
             floating_buffer: None,
             float_session: None,
+            idle_box_for: Vec::new(),
+            in_place: None,
             selection_transform: None,
             transform_info: None,
             float_overlay: None,
@@ -485,6 +611,9 @@ pub struct WorkspaceState {
     /// The colour and layers panels are open (they share the right side).
     pub show_color: bool,
     pub show_layers: bool,
+    /// The mixing palette shows under the colours.
+    pub show_mixer: bool,
+    pub mixer: crate::app::tools::mixer::Mixer,
     /// Window size last frame, to notice resizes and screen rotations.
     pub screen_size: Option<egui::Vec2>,
     /// Selection type the Select tool uses (last one picked).
@@ -611,6 +740,8 @@ impl WorkspaceState {
             // Closed: the canvas gets the screen; the rails open them.
             show_left_panel: false,
             show_color: false,
+            show_mixer: false,
+            mixer: Default::default(),
             show_layers: false,
             screen_size: None,
             select_type: crate::selection::SelectionType::Rectangle,

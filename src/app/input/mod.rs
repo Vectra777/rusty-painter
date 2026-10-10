@@ -309,6 +309,15 @@ fn handle_mouse_button(
         egui::PointerButton::Primary => {
             handle_primary_button(app, ctx, response, canvas_pos, raw, pressed);
         }
+        // Alt+right-click: pick the layer with paint under the pointer.
+        egui::PointerButton::Secondary
+            if pressed && response.hovered() && ctx.input(|i| i.modifiers.alt) =>
+        {
+            if canvas_pos.1 {
+                let (x, y) = (canvas_pos.0.x.floor() as i32, canvas_pos.0.y.floor() as i32);
+                app.pick_layer_at(pos, x, y);
+            }
+        }
         egui::PointerButton::Secondary => {
             app.viewport.is_panning = pressed && response.hovered();
             app.radial_right_button(pos, pressed, response.hovered());

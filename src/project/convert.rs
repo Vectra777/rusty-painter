@@ -573,6 +573,22 @@ pub(super) enum StoredLayerHistoryOp {
     },
     /// Several adds and moves as one step, in the order they were done.
     Batch(Vec<StoredLayerHistoryOp>),
+    /// Layers' settings on the other side of the step.
+    Settings(Vec<(u64, StoredLayerSettings)>),
+}
+
+/// Mirrors `LayerSettings`.
+#[derive(Serialize, Deserialize)]
+pub(super) struct StoredLayerSettings {
+    visible: bool,
+    opacity: f32,
+    locked: bool,
+    alpha_locked: bool,
+    blend: String,
+    clipped: bool,
+    position_locked: bool,
+    draft: bool,
+    reference: bool,
 }
 
 impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
@@ -637,6 +653,25 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                 unreachable!("a merge step is saved as StoredUndoAction::merge")
             }
             LayerHistoryOp::Batch(ops) => Self::Batch(ops.iter().map(Self::from).collect()),
+            LayerHistoryOp::Settings(layers) => Self::Settings(
+                layers
+                    .iter()
+                    .map(|(id, s)| {
+                        let stored = StoredLayerSettings {
+                            visible: s.visible,
+                            opacity: s.opacity,
+                            locked: s.locked,
+                            alpha_locked: s.alpha_locked,
+                            blend: s.blend.key().to_string(),
+                            clipped: s.clipped,
+                            position_locked: s.position_locked,
+                            draft: s.draft,
+                            reference: s.reference,
+                        };
+                        (id.0, stored)
+                    })
+                    .collect(),
+            ),
             LayerHistoryOp::Text { layers, inner } => Self::Text {
                 layers: layers
                     .iter()
@@ -764,6 +799,26 @@ impl StoredLayerHistoryOp {
                 inner: inner.map(|op| Box::new(op.into_op())),
             },
             Self::Batch(ops) => LayerHistoryOp::Batch(ops.into_iter().map(Self::into_op).collect()),
+            Self::Settings(layers) => LayerHistoryOp::Settings(
+                layers
+                    .into_iter()
+                    .map(|(id, s)| {
+                        let settings = crate::canvas::history::LayerSettings {
+                            visible: s.visible,
+                            opacity: s.opacity,
+                            locked: s.locked,
+                            alpha_locked: s.alpha_locked,
+                            blend: crate::canvas::blend_modes::LayerBlend::from_key(&s.blend)
+                                .unwrap_or_default(),
+                            clipped: s.clipped,
+                            position_locked: s.position_locked,
+                            draft: s.draft,
+                            reference: s.reference,
+                        };
+                        (LayerId(id), settings)
+                    })
+                    .collect(),
+            ),
         }
     }
 }

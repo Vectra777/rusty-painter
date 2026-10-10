@@ -1,13 +1,14 @@
 //! The app's settings, in `settings.json` next to `brushes/`: preferences,
 //! each tool's options and where the last session left off. Saved when they
-//! change (once the pointer is up), read at startup. The brush and eraser in
-//! use are kept whole in `brushes/current.rpbrush`, colour and stabiliser
-//! included.
+//! change (once the pointer is up), read at startup. The brush, eraser,
+//! smudge and blur in use are kept whole in `brushes/current.rpbrush`, colour
+//! and stabiliser included.
 
 use crate::PainterApp;
 use crate::app::document::{BackgroundChoice, CanvasUnit, MAX_CANVAS_DPI};
 use crate::app::input::keyboard::KeyboardLayout;
 use crate::app::jobs::write_later;
+use crate::app::state::BrushSlot;
 use crate::app::tools::{
     Tool,
     blend::BlendToolSettings,
@@ -36,10 +37,13 @@ use std::sync::Mutex;
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct AppSettings {
     tool: Tool,
-    eraser_active: bool,
-    /// The presets the brush and the eraser came from.
+    /// Whose brush is in use (brush, eraser, smudge or blur).
+    brush_slot: BrushSlot,
+    /// The presets the brush, the eraser, the smudge and the blur came from.
     brush_preset: Option<String>,
     eraser_preset: Option<String>,
+    smudge_preset: Option<String>,
+    blur_preset: Option<String>,
     secondary_color: [u8; 4],
     recent_colors: Vec<[u8; 4]>,
     thread_count: usize,
@@ -53,6 +57,7 @@ pub struct AppSettings {
     show_left_panel: bool,
     show_color: bool,
     show_layers: bool,
+    show_mixer: bool,
     show_presets: bool,
     quickshape: bool,
     transform_pick_layer: bool,
@@ -114,30 +119,30 @@ pub fn remember_dir(path: &Path) {
     }
 }
 
-/// What was written last: the settings, and the brush and eraser.
+/// What was written last: the settings, and the brush, eraser, smudge and
+/// blur.
 pub struct Saved {
     settings: AppSettings,
-    brushes: [Brush; 2],
+    brushes: [Brush; 4],
 }
 
 impl AppSettings {
     fn of(app: &PainterApp) -> Self {
         let (bs, ws) = (&app.brush_state, &app.workspace);
         let nc = &app.modal_state.new_canvas;
-        let (brush_preset, eraser_preset) = if bs.eraser_active {
-            (bs.stashed_preset.clone(), bs.active_preset.clone())
-        } else {
-            (bs.active_preset.clone(), bs.stashed_preset.clone())
-        };
+        let [brush_preset, eraser_preset, smudge_preset, blur_preset] =
+            BrushSlot::ALL.map(|slot| bs.slot_brush(slot).1.clone());
         Self {
             // Transforming is mid-edit, not a place to come back to.
             tool: match app.active_tool {
                 Tool::Transform(_) => Tool::Brush,
                 tool => tool,
             },
-            eraser_active: bs.eraser_active,
+            brush_slot: bs.slot,
             brush_preset,
             eraser_preset,
+            smudge_preset,
+            blur_preset,
             secondary_color: bs.secondary_color.to_array(),
             recent_colors: bs.recent_colors.iter().map(|c| c.to_array()).collect(),
             thread_count: ws.thread_count,
@@ -150,6 +155,7 @@ impl AppSettings {
             show_left_panel: ws.show_left_panel,
             show_color: ws.show_color,
             show_layers: ws.show_layers,
+            show_mixer: ws.show_mixer,
             show_presets: bs.show_presets,
             quickshape: ws.quickshape.enabled,
             transform_pick_layer: ws.transform_pick_layer,
@@ -186,14 +192,23 @@ impl AppSettings {
         let preset = |name: Option<String>| {
             name.filter(|n| app.brush_state.presets.iter().any(|p| &p.name == n))
         };
-        let (brush_preset, eraser_preset) = (preset(self.brush_preset), preset(self.eraser_preset));
+        let presets = [
+            self.brush_preset,
+            self.eraser_preset,
+            self.smudge_preset,
+            self.blur_preset,
+        ]
+        .map(preset);
         let bs = &mut app.brush_state;
-        bs.eraser_active = self.eraser_active;
-        (bs.active_preset, bs.stashed_preset) = if self.eraser_active {
-            (eraser_preset, brush_preset)
-        } else {
-            (brush_preset, eraser_preset)
-        };
+        bs.switch_slot(self.brush_slot);
+        for (slot, name) in BrushSlot::ALL.into_iter().zip(presets) {
+            if slot == bs.slot {
+                bs.active_preset = name;
+            } else {
+                let brush = bs.slot_brush(slot).0.clone();
+                bs.parked[slot as usize].get_or_insert((brush, None)).1 = name;
+            }
+        }
         bs.secondary_color = color(self.secondary_color);
         bs.recent_colors = self.recent_colors.into_iter().map(color).collect();
         bs.use_masked_brush = self.use_masked_brush;
@@ -218,6 +233,7 @@ impl AppSettings {
         ws.show_left_panel = restore && self.show_left_panel;
         ws.show_color = restore && self.show_color;
         ws.show_layers = restore && self.show_layers;
+        ws.show_mixer = self.show_mixer;
         app.brush_state.show_presets &= restore;
         ws.quickshape.enabled = self.quickshape;
         ws.transform_pick_layer = self.transform_pick_layer;
@@ -296,19 +312,17 @@ impl PainterApp {
             .with_file_name("settings.json")
     }
 
+    fn mixer_path(&self) -> std::path::PathBuf {
+        self.brush_state.brushes_path.with_file_name("mixer.png")
+    }
+
     fn current_brushes_path(&self) -> std::path::PathBuf {
         self.brush_state.brushes_path.join("current.rpbrush")
     }
 
-    /// The brush tool's brush and the eraser's, whichever is active.
-    fn current_brushes(&self) -> [Brush; 2] {
-        let bs = &self.brush_state;
-        let (active, stashed) = (bs.brush.clone(), bs.stashed_brush.clone());
-        if bs.eraser_active {
-            [stashed, active]
-        } else {
-            [active, stashed]
-        }
+    /// The brush, eraser, smudge and blur, whichever is active.
+    fn current_brushes(&self) -> [Brush; 4] {
+        BrushSlot::ALL.map(|slot| self.brush_state.slot_brush(slot).0.clone())
     }
 
     /// Where the last session left off (after the presets are loaded).
@@ -319,16 +333,26 @@ impl PainterApp {
             Err(_) => defaults,
         };
         settings.apply(self);
+        self.workspace.mixer = crate::app::tools::mixer::Mixer::load(&self.mixer_path());
         let brushes = std::fs::read(self.current_brushes_path())
             .map_err(|e| e.to_string())
             .and_then(|bytes| preset_file::decode(&bytes));
-        if let Ok(Ok([brush, eraser])) = brushes.map(<[BrushPreset; 2]>::try_from) {
+        // Older files have the brush and the eraser only: the smudge and
+        // the blur keep the brush's.
+        if let Ok(mut brushes) = brushes
+            && matches!(brushes.len(), 2 | 4)
+        {
+            if brushes.len() == 2 {
+                brushes.extend([brushes[0].clone(), brushes[0].clone()]);
+            }
             let bs = &mut self.brush_state;
-            (bs.brush, bs.stashed_brush) = if bs.eraser_active {
-                (eraser.brush, brush.brush)
-            } else {
-                (brush.brush, eraser.brush)
-            };
+            for (slot, preset) in BrushSlot::ALL.into_iter().zip(brushes) {
+                if slot == bs.slot {
+                    bs.brush = preset.brush;
+                } else if let Some((brush, _)) = &mut bs.parked[slot as usize] {
+                    *brush = preset.brush;
+                }
+            }
             bs.brush.is_changed = true;
             bs.brush_preview.dirty = true;
         }
@@ -348,6 +372,8 @@ impl PainterApp {
         if pointer_down || self.brush_state.is_drawing {
             return;
         }
+        let mixer = self.mixer_path();
+        self.workspace.mixer.save(&mixer);
         let settings = AppSettings::of(self);
         let brushes = self.current_brushes();
         let settings_changed = settings != saved.settings;
@@ -381,6 +407,9 @@ mod tests {
     use super::*;
     use crate::canvas::Canvas;
 
+    /// The tests that load settings take turns: the last folder is global.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     fn app_in(dir: &std::path::Path) -> PainterApp {
         let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
         app.brush_state.brushes_path = dir.join("brushes");
@@ -390,6 +419,7 @@ mod tests {
 
     #[test]
     fn settings_and_brushes_come_back_and_a_bad_field_falls_back_alone() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("rp-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -442,6 +472,47 @@ mod tests {
         back.load_settings();
         assert_eq!(back.active_tool, Tool::Brush);
         assert_eq!(back.workspace.fill.settings.tolerance, 77);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_tool_brush_comes_back_and_old_files_still_read() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rp-slots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app_in(&dir);
+        app.load_settings();
+        app.brush_state.brush.brush_options.diameter = 11.0;
+        app.set_blend_tool(true);
+        app.brush_state.brush.brush_options.diameter = 66.0;
+        app.save_settings(false);
+
+        let mut back = app_in(&dir);
+        back.load_settings();
+        assert_eq!(back.active_tool, Tool::Smudge);
+        assert_eq!(back.brush_state.brush.brush_options.diameter, 66.0);
+        back.set_brush_tool(false);
+        assert_eq!(back.brush_state.brush.brush_options.diameter, 11.0);
+
+        // A brush and an eraser only, as before the smudge and blur had
+        // their own: the smudge starts as the brush.
+        let two: Vec<_> = app.current_brushes()[..2]
+            .iter()
+            .map(|brush| BrushPreset {
+                name: "Current".into(),
+                brush: brush.clone(),
+                file: None,
+            })
+            .collect();
+        std::fs::write(
+            app.current_brushes_path(),
+            preset_file::encode(&two).unwrap(),
+        )
+        .unwrap();
+        let mut back = app_in(&dir);
+        back.load_settings();
+        assert_eq!(back.brush_state.brush.brush_options.diameter, 11.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

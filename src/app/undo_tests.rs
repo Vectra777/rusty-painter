@@ -590,9 +590,10 @@ fn a_gradient_keeps_full_depth_and_undoes_to_it() {
     }
 }
 
-/// Colour adjustments run at full depth in a deeper document: the same
-/// picture as in 8 bits (give or take its rounding), stretching dark tones
-/// without the gaps 8 bits leave, and undone back to full depth.
+/// Colour adjustments, blurs and sharpening run at full depth in a deeper
+/// document: the same picture as in 8 bits (give or take its rounding),
+/// stretching dark tones without the gaps 8 bits leave, and undone back to
+/// full depth.
 #[test]
 fn colour_filters_work_at_full_depth() {
     use crate::canvas::filters::Filter;
@@ -621,6 +622,11 @@ fn colour_filters_work_at_full_depth() {
             contrast: 0.4,
         },
         Filter::Invert,
+        Filter::GaussianBlur { radius: 4.0 },
+        Filter::Sharpen {
+            radius: 2.0,
+            amount: 1.0,
+        },
     ];
     let row = |app: &PainterApp| -> Vec<Color32> {
         (0..4)
@@ -636,6 +642,10 @@ fn colour_filters_work_at_full_depth() {
         let before = deep.canvas.get_layer_tile_deep(1, 1, 0).unwrap();
         deep.filter_open(filter);
         deep.filter_commit();
+        assert!(
+            deep.canvas.get_layer_tile_deep(1, 1, 0).is_some(),
+            "{filter:?} kept the full depth"
+        );
         let got = row(&deep);
         let worst = (want.iter().zip(&got))
             .flat_map(|(a, b)| (0..4).map(move |c| a[c].abs_diff(b[c])))

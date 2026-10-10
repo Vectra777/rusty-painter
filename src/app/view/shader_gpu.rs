@@ -360,7 +360,8 @@ fn fs_blend(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 /// A mode's code in [`BLEND_SHADER`].
 pub fn blend_code(mode: LayerBlend) -> u32 {
     match mode {
-        LayerBlend::Normal => 0,
+        // A pass-through folder that can't pass through composites as Normal.
+        LayerBlend::Normal | LayerBlend::PassThrough => 0,
         LayerBlend::Dissolve => 1,
         LayerBlend::Darken => 2,
         LayerBlend::Multiply => 3,

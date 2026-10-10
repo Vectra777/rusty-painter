@@ -537,7 +537,28 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         "Duplicate Layer",
         keys(app, ctx, Action::DuplicateLayer),
     ) {
-        app.duplicate_layer();
+        app.duplicate_picked();
+    }
+    if menu_item(ui, "Copy Layers", None) {
+        app.copy_layers();
+    }
+    let can_paste = app.workspace.clipboard.layers.is_some();
+    if ui
+        .add_enabled_ui(can_paste, |ui| menu_item(ui, "Paste Layers", None))
+        .inner
+    {
+        app.paste_layers();
+    }
+    let row = app.active_row();
+    let is_folder =
+        app.canvas.layers.get(row).is_some_and(|l| {
+            l.kind == crate::canvas::storage::LayerKind::Group && l.anim.is_none()
+        });
+    if ui
+        .add_enabled_ui(is_folder, |ui| menu_item(ui, "Ungroup", None))
+        .inner
+    {
+        app.ungroup(row);
     }
     ui.separator();
     if menu_item(ui, "Add Layer Mask", None) {
@@ -675,6 +696,8 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     }
     ui.checkbox(&mut app.workspace.show_left_panel, "Brush panel");
     ui.checkbox(&mut app.workspace.show_color, "Colour panel");
+    ui.checkbox(&mut app.workspace.show_mixer, "Mixing palette")
+        .on_hover_text("Under the colours: paint, smudge and pick colours on a palette of its own");
     ui.checkbox(&mut app.workspace.show_layers, "Layers panel");
     ui.checkbox(&mut app.workspace.touch_mode, "Touch mode");
     if app.workspace.touch_mode {

@@ -192,7 +192,11 @@ impl Reader<'_> {
                     if let Some(inner) = child(layer, "layers") {
                         self.list(inner, out, depth + 1)?;
                     }
-                    out.push(common(PsdKind::GroupStart));
+                    let mut folder = common(PsdKind::GroupStart);
+                    if layer.attr("passthrough") == Some("1") {
+                        folder.blend = LayerBlend::PassThrough;
+                    }
+                    out.push(folder);
                 }
                 Some("paintlayer") => {
                     let mut l = common(PsdKind::Pixels);

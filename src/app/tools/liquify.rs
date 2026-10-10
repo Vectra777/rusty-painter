@@ -4,7 +4,7 @@
 //! makes it one undo step; Cancel (Esc) puts the layer back.
 
 use crate::PainterApp;
-use crate::canvas::history::{TileSnapshot, UndoAction};
+use crate::canvas::history::{SnapshotPixels, TileSnapshot, UndoAction};
 use crate::canvas::liquify::{LiquifyField, LiquifyMode};
 use crate::canvas::storage::{LayerId, LayerKind};
 use eframe::egui::{Color32, Vec2};
@@ -33,6 +33,9 @@ impl Default for LiquifySettings {
 pub struct LiquifySession {
     layer_id: LayerId,
     source: HashMap<(i32, i32), Vec<Color32>>,
+    /// In a deeper document, the same at full depth (premultiplied linear
+    /// light): rendered from and kept for undo.
+    source_deep: HashMap<(i32, i32), Vec<[f32; 4]>>,
     field: LiquifyField,
     /// Tiles written into the layer so far.
     written: HashSet<(i32, i32)>,
@@ -100,6 +103,7 @@ impl PainterApp {
         self.layer_state.liquify = Some(LiquifySession {
             layer_id,
             source: self.canvas.capture_layer_pixels(active),
+            source_deep: self.canvas.capture_layer_linear(active),
             field: LiquifyField::new(
                 self.canvas.tile_size(),
                 self.canvas.width(),
@@ -281,7 +285,6 @@ impl PainterApp {
         };
         // Only the pixels this dab changed: render them and tell the display
         // exactly that area (not whole tiles).
-        let pixels = session.field.render_rect(&session.source, rect);
         let ts = self.canvas.tile_size() as i32;
         for ty in rect[1].div_euclid(ts)..=(rect[3] - 1).div_euclid(ts) {
             for tx in rect[0].div_euclid(ts)..=(rect[2] - 1).div_euclid(ts) {
@@ -289,8 +292,17 @@ impl PainterApp {
             }
         }
         let (w, h) = ((rect[2] - rect[0]) as usize, (rect[3] - rect[1]) as usize);
-        self.canvas
-            .write_layer_region(idx, (rect[0], rect[1], w, h), &pixels, None);
+        let area = (rect[0], rect[1], w, h);
+        if self.canvas.depth().is_deep() {
+            let pixels = session.field.render_rect_deep(&session.source_deep, rect);
+            // (Undo comes from the session's source, not from these.)
+            let (mut before, mut before_deep) = (HashMap::new(), HashMap::new());
+            self.canvas
+                .write_layer_region_deep(idx, area, &pixels, &mut before, &mut before_deep);
+        } else {
+            let pixels = session.field.render_rect(&session.source, rect);
+            self.canvas.write_layer_region(idx, area, &pixels, None);
+        }
         self.mark_rect_damage(rect);
     }
 
@@ -307,6 +319,7 @@ impl PainterApp {
             return;
         }
         let ts = self.canvas.tile_size();
+        let depth = self.canvas.depth();
         let tiles = session
             .written
             .iter()
@@ -318,12 +331,12 @@ impl PainterApp {
                 y0: 0,
                 width: ts,
                 height: ts,
-                data: session
-                    .source
-                    .get(&(tx, ty))
-                    .cloned()
-                    .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
-                    .into(),
+                data: match deep_tile(&session, depth, ts, (tx, ty)) {
+                    Some(deep) => SnapshotPixels::Deep(deep),
+                    None => (session.source.get(&(tx, ty)).cloned())
+                        .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
+                        .into(),
+                },
             })
             .collect();
         let action = UndoAction {
@@ -345,7 +358,12 @@ impl PainterApp {
         };
         self.release_canvas();
         let ts = self.canvas.tile_size();
+        let depth = self.canvas.depth();
         for &(tx, ty) in &session.written {
+            if let Some(deep) = deep_tile(&session, depth, ts, (tx, ty)) {
+                self.canvas.set_layer_tile_deep(idx, tx, ty, &deep);
+                continue;
+            }
             let data = session
                 .source
                 .get(&(tx, ty))
@@ -369,6 +387,22 @@ impl PainterApp {
     pub(crate) fn liquify_redraw_for_test(&mut self, rect: [i32; 4]) {
         self.liquify_redraw(rect);
     }
+}
+
+/// Tile `key` of the session's source at full depth, in a deeper document.
+fn deep_tile(
+    session: &LiquifySession,
+    depth: crate::canvas::storage::Depth,
+    ts: usize,
+    key: (i32, i32),
+) -> Option<crate::canvas::storage::DeepTile> {
+    let mut deep = crate::canvas::storage::DeepTile::transparent(depth, ts * ts)?;
+    if let Some(px) = session.source_deep.get(&key) {
+        for (i, &v) in px.iter().enumerate() {
+            deep.set_linear(i, v);
+        }
+    }
+    Some(deep)
 }
 
 fn union(a: Option<[i32; 4]>, b: [i32; 4]) -> [i32; 4] {
@@ -448,6 +482,19 @@ mod tests {
             assert!(worst <= 2, "{mode:?}: off by {worst}");
             assert!(layer(&pen) != layer(&app()), "{mode:?} changed nothing");
         }
+    }
+
+    #[test]
+    fn a_deeper_document_liquifies_at_full_depth_and_undoes_exactly() {
+        use crate::canvas::storage::Depth;
+        let mut app = app();
+        app.convert_depth(Depth::U16);
+        let before = app.canvas.get_layer_tile_deep(1, 1, 1).unwrap();
+        drag(&mut app, LiquifyMode::Push, 4.0);
+        let after = app.canvas.get_layer_tile_deep(1, 1, 1).expect("still deep");
+        assert!(after != before, "it moved");
+        app.apply_history(false);
+        assert_eq!(app.canvas.get_layer_tile_deep(1, 1, 1).unwrap(), before);
     }
 
     #[test]

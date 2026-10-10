@@ -3,7 +3,7 @@
 //! composites it back as a single undo step, cancel restores the original.
 
 use crate::PainterApp;
-use crate::app::state::FloatSession;
+use crate::app::state::{FloatSession, InPlaceLayer, InPlaceTransform};
 use crate::app::stroke_ops::exclusive;
 use crate::app::tools::Tool;
 use crate::canvas::history::{TileSnapshot, UndoAction};
@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 /// Whether a transform session is running (pixels or a selection).
 pub(crate) fn transform_running(app: &PainterApp) -> bool {
-    app.layer_state.floating_layer_idx.is_some() || app.layer_state.selection_transform.is_some()
+    app.layer_state.floating_layer_idx.is_some()
+        || app.layer_state.selection_transform.is_some()
+        || app.layer_state.in_place.is_some()
 }
 
 /// Keep a copy of the session's transform (see
@@ -72,6 +74,14 @@ fn lift_pixels(app: &mut PainterApp) -> bool {
     let Some(source_id) = app.canvas.layer_id_at(active) else {
         return false;
     };
+    // Other layers picked in the layers panel move with it, each redrawn
+    // in place (see `lift_in_place`).
+    let extra = moving_with(app);
+    if !extra.is_empty() {
+        let ids = std::iter::once(source_id).chain(extra).collect();
+        return lift_in_place(app, ids);
+    }
+
     // Its paint's thickness wouldn't move with it: lit as it shows first.
     app.bake_impasto(active);
     app.release_canvas();
@@ -90,25 +100,7 @@ fn lift_pixels(app: &mut PainterApp) -> bool {
         app.mark_all_tiles_dirty();
     }
     let buffer = app.canvas.capture_layer_pixels(idx);
-
-    // The source as it was: the float lifted disjoint pixels, so putting
-    // them back over what's left is exact.
-    let tile_len = app.canvas.tile_size() * app.canvas.tile_size();
-    let source_tiles: HashMap<(i32, i32), Vec<Color32>> = buffer
-        .par_iter()
-        .map(|(&(tx, ty), lifted)| {
-            let mut tile = app
-                .canvas
-                .get_layer_tile_data(active, tx, ty)
-                .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_len]);
-            for (dst, &src) in tile.iter_mut().zip(lifted) {
-                if src != Color32::TRANSPARENT {
-                    *dst = src;
-                }
-            }
-            ((tx, ty), tile)
-        })
-        .collect();
+    let source_tiles = sources_before(app, active, &buffer);
 
     app.layer_state.float_session = Some(FloatSession {
         source_id,
@@ -133,6 +125,340 @@ fn lift_pixels(app: &mut PainterApp) -> bool {
     true
 }
 
+/// The other layers picked in the layers panel that a transform of the
+/// selected one moves too (paint layers that can move; none when the
+/// selected one is keyed).
+fn moving_with(app: &PainterApp) -> Vec<crate::canvas::storage::LayerId> {
+    let active = app.canvas.active_layer_idx;
+    if app.canvas.layers.get(active).is_none_or(|l| l.is_posed()) {
+        return Vec::new();
+    }
+    let row = app.active_row();
+    app.selected_indices()
+        .into_iter()
+        .filter(|&i| i != row && i != active)
+        .map(|i| &app.canvas.layers[i])
+        .filter(|l| {
+            l.kind == LayerKind::Paint
+                && !l.locked
+                && !l.position_locked
+                && !l.is_posed()
+                && l.text.is_none()
+                && l.vector.is_none()
+                && l.shader.is_none()
+                && l.adjustment.is_none()
+                && l.style.fill.is_none()
+        })
+        .map(|l| l.id)
+        .collect()
+}
+
+/// The box the Transform tool shows before it's used: around the selected
+/// layer's paint (inside the selection, if any) and the other picked
+/// layers' that move with it, or around the selection.
+pub(crate) fn idle_box(app: &PainterApp) -> Option<egui::Rect> {
+    let selection = app
+        .selection_manager
+        .has_selection()
+        .then_some(&app.selection_manager);
+    let c = &app.canvas;
+    moving_with(app)
+        .into_iter()
+        .filter_map(|id| c.layer_index_of(id))
+        .chain(std::iter::once(c.active_layer_idx))
+        .filter_map(|i| c.get_content_bounds(i, selection))
+        .reduce(|a, b| a.union(b))
+        .or_else(|| app.selection_manager.get_bounds())
+}
+
+/// What the idle box was worked out for: it's worked out again when the
+/// selected layer or the picked ones change.
+pub(crate) fn idle_box_key(app: &PainterApp) -> Vec<crate::canvas::storage::LayerId> {
+    let c = &app.canvas;
+    std::iter::once(c.active_layer_idx)
+        .chain(app.selected_indices())
+        .filter_map(|i| c.layer_id_at(i))
+        .collect()
+}
+
+/// A transform of several layers, done the way Krita does it: each layer's
+/// moving pixels are taken out of it and kept, and every redraw puts them
+/// back into the layer itself, transformed. Nothing else is drawn, so the
+/// preview shows each layer as the stack composites it (blend modes,
+/// opacity, masks, folders, order). `ids` are the layers, the selected one
+/// first. Whether there was anything to move.
+fn lift_in_place(app: &mut PainterApp, ids: Vec<crate::canvas::storage::LayerId>) -> bool {
+    let source_id = ids[0];
+    app.release_canvas();
+    let mut layers = Vec::new();
+    for id in ids {
+        let Some(i) = app.canvas.layer_index_of(id) else {
+            continue;
+        };
+        app.bake_impasto(i);
+        app.canvas_mut().active_layer_idx = i;
+        let layer_selection = app.layer_selection();
+        let selection = app
+            .selection_manager
+            .has_selection()
+            .then_some(&layer_selection);
+        let Some(float) = exclusive(&mut app.canvas).float_pixels(selection) else {
+            continue;
+        };
+        let lifted = app.canvas.capture_layer_pixels(float);
+        exclusive(&mut app.canvas).layers.remove(float);
+        let before = sources_before(app, i, &lifted);
+        // What stayed under the moving pixels.
+        let ts = app.canvas.tile_size();
+        let left = lifted
+            .keys()
+            .map(|&(tx, ty)| {
+                let tile = app.canvas.get_layer_tile_data(i, tx, ty);
+                (
+                    (tx, ty),
+                    tile.unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts]),
+                )
+            })
+            .collect();
+        layers.push(InPlaceLayer {
+            id,
+            src_bounds: app.canvas.tiles_content_bounds(&lifted),
+            lifted,
+            before,
+            left,
+            drawn: Vec::new(),
+        });
+    }
+    if let Some(source) = app.canvas.layer_index_of(source_id) {
+        app.canvas_mut().active_layer_idx = source;
+    }
+    if layers.is_empty() {
+        return false;
+    }
+    let bounds = layers
+        .iter()
+        .filter_map(|l| l.src_bounds)
+        .reduce(|a, b| a.union(b));
+    app.layer_state.in_place = Some(InPlaceTransform {
+        source_id,
+        layers,
+        selection: app.selection_manager.current_shape.clone(),
+        draft_shown: false,
+        slow: false,
+    });
+    if let Tool::Transform(ref mut info) = app.active_tool {
+        info.reset_to(bounds);
+    }
+    // As they were, until the box moves.
+    let info = session_info(app).unwrap_or_default();
+    redraw_in_place(app, &info);
+    app.mark_all_tiles_dirty();
+    true
+}
+
+/// Redraw every layer of the in-place transform for `info`.
+fn redraw_in_place(app: &mut PainterApp, info: &TransformInfo) {
+    let Some(mut session) = app.layer_state.in_place.take() else {
+        return;
+    };
+    app.release_canvas();
+    let mut params = info.params();
+    // Full quality while dragging too, unless that's too slow to keep up:
+    // then a quick nearest-pixel preview until the box is let go.
+    params.draft = info.start_pos.is_some() && session.slow;
+    let started = std::time::Instant::now();
+    let ts = app.canvas.tile_size() as f32;
+    let mut changed: Vec<(i32, i32)> = Vec::new();
+    for layer in &mut session.layers {
+        let (Some(i), Some(src_bounds)) = (app.canvas.layer_index_of(layer.id), layer.src_bounds)
+        else {
+            continue;
+        };
+        let drawn = exclusive(&mut app.canvas).transform_in_place(
+            i,
+            &layer.lifted,
+            src_bounds,
+            params,
+            &mut layer.left,
+            &layer.drawn,
+        );
+        // What it covered before and covers now.
+        changed.extend(std::mem::replace(&mut layer.drawn, drawn));
+        changed.extend(layer.drawn.iter().copied());
+    }
+    if !params.draft && info.start_pos.is_some() {
+        session.slow = started.elapsed() > std::time::Duration::from_millis(16);
+    }
+    session.draft_shown = params.draft;
+    changed.sort_unstable();
+    changed.dedup();
+    for (tx, ty) in changed {
+        let min = egui::pos2(tx as f32 * ts, ty as f32 * ts);
+        app.mark_tiles_in_bounds_dirty(egui::Rect::from_min_size(min, egui::vec2(ts, ts)));
+    }
+    app.layer_state.thumbnails_dirty = true;
+    app.layer_state.in_place = Some(session);
+}
+
+/// Keep the in-place transform: each layer at full quality, all as one
+/// undo step.
+fn commit_in_place(app: &mut PainterApp) {
+    let info = session_info(app);
+    if let Some(info) = info.as_ref() {
+        let mut full = *info;
+        full.start_pos = None;
+        redraw_in_place(app, &full);
+    }
+    let Some(session) = app.layer_state.in_place.take() else {
+        return;
+    };
+    let moved = info.filter(|i| !i.is_identity());
+    if let Some(info) = moved {
+        let mut tiles = Vec::new();
+        for layer in session.layers {
+            // As they were: under the moving pixels, and wherever else
+            // the redraws went.
+            let landing = layer
+                .left
+                .into_iter()
+                .filter(|(key, _)| !layer.before.contains_key(key))
+                .collect();
+            tiles.extend(undo_tiles(
+                app,
+                layer.id,
+                layer.before,
+                landing,
+                &layer.drawn,
+            ));
+        }
+        let whole = session.selection.is_none();
+        let layer_action = whole.then_some(info).and_then(|i| {
+            app.text_layer_moved(session.source_id, &i)
+                .or_else(|| app.vector_layer_moved(session.source_id, &i))
+        });
+        app.push_undo(UndoAction {
+            tiles,
+            selection: Some(session.selection.clone()),
+            transform: None,
+            layer_action,
+        });
+        app.selection_manager.transform_by(&info.params());
+    }
+    reset_tool_info(app);
+    app.mark_all_tiles_dirty();
+}
+
+/// Put every layer of the in-place transform back as it was.
+fn cancel_in_place(app: &mut PainterApp) {
+    let Some(session) = app.layer_state.in_place.take() else {
+        return;
+    };
+    app.release_canvas();
+    let ts = app.canvas.tile_size();
+    let canvas = exclusive(&mut app.canvas);
+    for layer in session.layers {
+        let Some(i) = canvas.layer_index_of(layer.id) else {
+            continue;
+        };
+        for key in &layer.drawn {
+            let data = layer.left.get(key).cloned();
+            canvas.set_layer_tile_data(
+                i,
+                key.0,
+                key.1,
+                data.unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts]),
+            );
+        }
+        for ((tx, ty), data) in layer.before {
+            canvas.set_layer_tile_data(i, tx, ty, data);
+        }
+    }
+    app.selection_manager.current_shape = session.selection;
+    reset_tool_info(app);
+    app.mark_all_tiles_dirty();
+}
+
+/// Drop the floating layer `idx` and put its source back as it was; the
+/// source is selected again.
+fn put_back(app: &mut PainterApp, idx: usize, session: &mut FloatSession) {
+    let source_tiles = std::mem::take(&mut session.source_tiles);
+    {
+        let canvas = exclusive(&mut app.canvas);
+        canvas.layers.remove(idx);
+        if let Some(i) = canvas.layer_index_of(session.source_id) {
+            for ((tx, ty), data) in source_tiles {
+                canvas.set_layer_tile_data(i, tx, ty, data);
+            }
+        }
+        canvas.active_layer_idx = canvas.layer_index_of(session.source_id).unwrap_or_else(|| {
+            idx.saturating_sub(1)
+                .min(canvas.layers.len().saturating_sub(1))
+        });
+    }
+    app.remove_layer_state(idx);
+    app.layer_state.floating_layer_idx = None;
+    app.layer_state.floating_buffer = None;
+    app.layer_state.transform_preview_pending = false;
+    app.layer_state.float_overlay = None;
+}
+
+/// Layer `layer`'s tiles under `lifted` as they were before the lift: the
+/// float lifted disjoint pixels, so putting them back over what's left is
+/// exact.
+fn sources_before(
+    app: &PainterApp,
+    layer: usize,
+    lifted: &HashMap<(i32, i32), Vec<Color32>>,
+) -> HashMap<(i32, i32), Vec<Color32>> {
+    let canvas: &crate::canvas::Canvas = &app.canvas;
+    let tile_len = canvas.tile_size() * canvas.tile_size();
+    lifted
+        .par_iter()
+        .map(|(&(tx, ty), lifted)| {
+            let mut tile = canvas
+                .get_layer_tile_data(layer, tx, ty)
+                .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_len]);
+            for (dst, &src) in tile.iter_mut().zip(lifted) {
+                if src != Color32::TRANSPARENT {
+                    *dst = src;
+                }
+            }
+            ((tx, ty), tile)
+        })
+        .collect()
+}
+
+/// Undo snapshots of layer `id` for a kept transform: every tile the
+/// pixels came from (`sources`) or landed on (`landing`, `touched`), as it
+/// was.
+fn undo_tiles(
+    app: &PainterApp,
+    id: crate::canvas::storage::LayerId,
+    mut sources: HashMap<(i32, i32), Vec<Color32>>,
+    landing: HashMap<(i32, i32), Vec<Color32>>,
+    touched: &[(i32, i32)],
+) -> Vec<TileSnapshot> {
+    let ts = app.canvas.tile_size();
+    sources.extend(landing);
+    let mut keys: Vec<(i32, i32)> = sources.keys().copied().collect();
+    keys.extend(touched.iter().filter(|k| !sources.contains_key(k)));
+    keys.into_iter()
+        .map(|(tx, ty)| TileSnapshot {
+            tx,
+            ty,
+            layer_id: id,
+            x0: 0,
+            y0: 0,
+            width: ts,
+            height: ts,
+            data: sources
+                .remove(&(tx, ty))
+                .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
+                .into(),
+        })
+        .collect()
+}
+
 /// Apply a selection-only transform: the selection moves, as one undo step.
 fn commit_selection_transform(app: &mut PainterApp) {
     let Some(before) = app.layer_state.selection_transform.take() else {
@@ -149,6 +475,10 @@ fn commit_selection_transform(app: &mut PainterApp) {
 pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
     if app.layer_state.selection_transform.is_some() {
         commit_selection_transform(app);
+        return;
+    }
+    if app.layer_state.in_place.is_some() {
+        commit_in_place(app);
         return;
     }
     let Some(idx) = app.layer_state.floating_layer_idx else {
@@ -207,28 +537,9 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
 
     // One undo step: every tile the float came from or went to, as it was.
     if let Some(mut session) = session {
-        let ts = app.canvas.tile_size();
         // Moved into the undo step, not copied.
-        let mut source_tiles = std::mem::take(&mut session.source_tiles);
-        source_tiles.extend(landing);
-        let mut keys: Vec<(i32, i32)> = source_tiles.keys().copied().collect();
-        keys.extend(touched.iter().filter(|k| !source_tiles.contains_key(k)));
-        let tiles: Vec<TileSnapshot> = keys
-            .into_iter()
-            .map(|(tx, ty)| TileSnapshot {
-                tx,
-                ty,
-                layer_id: session.source_id,
-                x0: 0,
-                y0: 0,
-                width: ts,
-                height: ts,
-                data: source_tiles
-                    .remove(&(tx, ty))
-                    .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
-                    .into(),
-            })
-            .collect();
+        let source_tiles = std::mem::take(&mut session.source_tiles);
+        let tiles = undo_tiles(app, session.source_id, source_tiles, landing, &touched);
         let moved = info.is_some_and(|i| !i.is_identity());
         if moved && app.canvas.layer_index_of(session.source_id).is_some() {
             // A whole text or vector layer only moved stays text or lines
@@ -273,6 +584,10 @@ pub(crate) fn cancel_floating_layer(app: &mut PainterApp) {
         reset_tool_info(app);
         return;
     }
+    if app.layer_state.in_place.is_some() {
+        cancel_in_place(app);
+        return;
+    }
     let Some(idx) = app.layer_state.floating_layer_idx else {
         return;
     };
@@ -282,31 +597,25 @@ pub(crate) fn cancel_floating_layer(app: &mut PainterApp) {
         Tool::Transform(info) => info.bounds,
         _ => None,
     };
-    let session = app.layer_state.float_session.take();
-    {
-        let canvas = exclusive(&mut app.canvas);
-        canvas.layers.remove(idx);
-        if let Some(session) = &session
-            && let Some(source) = canvas.layer_index_of(session.source_id)
-        {
-            for (&(tx, ty), data) in &session.source_tiles {
-                canvas.set_layer_tile_data(source, tx, ty, data.clone());
-            }
-            canvas.active_layer_idx = source;
-        } else {
+    match app.layer_state.float_session.take() {
+        // Every lifted layer back as it was.
+        Some(mut session) => {
+            put_back(app, idx, &mut session);
+            app.selection_manager.current_shape = session.selection;
+        }
+        None => {
+            let canvas = exclusive(&mut app.canvas);
+            canvas.layers.remove(idx);
             canvas.active_layer_idx = idx
                 .saturating_sub(1)
                 .min(canvas.layers.len().saturating_sub(1));
+            app.remove_layer_state(idx);
+            app.layer_state.floating_layer_idx = None;
+            app.layer_state.floating_buffer = None;
+            app.layer_state.transform_preview_pending = false;
+            app.layer_state.float_overlay = None;
         }
     }
-    app.remove_layer_state(idx);
-    if let Some(session) = session {
-        app.selection_manager.current_shape = session.selection;
-    }
-    app.layer_state.floating_layer_idx = None;
-    app.layer_state.floating_buffer = None;
-    app.layer_state.transform_preview_pending = false;
-    app.layer_state.float_overlay = None;
     reset_tool_info(app);
     for rect in [float_bounds, start_bounds].into_iter().flatten() {
         app.mark_tiles_in_bounds_dirty(rect);
@@ -433,6 +742,11 @@ pub(crate) fn transform_release(app: &mut PainterApp) {
         || app
             .layer_state
             .float_session
+            .as_ref()
+            .is_some_and(|s| s.draft_shown)
+        || app
+            .layer_state
+            .in_place
             .as_ref()
             .is_some_and(|s| s.draft_shown)
     {
@@ -619,6 +933,9 @@ pub(crate) fn update_scaling(
 }
 
 pub(crate) fn apply_live_transform_preview(app: &mut PainterApp, info: &TransformInfo) {
+    if app.layer_state.in_place.is_some() {
+        return redraw_in_place(app, info);
+    }
     if app.layer_state.floating_buffer.is_none() {
         return;
     }

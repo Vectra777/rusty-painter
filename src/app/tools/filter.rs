@@ -200,11 +200,18 @@ fn apply_to(
     original: &Region,
     coverage: Option<&SelectionMask>,
 ) {
-    // A deeper document and a colour adjustment: at full depth.
-    let deep = filter.adjust_linear([0.5, 0.5, 0.5, 1.0]).is_some()
-        && canvas.map_region_deep(layer, original, coverage, |px| {
+    // A deeper document: a colour adjustment, a blur or sharpening at full
+    // depth.
+    let deep = if filter.adjust_linear([0.5, 0.5, 0.5, 1.0]).is_some() {
+        canvas.map_region_deep(layer, original, coverage, |px| {
             filter.adjust_linear(px).unwrap_or(px)
-        });
+        })
+    } else {
+        // The filters that have it (blurs, sharpening) at full depth too.
+        canvas.filter_region_deep(layer, original, coverage, |src, w, h| {
+            filter.apply_deep(src, w, h)
+        })
+    };
     if !deep {
         let [x0, y0, x1, y1] = original.bounds;
         let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);

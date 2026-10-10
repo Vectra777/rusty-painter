@@ -141,11 +141,16 @@ pub(crate) fn show_dropdowns(app: &mut PainterApp, ctx: &egui::Context) {
         let id = format!("dropdown_{}", dropdown as u8);
         ui::widgets::dropdown(ctx, &id, &mut open, anchor, size, |ui| match dropdown {
             Dropdown::Brushes => ui::brush_list::presets_contents(app, ui),
-            Dropdown::Colour => ui::color_picker::color_picker_panel(
-                ui,
-                &mut app.brush_state,
-                app.workspace.color_model,
-            ),
+            Dropdown::Colour => {
+                ui::color_picker::color_picker_panel(
+                    ui,
+                    &mut app.brush_state,
+                    app.workspace.color_model,
+                );
+                if app.workspace.show_mixer {
+                    ui::mixer::mixer_panel(app, ui);
+                }
+            }
             Dropdown::Layers => {
                 let ctx = ui.ctx().clone();
                 ui::layers::layers_panel(&ctx, ui, app);
@@ -572,6 +577,10 @@ fn right_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
             );
         });
         ui.add_space(4.0);
+        if app.workspace.show_mixer {
+            ui::mixer::mixer_panel(app, ui);
+            ui.add_space(4.0);
+        }
     }
     if app.workspace.show_layers {
         if app.workspace.show_color {

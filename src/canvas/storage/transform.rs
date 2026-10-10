@@ -650,6 +650,82 @@ impl Canvas {
         }
     }
 
+    /// Redraw layer `layer_idx` in place as `left` with `lifted` (content
+    /// bounds `src_bounds`) transformed over it: one layer of a transform
+    /// of several, which shows through the normal compositing (its blend
+    /// mode, opacity, mask and place in the stack). `left` holds what the
+    /// layer has besides the moving pixels; tiles not in it yet are taken
+    /// from the layer the first time they're written (still untouched
+    /// then). `drawn` are the tiles the last redraw wrote: they're reset
+    /// first. Returns the tiles written now.
+    pub fn transform_in_place(
+        &mut self,
+        layer_idx: usize,
+        lifted: &HashMap<(i32, i32), Vec<Color32>>,
+        src_bounds: eframe::egui::Rect,
+        params: TransformParams,
+        left: &mut HashMap<(i32, i32), Vec<Color32>>,
+        drawn: &[TileKey],
+    ) -> Vec<TileKey> {
+        let ts = self.tile_size;
+        if lifted.len().saturating_mul(ts * ts) > MAX_TRANSFORM_SOURCE_PIXELS {
+            log::warn!("Skipping transform preview: source is too large");
+            return drawn.to_vec();
+        }
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return Vec::new();
+        };
+        let moved = transform_tiles(
+            lifted,
+            src_bounds,
+            params,
+            ts,
+            self.width,
+            self.height,
+            None,
+        );
+        let over = match self.blend_space {
+            crate::canvas::blend_modes::BlendSpace::Linear => crate::canvas::blend::alpha_over,
+            crate::canvas::blend_modes::BlendSpace::Gamma => super::composite::gamma_over,
+        };
+        let mut tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
+        let mut keys: Vec<TileKey> = drawn.to_vec();
+        keys.extend(moved.keys().filter(|k| !drawn.contains(k)));
+        for key in &keys {
+            if !left.contains_key(key) {
+                let original = tiles
+                    .get(key)
+                    .and_then(|c| c.lock().unwrap_or_else(|e| e.into_inner()).data().cloned());
+                left.insert(
+                    *key,
+                    original.unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts]),
+                );
+            }
+        }
+        let fresh: Vec<(TileKey, Vec<Color32>)> = keys
+            .par_iter()
+            .map(|key| {
+                let mut data = left[key].clone();
+                if let Some(top) = moved.get(key) {
+                    for (d, &t) in data.iter_mut().zip(top) {
+                        if t.a() > 0 {
+                            *d = over(t, *d);
+                        }
+                    }
+                }
+                (*key, data)
+            })
+            .collect();
+        for (key, data) in fresh {
+            let is_empty = data.iter().all(|p| p.a() == 0);
+            tiles.insert(
+                key,
+                Arc::new(Mutex::new(TileCell::new(Some(data), is_empty))),
+            );
+        }
+        moved.into_keys().collect()
+    }
+
     /// Content bounds of detached tiles (a floating layer's source).
     pub fn tiles_content_bounds(
         &self,

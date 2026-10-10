@@ -9,10 +9,7 @@ use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
 use crate::canvas::color_profile::ColorProfile;
 use crate::{
     PainterApp,
-    app::{
-        document::{ColorModel, TILE_SIZE, validate_canvas_size},
-        tools::Tool,
-    },
+    app::document::{ColorModel, TILE_SIZE, validate_canvas_size},
     canvas::{
         Canvas,
         history::{History, LayerHistoryOp, SnapshotPixels, TileSnapshot, UndoAction},
@@ -291,7 +288,7 @@ impl PainterApp {
                 self.workspace.select.saved = loaded.saved_selections;
             }
         }
-        self.active_tool = Tool::Brush;
+        self.set_brush_tool(self.brush_state.eraser_active());
         self.workspace.library.has_document = true;
     }
 }

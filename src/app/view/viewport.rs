@@ -170,20 +170,28 @@ impl PainterApp {
         let world = (self.canvas.layers.get(self.canvas.active_layer_idx))
             .filter(|l| l.is_posed())
             .map(|_| self.canvas.world_motion(self.canvas.active_layer_idx).0);
+        if !matches!(self.active_tool, crate::app::tools::Tool::Transform(_)) {
+            return;
+        }
+        // Before it's used, the box goes around everything that would move
+        // (worked out again when the selected or picked layers change).
+        let idle = !crate::app::tools::transform::transform_running(self);
+        let key = idle.then(|| crate::app::tools::transform::idle_box_key(self));
+        let refit = key
+            .as_ref()
+            .is_some_and(|k| *k != self.layer_state.idle_box_for);
+        let unset =
+            matches!(self.active_tool, crate::app::tools::Tool::Transform(i) if i.bounds.is_none());
+        let fit = (refit || unset).then(|| crate::app::tools::transform::idle_box(self));
+        if let Some(key) = key {
+            self.layer_state.idle_box_for = key;
+        }
         let crate::app::tools::Tool::Transform(ref mut info) = self.active_tool else {
             return;
         };
-        if info.bounds.is_none() {
-            let selection = self
-                .selection_manager
-                .has_selection()
-                .then_some(&self.selection_manager);
-            // An empty selection still gets a box: the outline transforms.
-            info.reset_to(
-                self.canvas
-                    .get_content_bounds(self.canvas.active_layer_idx, selection)
-                    .or_else(|| self.selection_manager.get_bounds()),
-            );
+        // (An empty selection still gets a box: the outline transforms.)
+        if let Some(bounds) = fit {
+            info.reset_to(bounds);
         }
         let Some(quad) = info.quad() else {
             return;

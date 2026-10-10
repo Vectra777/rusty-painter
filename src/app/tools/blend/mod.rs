@@ -21,6 +21,7 @@
 //! stroke worker like a brush stroke, so a big tip never holds up the UI.
 
 use crate::PainterApp;
+use crate::app::state::BrushSlot;
 use crate::app::tools::Tool;
 use crate::brush_engine::brush_options::PixelBrushShape;
 use crate::canvas::history::{LayerHistoryOp, TileSnapshot, UndoAction};
@@ -231,7 +232,7 @@ pub struct ActiveBlend {
 
 /// A blend stroke as the stroke worker paints it: what it reads, captured
 /// when it starts, and the stroke's own state.
-pub struct BlendSession {
+pub(crate) struct BlendSession {
     canvas: Arc<crate::canvas::Canvas>,
     pool: Arc<rayon::ThreadPool>,
     selection: Option<crate::selection::SelectionManager>,
@@ -254,6 +255,114 @@ pub struct BlendSession {
     /// Smudge or blur laid over the paint, never thinning it (see
     /// [`BlendToolSettings::keep_paint`]).
     keep_paint: bool,
+}
+
+impl BlendSession {
+    /// A stroke of `kind` going down at `pos` on the active layer of
+    /// `canvas`, with no selection, mirror or wrap (the caller sets those).
+    fn new(
+        canvas: Arc<crate::canvas::Canvas>,
+        pool: Arc<rayon::ThreadPool>,
+        brush: crate::brush_engine::brush::Brush,
+        kind: BlendKind,
+        mix: SmudgeMix,
+        pos: Vec2,
+        pressure: f32,
+    ) -> Self {
+        let dabber = (kind == BlendKind::Smudge).then(|| {
+            let mut placing = brush.clone();
+            placing.dynamics.taper.end = 0.0;
+            placing.dual = None;
+            placing.wet_edge = 0.0;
+            let seed = rand::random();
+            let stroke = crate::brush_engine::stroke::StrokeState::with_seed(seed);
+            let correcting = placing.stabilizer_algorithm
+                == crate::brush_engine::brush::StabilizerAlgorithm::PostCorrection
+                && placing.stabilizer_modes.correction > 0.0;
+            Box::new(Dabber {
+                stroke,
+                tiles: crate::brush_engine::stroke::StrokeTiles::collecting(),
+                undo: UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: None,
+                },
+                brush: placing,
+                seed,
+                pressure,
+                samples: correcting.then(Vec::new),
+                first: (pos, pressure),
+            })
+        });
+        // A dirty brush starts with what it carried.
+        let carries = match &mix.dirty {
+            Some(d) => std::mem::take(&mut *d.0.lock().unwrap_or_else(|e| e.into_inner())),
+            None => Vec::new(),
+        };
+        BlendSession {
+            inside: None,
+            keep_paint: false,
+            codec: Codec::for_canvas(&canvas),
+            idx: canvas.active_layer_idx,
+            canvas,
+            pool,
+            selection: None,
+            brush,
+            blur_size: 1.0,
+            wrap: false,
+            damage: Vec::new(),
+            dabber,
+            stroke: BlendStroke {
+                kind,
+                dir: Vec2::ZERO,
+                before: HashMap::new(),
+                before_deep: HashMap::new(),
+                last: Some(pos),
+                last_pressure: pressure,
+                travelled: 0.0,
+                carries: carries.clone(),
+                smudge_last: Vec::new(),
+                carries_at_start: carries,
+                spent: 0.0,
+                symmetry: Default::default(),
+                copies: crate::brush_engine::symmetry::Symmetry::default().copies(),
+                filtered: HashMap::new(),
+                coverage: HashMap::new(),
+                mix,
+                krita_last: Vec::new(),
+                random: 0x9e37_79b9,
+                lightness_before: HashMap::new(),
+                precise: HashMap::new(),
+            },
+        }
+    }
+
+    /// A smudge on a picture of its own (the mixing palette), taking up
+    /// `color_rate` of the brush's colour and carrying paint `length` far.
+    pub(crate) fn offscreen(
+        canvas: Arc<crate::canvas::Canvas>,
+        pool: Arc<rayon::ThreadPool>,
+        brush: crate::brush_engine::brush::Brush,
+        length: f32,
+        color_rate: f32,
+        pos: Vec2,
+        pressure: f32,
+    ) -> Self {
+        let mix = SmudgeMix {
+            length,
+            color_rate,
+            pressure_length: false,
+            pressure_color: false,
+            blend: crate::canvas::blend_modes::LayerBlend::Normal,
+            from_brush: false,
+            krita: None,
+            sample_all: false,
+            load: 0.0,
+            dirty: None,
+        };
+        Self::new(canvas, pool, brush, BlendKind::Smudge, mix, pos, pressure)
+    }
 }
 
 /// The dabs of a smudge, placed and varied as the brush's own strokes'
@@ -855,8 +964,15 @@ fn halton_dull(
 
 impl PainterApp {
     pub(crate) fn set_blend_tool(&mut self, smudge: bool) {
-        // They use the brush's settings, not the eraser's.
-        self.set_brush_tool(false);
+        // Each has its own brush (size, tip, preset), as the eraser does.
+        let slot = if smudge {
+            BrushSlot::Smudge
+        } else {
+            BrushSlot::Blur
+        };
+        if self.brush_state.switch_slot(slot) {
+            crate::ui::widgets::new_slider_defaults();
+        }
         self.active_tool = if smudge { Tool::Smudge } else { Tool::Blur };
     }
 
@@ -970,38 +1086,6 @@ impl PainterApp {
         if kind == BlendKind::Smudge && brush.lays_lightness() {
             self.ensure_lightness_map(idx);
         }
-        let dabber = (kind == BlendKind::Smudge).then(|| {
-            let mut placing = brush.clone();
-            placing.dynamics.taper.end = 0.0;
-            placing.dual = None;
-            placing.wet_edge = 0.0;
-            let seed = rand::random();
-            let mut stroke = crate::brush_engine::stroke::StrokeState::with_seed(seed);
-            stroke.view_scale = self.viewport.zoom;
-            let correcting = placing.stabilizer_algorithm
-                == crate::brush_engine::brush::StabilizerAlgorithm::PostCorrection
-                && placing.stabilizer_modes.correction > 0.0;
-            Box::new(Dabber {
-                stroke,
-                tiles: crate::brush_engine::stroke::StrokeTiles::collecting(),
-                undo: UndoAction {
-                    tiles: Vec::new(),
-                    selection: None,
-                    transform: None,
-                    layer_action: None,
-                },
-                brush: placing,
-                seed,
-                pressure,
-                samples: correcting.then(Vec::new),
-                first: (pos, pressure),
-            })
-        });
-        // A dirty brush starts with what it carried.
-        let carries = match &mix.dirty {
-            Some(d) => std::mem::take(&mut *d.0.lock().unwrap_or_else(|e| e.into_inner())),
-            None => Vec::new(),
-        };
         let inside = if mix.from_brush {
             self.inside_lines(pos)
         } else {
@@ -1010,44 +1094,29 @@ impl PainterApp {
         let keep_paint = !mix.from_brush
             && self.workspace.blend.keep_paint
             && matches!(kind, BlendKind::Smudge | BlendKind::Blur);
-        let session = BlendSession {
-            inside,
-            keep_paint,
-            canvas: Arc::clone(&self.canvas),
-            pool: Arc::clone(&self.workspace.pool),
-            selection: self.selection_manager.has_selection().then(|| {
-                crate::selection::SelectionManager::with_shape(self.layer_selection_shape())
-            }),
+        let mut session = BlendSession::new(
+            Arc::clone(&self.canvas),
+            Arc::clone(&self.workspace.pool),
             brush,
-            blur_size: self.workspace.blend.blur_size,
-            wrap: self.workspace.wrap_around,
-            idx,
-            damage: Vec::new(),
-            dabber,
-            codec: Codec::for_canvas(&self.canvas),
-            stroke: BlendStroke {
-                kind,
-                dir: Vec2::ZERO,
-                before: HashMap::new(),
-                before_deep: HashMap::new(),
-                last: Some(pos),
-                last_pressure: pressure,
-                travelled: 0.0,
-                carries: carries.clone(),
-                smudge_last: Vec::new(),
-                carries_at_start: carries,
-                spent: 0.0,
-                symmetry: self.workspace.symmetry,
-                copies: self.workspace.symmetry.copies(),
-                filtered: HashMap::new(),
-                coverage: HashMap::new(),
-                mix,
-                krita_last: Vec::new(),
-                random: 0x9e37_79b9,
-                lightness_before: HashMap::new(),
-                precise: HashMap::new(),
-            },
-        };
+            kind,
+            mix,
+            pos,
+            pressure,
+        );
+        session.inside = inside;
+        session.keep_paint = keep_paint;
+        session.selection = self
+            .selection_manager
+            .has_selection()
+            .then(|| crate::selection::SelectionManager::with_shape(self.layer_selection_shape()));
+        session.blur_size = self.workspace.blend.blur_size;
+        session.wrap = self.workspace.wrap_around;
+        session.idx = idx;
+        session.stroke.symmetry = self.workspace.symmetry;
+        session.stroke.copies = self.workspace.symmetry.copies();
+        if let Some(dabber) = &mut session.dabber {
+            dabber.stroke.view_scale = self.viewport.zoom;
+        }
         self.brush_state.blend_stroke = Some(ActiveBlend {
             from_brush: session.stroke.mix.from_brush,
             kind,

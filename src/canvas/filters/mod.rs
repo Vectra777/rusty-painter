@@ -915,6 +915,31 @@ impl Filter {
 
     /// The filters that mix neighbouring pixels, on a [`to_mixable`]
     /// buffer (and giving one back).
+    /// [`Self::apply`] at full depth, for the filters that have it (the
+    /// Gaussian blur and sharpening): `src` is premultiplied sRGB (0..1), as
+    /// the 8-bit filters see it. `None` for the rest, which work at 8 bits.
+    pub fn apply_deep(&self, src: &[[f32; 4]], w: usize, h: usize) -> Option<Vec<[f32; 4]>> {
+        match *self {
+            Filter::GaussianBlur { radius } => Some(gaussian_blur_deep(src, w, h, radius)),
+            Filter::Sharpen { radius, amount } => {
+                let blurred = gaussian_blur_deep(src, w, h, radius);
+                Some(
+                    (src.par_iter().zip(blurred.par_iter()))
+                        .map(|(s, b)| {
+                            let a = s[3];
+                            // As the 8-bit one: no brighter than it's opaque.
+                            std::array::from_fn(|c| match c {
+                                3 => a,
+                                _ => (s[c] + amount * (s[c] - b[c])).clamp(0.0, a),
+                            })
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        }
+    }
+
     fn apply_mixable(
         &self,
         src: &[Color32],
@@ -1297,6 +1322,49 @@ pub(crate) fn gaussian_blur(src: &[Color32], w: usize, h: usize, sigma: f32) -> 
     buf
 }
 
+/// [`gaussian_blur`] at full depth.
+fn gaussian_blur_deep(src: &[[f32; 4]], w: usize, h: usize, sigma: f32) -> Vec<[f32; 4]> {
+    if sigma < 0.3 || w == 0 || h == 0 {
+        return src.to_vec();
+    }
+    let mut buf = src.to_vec();
+    for r in box_radii(sigma) {
+        buf = box_blur_rows_deep(&buf, w, h, r);
+        buf = transpose(&buf, w, h);
+        buf = box_blur_rows_deep(&buf, h, w, r);
+        buf = transpose(&buf, h, w);
+    }
+    buf
+}
+
+/// [`box_blur_rows`] at full depth (sums in f64: a long row adds up).
+fn box_blur_rows_deep(src: &[[f32; 4]], w: usize, h: usize, r: usize) -> Vec<[f32; 4]> {
+    if r == 0 {
+        return src.to_vec();
+    }
+    let mut out = vec![[0.0; 4]; w * h];
+    let n = (2 * r + 1) as f64;
+    out.par_chunks_mut(w)
+        .zip(src.par_chunks(w))
+        .for_each(|(out, row)| {
+            let at = |i: isize| row[i.clamp(0, w as isize - 1) as usize];
+            let mut sum = [0f64; 4];
+            for i in -(r as isize)..=r as isize {
+                for (s, v) in sum.iter_mut().zip(at(i)) {
+                    *s += v as f64;
+                }
+            }
+            for (x, o) in out.iter_mut().enumerate() {
+                *o = sum.map(|s| (s / n) as f32);
+                let (add, sub) = (at(x as isize + r as isize + 1), at(x as isize - r as isize));
+                for ((s, a), b) in sum.iter_mut().zip(add).zip(sub) {
+                    *s += a as f64 - b as f64;
+                }
+            }
+        });
+    out
+}
+
 /// Each row averaged over `2r + 1` pixels (edge pixels repeat).
 fn box_blur_rows(src: &[Color32], w: usize, h: usize, r: usize) -> Vec<Color32> {
     if r == 0 {
@@ -1326,8 +1394,8 @@ fn box_blur_rows(src: &[Color32], w: usize, h: usize, r: usize) -> Vec<Color32> 
     out
 }
 
-fn transpose(src: &[Color32], w: usize, h: usize) -> Vec<Color32> {
-    let mut out = vec![Color32::TRANSPARENT; w * h];
+fn transpose<T: Copy + Default + Send + Sync>(src: &[T], w: usize, h: usize) -> Vec<T> {
+    let mut out = vec![T::default(); w * h];
     out.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
         for (y, o) in col.iter_mut().enumerate() {
             *o = src[y * w + x];

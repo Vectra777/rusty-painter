@@ -121,6 +121,17 @@ enum CompositeNode {
 }
 
 impl CompositeNode {
+    /// Scale how much it shows by `k` (a pass-through folder's opacity).
+    fn fade(&mut self, k: f32) {
+        match self {
+            CompositeNode::Layer { input, .. } => input.opacity *= k,
+            CompositeNode::Group { opacity, .. } | CompositeNode::Adjust { opacity, .. } => {
+                *opacity *= k
+            }
+            CompositeNode::Clip { base, .. } => base.fade(k),
+        }
+    }
+
     fn blend(&self) -> LayerBlend {
         match self {
             CompositeNode::Layer { blend, .. }
@@ -1020,6 +1031,16 @@ impl Canvas {
             if layer.parent != parent || matches!(layer.kind, LayerKind::Mask { .. }) {
                 continue;
             }
+            if self.passes_through(i) && layer.visible && layer.opacity > 0.0 {
+                let mut children =
+                    self.child_nodes(tx, ty, Some(layer.id), masks, depth + 1, shrink);
+                for child in &mut children {
+                    child.fade(layer.opacity);
+                }
+                nodes.extend(children);
+                base = Base::None;
+                continue;
+            }
             let node = if layer.visible && layer.opacity > 0.0 {
                 self.layer_node(i, tx, ty, masks, depth, shrink)
             } else {
@@ -1064,6 +1085,24 @@ impl Canvas {
         nodes
     }
 
+    /// Folder `i` is pass-through and can be: its layers blend straight into
+    /// what's below it. Not when something clips to it or it clips to
+    /// something (both need it as one picture), nor for an animated layer.
+    fn passes_through(&self, i: usize) -> bool {
+        let layer = &self.layers[i];
+        if layer.blend != LayerBlend::PassThrough
+            || layer.kind != LayerKind::Group
+            || layer.clipped
+            || layer.anim.is_some()
+        {
+            return false;
+        }
+        let above = self.layers[i + 1..]
+            .iter()
+            .find(|l| l.parent == layer.parent && !matches!(l.kind, LayerKind::Mask { .. }));
+        !above.is_some_and(|l| l.clipped)
+    }
+
     /// Layer `i` (a folder or paint layer) as a node for one tile, or `None`
     /// when it shows nothing there.
     fn layer_node(
@@ -1080,10 +1119,14 @@ impl Canvas {
             LayerKind::Mask { .. } => None,
             LayerKind::Group => {
                 let children = self.child_nodes(tx, ty, Some(layer.id), masks, depth + 1, shrink);
+                let blend = match layer.blend {
+                    LayerBlend::PassThrough => LayerBlend::Normal,
+                    blend => blend,
+                };
                 (!children.is_empty()).then_some(CompositeNode::Group {
                     opacity: layer.opacity,
                     children,
-                    blend: layer.blend,
+                    blend,
                 })
             }
             LayerKind::Paint if layer.adjustment.is_some() => Some(CompositeNode::Adjust {

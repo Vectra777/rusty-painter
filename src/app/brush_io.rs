@@ -469,7 +469,7 @@ impl PainterApp {
         // artist's, and erasing with a brush doesn't make it an eraser.
         let (b, s) = (&mut brush, stored);
         b.brush_options.color = s.brush_options.color;
-        if bs.eraser_active {
+        if bs.eraser_active() {
             b.brush_options.blend_mode = s.brush_options.blend_mode;
         }
         b.stabilizer = s.stabilizer;
@@ -506,10 +506,9 @@ impl PainterApp {
         let preset = self.brush_state.presets.remove(index);
         self.forget_preset_preview(&preset.name);
         self.edit_library(|lib| lib.forget(&preset.name));
-        for active in [
-            &mut self.brush_state.active_preset,
-            &mut self.brush_state.stashed_preset,
-        ] {
+        let bs = &mut self.brush_state;
+        let parked = bs.parked.iter_mut().flatten().map(|(_, p)| p);
+        for active in parked.chain([&mut bs.active_preset]) {
             if active.as_deref() == Some(preset.name.as_str()) {
                 *active = None;
             }

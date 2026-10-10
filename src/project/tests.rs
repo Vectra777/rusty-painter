@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::tools::Tool;
 use crate::{app::state::LayerState, brush_engine::brush::Brush};
 use eframe::egui::Vec2;
 use rayon::ThreadPoolBuilder;

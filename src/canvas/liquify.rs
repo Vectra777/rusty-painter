@@ -302,10 +302,33 @@ impl LiquifyField {
     /// column, so each pixel then only blends two neighbours horizontally
     /// (instead of four field reads per pixel).
     pub fn render_rect(&self, source: &HashMap<Key, Vec<Color32>>, rect: [i32; 4]) -> Vec<Color32> {
+        let codec = codec();
+        self.render_rect_with(source, rect, Color32::TRANSPARENT, |src, p| {
+            bilinear(src, p, codec)
+        })
+    }
+
+    /// [`Self::render_rect`] at full depth: `source` is premultiplied
+    /// linear light.
+    pub fn render_rect_deep(
+        &self,
+        source: &HashMap<Key, Vec<[f32; 4]>>,
+        rect: [i32; 4],
+    ) -> Vec<[f32; 4]> {
+        self.render_rect_with(source, rect, [0.0; 4], bilinear_deep)
+    }
+
+    fn render_rect_with<T: Copy + PartialEq + Send + Sync>(
+        &self,
+        source: &HashMap<Key, Vec<T>>,
+        rect: [i32; 4],
+        empty: T,
+        sample: impl Fn(&mut TileReader<'_, T>, Vec2) -> T + Sync,
+    ) -> Vec<T> {
         const ROWS: usize = 4;
         let [x0, y0, x1, y1] = rect;
         let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
-        let mut out = vec![Color32::TRANSPARENT; w * h];
+        let mut out = vec![empty; w * h];
         if w == 0 {
             return out;
         }
@@ -318,8 +341,7 @@ impl LiquifyField {
             .enumerate()
             .for_each(|(chunk, lines)| {
                 let mut field = TileReader::new(&self.tiles, self.ts, Vec2::ZERO);
-                let mut src = TileReader::new(source, self.ts, Color32::TRANSPARENT);
-                let codec = codec();
+                let mut src = TileReader::new(source, self.ts, empty);
                 let mut column = vec![Vec2::ZERO; (c1 - c0 + 1) as usize];
                 for (row, line) in lines.chunks_mut(w).enumerate() {
                     let y = y0 + (chunk * ROWS + row) as i32;
@@ -348,11 +370,7 @@ impl LiquifyField {
                         *px = if d == Vec2::ZERO {
                             src.at(x, y)
                         } else {
-                            bilinear(
-                                &mut src,
-                                Vec2::new(x as f32 + 0.5, y as f32 + 0.5) + d,
-                                codec,
-                            )
+                            sample(&mut src, Vec2::new(x as f32 + 0.5, y as f32 + 0.5) + d)
                         };
                     }
                 }
@@ -445,6 +463,21 @@ fn bilinear(reader: &mut TileReader<'_, Color32>, p: Vec2, (dec, enc): Codec) ->
         acc = acc + dec.decode(c) * w;
     }
     enc.encode(acc)
+}
+
+/// [`bilinear`] at full depth (premultiplied linear light).
+fn bilinear_deep(reader: &mut TileReader<'_, [f32; 4]>, p: Vec2) -> [f32; 4] {
+    let (fx, fy) = (p.x - 0.5, p.y - 0.5);
+    let (x0, y0) = (fx.floor() as i32, fy.floor() as i32);
+    let (ax, ay) = (fx - x0 as f32, fy - y0 as f32);
+    let [c00, c10, c01, c11] = reader.quad(x0, y0);
+    let w = [
+        (1.0 - ax) * (1.0 - ay),
+        ax * (1.0 - ay),
+        (1.0 - ax) * ay,
+        ax * ay,
+    ];
+    std::array::from_fn(|c| c00[c] * w[0] + c10[c] * w[1] + c01[c] * w[2] + c11[c] * w[3])
 }
 
 #[cfg(test)]

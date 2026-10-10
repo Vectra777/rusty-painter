@@ -91,7 +91,7 @@ impl eframe::App for PainterApp {
         self.workspace.keyboard.observe(ctx);
         let label = self
             .active_tool
-            .history_label(self.brush_state.eraser_active);
+            .history_label(self.brush_state.eraser_active());
         self.layer_state.history.set_tool_label(label);
         let mut needs_repaint = false;
         // Last frame's dropped textures, now safe to free.
@@ -614,6 +614,7 @@ impl PainterApp {
         ui::history_panel::history_window(self, ctx);
         ui::brush_list::presets_window(self, ctx);
         ui::radial_palette::radial_palette(self, ctx);
+        ui::layers::layer_pick_menu(self, ctx);
         ui::export_modal::export_modal(self, ctx);
         ui::frame_times::frame_times_window(self, ctx);
         ui::gradient_editor::gradient_editor_window(self, ctx);
@@ -690,27 +691,43 @@ impl PainterApp {
                     .clone();
                 self.replace_layer_states(&out, &put);
             }
-            // Adds and moves, in the order they were applied (the canvas has
-            // had them all, so it only matches after the last).
+            // Adds, moves and removals, in the order they were applied (the
+            // canvas has had them all, so it only matches after the last).
             LayerHistoryOp::Batch(ops) => {
                 let colors = &mut self.layer_state.layer_ui_colors;
+                let untagged = Color32::from_gray(40);
                 for op in ops {
-                    match *op {
+                    match op {
                         LayerHistoryOp::Added { index, .. } if redo => {
-                            colors.insert(index.min(colors.len()), Color32::from_gray(40));
+                            colors.insert((*index).min(colors.len()), untagged);
                         }
-                        LayerHistoryOp::Added { index, .. } if index < colors.len() => {
-                            colors.remove(index);
+                        LayerHistoryOp::Added { index, .. } if *index < colors.len() => {
+                            colors.remove(*index);
                         }
-                        LayerHistoryOp::Moved { from, to, .. } if from < colors.len() => {
-                            let color = colors.remove(from);
-                            colors.insert(to.min(colors.len()), color);
+                        LayerHistoryOp::Moved { from, to, .. } if *from < colors.len() => {
+                            let color = colors.remove(*from);
+                            colors.insert((*to).min(colors.len()), color);
+                        }
+                        op @ LayerHistoryOp::Removed { .. } => {
+                            let indices = op.removed_indices();
+                            if redo {
+                                for &i in indices.iter().rev() {
+                                    if i < colors.len() {
+                                        colors.remove(i);
+                                    }
+                                }
+                            } else {
+                                for &i in &indices {
+                                    colors.insert(i.min(colors.len()), untagged);
+                                }
+                            }
                         }
                         _ => {}
                     }
                 }
             }
             LayerHistoryOp::Text { .. }
+            | LayerHistoryOp::Settings(_)
             | LayerHistoryOp::Vector { .. }
             | LayerHistoryOp::Height { .. }
             | LayerHistoryOp::Wet { .. } => {}

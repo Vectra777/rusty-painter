@@ -741,7 +741,8 @@ pub(crate) fn transform_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
             "Click an image or drawing on another (unlocked) layer to select and transform it",
         );
     vdivider(ui);
-    let floating = app.layer_state.floating_layer_idx.is_some();
+    let floating =
+        app.layer_state.floating_layer_idx.is_some() || app.layer_state.in_place.is_some();
     if ui
         .add_enabled(floating, egui::Button::new("Apply"))
         .on_hover_text("Apply the transform (Enter)")

@@ -1,4 +1,4 @@
-//! Copy, cut and paste of pixels, and duplicating a layer.
+//! Copy, cut and paste of pixels, and of whole layers; duplicating layers.
 //!
 //! Copy takes the selection (soft edges included) from the selected layer,
 //! or from everything visible for Copy Merged; without a selection, the
@@ -11,7 +11,7 @@
 use crate::PainterApp;
 use crate::app::tools::Tool;
 use crate::canvas::blend::Unmultiply;
-use crate::canvas::storage::LayerKind;
+use crate::canvas::storage::{CanvasLayerSnapshot, Depth, Layer, LayerId, LayerKind};
 use crate::selection::SelectionMask;
 use crate::selection::transform::TransformInfo;
 use eframe::egui::{self, Color32};
@@ -26,9 +26,18 @@ pub struct Clip {
     pub pixels: Vec<Color32>,
 }
 
+/// Copied layers with their folders' contents and masks, bottom to top.
+/// Kept when another document is opened, to paste them there.
+pub struct LayerClip {
+    tile_size: usize,
+    depth: Depth,
+    layers: Vec<CanvasLayerSnapshot>,
+}
+
 #[derive(Default)]
 pub struct ClipboardState {
     pub clip: Option<Clip>,
+    pub layers: Option<LayerClip>,
     /// Size and fingerprint of the image last put on the system clipboard,
     /// to tell on paste whether it still holds our copy (then the exact
     /// pixels and position are used) or something from another program.
@@ -228,6 +237,100 @@ impl PainterApp {
             self.selection_manager.clear_selection();
             self.active_tool = Tool::Transform(TransformInfo::default());
         }
+    }
+
+    /// Copy the picked layers (settings, masks, folders' contents).
+    pub(crate) fn copy_layers(&mut self) {
+        self.release_canvas();
+        let layers = self.picked_snapshots();
+        self.workspace.clipboard.layers = Some(LayerClip {
+            tile_size: self.canvas.tile_size(),
+            depth: self.canvas.depth(),
+            layers,
+        });
+    }
+
+    /// Paste the copied layers above the selected one (one undo step).
+    pub(crate) fn paste_layers(&mut self) {
+        let Some(clip) = self.workspace.clipboard.layers.as_ref() else {
+            self.report("No layers copied".to_string());
+            return;
+        };
+        if (clip.tile_size, clip.depth) != (self.canvas.tile_size(), self.canvas.depth()) {
+            self.report("These layers come from a document with another colour depth".to_string());
+            return;
+        }
+        let layers = clip.layers.clone();
+        self.insert_layer_copies(layers, "Paste layers", false);
+    }
+
+    /// Duplicate the picked layers above the selected one (one undo step),
+    /// or the selected layer alone.
+    pub(crate) fn duplicate_picked(&mut self) {
+        if self.selected_indices().len() < 2 {
+            return self.duplicate_layer();
+        }
+        self.release_canvas();
+        let layers = self.picked_snapshots();
+        self.insert_layer_copies(layers, "Duplicate layers", true);
+    }
+
+    fn picked_snapshots(&self) -> Vec<CanvasLayerSnapshot> {
+        self.with_contents(&self.selected_indices())
+            .into_iter()
+            .map(|i| self.canvas.layers[i].snapshot())
+            .collect()
+    }
+
+    /// Put copies of `layers` (bottom to top) above the selected row, with
+    /// new ids, and pick them.
+    fn insert_layer_copies(&mut self, layers: Vec<CanvasLayerSnapshot>, label: &str, rename: bool) {
+        if layers.is_empty() {
+            return;
+        }
+        self.settle_layers();
+        let (at, parent) = self.insertion_point(false);
+        let canvas = self.canvas_mut();
+        let ids: std::collections::HashMap<LayerId, LayerId> = layers
+            .iter()
+            .map(|l| (l.id, canvas.allocate_layer_id()))
+            .collect();
+        let mut roots = Vec::new();
+        let incoming = layers
+            .into_iter()
+            .enumerate()
+            .map(|(k, mut layer)| {
+                layer.id = ids[&layer.id];
+                match layer.kind {
+                    LayerKind::Mask { owner } => {
+                        layer.kind = LayerKind::Mask {
+                            owner: ids.get(&owner).copied().unwrap_or(owner),
+                        };
+                    }
+                    _ => match layer.parent.and_then(|p| ids.get(&p)) {
+                        Some(&p) => layer.parent = Some(p),
+                        // Copied without its folder: goes where the paste is.
+                        None => {
+                            layer.parent = parent;
+                            if rename {
+                                layer.name = format!("{} copy", layer.name);
+                            }
+                            roots.push((layer.id, at + k));
+                        }
+                    },
+                }
+                (at + k, Layer::from_snapshot(layer))
+            })
+            .collect();
+        let top = roots.last().map_or(at, |r| r.1);
+        let swap = crate::canvas::storage::LayerSwap {
+            layers: incoming,
+            remove: Vec::new(),
+            active_layer_idx: top,
+            applied: (Vec::new(), Vec::new()),
+        };
+        self.apply_swap(swap, label);
+        self.layer_state.selected = roots.into_iter().map(|r| r.0).collect();
     }
 
     /// Duplicate the selected layer just above it (one undo step).

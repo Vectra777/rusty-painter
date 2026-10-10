@@ -2,6 +2,7 @@
 //! toolbar and menus.
 
 use crate::app::PainterApp;
+use crate::app::state::BrushSlot;
 use crate::app::tools::Tool;
 use crate::brush_engine::brush_options::BlendMode;
 use crate::selection::SelectionType;
@@ -26,33 +27,12 @@ impl PainterApp {
     pub(crate) fn set_brush_tool(&mut self, eraser: bool) {
         self.active_tool = Tool::Brush;
         let bs = &mut self.brush_state;
-        if bs.eraser_active != eraser {
-            let color = bs.brush.brush_options.color;
-            // The stabiliser is the artist's: it stays with the hand, not
-            // with the brush or eraser.
-            let b = &bs.brush;
-            let stabilizer = (
-                b.stabilizer_algorithm,
-                b.stabilizer,
-                b.stabilizer_mass,
-                b.stabilizer_drag,
-                b.stabilizer_modes,
-            );
-            std::mem::swap(&mut bs.brush, &mut bs.stashed_brush);
-            std::mem::swap(&mut bs.active_preset, &mut bs.stashed_preset);
-            bs.brush.brush_options.color = color;
-            let b = &mut bs.brush;
-            (
-                b.stabilizer_algorithm,
-                b.stabilizer,
-                b.stabilizer_mass,
-                b.stabilizer_drag,
-                b.stabilizer_modes,
-            ) = stabilizer;
+        if bs.switch_slot(if eraser {
+            BrushSlot::Eraser
+        } else {
+            BrushSlot::Brush
+        }) {
             crate::ui::widgets::new_slider_defaults();
-            bs.eraser_active = eraser;
-            bs.brush.is_changed = true;
-            bs.brush_preview.dirty = true;
         }
         // (A brush painting behind keeps doing so.)
         let mode = &mut bs.brush.brush_options.blend_mode;
@@ -64,7 +44,7 @@ impl PainterApp {
     }
 
     pub(crate) fn is_eraser_active(&self) -> bool {
-        matches!(self.active_tool, Tool::Brush) && self.brush_state.eraser_active
+        matches!(self.active_tool, Tool::Brush) && self.brush_state.eraser_active()
     }
 
     /// Load a preset into the tool it belongs to (eraser presets into the
@@ -75,35 +55,21 @@ impl PainterApp {
         };
         // Erasing, any brush erases: picking one keeps the eraser on, with
         // that brush's tip, texture and dynamics. An eraser preset picked
-        // while painting switches to erasing.
-        let eraser = self.brush_state.eraser_active
+        // while painting switches to erasing. Smudging or blurring, a brush
+        // picked becomes the smudge's or the blur's.
+        let eraser = self.brush_state.eraser_active()
             || preset.brush.brush_options.blend_mode == BlendMode::Eraser;
-        // The stabiliser is the artist's, not the brush's: a preset (or the
-        // switch between brush and eraser) keeps it.
-        let b = &self.brush_state.brush;
-        let stabilizer = (
-            b.stabilizer_algorithm,
-            b.stabilizer,
-            b.stabilizer_mass,
-            b.stabilizer_drag,
-            b.stabilizer_modes,
-        );
-        self.set_brush_tool(eraser);
+        if eraser || !matches!(self.active_tool, Tool::Smudge | Tool::Blur) {
+            self.set_brush_tool(eraser);
+        }
         let bs = &mut self.brush_state;
-        let color = bs.brush.brush_options.color;
-        bs.brush = preset.brush;
-        bs.brush.brush_options.color = color;
+        let mut brush = preset.brush;
+        // The colour and stabiliser are the artist's, not the brush's.
+        crate::app::state::keep_hand(&mut brush, &bs.brush);
+        bs.brush = brush;
         if eraser {
             bs.brush.brush_options.blend_mode = BlendMode::Eraser;
         }
-        let b = &mut bs.brush;
-        (
-            b.stabilizer_algorithm,
-            b.stabilizer,
-            b.stabilizer_mass,
-            b.stabilizer_drag,
-            b.stabilizer_modes,
-        ) = stabilizer;
         bs.brush.is_changed = true;
         bs.brush_preview.dirty = true;
         bs.library.file.remember(&preset.name);
@@ -269,7 +235,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
 
     let mut repaint = clipboard;
     if duplicate {
-        app.duplicate_layer();
+        app.duplicate_picked();
         repaint = true;
     }
 
@@ -424,7 +390,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         app.shape_undo_point();
         repaint = true;
     } else if delete
-        && (app.layer_state.floating_layer_idx.is_none() || app.selection_manager.has_selection())
+        && ((app.layer_state.floating_layer_idx.is_none() && app.layer_state.in_place.is_none())
+            || app.selection_manager.has_selection())
     {
         // Delete (or Backspace, the Mac delete key) erases the selected
         // pixels (mid-transform too: it ends it), or with nothing selected
@@ -433,7 +400,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         if app.selection_manager.has_selection() {
             app.delete_selection_contents();
         } else {
-            app.delete_selected_layer();
+            app.delete_picked();
         }
         repaint = true;
     }
@@ -656,5 +623,28 @@ mod preset_tests {
             );
             assert_eq!(b.stabilizer_modes.string_length, 90.0, "{name}");
         }
+    }
+
+    #[test]
+    fn smudge_and_blur_keep_their_own_size() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.brush_state.brush.brush_options.diameter = 20.0;
+        app.set_blend_tool(true);
+        assert_eq!(
+            app.brush_state.brush.brush_options.diameter, 20.0,
+            "starts as the brush"
+        );
+        app.brush_state.brush.brush_options.diameter = 80.0;
+        app.set_blend_tool(false);
+        app.brush_state.brush.brush_options.diameter = 5.0;
+        app.brush_state.brush.brush_options.color = Color32::RED;
+        app.set_brush_tool(false);
+        let b = &app.brush_state.brush.brush_options;
+        assert_eq!(b.diameter, 20.0);
+        assert_eq!(b.color, Color32::RED, "the colour follows the hand");
+        app.set_blend_tool(true);
+        assert_eq!(app.brush_state.brush.brush_options.diameter, 80.0);
+        app.set_blend_tool(false);
+        assert_eq!(app.brush_state.brush.brush_options.diameter, 5.0);
     }
 }

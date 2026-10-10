@@ -7,8 +7,7 @@
 //! pixels.
 //!
 //! Not kept: adjustment, text and smart-object layers come in as the
-//! pixels Photoshop stored for them; pass-through folders open as Normal;
-//! 32-bit, CMYK and large (`.psb`) documents are refused.
+//! pixels Photoshop stored for them; 32-bit, CMYK and large (`.psb`) documents are refused.
 
 use eframe::egui::Color32;
 
@@ -108,15 +107,14 @@ fn blend_key(blend: LayerBlend) -> &'static [u8; 4] {
         Luminosity => b"lum ",
         // Photoshop has no Parallel.
         Parallel => b"norm",
+        PassThrough => b"pass",
     }
 }
 
-/// Keys with no counterpart (pass-through) read as Normal.
+/// Keys with no counterpart read as Normal.
 fn blend_from_key(key: &[u8]) -> LayerBlend {
-    LayerBlend::GROUPS
-        .iter()
-        .flat_map(|g| g.iter())
-        .copied()
+    (LayerBlend::GROUPS.iter().flat_map(|g| g.iter()).copied())
+        .chain([LayerBlend::PassThrough])
         .find(|&b| blend_key(b) == key)
         .unwrap_or(LayerBlend::Normal)
 }
@@ -241,7 +239,11 @@ impl PsdDocument {
                 },
                 parent,
                 expanded: true,
-                blend: layer.blend,
+                // Only folders pass through.
+                blend: match layer.blend {
+                    LayerBlend::PassThrough if !is_group => LayerBlend::Normal,
+                    blend => blend,
+                },
                 clipped: layer.clipped,
                 adjustment: None,
                 style: Default::default(),
@@ -1560,6 +1562,21 @@ mod tests {
         canvas.layers[hi].alpha_locked = true;
         canvas.layers[hi].position_locked = true;
         canvas
+    }
+
+    #[test]
+    fn a_pass_through_folder_round_trips_through_psd() {
+        let mut canvas = document();
+        let folder = canvas
+            .layers
+            .iter()
+            .position(|l| l.name == "Folder")
+            .unwrap();
+        canvas.layers[folder].blend = LayerBlend::PassThrough;
+        let bytes = encode_psd(&PsdDocument::from_canvas(&canvas)).unwrap();
+        let back = decode_psd(&bytes).unwrap().into_canvas().unwrap();
+        let folder = back.layers.iter().find(|l| l.name == "Folder").unwrap();
+        assert_eq!(folder.blend, LayerBlend::PassThrough);
     }
 
     #[test]

@@ -125,7 +125,7 @@ impl PainterApp {
     /// Add a line through `points` (a shape's outline) to vector layer
     /// `idx`, with the brush's width, colour and opacity, as one step.
     pub(crate) fn add_vector_line(&mut self, idx: usize, points: &[Vec2]) {
-        if !self.is_vector_layer(idx) || points.len() < 2 || self.brush_state.eraser_active {
+        if !self.is_vector_layer(idx) || points.len() < 2 || self.brush_state.eraser_active() {
             return;
         }
         self.release_canvas();
@@ -179,7 +179,7 @@ impl PainterApp {
         self.mark_action();
         let layer = &self.canvas.layers[idx];
         let before = layer.vector.clone().unwrap_or_default();
-        let erasing = self.brush_state.eraser_active;
+        let erasing = self.brush_state.eraser_active();
         let drawing = (!erasing).then(|| {
             let o = &self.brush_state.brush.brush_options;
             let [r, g, b, _] = o.color.to_srgba_unmultiplied();

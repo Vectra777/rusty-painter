@@ -168,6 +168,51 @@ pub struct LayerMeta {
     pub motion: Option<Box<crate::canvas::motion::Motion>>,
 }
 
+/// A layer's settings as undo puts them back (not its name or pixels).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerSettings {
+    pub visible: bool,
+    pub opacity: f32,
+    pub locked: bool,
+    pub alpha_locked: bool,
+    pub blend: crate::canvas::blend_modes::LayerBlend,
+    pub clipped: bool,
+    pub position_locked: bool,
+    pub draft: bool,
+    pub reference: bool,
+}
+
+impl LayerSettings {
+    pub fn of(l: &crate::canvas::storage::Layer) -> Self {
+        Self {
+            visible: l.visible,
+            opacity: l.opacity,
+            locked: l.locked,
+            alpha_locked: l.alpha_locked,
+            blend: l.blend,
+            clipped: l.clipped,
+            position_locked: l.position_locked,
+            draft: l.draft,
+            reference: l.reference,
+        }
+    }
+
+    /// Exchange these with the layer's.
+    fn swap(&mut self, l: &mut crate::canvas::storage::Layer) {
+        let now = Self::of(l);
+        l.visible = self.visible;
+        l.opacity = self.opacity;
+        l.locked = self.locked;
+        l.alpha_locked = self.alpha_locked;
+        l.blend = self.blend;
+        l.clipped = self.clipped;
+        l.position_locked = self.position_locked;
+        l.draft = self.draft;
+        l.reference = self.reference;
+        *self = now;
+    }
+}
+
 /// A layer removed alongside the main one of a `Removed` op (its mask, or
 /// a folder's contents), with its position before the removal.
 #[derive(Clone)]
@@ -255,6 +300,9 @@ pub enum LayerHistoryOp {
     /// Several adds and moves as one step (layers grouped into a new
     /// folder, or dragged together), in the order they were done.
     Batch(Vec<LayerHistoryOp>),
+    /// Layers' settings (opacity, visibility, blend mode, locks...) as they
+    /// are on the other side of this step.
+    Settings(Vec<(LayerId, LayerSettings)>),
 }
 
 impl LayerHistoryOp {
@@ -416,6 +464,7 @@ fn describe(action: &UndoAction) -> Option<&'static str> {
         Some(LayerHistoryOp::Document(_)) => "Image or animation change",
         Some(LayerHistoryOp::Replaced(_)) => "Merge layers",
         Some(LayerHistoryOp::Batch(_)) => "Move layers",
+        Some(LayerHistoryOp::Settings(_)) => "Layer settings",
         Some(LayerHistoryOp::Text { .. }) => "Text",
         None if matches!(action.layer_action, Some(LayerHistoryOp::Text { .. }))
             && action.tiles.is_empty() =>
@@ -531,7 +580,10 @@ impl History {
     /// [`History::top_token`]) one step. Only for layer adds and moves,
     /// which carry no pixels.
     pub fn squash_since(&mut self, len: usize) {
-        if self.undo_stack.len() <= len + 1 {
+        // (Steps with pixels stay as they are: a batch doesn't keep them.)
+        if self.undo_stack.len() <= len + 1
+            || self.undo_stack[len..].iter().any(|a| !a.tiles.is_empty())
+        {
             return;
         }
         let ops = self
@@ -698,6 +750,14 @@ impl History {
                     }
                     op = inner.as_deref_mut();
                 }
+                Some(LayerHistoryOp::Settings(layers)) => {
+                    for (id, settings) in layers {
+                        if let Some(idx) = canvas.layer_index_of(*id) {
+                            settings.swap(&mut canvas.layers[idx]);
+                        }
+                    }
+                    return;
+                }
                 _ => return,
             }
         }
@@ -803,6 +863,8 @@ impl History {
                 canvas.swap_layers(&mut swap.lock().unwrap_or_else(|e| e.into_inner()));
                 Some(op.clone())
             }
+            // (Swapped with the text, both ways.)
+            Some(op @ LayerHistoryOp::Settings(_)) => Some(op.clone()),
             // Last done, first undone; returned in the order applied.
             Some(LayerHistoryOp::Batch(ops)) => Some(LayerHistoryOp::Batch(
                 ops.iter()
@@ -969,6 +1031,8 @@ impl History {
                 canvas.swap_layers(&mut swap.lock().unwrap_or_else(|e| e.into_inner()));
                 Some(op.clone())
             }
+            // (Swapped with the text, both ways.)
+            Some(op @ LayerHistoryOp::Settings(_)) => Some(op.clone()),
             Some(LayerHistoryOp::Batch(ops)) => Some(LayerHistoryOp::Batch(
                 ops.iter()
                     .filter_map(|op| {

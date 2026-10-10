@@ -170,7 +170,7 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
     let mut picked = None;
 
     ui.horizontal(|ui| {
-        let tool = if app.brush_state.eraser_active {
+        let tool = if app.brush_state.eraser_active() {
             "eraser"
         } else {
             "brush"
@@ -237,7 +237,7 @@ fn presets_list(app: &mut PainterApp, ui: &mut egui::Ui) -> Option<PresetAction>
     let tile_height = if m.touch { 76.0 } else { 58.0 };
     let pool = app.workspace.pool.clone();
     collect_preset_previews(app, ui.ctx());
-    let eraser_first = app.brush_state.eraser_active;
+    let eraser_first = app.brush_state.eraser_active();
     let bs = &mut app.brush_state;
     let lib = &bs.library;
     let shown = shown_presets(&bs.presets, &lib.file, &lib.shelf, &lib.search);

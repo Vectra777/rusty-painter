@@ -11,6 +11,7 @@ pub(crate) mod gradient;
 pub(crate) mod gradient_colors;
 pub(crate) mod guides;
 pub(crate) mod liquify;
+pub(crate) mod mixer;
 pub(crate) mod palette;
 pub(crate) mod patch;
 pub(crate) mod puppet;

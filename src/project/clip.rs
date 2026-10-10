@@ -667,6 +667,7 @@ fn blend(mode: i64) -> LayerBlend {
         25 => Color,
         26 => Luminosity,
         36 => Divide,
+        30 => PassThrough,
         _ => Normal,
     }
 }
@@ -1022,7 +1023,7 @@ mod tests {
         assert_eq!(blend(2), LayerBlend::Multiply);
         assert_eq!(blend(14), LayerBlend::Overlay);
         assert_eq!(blend(26), LayerBlend::Luminosity);
-        assert_eq!(blend(30), LayerBlend::Normal, "pass-through");
+        assert_eq!(blend(30), LayerBlend::PassThrough);
         assert_eq!(blend(999), LayerBlend::Normal);
     }
 

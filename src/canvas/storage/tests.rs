@@ -608,6 +608,30 @@ fn multiply_folder_blends_its_whole_contents() {
 }
 
 #[test]
+fn pass_through_folder_blends_its_layers_with_what_is_below() {
+    let mut canvas = one_tile_canvas();
+    canvas.blend_space = BlendSpace::Gamma;
+    fill(&canvas, 1, Color32::from_rgb(200, 100, 50));
+    let folder = canvas.insert_new_layer(2, "folder".into(), LayerKind::Group, None);
+    let inner = canvas.insert_new_layer(3, "inner".into(), LayerKind::Paint, Some(folder));
+    let inner_idx = canvas.layer_index_of(inner).unwrap();
+    fill(&canvas, inner_idx, Color32::from_rgb(128, 128, 128));
+    canvas.layers[inner_idx].blend = LayerBlend::Multiply;
+    // Isolated, the multiply has nothing under it in the folder: grey.
+    let px = pixel(&canvas);
+    assert_eq!([px.r(), px.g(), px.b()], [128, 128, 128]);
+    canvas.layers[2].blend = LayerBlend::PassThrough;
+    let px = pixel(&canvas);
+    assert_eq!([px.r(), px.g(), px.b()], [100, 50, 25]);
+    // Something clipped to the folder needs it whole: isolated again.
+    let clip = canvas.insert_new_layer(4, "clip".into(), LayerKind::Paint, None);
+    let clip_idx = canvas.layer_index_of(clip).unwrap();
+    canvas.layers[clip_idx].clipped = true;
+    let px = pixel(&canvas);
+    assert_eq!([px.r(), px.g(), px.b()], [128, 128, 128]);
+}
+
+#[test]
 fn new_mask_shows_everything_and_black_hides() {
     let mut canvas = one_tile_canvas();
     fill(&canvas, 1, Color32::RED);
@@ -1145,6 +1169,33 @@ fn fills_and_backgrounds_keep_their_exact_colour() {
     let tile = canvas.get_layer_tile_data(1, 0, 0).unwrap();
     assert_eq!(tile[0], grey);
     assert_eq!(tile[1], Color32::from_rgba_unmultiplied(100, 100, 100, 128));
+}
+
+#[test]
+fn a_fill_in_a_deeper_document_keeps_the_full_depth() {
+    use crate::canvas::storage::{DeepTile, Depth};
+    let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+    canvas.convert_depth(Depth::U16);
+    // A ramp too fine for 8 bits, under a half-covering fill.
+    let mut deep = DeepTile::transparent(Depth::U16, 64 * 64).unwrap();
+    for i in 0..deep.len() {
+        let v = (i % 64) as f32 / 64.0 * 0.01;
+        deep.set_linear(i, [v, v, v, 1.0]);
+    }
+    canvas.set_layer_tile_deep(1, 0, 0, &deep);
+    let mask = crate::selection::SelectionMask::new(0, 0, 64, 64, vec![128; 64 * 64]);
+    let mut undo = empty_action();
+    canvas.paint_mask(1, &mask, Color32::from_rgb(200, 0, 0), &mut undo);
+    let filled = canvas.get_layer_tile_deep(1, 0, 0).expect("still deep");
+    let mut row: Vec<u32> = (0..64)
+        .map(|i| (filled.linear(i)[1] * 1e6) as u32)
+        .collect();
+    row.dedup();
+    assert!(row.len() > 50, "{} steps", row.len());
+    assert!(filled.linear(0)[0] > 0.1, "the red went on");
+    // Undo puts the ramp back exactly.
+    let snap = &undo.tiles[0];
+    assert!(matches!(snap.data, crate::canvas::history::SnapshotPixels::Deep(ref d) if *d == deep));
 }
 
 /// Zoomed out, a stroke shows as tiles averaged on the CPU; once it ends,

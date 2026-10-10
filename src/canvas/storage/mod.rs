@@ -703,7 +703,7 @@ impl Canvas {
         id
     }
 
-    fn allocate_layer_id(&mut self) -> LayerId {
+    pub(crate) fn allocate_layer_id(&mut self) -> LayerId {
         let id = LayerId(self.next_layer_id);
         self.next_layer_id = self.next_layer_id.saturating_add(1);
         id

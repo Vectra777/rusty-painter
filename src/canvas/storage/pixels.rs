@@ -117,6 +117,35 @@ impl Canvas {
             .collect()
     }
 
+    /// [`Self::capture_layer_pixels`] at full depth, as premultiplied linear
+    /// light (16 bytes a pixel: only while a tool needs them). Empty in an
+    /// 8-bit document.
+    pub fn capture_layer_linear(&self, layer_idx: usize) -> HashMap<(i32, i32), Vec<[f32; 4]>> {
+        let Some(layer) = self.layers.get(layer_idx).filter(|_| self.depth.is_deep()) else {
+            return HashMap::new();
+        };
+        let cells: Vec<(TileKey, SharedCell)> = layer
+            .tiles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(&k, c)| (k, c.clone()))
+            .collect();
+        let decoder = crate::canvas::blend::LinearDecoder::new();
+        cells
+            .par_iter()
+            .filter_map(|(key, cell)| {
+                let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let data = guard.data()?;
+                let px = match guard.deep() {
+                    Some(deep) => (0..data.len()).map(|i| deep.linear(i)).collect(),
+                    None => data.iter().map(|&c| decoder.decode(c).to_array()).collect(),
+                };
+                Some((*key, px))
+            })
+            .collect()
+    }
+
     /// Replace every pixel of layer `layer_idx` by `f(state, pixel, x, y)`
     /// (inside the selection, if any), recording changed tiles in
     /// `history`. Each tile gets its own `state` from `init` (a cache, say).
@@ -373,17 +402,39 @@ impl Canvas {
                 Color32::from_rgba_unmultiplied(r, g, b, alpha)
             })
             .collect();
-        self.apply_mask(layer_idx, mask, history, |dst, cov| {
-            if alpha_lock && dst.a() == 0 {
+        // At full depth: the same, in the same space (premultiplied sRGB).
+        let unit = [r, g, b, a].map(|v| v as f32 / 255.0);
+        let deep = move |dst: [f32; 4], cov: u8| {
+            if alpha_lock && dst[3] <= 0.0 {
                 return dst;
             }
-            let out = crate::canvas::blend::alpha_over(colors[cov as usize], dst);
-            if alpha_lock {
-                crate::canvas::blend::with_alpha_of(out, dst.a())
-            } else {
-                out
+            let sa = unit[3] * cov as f32 / 255.0;
+            let mut out: [f32; 4] = std::array::from_fn(
+                |c| if c == 3 { sa } else { unit[c] * sa } + dst[c] * (1.0 - sa),
+            );
+            if alpha_lock && out[3] > 0.0 {
+                let k = dst[3] / out[3];
+                out = [out[0] * k, out[1] * k, out[2] * k, dst[3]];
             }
-        })
+            out
+        };
+        self.apply_mask(
+            layer_idx,
+            mask,
+            history,
+            |dst, cov| {
+                if alpha_lock && dst.a() == 0 {
+                    return dst;
+                }
+                let out = crate::canvas::blend::alpha_over(colors[cov as usize], dst);
+                if alpha_lock {
+                    crate::canvas::blend::with_alpha_of(out, dst.a())
+                } else {
+                    out
+                }
+            },
+            deep,
+        )
     }
 
     /// Erase layer `layer_idx` with `mask` as coverage (255 clears a pixel,
@@ -398,24 +449,33 @@ impl Canvas {
         if self.layers.get(layer_idx)?.alpha_locked {
             return None;
         }
-        self.apply_mask(layer_idx, mask, history, |dst, cov| {
-            // Premultiplied: fading scales every channel alike.
-            let keep = 255 - cov as u32;
-            let f = |c: u8| ((c as u32 * keep + 127) / 255) as u8;
-            let [r, g, b, a] = dst.to_array();
-            Color32::from_rgba_premultiplied(f(r), f(g), f(b), f(a))
-        })
+        self.apply_mask(
+            layer_idx,
+            mask,
+            history,
+            |dst, cov| {
+                // Premultiplied: fading scales every channel alike.
+                let keep = 255 - cov as u32;
+                let f = |c: u8| ((c as u32 * keep + 127) / 255) as u8;
+                let [r, g, b, a] = dst.to_array();
+                Color32::from_rgba_premultiplied(f(r), f(g), f(b), f(a))
+            },
+            |dst, cov| dst.map(|c| c * (1.0 - cov as f32 / 255.0)),
+        )
     }
 
     /// Replace each pixel of layer `layer_idx` that `mask` covers with
     /// `apply(pixel, coverage)`, tiles in parallel, recording the changed
-    /// tiles in `history`. Returns the changed canvas area.
+    /// tiles in `history`. In a deeper document it's `apply_deep` instead,
+    /// at full depth on premultiplied sRGB (0..1). Returns the changed
+    /// canvas area.
     fn apply_mask(
         &self,
         layer_idx: usize,
         mask: &crate::selection::SelectionMask,
         history: &mut UndoAction,
         apply: impl Fn(Color32, u8) -> Color32 + Sync,
+        apply_deep: impl Fn([f32; 4], u8) -> [f32; 4] + Sync,
     ) -> Option<eframe::egui::Rect> {
         let layer_id = self.layers.get(layer_idx)?.id;
         let ts = self.tile_size as i32;
@@ -438,6 +498,38 @@ impl Canvas {
             .par_iter()
             .filter_map(|&((tx, ty), ref cell)| {
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                if let (data, Some(deep)) = cell.deep_parts(self.depth, tile_len) {
+                    let before = deep.clone();
+                    let mut changed = false;
+                    for ly in 0..ts {
+                        for lx in 0..ts {
+                            let cov = mask.value(tx * ts + lx, ty * ts + ly);
+                            if cov == 0 {
+                                continue;
+                            }
+                            let i = (ly * ts + lx) as usize;
+                            let dst = deep.gamma(i);
+                            let out = apply_deep(dst, cov);
+                            changed |= out != dst;
+                            deep.set_gamma(i, out);
+                            data[i] = deep.narrow(i);
+                        }
+                    }
+                    if !changed {
+                        return None;
+                    }
+                    cell.is_empty = cell.deep().is_none_or(DeepTile::is_transparent);
+                    return Some(TileSnapshot {
+                        tx,
+                        ty,
+                        layer_id,
+                        x0: 0,
+                        y0: 0,
+                        width: ts as usize,
+                        height: ts as usize,
+                        data: SnapshotPixels::Deep(before),
+                    });
+                }
                 let data = cell.data_or_insert(tile_len);
                 let before = data.clone();
                 let mut changed = false;
@@ -766,6 +858,82 @@ impl Canvas {
                             new = std::array::from_fn(|c| old[c] + (new[c] - old[c]) * k);
                         }
                         out.set_linear(i, new);
+                        out8[i] = out.narrow(i);
+                    }
+                }
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                cell.is_empty = out.is_transparent();
+                cell.set_both(Some(out8), Some(out));
+            });
+        true
+    }
+
+    /// Filter the layer's pixels in `region` at full depth: `f` gets them as
+    /// one row-major buffer over its bounds in the space the 8-bit filters
+    /// work in (premultiplied sRGB, 0..1) and returns them filtered, or
+    /// `None` when it can't. Kept mixed with the originals by `coverage`
+    /// where it's given (the selection); alpha-locked layers keep their
+    /// transparency. Only for a deeper document: `false`, and nothing done,
+    /// in an 8-bit one or when `f` can't.
+    pub fn filter_region_deep(
+        &self,
+        layer_idx: usize,
+        region: &Region,
+        coverage: Option<&crate::selection::SelectionMask>,
+        f: impl FnOnce(&[[f32; 4]], usize, usize) -> Option<Vec<[f32; 4]>>,
+    ) -> bool {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return false;
+        };
+        if !self.depth.is_deep() {
+            return false;
+        }
+        let alpha_lock = layer.alpha_locked;
+        let ts = self.tile_size as i32;
+        let [bx0, by0, bx1, by1] = region.bounds;
+        let (w, h) = ((bx1 - bx0).max(0) as usize, (by1 - by0).max(0) as usize);
+        let mut src = vec![[0.0; 4]; w * h];
+        for ((tx, ty), _, deep, _) in &region.tiles {
+            let Some(deep) = deep else {
+                continue;
+            };
+            let (ox, oy) = (tx * ts, ty * ts);
+            for y in by0.max(oy)..by1.min(oy + ts) {
+                for x in bx0.max(ox)..bx1.min(ox + ts) {
+                    let i = ((y - oy) * ts + (x - ox)) as usize;
+                    src[(y - by0) as usize * w + (x - bx0) as usize] = deep.gamma(i);
+                }
+            }
+        }
+        let Some(pixels) = f(&src, w, h) else {
+            return false;
+        };
+        region
+            .tiles
+            .par_iter()
+            .for_each(|((tx, ty), original, deep, cell)| {
+                let Some(deep) = deep else {
+                    return;
+                };
+                let (tx, ty) = (*tx, *ty);
+                let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
+                let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
+                let (mut out, mut out8) = (deep.clone(), original.clone());
+                for ly in ly0..ly1 {
+                    for lx in lx0..lx1 {
+                        let (x, y) = (tx * ts + lx, ty * ts + ly);
+                        let i = (ly * ts + lx) as usize;
+                        let old = deep.gamma(i);
+                        let mut new = pixels[(y - by0) as usize * w + (x - bx0) as usize];
+                        if let Some(cov) = coverage {
+                            let k = cov.value(x, y) as f32 / 255.0;
+                            new = std::array::from_fn(|c| old[c] + (new[c] - old[c]) * k);
+                        }
+                        if alpha_lock {
+                            let k = if new[3] > 0.0 { old[3] / new[3] } else { 0.0 };
+                            new = [new[0] * k, new[1] * k, new[2] * k, old[3]];
+                        }
+                        out.set_gamma(i, new);
                         out8[i] = out.narrow(i);
                     }
                 }

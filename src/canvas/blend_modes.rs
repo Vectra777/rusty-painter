@@ -44,6 +44,11 @@ pub enum LayerBlend {
     Saturation,
     Color,
     Luminosity,
+    /// Folders only: the folder isn't composited on its own first; its
+    /// layers blend straight into what's below it (Photoshop's and Krita's
+    /// pass-through). Not in [`Self::GROUPS`]: the folder's blend menu
+    /// offers it apart. Composites as Normal wherever it can't pass through.
+    PassThrough,
 }
 
 impl LayerBlend {
@@ -114,6 +119,7 @@ impl LayerBlend {
             Self::Saturation => "Saturation",
             Self::Color => "Color",
             Self::Luminosity => "Luminosity",
+            Self::PassThrough => "Pass Through",
         }
     }
 
@@ -148,14 +154,13 @@ impl LayerBlend {
             Self::Saturation => "saturation",
             Self::Color => "color",
             Self::Luminosity => "luminosity",
+            Self::PassThrough => "pass_through",
         }
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::GROUPS
-            .iter()
-            .flat_map(|g| g.iter())
-            .copied()
+        (Self::GROUPS.iter().flat_map(|g| g.iter()).copied())
+            .chain([Self::PassThrough])
             .find(|m| m.key() == key)
     }
 }
