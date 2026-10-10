@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::Color32;
 
-use super::{Canvas, Layer, SharedCell, TileCell, TileKey, TileMap};
+use super::{Canvas, DeepTile, Layer, SharedCell, TileCell, TileKey, TileMap};
 use crate::canvas::history::UndoAction;
 use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
@@ -381,15 +381,15 @@ pub(super) fn sample_source_tile(
         .map_or(Color32::TRANSPARENT, |data| data[py * tile_size + px])
 }
 
-pub(super) fn transform_tiles(
-    src_tiles: &HashMap<(i32, i32), Vec<Color32>>,
+pub(super) fn transform_tiles<P: Px>(
+    src_tiles: &HashMap<(i32, i32), Vec<P>>,
     src_bounds: eframe::egui::Rect,
     params: TransformParams,
     tile_size: usize,
     canvas_width: usize,
     canvas_height: usize,
     selection: Option<&SelectionManager>,
-) -> HashMap<(i32, i32), Vec<Color32>> {
+) -> HashMap<(i32, i32), Vec<P>> {
     if params.scale.x.abs() < f32::EPSILON
         || params.scale.y.abs() < f32::EPSILON
         || !params.offset.is_finite()
@@ -448,18 +448,18 @@ pub(super) fn transform_tiles(
     dst_tiles
         .par_iter()
         .filter_map(|&(ntx, nty)| {
-            let mut data: Option<Vec<Color32>> = None;
+            let mut data: Option<Vec<P>> = None;
             // Source pixel lookup with a one-tile cache (neighbouring
             // destination pixels read neighbouring source pixels).
-            let mut cached: Option<(TileKey, Option<&Vec<Color32>>)> = None;
-            let mut source = |sx: i32, sy: i32| -> Color32 {
+            let mut cached: Option<(TileKey, Option<&Vec<P>>)> = None;
+            let mut source = |sx: i32, sy: i32| -> P {
                 if sx < src_min_x || sx >= src_max_x || sy < src_min_y || sy >= src_max_y {
-                    return Color32::TRANSPARENT;
+                    return P::CLEAR;
                 }
                 if let Some(sel) = selection
                     && !sel.contains_coords(sx as f32, sy as f32)
                 {
-                    return Color32::TRANSPARENT;
+                    return P::CLEAR;
                 }
                 let key = (sx.div_euclid(tile_size_i32), sy.div_euclid(tile_size_i32));
                 let tile = match cached {
@@ -470,12 +470,12 @@ pub(super) fn transform_tiles(
                         tile
                     }
                 };
-                tile.map_or(Color32::TRANSPARENT, |t| {
+                tile.map_or(P::CLEAR, |t| {
                     t[(sy - key.1 * tile_size_i32) as usize * tile_size
                         + (sx - key.0 * tile_size_i32) as usize]
                 })
             };
-            let mut quad_cache: Option<(TileKey, Option<&Vec<Color32>>)> = None;
+            let mut quad_cache: Option<(TileKey, Option<&Vec<P>>)> = None;
             let tile_y0 = (nty * tile_size_i32).max(y0);
             let tile_y1 = ((nty + 1) * tile_size_i32).min(y1);
             let tile_x0 = (ntx * tile_size_i32).max(x0);
@@ -520,7 +520,7 @@ pub(super) fn transform_tiles(
                             match tile {
                                 Some(t) => {
                                     let i = ly as usize * tile_size + lx as usize;
-                                    bilinear(
+                                    P::bilinear(
                                         t[i],
                                         t[i + 1],
                                         t[i + tile_size],
@@ -529,10 +529,10 @@ pub(super) fn transform_tiles(
                                         fy,
                                     )
                                 }
-                                None => Color32::TRANSPARENT,
+                                None => P::CLEAR,
                             }
                         } else {
-                            bilinear(
+                            P::bilinear(
                                 source(ix, iy),
                                 source(ix + 1, iy),
                                 source(ix, iy + 1),
@@ -542,18 +542,60 @@ pub(super) fn transform_tiles(
                             )
                         }
                     };
-                    if pixel == Color32::TRANSPARENT {
+                    if pixel == P::CLEAR {
                         continue;
                     }
                     let npx = (x - ntx * tile_size_i32) as usize;
                     let npy = (y - nty * tile_size_i32) as usize;
-                    data.get_or_insert_with(|| vec![Color32::TRANSPARENT; tile_size * tile_size])
+                    data.get_or_insert_with(|| vec![P::CLEAR; tile_size * tile_size])
                         [npy * tile_size + npx] = pixel;
                 }
             }
             data.map(|d| ((ntx, nty), d))
         })
         .collect()
+}
+
+/// A pixel a transform moves: 8-bit, or a deeper document's at full depth
+/// (premultiplied linear light).
+pub(super) trait Px: Copy + PartialEq + Send + Sync {
+    const CLEAR: Self;
+    /// Bilinear blend of four premultiplied pixels.
+    fn bilinear(p00: Self, p10: Self, p01: Self, p11: Self, fx: f32, fy: f32) -> Self;
+}
+
+impl Px for Color32 {
+    const CLEAR: Self = Color32::TRANSPARENT;
+
+    #[inline]
+    fn bilinear(p00: Self, p10: Self, p01: Self, p11: Self, fx: f32, fy: f32) -> Self {
+        bilinear(p00, p10, p01, p11, fx, fy)
+    }
+}
+
+impl Px for [f32; 4] {
+    const CLEAR: Self = [0.0; 4];
+
+    #[inline]
+    fn bilinear(p00: Self, p10: Self, p01: Self, p11: Self, fx: f32, fy: f32) -> Self {
+        let w = [
+            (1.0 - fx) * (1.0 - fy),
+            fx * (1.0 - fy),
+            (1.0 - fx) * fy,
+            fx * fy,
+        ];
+        std::array::from_fn(|c| p00[c] * w[0] + p10[c] * w[1] + p01[c] * w[2] + p11[c] * w[3])
+    }
+}
+
+/// A premultiplied linear pixel as gamma-space documents blend it (see
+/// [`DeepTile::gamma`]).
+fn gamma_of([r, g, b, a]: [f32; 4]) -> [f32; 4] {
+    if a <= 0.0 {
+        return [0.0; 4];
+    }
+    let enc = |v: f32| eframe::egui::ecolor::gamma_from_linear((v / a).max(0.0)) * a;
+    [enc(r), enc(g), enc(b), a]
 }
 
 /// Bilinear blend of four premultiplied pixels.
@@ -724,6 +766,128 @@ impl Canvas {
             );
         }
         moved.into_keys().collect()
+    }
+
+    /// Layer `layer_idx`'s tiles at full depth (8-bit-only ones widened),
+    /// kept as a transform starts to do it again at full depth when it's
+    /// kept (see [`Self::redo_transform_deep`]) or to put back. Empty in an
+    /// 8-bit document.
+    pub fn capture_layer_deep(&self, layer_idx: usize) -> HashMap<TileKey, DeepTile> {
+        let Some(layer) = self.layers.get(layer_idx).filter(|_| self.depth.is_deep()) else {
+            return HashMap::new();
+        };
+        let depth = self.depth;
+        let cells: Vec<(TileKey, SharedCell)> = layer
+            .tiles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(&k, c)| (k, c.clone()))
+            .collect();
+        cells
+            .par_iter()
+            .filter_map(|(key, cell)| {
+                let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let deep = match guard.deep() {
+                    Some(deep) => deep.convert(depth).unwrap_or_else(|| deep.clone()),
+                    None => DeepTile::widen(depth, guard.data()?)?,
+                };
+                Some((*key, deep))
+            })
+            .collect()
+    }
+
+    /// A transform kept in a deeper document, done again at full depth (its
+    /// previews and merge work at 8 bits): layer `layer_idx` back to `orig`
+    /// (its tiles before the transform), the pixels `lifted` took (8-bit,
+    /// as lifted, content bounds `src_bounds`) moved by `params` over the
+    /// rest. Rewrites the tiles in `keys`, those the pixels came from and
+    /// those they land on (on the canvas).
+    pub fn redo_transform_deep(
+        &self,
+        layer_idx: usize,
+        orig: &HashMap<TileKey, DeepTile>,
+        lifted: &HashMap<TileKey, Vec<Color32>>,
+        src_bounds: eframe::egui::Rect,
+        mut params: TransformParams,
+        keys: &[TileKey],
+    ) {
+        if !self.depth.is_deep() || layer_idx >= self.layers.len() {
+            return;
+        }
+        let (ts, depth) = (self.tile_size, self.depth);
+        let decoder = crate::canvas::blend::LinearDecoder::new();
+        let lifted_deep: HashMap<TileKey, Vec<[f32; 4]>> = lifted
+            .par_iter()
+            .map(|(key, px)| {
+                let o = orig.get(key);
+                let px = (px.iter().enumerate())
+                    .map(|(i, &c)| match (c == Color32::TRANSPARENT, o) {
+                        (true, _) => [0.0; 4],
+                        (false, Some(o)) => o.linear(i),
+                        (false, None) => decoder.decode(c).to_array(),
+                    })
+                    .collect();
+                (*key, px)
+            })
+            .collect();
+        params.draft = false;
+        let moved = transform_tiles(
+            &lifted_deep,
+            src_bounds,
+            params,
+            ts,
+            self.width,
+            self.height,
+            None,
+        );
+        let mut all: HashSet<TileKey> = keys.iter().copied().collect();
+        all.extend(lifted.keys().copied());
+        all.extend(moved.keys().copied());
+        let (cols, rows) = (
+            self.width.div_ceil(ts) as i32,
+            self.height.div_ceil(ts) as i32,
+        );
+        // (Pixels moved off the canvas stay at 8 bits.)
+        all.retain(|&(tx, ty)| (0..cols).contains(&tx) && (0..rows).contains(&ty));
+        let linear = self.blend_space == crate::canvas::blend_modes::BlendSpace::Linear;
+        let all: Vec<TileKey> = all.into_iter().collect();
+        all.par_iter().for_each(|&key| {
+            let Some(mut out) = orig
+                .get(&key)
+                .cloned()
+                .or_else(|| DeepTile::transparent(depth, ts * ts))
+            else {
+                return;
+            };
+            if let Some(px) = lifted.get(&key) {
+                for (i, &c) in px.iter().enumerate() {
+                    if c != Color32::TRANSPARENT {
+                        out.set_linear(i, [0.0; 4]);
+                    }
+                }
+            }
+            if let Some(top) = moved.get(&key) {
+                for (i, &t) in top.iter().enumerate() {
+                    if t[3] <= 0.0 {
+                        continue;
+                    }
+                    // Over what's left, in the space the 8-bit merge used.
+                    if linear {
+                        let d = out.linear(i);
+                        out.set_linear(i, std::array::from_fn(|c| t[c] + d[c] * (1.0 - t[3])));
+                    } else {
+                        let (t, d) = (gamma_of(t), out.gamma(i));
+                        out.set_gamma(i, std::array::from_fn(|c| t[c] + d[c] * (1.0 - t[3])));
+                    }
+                }
+            }
+            if let Some(cell) = self.ensure_layer_tile(layer_idx, key.0, key.1) {
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                cell.is_empty = out.is_transparent();
+                cell.set_both(Some(out.narrow_all()), Some(out));
+            }
+        });
     }
 
     /// Content bounds of detached tiles (a floating layer's source).

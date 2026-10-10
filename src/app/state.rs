@@ -327,6 +327,9 @@ pub type Tiles = HashMap<(i32, i32), Vec<Color32>>;
 pub struct FloatSession {
     pub source_id: crate::canvas::storage::LayerId,
     pub source_tiles: HashMap<(i32, i32), Vec<Color32>>,
+    /// In a deeper document, the source layer's tiles at full depth as they
+    /// were: the transform is done again from them when it's kept.
+    pub orig_deep: HashMap<(i32, i32), crate::canvas::storage::DeepTile>,
     pub selection: Option<crate::selection::SelectionShape>,
     /// Canvas area the floating layer last covered.
     pub last_rect: Option<egui::Rect>,
@@ -362,6 +365,9 @@ pub struct InPlaceLayer {
     pub left: Tiles,
     /// Tiles the last redraw wrote.
     pub drawn: Vec<(i32, i32)>,
+    /// In a deeper document, the layer's tiles at full depth as they were
+    /// (see [`FloatSession::orig_deep`]).
+    pub orig_deep: HashMap<(i32, i32), crate::canvas::storage::DeepTile>,
 }
 
 /// The toolbar buttons that hold more than one tool: which one each shows.

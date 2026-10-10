@@ -2020,6 +2020,41 @@ mod merge_tests {
     }
 
     #[test]
+    fn picked_layers_transform_at_full_depth_in_a_deeper_document() {
+        use crate::app::tools::Tool;
+        use crate::canvas::storage::Depth;
+        use crate::selection::transform::TransformInfo;
+        let mut app = test_app_pub(Canvas::new(128, 128, Color32::WHITE, 64));
+        let c = app.canvas_mut();
+        c.set_layer_tile_data(1, 0, 0, solid(Color32::RED));
+        c.insert_new_layer(2, "Top".into(), LayerKind::Paint, None);
+        c.set_layer_tile_data(2, 0, 0, half(Color32::BLUE));
+        c.active_layer_idx = 2;
+        app.convert_depth(Depth::U16);
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        app.layer_state.selected = vec![app.canvas.layers[1].id, app.canvas.layers[2].id];
+        let deep =
+            |app: &PainterApp, (tx, ty)| [1, 2].map(|i| app.canvas.get_layer_tile_deep(i, tx, ty));
+        let before = deep(&app, (0, 0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        crate::app::tools::transform::create_floating_layer(&mut app);
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            info.offset = Vec2::new(64.0, 64.0);
+        }
+        app.layer_state.transform_preview_pending = true;
+        crate::app::tools::transform::flush_transform_preview(&mut app);
+        crate::app::tools::transform::commit_floating_layer(&mut app);
+        assert!(
+            deep(&app, (1, 1)).iter().all(Option::is_some),
+            "arrived deep"
+        );
+        app.apply_history(false);
+        assert!(deep(&app, (0, 0)) == before, "undone at full depth");
+    }
+
+    #[test]
     fn picked_layers_transform_together_in_one_step() {
         use crate::app::tools::Tool;
         use crate::selection::transform::TransformInfo;

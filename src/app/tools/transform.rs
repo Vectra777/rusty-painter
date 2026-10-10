@@ -6,7 +6,7 @@ use crate::PainterApp;
 use crate::app::state::{FloatSession, InPlaceLayer, InPlaceTransform};
 use crate::app::stroke_ops::exclusive;
 use crate::app::tools::Tool;
-use crate::canvas::history::{TileSnapshot, UndoAction};
+use crate::canvas::history::{SnapshotPixels, TileSnapshot, UndoAction};
 use crate::canvas::storage::{DistortKind, LayerKind, TransformParams};
 use crate::selection::transform::{TransformInfo, TransformState};
 use eframe::egui::{self, Color32, Vec2};
@@ -92,6 +92,7 @@ fn lift_pixels(app: &mut PainterApp) -> bool {
         .selection_manager
         .has_selection()
         .then_some(&layer_selection);
+    let orig_deep = app.canvas.capture_layer_deep(active);
     let Some(idx) = exclusive(&mut app.canvas).float_pixels(selection) else {
         return false;
     };
@@ -105,6 +106,7 @@ fn lift_pixels(app: &mut PainterApp) -> bool {
     app.layer_state.float_session = Some(FloatSession {
         source_id,
         source_tiles,
+        orig_deep,
         selection: app.selection_manager.current_shape.clone(),
         last_rect: None,
         src_bounds: None,
@@ -202,6 +204,7 @@ fn lift_in_place(app: &mut PainterApp, ids: Vec<crate::canvas::storage::LayerId>
             .selection_manager
             .has_selection()
             .then_some(&layer_selection);
+        let orig_deep = app.canvas.capture_layer_deep(i);
         let Some(float) = exclusive(&mut app.canvas).float_pixels(selection) else {
             continue;
         };
@@ -227,6 +230,7 @@ fn lift_in_place(app: &mut PainterApp, ids: Vec<crate::canvas::storage::LayerId>
             before,
             left,
             drawn: Vec::new(),
+            orig_deep,
         });
     }
     if let Some(source) = app.canvas.layer_index_of(source_id) {
@@ -312,6 +316,24 @@ fn commit_in_place(app: &mut PainterApp) {
     let Some(session) = app.layer_state.in_place.take() else {
         return;
     };
+    // A deeper document: each layer done again at full depth.
+    let params = info.unwrap_or_default().params();
+    for layer in &session.layers {
+        if let (Some(i), Some(src_bounds)) = (app.canvas.layer_index_of(layer.id), layer.src_bounds)
+            && !layer.orig_deep.is_empty()
+        {
+            let mut keys = layer.drawn.clone();
+            keys.extend(layer.before.keys());
+            app.canvas.redo_transform_deep(
+                i,
+                &layer.orig_deep,
+                &layer.lifted,
+                src_bounds,
+                params,
+                &keys,
+            );
+        }
+    }
     let moved = info.filter(|i| !i.is_identity());
     if let Some(info) = moved {
         let mut tiles = Vec::new();
@@ -329,6 +351,7 @@ fn commit_in_place(app: &mut PainterApp) {
                 layer.before,
                 landing,
                 &layer.drawn,
+                &layer.orig_deep,
             ));
         }
         let whole = session.selection.is_none();
@@ -372,6 +395,11 @@ fn cancel_in_place(app: &mut PainterApp) {
         for ((tx, ty), data) in layer.before {
             canvas.set_layer_tile_data(i, tx, ty, data);
         }
+        for key in layer.drawn.iter().chain(layer.orig_deep.keys()) {
+            if let Some(deep) = layer.orig_deep.get(key) {
+                canvas.set_layer_tile_deep(i, key.0, key.1, deep);
+            }
+        }
     }
     app.selection_manager.current_shape = session.selection;
     reset_tool_info(app);
@@ -387,7 +415,10 @@ fn put_back(app: &mut PainterApp, idx: usize, session: &mut FloatSession) {
         canvas.layers.remove(idx);
         if let Some(i) = canvas.layer_index_of(session.source_id) {
             for ((tx, ty), data) in source_tiles {
-                canvas.set_layer_tile_data(i, tx, ty, data);
+                match session.orig_deep.get(&(tx, ty)) {
+                    Some(deep) => canvas.set_layer_tile_deep(i, tx, ty, deep),
+                    None => canvas.set_layer_tile_data(i, tx, ty, data),
+                }
             }
         }
         canvas.active_layer_idx = canvas.layer_index_of(session.source_id).unwrap_or_else(|| {
@@ -437,8 +468,10 @@ fn undo_tiles(
     mut sources: HashMap<(i32, i32), Vec<Color32>>,
     landing: HashMap<(i32, i32), Vec<Color32>>,
     touched: &[(i32, i32)],
+    orig_deep: &HashMap<(i32, i32), crate::canvas::storage::DeepTile>,
 ) -> Vec<TileSnapshot> {
     let ts = app.canvas.tile_size();
+    let depth = app.canvas.depth();
     sources.extend(landing);
     let mut keys: Vec<(i32, i32)> = sources.keys().copied().collect();
     keys.extend(touched.iter().filter(|k| !sources.contains_key(k)));
@@ -451,10 +484,20 @@ fn undo_tiles(
             y0: 0,
             width: ts,
             height: ts,
-            data: sources
-                .remove(&(tx, ty))
-                .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
-                .into(),
+            // At full depth in a deeper document, as it was before the lift.
+            data: match (orig_deep.is_empty(), orig_deep.get(&(tx, ty))) {
+                (false, Some(deep)) => SnapshotPixels::Deep(deep.clone()),
+                (false, None) => {
+                    match crate::canvas::storage::DeepTile::transparent(depth, ts * ts) {
+                        Some(deep) => SnapshotPixels::Deep(deep),
+                        None => vec![Color32::TRANSPARENT; ts * ts].into(),
+                    }
+                }
+                (true, _) => sources
+                    .remove(&(tx, ty))
+                    .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
+                    .into(),
+            },
         })
         .collect()
 }
@@ -528,7 +571,22 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
             .collect(),
         None => HashMap::new(),
     };
+    let lifted = app.layer_state.floating_buffer.take();
     let touched = exclusive(&mut app.canvas).merge_floating(idx, target);
+    // A deeper document: the merge was at 8 bits; done again at full depth.
+    if let (Some(session), Some(lifted)) = (&session, &lifted)
+        && !session.orig_deep.is_empty()
+        && let Some(i) = app.canvas.layer_index_of(session.source_id)
+        && let Some(src_bounds) = session
+            .src_bounds
+            .or_else(|| app.canvas.tiles_content_bounds(lifted))
+    {
+        let mut keys = touched.clone();
+        keys.extend(session.source_tiles.keys());
+        let params = info.unwrap_or_default().params();
+        app.canvas
+            .redo_transform_deep(i, &session.orig_deep, lifted, src_bounds, params, &keys);
+    }
     app.remove_layer_state(idx);
     app.layer_state.floating_layer_idx = None;
     app.layer_state.floating_buffer = None;
@@ -539,7 +597,14 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
     if let Some(mut session) = session {
         // Moved into the undo step, not copied.
         let source_tiles = std::mem::take(&mut session.source_tiles);
-        let tiles = undo_tiles(app, session.source_id, source_tiles, landing, &touched);
+        let tiles = undo_tiles(
+            app,
+            session.source_id,
+            source_tiles,
+            landing,
+            &touched,
+            &session.orig_deep,
+        );
         let moved = info.is_some_and(|i| !i.is_identity());
         if moved && app.canvas.layer_index_of(session.source_id).is_some() {
             // A whole text or vector layer only moved stays text or lines
@@ -1525,5 +1590,58 @@ mod tests {
         assert_eq!(pixel(&app, 1, 148, 20), RED, "redo moves it again");
         assert_eq!(pixel(&app, 1, 180, 50), BLUE);
         assert_eq!(pixel(&app, 1, 20, 20).a(), 0);
+    }
+
+    /// A 16-bit document whose red square is a ramp too fine for 8 bits.
+    fn deep_app() -> (PainterApp, crate::canvas::storage::DeepTile) {
+        use crate::canvas::storage::Depth;
+        let mut app = app();
+        app.convert_depth(Depth::U16);
+        let mut deep = app.canvas.get_layer_tile_deep(1, 0, 0).unwrap();
+        for y in 10..30 {
+            for x in 10..30 {
+                let v = 0.2 + (x * 20 + y) as f32 * 0.00005;
+                deep.set_linear(y * 64 + x, [v, 0.0, 0.0, 1.0]);
+            }
+        }
+        app.canvas.set_layer_tile_deep(1, 0, 0, &deep);
+        (app, deep)
+    }
+
+    fn steps(app: &PainterApp, tx: i32, x0: usize) -> usize {
+        let deep = app
+            .canvas
+            .get_layer_tile_deep(1, tx, 0)
+            .expect("still deep");
+        let mut v: Vec<u32> = (10..30)
+            .flat_map(|y| (x0..x0 + 20).map(move |x| y * 64 + x))
+            .map(|i| (deep.linear(i)[0] * 1e6) as u32)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v.len()
+    }
+
+    #[test]
+    fn a_deeper_document_transforms_at_full_depth_and_undoes_exactly() {
+        let (mut app, before) = deep_app();
+        assert!(steps(&app, 0, 10) > 300);
+        move_square(&mut app, 128.0);
+        assert!(steps(&app, 2, 10) > 300, "the ramp moved whole");
+        app.apply_history(false);
+        assert_eq!(app.canvas.get_layer_tile_deep(1, 0, 0).unwrap(), before);
+    }
+
+    #[test]
+    fn cancelling_in_a_deeper_document_puts_the_full_depth_back() {
+        let (mut app, before) = deep_app();
+        select_rect(&mut app, (10.0, 10.0), (30.0, 30.0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        transform_press(&mut app, Vec2::new(20.0, 20.0));
+        transform_drag(&mut app, Vec2::new(60.0, 20.0), false);
+        flush_transform_preview(&mut app);
+        transform_release(&mut app);
+        cancel_floating_layer(&mut app);
+        assert_eq!(app.canvas.get_layer_tile_deep(1, 0, 0).unwrap(), before);
     }
 }

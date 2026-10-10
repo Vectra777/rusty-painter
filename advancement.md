@@ -31,7 +31,7 @@ Paint behaviour
 Brush management
 
 - Combining two whole presets (P "combine brushes"); the dual brush only adds a second tip.
-- Sub-tool memory (C): each tool remembering its own brush, size and colour.
+- Sub-tool memory (C) goes as far as the brush, eraser, smudge and blur each keeping their own brush; Clip Studio's several sub-tools per tool, each with its own colour if asked, aren't here.
 - A live test pad in the brush settings (P Brush Studio).
 
 Part 2: Everything else
@@ -76,14 +76,13 @@ Comics (C leads, I has most)
 
 Colour
 
-- Full depth for the tools still working at 8 bits in 16-bit and float documents: transforms, smudging and mixing brushes, wet paint, blurs and other spatial filters, fills, liquify.
+- Full depth for what still works at 8 bits in 16-bit and float documents: wet paint (its simulation is 8-bit), the filter brush's filtered picture, and the spatial filters besides Gaussian blur and sharpen (motion, zoom and spin blur, glow, median, oil paint, pixelate, emboss, noise...). Transform previews are 8-bit too; the transform is done again at full depth when it's kept.
 - The app's "linear light" decodes every profile with sRGB's curve; live shader layers show without the display conversion; CMYK PSD export.
-- A mixing palette (C, K), gamut masks (K).
+- Gamut masks (K). The mixing palette is one picture: Clip Studio's has several, and Krita's is endless.
 
 Layers
 
-- Pass-through blending for folders.
-- Transforming several layers at once.
+- Pass-through folders can't take a mask, and fall back to isolated where something clips to them.
 
 Selection and transform
 
@@ -99,7 +98,7 @@ Workflow
 Platforms
 
 - No macOS release build (the release workflow builds Linux, Windows and Android).
-- No iPad, where Procreate and ibisPaint live.
+- The iPad build is experimental (sideloaded, built without a Mac); no App Store release.
 
 AI (optional, and divisive among artists)
 
