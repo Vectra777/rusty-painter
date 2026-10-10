@@ -481,7 +481,7 @@ pub const ACTIONS: &[ActionInfo] = &[
     info(
         Action::NewFolder,
         "new_folder",
-        "New folder",
+        "New folder (groups the picked layers)",
         "Edit",
         &[b!(CMD, G)],
     ),
@@ -495,7 +495,7 @@ pub const ACTIONS: &[ActionInfo] = &[
     info(
         Action::MergeDown,
         "merge_down",
-        "Merge down",
+        "Merge down (or the picked layers)",
         "Edit",
         &[b!(CMD_ALT, E)],
     ),

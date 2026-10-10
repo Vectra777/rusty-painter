@@ -297,6 +297,16 @@ impl PainterApp {
         self.apply_merge(move |canvas| canvas.plan_merge_down(idx));
     }
 
+    /// Merge the rows picked in the layers panel into one, or the selected
+    /// layer down when only one is picked.
+    pub(crate) fn merge_selected(&mut self) {
+        let picked = self.selected_indices();
+        if picked.len() < 2 {
+            return self.merge_down();
+        }
+        self.apply_merge(move |canvas| canvas.plan_merge_selected(&picked));
+    }
+
     /// Merge every layer that shows into one (Ctrl+Shift+E).
     pub(crate) fn merge_visible(&mut self) {
         self.apply_merge(Canvas::plan_merge_visible);
@@ -532,6 +542,142 @@ impl PainterApp {
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;
         self.debug_assert_layer_state_in_sync();
+    }
+
+    /// The layers panel row standing for the selected entry: a mask's
+    /// layer, a drawing's animated layer, or the entry itself.
+    pub(crate) fn active_row(&self) -> usize {
+        let active = self.canvas.active_layer_idx;
+        match self
+            .canvas
+            .layers
+            .get(active)
+            .map(|l| (l.kind, l.anim, l.parent))
+        {
+            Some((LayerKind::Mask { owner }, ..)) => {
+                self.canvas.layer_index_of(owner).unwrap_or(active)
+            }
+            Some((_, Some(crate::canvas::storage::Anim::Frame(_)), Some(track))) => {
+                self.canvas.layer_index_of(track).unwrap_or(active)
+            }
+            _ => active,
+        }
+    }
+
+    /// Rows picked in the layers panel, ascending: the multi-selection while
+    /// it holds the selected row, else just that row.
+    pub(crate) fn selected_indices(&self) -> Vec<usize> {
+        let row = self.active_row();
+        let mut picked: Vec<usize> = self
+            .layer_state
+            .selected
+            .iter()
+            .filter_map(|&id| self.canvas.layer_index_of(id))
+            .collect();
+        if !picked.contains(&row) {
+            return vec![row];
+        }
+        picked.sort_unstable();
+        picked.dedup();
+        picked
+    }
+
+    /// [`Self::selected_indices`] without the background and without those
+    /// inside another picked folder (they go with it).
+    fn selected_roots(&self) -> Vec<usize> {
+        let picked = self.selected_indices();
+        let ids: Vec<LayerId> = picked.iter().map(|&i| self.canvas.layers[i].id).collect();
+        picked
+            .into_iter()
+            .filter(|&i| {
+                let l = &self.canvas.layers[i];
+                i != 0
+                    && l.parent
+                        .is_none_or(|p| !ids.iter().any(|&a| self.canvas.is_within(p, a)))
+            })
+            .collect()
+    }
+
+    /// Ctrl+G: the picked rows grouped into a folder, or a new empty one.
+    pub(crate) fn folder_or_group(&mut self) {
+        if self.selected_indices().len() > 1 {
+            self.group_selected();
+        } else {
+            self.add_folder();
+        }
+    }
+
+    /// Put the picked rows into a new folder where the topmost of them was,
+    /// in their order, as one undo step (Ctrl+G).
+    pub(crate) fn group_selected(&mut self) {
+        let roots = self.selected_roots();
+        let Some(&top) = roots.last() else {
+            self.report("The background can't go in a folder".to_string());
+            return;
+        };
+        let ids: Vec<LayerId> = roots.iter().map(|&i| self.canvas.layers[i].id).collect();
+        let parent = self.canvas.layers[top].parent;
+        let steps = self.layer_state.history.top_token().1;
+        let name = self.next_layer_name("Folder");
+        let folder = self.insert_entry(top + 1, name, LayerKind::Group, parent, true);
+        let folder = self.canvas.layers[folder].id;
+        // Lowest first, each just under the folder: they keep their order.
+        for id in ids {
+            self.move_next_to(id, folder, false, Some(folder));
+        }
+        self.layer_state.selected = vec![folder];
+        self.layer_state.history.label_next("Group layers");
+        self.layer_state.history.squash_since(steps);
+    }
+
+    /// Move layer `from` (as [`Self::move_layer`]) with the other picked
+    /// rows, which stay next to it in their order, as one undo step.
+    pub(crate) fn move_selected(&mut self, from: usize, to: usize, parent: Option<LayerId>) {
+        let roots = self.selected_roots();
+        let Some(dragged) = self.canvas.layer_id_at(from) else {
+            return;
+        };
+        let Some(at) = roots.iter().position(|&i| i == from) else {
+            return self.move_layer(from, to, parent);
+        };
+        if roots.len() < 2 {
+            return self.move_layer(from, to, parent);
+        }
+        let ids: Vec<LayerId> = roots.iter().map(|&i| self.canvas.layers[i].id).collect();
+        let steps = self.layer_state.history.top_token().1;
+        self.move_layer(from, to, parent);
+        // Nearest first, each next to the one placed before it.
+        let mut anchor = dragged;
+        for &id in ids[..at].iter().rev() {
+            self.move_next_to(id, anchor, false, parent);
+            anchor = id;
+        }
+        anchor = dragged;
+        for &id in &ids[at + 1..] {
+            self.move_next_to(id, anchor, true, parent);
+            anchor = id;
+        }
+        self.layer_state.history.label_next("Move layers");
+        self.layer_state.history.squash_since(steps);
+    }
+
+    /// Move entry `id` directly above (or below) entry `anchor` in the
+    /// list, into folder `parent`.
+    fn move_next_to(&mut self, id: LayerId, anchor: LayerId, above: bool, parent: Option<LayerId>) {
+        let (Some(from), Some(a)) = (
+            self.canvas.layer_index_of(id),
+            self.canvas.layer_index_of(anchor),
+        ) else {
+            return;
+        };
+        // As `Vec::remove` then `insert`: taking `from` out shifts what's above it.
+        let to = match (above, from < a) {
+            (true, true) => a,
+            (true, false) => a + 1,
+            (false, true) => a - 1,
+            (false, false) => a,
+        };
+        self.move_layer(from, to, parent);
     }
 
     /// Move the side-car per-layer state (UI color) from `from` to `to`,
@@ -1336,6 +1482,102 @@ mod merge_tests {
             app.canvas.mask_index_of(shade.id).is_none(),
             "mask baked in"
         );
+    }
+
+    #[test]
+    fn merge_selected_keeps_the_picture_and_undoes_in_one_step() {
+        let mut app = app();
+        // Both layers of the folder: merged as they show in it, kept in it.
+        check(
+            &mut app,
+            |app| {
+                app.layer_state.selected = vec![app.canvas.layers[3].id, app.canvas.layers[4].id];
+                app.merge_selected();
+            },
+            7,
+        );
+        let merged = &app.canvas.layers[3];
+        assert_eq!(merged.name, "Shade");
+        assert_eq!(
+            merged.parent,
+            Some(app.canvas.layers[2].id),
+            "stays in the folder"
+        );
+    }
+
+    /// Names of the entries in `folder`, bottom to top.
+    fn children(app: &PainterApp, folder: LayerId) -> Vec<String> {
+        let c = &app.canvas;
+        c.layers
+            .iter()
+            .filter(|l| l.parent == Some(folder))
+            .map(|l| l.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn group_selected_puts_the_picked_layers_in_one_folder_in_one_step() {
+        let mut app = app();
+        let tree_before = tree(&app);
+        let (base, hidden) = (app.canvas.layers[1].id, app.canvas.layers[6].id);
+        app.canvas_mut().active_layer_idx = 6;
+        // The background and a folder's contents with it don't count twice.
+        app.layer_state.selected = vec![LayerId(0), base, hidden];
+        app.group_selected();
+        let folder = app.canvas.layers[app.canvas.active_layer_idx].id;
+        assert_eq!(
+            app.canvas.layers[app.canvas.active_layer_idx].kind,
+            LayerKind::Group
+        );
+        let names: Vec<String> = [base, hidden]
+            .iter()
+            .map(|&id| {
+                app.canvas.layers[app.canvas.layer_index_of(id).unwrap()]
+                    .name
+                    .clone()
+            })
+            .collect();
+        assert_eq!(children(&app, folder), names, "in their order");
+        assert_eq!(
+            app.layer_state.layer_ui_colors.len(),
+            app.canvas.layers.len()
+        );
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        let tree_after = tree(&app);
+        app.apply_history(false);
+        assert!(tree(&app) == tree_before, "undo takes the folder away");
+        assert_eq!(
+            app.layer_state.layer_ui_colors.len(),
+            app.canvas.layers.len()
+        );
+        app.apply_history(true);
+        assert!(tree(&app) == tree_after, "redo groups again");
+        // Saved as one step: the reopened file undoes it in one.
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let loaded = crate::project::decode_project(&bytes).unwrap();
+        let mut reopened = test_app_pub(Canvas::new(8, 8, Color32::WHITE, 64));
+        reopened.replace_document(loaded.canvas, loaded.history);
+        reopened.apply_history(false);
+        assert!(tree(&reopened) == tree_before, "undo after reopening");
+    }
+
+    #[test]
+    fn dragging_picked_layers_moves_them_together_in_one_step() {
+        let mut app = app();
+        let tree_before = tree(&app);
+        let folder = app.canvas.layers[2].id;
+        let (base, hidden) = (app.canvas.layers[1].id, app.canvas.layers[6].id);
+        app.canvas_mut().active_layer_idx = 1;
+        app.layer_state.selected = vec![base, hidden];
+        // Base dragged to the top of the folder; Hidden comes along above it.
+        app.move_selected(1, 4, Some(folder));
+        assert_eq!(
+            children(&app, folder),
+            ["Shade", "Clipped", "Layer 1", "Hidden"].map(String::from)
+        );
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        app.apply_history(false);
+        assert!(tree(&app) == tree_before, "undo puts them back");
     }
 
     #[test]

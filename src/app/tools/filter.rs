@@ -44,6 +44,9 @@ pub struct FilterSession {
     source: Option<ShrunkSource>,
     /// What the screen shows while a slider is dragged.
     preview: Option<FilterPreview>,
+    /// The other layers picked with it in the layers panel: the filter goes
+    /// on them too when it's kept (the preview shows on `layer` alone).
+    extra: Vec<LayerId>,
 }
 
 /// The session's area before the filter, shrunk by `block` (each
@@ -188,6 +191,29 @@ impl FilterState {
     }
 }
 
+/// Run `filter` over `original`'s area of layer `layer` (only where
+/// `coverage` says, if given).
+fn apply_to(
+    canvas: &crate::canvas::Canvas,
+    layer: usize,
+    filter: Filter,
+    original: &Region,
+    coverage: Option<&SelectionMask>,
+) {
+    // A deeper document and a colour adjustment: at full depth.
+    let deep = filter.adjust_linear([0.5, 0.5, 0.5, 1.0]).is_some()
+        && canvas.map_region_deep(layer, original, coverage, |px| {
+            filter.adjust_linear(px).unwrap_or(px)
+        });
+    if !deep {
+        let [x0, y0, x1, y1] = original.bounds;
+        let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let src = original.pixels(canvas.tile_size());
+        let out = filter.apply(&src, w, h, (x0, y0));
+        canvas.replace_region(layer, original, &out, coverage);
+    }
+}
+
 impl PainterApp {
     /// Start `filter` on the active layer: at once when it has no settings,
     /// else as a previewed session for the dialog.
@@ -224,6 +250,15 @@ impl PainterApp {
             }
             _ => ([0, 0, w, h], None),
         };
+        let row = self.active_row();
+        let extra = self
+            .selected_indices()
+            .into_iter()
+            .filter(|&i| i != row && i != layer)
+            .map(|i| &self.canvas.layers[i])
+            .filter(|l| !l.locked && l.kind == LayerKind::Paint)
+            .map(|l| l.id)
+            .collect();
         let pool = Arc::clone(&self.workspace.pool);
         let original = Arc::new(pool.install(|| self.canvas.capture_region(layer, bounds)));
         self.workspace.filter.session = Some(FilterSession {
@@ -237,6 +272,7 @@ impl PainterApp {
             exact: false,
             source: None,
             preview: None,
+            extra,
         });
         if !filter.has_settings() {
             self.filter_commit();
@@ -405,20 +441,8 @@ impl PainterApp {
         let canvas = Arc::clone(&self.canvas);
         self.run_on_worker(&format!("{}…", filter.name()), move || {
             let [x0, y0, x1, y1] = original.bounds;
-            let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
             let started = std::time::Instant::now();
-            pool.install(|| {
-                // A deeper document and a colour adjustment: at full depth.
-                let deep = filter.adjust_linear([0.5, 0.5, 0.5, 1.0]).is_some()
-                    && canvas.map_region_deep(layer, &original, coverage.as_deref(), |px| {
-                        filter.adjust_linear(px).unwrap_or(px)
-                    });
-                if !deep {
-                    let src = original.pixels(canvas.tile_size());
-                    let out = filter.apply(&src, w, h, (x0, y0));
-                    canvas.replace_region(layer, &original, &out, coverage.as_deref());
-                }
-            });
+            pool.install(|| apply_to(&canvas, layer, filter, &original, coverage.as_deref()));
             // The worker lets go of the canvas before it says it's done.
             drop(canvas);
             let slow = started.elapsed() > LIVE_BUDGET;
@@ -463,13 +487,39 @@ impl PainterApp {
         let pool = Arc::clone(&self.workspace.pool);
         let canvas = Arc::clone(&self.canvas);
         let name = session.filter.name();
+        let extra: Vec<usize> = session
+            .extra
+            .iter()
+            .filter_map(|&id| self.canvas.layer_index_of(id))
+            .collect();
+        let several = !extra.is_empty();
+        let bounds = session.original.bounds;
         // After the run: what the layer holds then.
         self.run_on_worker(&format!("{name}…"), move || {
-            let tiles = pool.install(|| canvas.region_snapshots(layer, &session.original));
+            let tiles = pool.install(|| {
+                let mut tiles = canvas.region_snapshots(layer, &session.original);
+                // The other picked layers, the same filter over the same area.
+                for i in extra {
+                    let original = canvas.capture_region(i, bounds);
+                    let coverage = session.coverage.as_deref();
+                    apply_to(&canvas, i, session.filter, &original, coverage);
+                    tiles.extend(canvas.region_snapshots(i, &original));
+                }
+                tiles
+            });
             drop(canvas);
             Box::new(move |app: &mut PainterApp| {
                 if tiles.is_empty() {
                     return;
+                }
+                // The other picked layers changed only now.
+                if several {
+                    let [x0, y0, x1, y1] = bounds;
+                    app.mark_tiles_in_bounds_dirty(egui::Rect::from_min_max(
+                        egui::pos2(x0 as f32, y0 as f32),
+                        egui::pos2(x1 as f32, y1 as f32),
+                    ));
+                    app.layer_state.thumbnails_dirty = true;
                 }
                 app.layer_state.history.label_next(name);
                 app.push_undo(UndoAction {

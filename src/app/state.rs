@@ -284,6 +284,10 @@ pub struct FloatOverlay {
 pub struct LayerState {
     pub layer_ui_colors: Vec<Color32>,
     pub layer_dragging: Option<usize>,
+    /// Rows picked together in the layers panel (Ctrl/Shift-click), by id.
+    /// Only counts while it holds the selected row (see
+    /// `PainterApp::selected_indices`).
+    pub selected: Vec<crate::canvas::storage::LayerId>,
     pub floating_layer_idx: Option<usize>,
     pub floating_buffer: Option<HashMap<(i32, i32), Vec<Color32>>>,
     /// What the running transform session needs to undo or cancel itself.
@@ -317,6 +321,7 @@ impl LayerState {
         Self {
             layer_ui_colors: vec![Color32::from_gray(40); layer_count],
             layer_dragging: None,
+            selected: Vec::new(),
             floating_layer_idx: None,
             floating_buffer: None,
             float_session: None,

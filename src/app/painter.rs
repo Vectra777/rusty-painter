@@ -643,6 +643,68 @@ impl PainterApp {
 
     /// Undo (or redo) the last action, once the strokes queued are painted
     /// (at once if there are none; else on a later frame, in order).
+    /// Mirror a structural change undo or redo applied (layer added,
+    /// removed or moved) onto the per-layer side-car state (UI colors):
+    /// `History` only has `&mut Canvas`, so it can't reach those.
+    fn mirror_layer_op(&mut self, op: &crate::canvas::history::LayerHistoryOp, redo: bool) {
+        use crate::canvas::history::LayerHistoryOp;
+        match op {
+            LayerHistoryOp::Added { index, .. } => {
+                if redo {
+                    self.insert_layer_state(*index);
+                } else {
+                    self.remove_layer_state(*index);
+                }
+            }
+            op @ LayerHistoryOp::Removed { .. } => {
+                // The layer plus whatever went with it (mask, folder
+                // contents), at the positions actually touched.
+                let indices = op.removed_indices();
+                if redo {
+                    self.remove_layer_states(&indices);
+                } else {
+                    self.insert_layer_states(&indices);
+                }
+            }
+            LayerHistoryOp::Moved { from, to, .. } => {
+                self.reorder_layer_state(*from, *to);
+            }
+            LayerHistoryOp::Document(_) => self.after_document_swap(),
+            LayerHistoryOp::Replaced(swap) => {
+                let (out, put) = swap
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .applied
+                    .clone();
+                self.replace_layer_states(&out, &put);
+            }
+            // Adds and moves, in the order they were applied (the canvas has
+            // had them all, so it only matches after the last).
+            LayerHistoryOp::Batch(ops) => {
+                let colors = &mut self.layer_state.layer_ui_colors;
+                for op in ops {
+                    match *op {
+                        LayerHistoryOp::Added { index, .. } if redo => {
+                            colors.insert(index.min(colors.len()), Color32::from_gray(40));
+                        }
+                        LayerHistoryOp::Added { index, .. } if index < colors.len() => {
+                            colors.remove(index);
+                        }
+                        LayerHistoryOp::Moved { from, to, .. } if from < colors.len() => {
+                            let color = colors.remove(from);
+                            colors.insert(to.min(colors.len()), color);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            LayerHistoryOp::Text { .. }
+            | LayerHistoryOp::Vector { .. }
+            | LayerHistoryOp::Height { .. }
+            | LayerHistoryOp::Wet { .. } => {}
+        }
+    }
+
     pub(crate) fn apply_history(&mut self, redo: bool) {
         self.when_strokes_painted(move |app| app.apply_history_now(redo));
     }
@@ -690,44 +752,8 @@ impl PainterApp {
             // A structural change (layer added/removed/moved) also needs the
             // per-layer side-car state (UI colors) mirrored to match:
             // `History` only has `&mut Canvas`, so it can't reach those.
-            use crate::canvas::history::LayerHistoryOp;
-            match &layer_action {
-                Some(LayerHistoryOp::Added { index, .. }) => {
-                    if redo {
-                        self.insert_layer_state(*index);
-                    } else {
-                        self.remove_layer_state(*index);
-                    }
-                }
-                Some(op @ LayerHistoryOp::Removed { .. }) => {
-                    // The layer plus whatever went with it (mask, folder
-                    // contents), at the positions actually touched.
-                    let indices = op.removed_indices();
-                    if redo {
-                        self.remove_layer_states(&indices);
-                    } else {
-                        self.insert_layer_states(&indices);
-                    }
-                }
-                Some(LayerHistoryOp::Moved { from, to, .. }) => {
-                    self.reorder_layer_state(*from, *to);
-                }
-                Some(LayerHistoryOp::Document(_)) => self.after_document_swap(),
-                Some(LayerHistoryOp::Replaced(swap)) => {
-                    let (out, put) = swap
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .applied
-                        .clone();
-                    self.replace_layer_states(&out, &put);
-                }
-                Some(
-                    LayerHistoryOp::Text { .. }
-                    | LayerHistoryOp::Vector { .. }
-                    | LayerHistoryOp::Height { .. }
-                    | LayerHistoryOp::Wet { .. },
-                )
-                | None => {}
+            if let Some(op) = &layer_action {
+                self.mirror_layer_op(op, redo);
             }
 
             if layer_action.is_some() {

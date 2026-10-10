@@ -571,6 +571,8 @@ pub(super) enum StoredLayerHistoryOp {
         #[serde(default)]
         inner: Option<Box<StoredLayerHistoryOp>>,
     },
+    /// Several adds and moves as one step, in the order they were done.
+    Batch(Vec<StoredLayerHistoryOp>),
 }
 
 impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
@@ -634,6 +636,7 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
             LayerHistoryOp::Replaced(_) => {
                 unreachable!("a merge step is saved as StoredUndoAction::merge")
             }
+            LayerHistoryOp::Batch(ops) => Self::Batch(ops.iter().map(Self::from).collect()),
             LayerHistoryOp::Text { layers, inner } => Self::Text {
                 layers: layers
                     .iter()
@@ -760,6 +763,7 @@ impl StoredLayerHistoryOp {
                 }),
                 inner: inner.map(|op| Box::new(op.into_op())),
             },
+            Self::Batch(ops) => LayerHistoryOp::Batch(ops.into_iter().map(Self::into_op).collect()),
         }
     }
 }

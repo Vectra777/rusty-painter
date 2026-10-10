@@ -363,8 +363,14 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "New Layer", keys(app, ctx, Action::NewLayer)) {
         app.add_layer_and_select();
     }
-    if menu_item(ui, "New Folder", keys(app, ctx, Action::NewFolder)) {
-        app.add_folder();
+    let several = app.selected_indices().len() > 1;
+    let folder_label = if several {
+        "Group Layers"
+    } else {
+        "New Folder"
+    };
+    if menu_item(ui, folder_label, keys(app, ctx, Action::NewFolder)) {
+        app.folder_or_group();
     }
     if menu_item(ui, "New Vector Layer", None) {
         app.add_vector_layer();
@@ -506,8 +512,13 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.rasterise_text_layer(active);
     }
     ui.separator();
-    if menu_item(ui, "Merge Down", keys(app, ctx, Action::MergeDown)) {
-        app.merge_down();
+    let merge_label = if several {
+        "Merge Selected"
+    } else {
+        "Merge Down"
+    };
+    if menu_item(ui, merge_label, keys(app, ctx, Action::MergeDown)) {
+        app.merge_selected();
     }
     if menu_item(ui, "Merge Visible", keys(app, ctx, Action::MergeVisible)) {
         app.merge_visible();

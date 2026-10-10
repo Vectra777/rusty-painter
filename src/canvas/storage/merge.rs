@@ -406,6 +406,31 @@ impl Canvas {
         if let Some(shown) = self.shown_copy() {
             return shown.plan_merge_visible();
         }
+        self.plan_merge_shown(&[])
+    }
+
+    /// The entries `selected` (folders with everything in them) merged into
+    /// one, as they show, where the lowest of them was; the hidden ones
+    /// stay as they are. Layers all in one folder merge as they show
+    /// without it, and stay in it.
+    pub fn plan_merge_selected(&self, selected: &[usize]) -> Result<MergePlan, &'static str> {
+        if let Some(shown) = self.shown_copy() {
+            return shown.plan_merge_selected(selected);
+        }
+        let ids: Vec<LayerId> = selected
+            .iter()
+            .filter_map(|&i| self.layers.get(i))
+            .map(|l| l.id)
+            .collect();
+        if ids.is_empty() {
+            return Err("Nothing to merge: no layer selected");
+        }
+        self.plan_merge_shown(&ids)
+    }
+
+    /// Every paint layer that shows (drafts aside) merged into one; only
+    /// those within `within` (any depth) unless it's empty.
+    fn plan_merge_shown(&self, within: &[LayerId]) -> Result<MergePlan, &'static str> {
         let n = self.layers.len();
         let shows = |i: usize| {
             let l = &self.layers[i];
@@ -421,8 +446,11 @@ impl Canvas {
             }
             !self.is_draft(i)
         };
+        let picked = |i: usize| {
+            within.is_empty() || within.iter().any(|&w| self.is_within(self.layers[i].id, w))
+        };
         let mut merged: Vec<usize> = (0..n)
-            .filter(|&i| self.layers[i].kind == LayerKind::Paint && shows(i))
+            .filter(|&i| self.layers[i].kind == LayerKind::Paint && picked(i) && shows(i))
             .collect();
         // A clipped layer shows only through its base.
         merged.retain(|&i| !self.layers[i].clipped || self.clip_base(i).is_none_or(shows));
@@ -430,9 +458,16 @@ impl Canvas {
         if chosen.len() < 2 {
             return Err("Nothing to merge: fewer than two layers show");
         }
+        // Picked layers all in one folder: merged without it, kept in it.
+        let folder = self.layers[merged[0]].parent.filter(|p| {
+            !within.is_empty() && merged.iter().all(|&i| self.layers[i].parent == Some(*p))
+        });
         let view = self.view(|i, l| {
             if l.kind == LayerKind::Paint && !chosen.contains(&i) {
                 l.visible = false;
+            }
+            if folder.is_some() && chosen.contains(&i) {
+                l.parent = None;
             }
             if l.draft && !matches!(l.kind, LayerKind::Mask { .. }) {
                 l.visible = false;
@@ -447,6 +482,7 @@ impl Canvas {
                     let l = &self.layers[i];
                     l.kind == LayerKind::Group
                         && !removed.contains(&i)
+                        && picked(i)
                         && shows(i)
                         && self.layers.iter().enumerate().all(|(j, c)| {
                             c.parent != Some(l.id)
@@ -462,7 +498,7 @@ impl Canvas {
         }
         let lowest = *merged.first().expect("two layers");
         let mut layer = self.layers[lowest].merged_from();
-        layer.parent = None;
+        layer.parent = folder;
         layer.opacity = 1.0;
         layer.blend = LayerBlend::Normal;
         layer.clipped = false;

@@ -252,6 +252,9 @@ pub enum LayerHistoryOp {
     /// Layers were merged: the entries on the other side of this step,
     /// swapped in place by undo and redo (see [`Canvas::swap_layers`]).
     Replaced(std::sync::Arc<std::sync::Mutex<crate::canvas::storage::LayerSwap>>),
+    /// Several adds and moves as one step (layers grouped into a new
+    /// folder, or dragged together), in the order they were done.
+    Batch(Vec<LayerHistoryOp>),
 }
 
 impl LayerHistoryOp {
@@ -412,6 +415,7 @@ fn describe(action: &UndoAction) -> Option<&'static str> {
         Some(LayerHistoryOp::Moved { .. }) => "Move layer",
         Some(LayerHistoryOp::Document(_)) => "Image or animation change",
         Some(LayerHistoryOp::Replaced(_)) => "Merge layers",
+        Some(LayerHistoryOp::Batch(_)) => "Move layers",
         Some(LayerHistoryOp::Text { .. }) => "Text",
         None if matches!(action.layer_action, Some(LayerHistoryOp::Text { .. }))
             && action.tiles.is_empty() =>
@@ -521,6 +525,27 @@ impl History {
     pub fn discard_redo(&mut self) {
         self.redo_stack.clear();
         self.redo_labels.clear();
+    }
+
+    /// Make the steps pushed since the stack held `len` steps (see
+    /// [`History::top_token`]) one step. Only for layer adds and moves,
+    /// which carry no pixels.
+    pub fn squash_since(&mut self, len: usize) {
+        if self.undo_stack.len() <= len + 1 {
+            return;
+        }
+        let ops = self
+            .undo_stack
+            .drain(len..)
+            .filter_map(|a| a.layer_action)
+            .collect();
+        self.undo_labels.truncate(len);
+        self.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Batch(ops)),
+        });
     }
 
     /// Push a new action onto the undo stack and clear redo, dropping the
@@ -778,6 +803,16 @@ impl History {
                 canvas.swap_layers(&mut swap.lock().unwrap_or_else(|e| e.into_inner()));
                 Some(op.clone())
             }
+            // Last done, first undone; returned in the order applied.
+            Some(LayerHistoryOp::Batch(ops)) => Some(LayerHistoryOp::Batch(
+                ops.iter()
+                    .rev()
+                    .filter_map(|op| {
+                        Self::prepare_for_undo(canvas, Some(op));
+                        Self::finalize_after_undo(canvas, Some(op))
+                    })
+                    .collect(),
+            )),
             // (Given the structural part: never a `Text` op.)
             Some(
                 LayerHistoryOp::Text { .. }
@@ -934,6 +969,14 @@ impl History {
                 canvas.swap_layers(&mut swap.lock().unwrap_or_else(|e| e.into_inner()));
                 Some(op.clone())
             }
+            Some(LayerHistoryOp::Batch(ops)) => Some(LayerHistoryOp::Batch(
+                ops.iter()
+                    .filter_map(|op| {
+                        Self::prepare_for_redo(canvas, Some(op));
+                        Self::finalize_after_redo(canvas, Some(op))
+                    })
+                    .collect(),
+            )),
             // (Given the structural part: never a `Text` op.)
             Some(
                 LayerHistoryOp::Text { .. }

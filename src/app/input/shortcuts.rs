@@ -281,7 +281,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         repaint = true;
     }
     if new_folder {
-        app.add_folder();
+        app.folder_or_group();
         repaint = true;
     }
     if clip {
@@ -293,7 +293,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         repaint = true;
     }
     if merge_down {
-        app.merge_down();
+        app.merge_selected();
         repaint = true;
     }
     if merge_visible {
