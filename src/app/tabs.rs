@@ -334,20 +334,12 @@ pub(crate) fn tab_strip(app: &mut PainterApp, ctx: &egui::Context) {
                         Some(doc) => (doc.title.clone(), doc.unsaved()),
                         None => (app.workspace.tabs.title.clone(), app.has_unsaved_work()),
                     };
-                    let label = if unsaved {
-                        format!("{title} •")
-                    } else {
-                        title
-                    };
-                    let tab = ui.selectable_label(i == active, label);
-                    if tab.clicked() {
+                    let (picked, close) = tab(ui, &title, i == active, unsaved);
+                    if close {
+                        close_tab = Some(i);
+                    } else if picked {
                         switch = Some(i);
                     }
-                    if tab.middle_clicked() || ui.small_button("✕").on_hover_text("Close").clicked()
-                    {
-                        close_tab = Some(i);
-                    }
-                    ui.separator();
                 }
             });
         });
@@ -359,6 +351,61 @@ pub(crate) fn tab_strip(app: &mut PainterApp, ctx: &egui::Context) {
         app.close_tab(i, false);
     }
     close_dialog(app, ctx);
+}
+
+/// One tab: its name and, in the same block, a cross that closes it (a
+/// dot while it has unsaved work, the cross when hovered). Whether it was
+/// clicked, and whether to close it (the cross, or a middle click).
+fn tab(ui: &mut egui::Ui, title: &str, active: bool, unsaved: bool) -> (bool, bool) {
+    use crate::ui::style::{accent, accent_text};
+    const PAD: f32 = 10.0;
+    const CROSS: f32 = 16.0;
+    let visuals = ui.visuals().clone();
+    let text = if active {
+        accent_text()
+    } else {
+        visuals.text_color()
+    };
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let galley = ui.painter().layout_no_wrap(title.to_owned(), font, text);
+    let size = egui::vec2(
+        PAD + galley.size().x + 6.0 + CROSS + PAD * 0.5,
+        galley.size().y.max(CROSS) + 8.0,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let cross = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - PAD * 0.5 - CROSS * 0.5, rect.center().y),
+        egui::Vec2::splat(CROSS),
+    );
+    let on_cross = response.hover_pos().is_some_and(|p| cross.contains(p));
+    let rounding = visuals.widgets.inactive.rounding;
+    let fill = match (active, response.hovered()) {
+        (true, _) => accent(),
+        (false, true) => visuals.widgets.hovered.weak_bg_fill,
+        (false, false) => visuals.widgets.inactive.weak_bg_fill,
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, rounding, fill);
+    painter.galley(
+        egui::pos2(rect.left() + PAD, rect.center().y - galley.size().y * 0.5),
+        galley,
+        text,
+    );
+    if on_cross {
+        painter.rect_filled(cross, rounding, text.gamma_multiply(0.2));
+    }
+    if unsaved && !response.hovered() {
+        painter.circle_filled(cross.center(), 3.5, text);
+    } else if active || response.hovered() {
+        let r = CROSS * 0.22;
+        let stroke = egui::Stroke::new(1.5_f32, text);
+        let c = cross.center();
+        painter.line_segment([c + egui::vec2(-r, -r), c + egui::vec2(r, r)], stroke);
+        painter.line_segment([c + egui::vec2(-r, r), c + egui::vec2(r, -r)], stroke);
+    }
+    let response = response.on_hover_text(if on_cross { "Close" } else { title });
+    let close = (response.clicked() && on_cross) || response.middle_clicked();
+    (response.clicked(), close)
 }
 
 /// Closing a tab with unsaved work: discard it or keep it open.
