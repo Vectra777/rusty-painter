@@ -2,16 +2,16 @@ name: iOS
 
 # The iPad build, on a macOS runner (no Mac needed): lint, a Simulator run
 # with a screenshot and the app's log, and an unsigned .ipa to sideload
-# with SideStore. Kept out of CI's own workflow: macOS minutes cost ten
-# Linux ones on private repositories.
+# with SideStore. Run by hand (Actions, iOS, Run workflow): macOS minutes
+# cost ten Linux ones on private repositories.
 on:
-  pull_request:
-  push:
-    branches: [main, master, pre-release]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # As scripts/build-ios.sh sets it (Info.plist's MinimumOSVersion), so the
+  # lint step's C builds are the ones the app links.
+  IPHONEOS_DEPLOYMENT_TARGET: "16.0"
 
 jobs:
   ios:
@@ -32,7 +32,8 @@ jobs:
 
       - name: Simulator run
         run: |
-          APP="$(scripts/build-ios.sh aarch64-apple-ios-sim debug | tail -n 1)"
+          scripts/build-ios.sh aarch64-apple-ios-sim debug
+          APP=target/aarch64-apple-ios-sim/debug/RustyPainter.app
           # The newest iPad the runner's Simulator has.
           UDID="$(xcrun simctl list devices available -j | python3 -c '
           import json, sys
@@ -55,8 +56,8 @@ jobs:
 
       - name: Unsigned .ipa (for SideStore)
         run: |
-          IPA="$(scripts/build-ios.sh aarch64-apple-ios release | tail -n 1)"
-          cp "$IPA" smoke/rusty-painter-ios-unsigned.ipa
+          scripts/build-ios.sh aarch64-apple-ios release
+          cp target/aarch64-apple-ios/release/RustyPainter.ipa smoke/rusty-painter-ios-unsigned.ipa
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -91,7 +91,7 @@ scripts/build-android.sh aarch64-linux-android release   # -> target/release/apk
 (The commented-out `[package.metadata.android.signing.release]` block in `Cargo.toml` works too, but must never be committed.)
 
 ## iPad (iOS build)
-Experimental, and built without a Mac: the **iOS** workflow (`.github/workflows/ios.yml`) runs on GitHub's macOS runners on pushes to `master` and `pre-release`, on pull requests, and by hand (*Actions* → *iOS* → *Run workflow*). It lints the iOS build, runs the app in the iPad Simulator, and keeps a screenshot, the app's log and an unsigned `.ipa` as the run's `ios` artifact.
+Experimental, and built without a Mac: the **iOS** workflow (`.github/workflows/ios.yml`) runs on GitHub's macOS runners, by hand only (*Actions* → *iOS* → *Run workflow*, on any branch). It lints the iOS build, runs the app in the iPad Simulator, and keeps a screenshot, the app's log and an unsigned `.ipa` as the run's `ios` artifact.
 
 - `scripts/build-ios.sh [aarch64-apple-ios|aarch64-apple-ios-sim] [debug|release]` (on macOS) builds the bundle from the binary, `ios/Info.plist` and `ios/PrivacyInfo.xcprivacy`; there's no Xcode project.
 - `src/ios.rs`: the Files and Photos pickers, the share sheet and exports (into the Documents folder: Files → On My iPad → Rusty Painter → Exports), through UIKit.

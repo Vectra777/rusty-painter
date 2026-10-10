@@ -15,6 +15,11 @@
 # Apple ID on the iPad.
 set -euo pipefail
 
+# Rust and the C dependencies (built by `cc`) for the same iOS as
+# Info.plist's MinimumOSVersion: left alone, Rust links for iOS 10 and `cc`
+# builds for the SDK's own (newer) version, and the link fails.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-16.0}"
+
 TARGET="${1:-aarch64-apple-ios}"
 MODE="${2:-release}"
 
