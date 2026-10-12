@@ -255,6 +255,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let fill = on(Action::Fill);
     let alpha_lock = on(Action::AlphaLock);
     let liquify = on(Action::Liquify);
+    let puppet = on(Action::PuppetWarp);
+    let bone = on(Action::BoneTool);
     let blend = on(Action::Blend);
     let swap = on(Action::SwapColors);
     let panels = on(Action::TogglePanels);
@@ -361,6 +363,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             crate::app::tools::transform::cancel_floating_layer(app);
         } else if app.layer_state.liquify.is_some() {
             app.liquify_cancel();
+        } else if app.layer_state.puppet.is_some() {
+            app.puppet_cancel();
         } else if app.workspace.shapes.session.is_some() {
             app.shape_cancel();
         } else if app.workspace.gradient.session.is_some() {
@@ -396,7 +400,19 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         guides.show = !guides.show;
         repaint = true;
     }
-    if delete && app.workspace.select.magnetic.is_some() {
+    if delete
+        && matches!(app.active_tool, crate::app::tools::Tool::Puppet)
+        && (app.layer_state.puppet.is_some() || app.layer_state.rig_pins.is_some())
+    {
+        // Mid-warp, Delete is for pins (never the layer).
+        repaint |= app.puppet_remove_pins();
+    } else if delete
+        && matches!(app.active_tool, crate::app::tools::Tool::Bone)
+        && app.workspace.bone.selected.is_some()
+    {
+        // Delete is for the selected bone (never the layer).
+        repaint |= app.bone_remove_selected();
+    } else if delete && app.workspace.select.magnetic.is_some() {
         app.magnetic_undo_anchor();
         repaint = true;
     } else if delete
@@ -534,6 +550,12 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         if liquify {
             app.active_tool = Tool::Liquify;
         }
+        if puppet {
+            app.active_tool = Tool::Puppet;
+        }
+        if bone {
+            app.active_tool = Tool::Bone;
+        }
         if blend {
             // S again switches smudge / blur.
             let smudge = !matches!(app.active_tool, Tool::Smudge);
@@ -547,6 +569,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             || eyedropper
             || fill
             || liquify
+            || puppet
+            || bone
             || blend;
     }
 

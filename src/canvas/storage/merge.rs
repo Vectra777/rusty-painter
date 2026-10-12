@@ -37,6 +37,11 @@ impl Layer {
         let layer = self.shell();
         *layer.tiles.lock().unwrap_or_else(|e| e.into_inner()) =
             self.tiles.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        *layer.rig_onion.lock().unwrap_or_else(|e| e.into_inner()) = self
+            .rig_onion
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         layer
     }
 

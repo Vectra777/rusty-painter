@@ -644,8 +644,27 @@ mod tests {
                 .iter()
                 .map(|c| c.iter().map(|g| group_rows(g)).sum())
                 .collect();
-            let (lo, hi) = (heights.iter().min().unwrap(), heights.iter().max().unwrap());
-            assert!(hi - lo <= 14, "{n} columns: {heights:?}");
+            // Balanced: no group at the edge of the tallest column could go
+            // to the column beside it and leave the tallest shorter.
+            let hi = *heights.iter().max().unwrap();
+            for (c, col) in columns.iter().enumerate() {
+                if heights[c] != hi || col.len() < 2 {
+                    continue;
+                }
+                let moved = [
+                    (c > 0).then(|| (c - 1, group_rows(col[0]))),
+                    (c + 1 < columns.len()).then(|| (c + 1, group_rows(col[col.len() - 1]))),
+                ];
+                for (to, h) in moved.into_iter().flatten() {
+                    let mut after = heights.clone();
+                    after[c] -= h;
+                    after[to] += h;
+                    assert!(
+                        after.iter().max().unwrap() >= &hi,
+                        "{n} columns: {heights:?} could be {after:?}"
+                    );
+                }
+            }
         }
     }
 

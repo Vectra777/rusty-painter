@@ -72,11 +72,22 @@
 - Pictures are imported converted from the profile they carry to the document's; Photoshop and Krita documents open with theirs.
 - Colour harmonies in the colour panel: complementary, split complementary, analogous, triadic and tetradic hues shown on the wheel and as swatches to pick.
 
+### Puppet Warp
+- Edit → Puppet Warp (Shift+W, the pin in the tool strip): click the paint to pin it (exactly there) and drag the pins to bend it, the rest following as rigidly as it can. The mesh follows the drawing's outline (holes too), with Density and Expansion; Rigid, Normal or Distort; live while dragging.
+- Pins as in Photoshop: Shift+click picks several (they move together), Alt+click removes one, Alt+drag near one turns the paint round it, a pin's turn Auto or Fixed at an angle, Depth ▲/▼ for which part goes on top where the paint folds over itself, Remove pins and Remove all. Ctrl+Z / Ctrl+Shift+Z step through the pins while warping (past the first pin, it's cancelled).
+- Works on the selected layer, or only the selected part of it; text and vector layers are rasterised first. Parts that don't touch, and parts without a pin, stay where they are. Enter (or another tool) applies it as one undo step, Esc puts the layer back.
+- Warps can be changed later: a layer remembers its warps (saved with the document), and picking Puppet Warp on it again, with nothing selected, reopens the last one with its pins, on the paint from before it. Undo and redo bring the matching warp back with the pixels; painting on the layer (or any other change to it) lets it go.
+
 ### Skeletal animation
 - Rig layers: bones with their setup pose (and how much they take from their parents), slots in draw order, region and weighted mesh attachments, two-bone IK, and animations of bones (turn, place, scale, shear), slot colours, attachment swaps and mesh deforms with linear, stepped and Bézier keys; drawn at the timeline's frame, saved with the document.
 - File → Import Animation: Spine JSON (3.8 and 4.x, with its texture atlas or loose pictures), DragonBones JSON (5.x, with its texture atlas) and Lottie (layers as bones; images, solids and still shapes as pictures; precompositions), each from its published format; what can't come across is listed.
 - The timeline's rig section: the animation playing, and each bone's turn and place, keyed at the frame showing (one undo step a gesture).
 - File → Import Video as Frames (and dropping a video or an animation JSON on the window): videos through ffmpeg, GIFs, animated PNGs and WebPs as an animated layer, a drawing a frame.
+- Layer → Rig → Make Rig from Layers: the picked layers (or a folder's) become one rig layer, each a part with a mesh following its paint (Puppet Warp's), its opacity, blend mode and visibility, in their order; the layers stay, hidden. One undo step. The rig comes with an animation as long as the timeline.
+- The Bone tool (Y, the bone in the tool strip): on a rig layer, draw bones on the canvas (a drag from empty canvas, a child of the selected bone; Shift+drag from a bone's tail for its child), move one by its head (its children follow), aim and lengthen it by its tail, Delete to remove it (its children and parts go to its parent, staying where they are). Pose: drag a bone to turn it round its head, Shift+drag to move it, keyed at the frame showing. Bind smooth (each point weighted between the bones near it, measured along the part, so an arm doesn't follow the body across a gap) or rigid (each part on one bone); keys already made are kept as they look.
+- Puppet Warp on a rig layer keys its parts: click a part to pin it, drag pins to bend it, and the bend is a key at the frame showing (each drag one undo step). Bend it at frame 1 and again at frame 12, and the frames between follow, eased per key (Linear, Ease in-out, in, out or Hold on the tool bar). Key this frame holds the shape where it is; Delete key takes one out. The pins are kept with the part and show again at any frame.
+- Rig layers get onion skins: the rig posed at the frames before and after, tinted like a drawing's.
+- Layer → Rig → New Animation, and New animation in the timeline's rig section.
 
 ### Animation
 - Frame-by-frame animation: animated layers whose drawings start on a frame and are held until the next, a timeline panel (View → Timeline) to play, step and set the frame rate and range, add, copy, drag and remove drawings, and onion skins before and after.

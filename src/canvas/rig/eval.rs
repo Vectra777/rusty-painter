@@ -227,6 +227,14 @@ impl Rig {
         }
     }
 
+    /// Each bone's frame in the setup pose (no animation, no IK).
+    pub fn setup_world(&self) -> Vec<Affine> {
+        let local: Vec<Local> = (self.bones.iter())
+            .map(|b| (b.x, b.y, b.rotation, b.scale, b.shear))
+            .collect();
+        self.world(&local)
+    }
+
     /// The bones' frames from their local values, root first.
     fn world(&self, local: &[Local]) -> Vec<Affine> {
         let mut world: Vec<Affine> = Vec::with_capacity(self.bones.len());

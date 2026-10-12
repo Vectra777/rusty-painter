@@ -264,6 +264,50 @@ fn transform_press_at(app: &mut PainterApp) {
 
 #[test]
 #[ignore = "timing"]
+fn puppet_warp() {
+    let mut app = big_app();
+    app.active_tool = Tool::Puppet;
+    time("puppet: begin + 1st pin (whole 4k layer)", || {
+        app.puppet_press(Vec2::new(500.0, 2000.0), false, false);
+        app.puppet_release();
+    });
+    app.puppet_press(Vec2::new(2000.0, 2000.0), false, false);
+    app.puppet_release();
+    app.puppet_press(Vec2::new(3500.0, 2000.0), false, false);
+    time("puppet: 20 drag frames", || {
+        for i in 1..=20 {
+            app.puppet_drag(Vec2::new(3500.0, 2000.0 + i as f32 * 20.0));
+            app.puppet_flush();
+        }
+    });
+    time("puppet: release (settle)", || app.puppet_release());
+    time("puppet: commit", || app.puppet_commit());
+    // A more usual part: 1000 px selected.
+    app.selection_manager.canvas_size = [N, N];
+    app.selection_manager.apply_shape(
+        crate::selection::SelectionShape::Rectangle {
+            start: Vec2::new(1500.0, 1500.0),
+            end: Vec2::new(2500.0, 2500.0),
+        },
+        crate::selection::SelectionMode::Replace,
+    );
+    time("puppet 1000 px: begin + 1st pin", || {
+        app.puppet_press(Vec2::new(1600.0, 2000.0), false, false);
+        app.puppet_release();
+    });
+    app.puppet_press(Vec2::new(2400.0, 2000.0), false, false);
+    time("puppet 1000 px: 20 drag frames", || {
+        for i in 1..=20 {
+            app.puppet_drag(Vec2::new(2400.0, 2000.0 + i as f32 * 10.0));
+            app.puppet_flush();
+        }
+    });
+    time("puppet 1000 px: release (settle)", || app.puppet_release());
+    time("puppet 1000 px: commit", || app.puppet_commit());
+}
+
+#[test]
+#[ignore = "timing"]
 fn liquify() {
     let mut app = big_app();
     app.active_tool = Tool::Liquify;

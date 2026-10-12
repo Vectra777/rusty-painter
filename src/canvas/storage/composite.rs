@@ -1025,6 +1025,28 @@ impl Canvas {
             } else {
                 None
             };
+            // A rig layer: under it, onion skins of its poses around.
+            if self.onion.enabled && layer.rig.is_some() && layer.visible && !layer.clipped {
+                let onions = layer.rig_onion.lock().unwrap_or_else(|e| e.into_inner());
+                for (k, tiles) in onions.iter() {
+                    let Some(data) = tiles.get(&(tx, ty)) else {
+                        continue;
+                    };
+                    let input = match shrink {
+                        Some(s) => {
+                            let shrunk = shrink_tile(data, self.tile_size, s.w, s.h, s.block);
+                            self.shrunk_input(i, &shrunk, self.blend_space)
+                        }
+                        None => self.shrunk_input(i, data, self.blend_space),
+                    };
+                    let node = CompositeNode::Layer {
+                        input,
+                        mask: None,
+                        blend: LayerBlend::Normal,
+                    };
+                    nodes.push(onion_tint(node, *k, self.onion.opacity, self.blend_space));
+                }
+            }
             if layer.clipped && !matches!(base, Base::None) {
                 if let (Base::Node(b), Some(node)) = (&base, node) {
                     nodes[*b].clip(node);

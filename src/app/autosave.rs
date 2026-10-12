@@ -19,7 +19,7 @@ const IDLE: Duration = Duration::from_secs(2);
 const EVERY: Duration = Duration::from_secs(60);
 
 /// Where the undo history stood: pushes, undo depth, redo depth.
-type Version = (u64, usize, usize);
+pub(crate) type Version = (u64, usize, usize);
 
 pub struct AutosaveState {
     /// The version last saved (or opened) by the user.
@@ -187,6 +187,7 @@ impl PainterApp {
             || ws.gradient.session.is_some()
             || ws.shapes.session.is_some()
             || self.layer_state.liquify.is_some()
+            || self.layer_state.puppet.is_some()
             || self.layer_state.floating_layer_idx.is_some()
             || ws.select.quick_mask.is_some()
     }

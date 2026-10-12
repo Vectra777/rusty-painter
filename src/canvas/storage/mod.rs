@@ -126,12 +126,21 @@ pub struct Layer {
     pub anim: Option<Anim>,
     /// A rig layer: its pixels are this rig posed at the current frame.
     pub rig: Option<Box<crate::canvas::rig::Rig>>,
+    /// Puppet warps it remembers, latest last (see
+    /// [`crate::canvas::puppet::WarpMemory`]).
+    pub warps: Vec<std::sync::Arc<crate::canvas::puppet::WarpMemory>>,
     /// Its keyed motion (see [`crate::canvas::motion`]).
     pub motion: Option<Box<crate::canvas::motion::Motion>>,
+    /// A rig layer's onion skins: the rig posed at the frames around the
+    /// one showing (frames away, and its tiles), while onion skins are on.
+    pub(crate) rig_onion: Mutex<Vec<RigOnion>>,
     tiles: Mutex<TileMap>,
     /// Its pixels as shown while it's moved (see `posed`).
     posed: Mutex<Option<posed::Posed>>,
 }
+
+/// A rig posed `k` frames away (before if negative), as tiles.
+pub(crate) type RigOnion = (i32, Arc<crate::canvas::puppet::Tiles>);
 
 #[derive(Clone)]
 pub struct CanvasTileSnapshot {
@@ -172,6 +181,9 @@ pub struct CanvasLayerSnapshot {
     pub reference: bool,
     pub anim: Option<Anim>,
     pub rig: Option<Box<crate::canvas::rig::Rig>>,
+    /// Puppet warps it remembers, latest last (see
+    /// [`crate::canvas::puppet::WarpMemory`]).
+    pub warps: Vec<std::sync::Arc<crate::canvas::puppet::WarpMemory>>,
     pub motion: Option<Box<crate::canvas::motion::Motion>>,
     pub tiles: Vec<CanvasTileSnapshot>,
 }
@@ -239,7 +251,9 @@ impl Layer {
             reference: self.reference,
             anim: self.anim,
             rig: self.rig.clone(),
+            warps: self.warps.clone(),
             motion: self.motion.clone(),
+            rig_onion: Mutex::new(Vec::new()),
             tiles: Mutex::new(TileMap::default()),
             posed: Mutex::new(None),
         }
@@ -294,7 +308,9 @@ impl Layer {
             reference: false,
             anim: None,
             rig: None,
+            warps: Vec::new(),
             motion: None,
+            rig_onion: Mutex::new(Vec::new()),
             tiles: Mutex::new(TileMap::default()),
             posed: Mutex::new(None),
         }
@@ -350,6 +366,7 @@ impl Layer {
             reference: self.reference,
             anim: self.anim,
             rig: self.rig.clone(),
+            warps: self.warps.clone(),
             motion: self.motion.clone(),
             tiles,
         }
@@ -390,7 +407,9 @@ impl Layer {
             reference: snapshot.reference,
             anim: snapshot.anim,
             rig: snapshot.rig,
+            warps: snapshot.warps,
             motion: snapshot.motion,
+            rig_onion: Mutex::new(Vec::new()),
             tiles: Mutex::new(tiles),
             posed: Mutex::new(None),
         }
@@ -632,6 +651,7 @@ impl Canvas {
                 && l.adjustment.is_none()
                 && l.shown_style().is_plain()
                 && !l.is_posed()
+                && !(self.onion.enabled && l.rig.is_some())
         })
     }
 

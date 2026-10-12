@@ -202,6 +202,7 @@ impl PainterApp {
         let active = self.canvas.active_layer_idx;
         crate::app::tools::transform::commit_floating_layer(self);
         self.liquify_commit();
+        self.puppet_commit();
         self.release_canvas();
         let (index, parent) = self.insertion_point(true);
         let id = self
@@ -232,6 +233,7 @@ impl PainterApp {
         self.text_commit();
         crate::app::tools::transform::commit_floating_layer(self);
         self.liquify_commit();
+        self.puppet_commit();
         self.release_canvas();
         let Some(layer) = self.canvas.layers.get(idx) else {
             return;

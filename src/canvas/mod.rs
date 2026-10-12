@@ -20,6 +20,7 @@ pub mod layer_style;
 pub mod liquify;
 pub mod motion;
 pub mod palette;
+pub mod puppet;
 pub mod rig;
 pub mod shader;
 pub mod storage;

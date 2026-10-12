@@ -474,6 +474,7 @@ fn transport(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, s
         if onion_changed {
             app.canvas_mut().onion = onion;
             app.canvas.pose_motions();
+            app.canvas.render_rig_onions();
             app.mark_all_tiles_dirty();
         }
         vdivider(ui);
@@ -2408,6 +2409,7 @@ fn rig_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
         let current = (rig.animation.and_then(|a| rig.animations.get(a)))
             .map_or("Setup pose", |a| a.name.as_str());
         let mut chosen = None;
+        let mut new = false;
         egui::ComboBox::from_id_salt("rig_animation")
             .selected_text(current)
             .show_ui(ui, |ui| {
@@ -2425,8 +2427,14 @@ fn rig_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
                         chosen = Some(Some(i));
                     }
                 }
+                ui.separator();
+                if ui.selectable_label(false, "New animation").clicked() {
+                    new = true;
+                }
             });
-        if let Some(c) = chosen {
+        if new {
+            app.new_rig_animation();
+        } else if let Some(c) = chosen {
             app.rig_edit(|r| r.animation = c);
             app.rig_edit_done();
         }

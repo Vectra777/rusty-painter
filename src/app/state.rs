@@ -305,6 +305,11 @@ pub struct LayerState {
     pub transform_preview_pending: bool,
     /// The running liquify session, if any.
     pub liquify: Option<crate::app::tools::liquify::LiquifySession>,
+    /// The running Puppet Warp session, if any.
+    pub puppet: Option<crate::app::tools::puppet::PuppetSession>,
+    /// Puppet Warp's pins on a rig part (its edits are keys, each drag an
+    /// undo step: nothing to apply or cancel).
+    pub rig_pins: Option<crate::app::tools::puppet_rig::RigPins>,
     /// The document's undo history: one stack for every layer, in the
     /// order things were done, so undo always takes back the last change
     /// wherever it was.
@@ -330,6 +335,8 @@ impl LayerState {
             float_overlay: None,
             transform_preview_pending: false,
             liquify: None,
+            puppet: None,
+            rig_pins: None,
             history: History::new(),
             thumbnails: Vec::new(),
             thumbnails_dirty: true,
@@ -486,6 +493,16 @@ pub struct WorkspaceState {
     pub fill: crate::app::tools::fill::FillToolState,
     /// Liquify brush mode and settings.
     pub liquify: crate::app::tools::liquify::LiquifySettings,
+    /// Puppet Warp mode and mesh.
+    pub puppet: crate::app::tools::puppet::PuppetSettings,
+    /// The Bone tool: its mode, the selected bone and the drag going on.
+    pub bone: crate::app::tools::bone::BoneState,
+    /// The layer and document version Puppet Warp last looked for a
+    /// remembered warp at.
+    pub puppet_checked: Option<(
+        Option<crate::canvas::storage::LayerId>,
+        crate::app::autosave::Version,
+    )>,
     /// Palette window state.
     pub palette: crate::app::tools::palette::PaletteToolState,
     /// Smudge and blur settings (the rest comes from the brush).
@@ -599,6 +616,9 @@ impl WorkspaceState {
             select_type: crate::selection::SelectionType::Rectangle,
             fill: Default::default(),
             liquify: Default::default(),
+            puppet: Default::default(),
+            bone: Default::default(),
+            puppet_checked: None,
             palette: Default::default(),
             blend: Default::default(),
             gallery: Default::default(),

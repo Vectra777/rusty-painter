@@ -22,7 +22,7 @@ struct Tri {
 
 /// An attachment's points (canvas), their picture points (0..1) and its
 /// triangles.
-type Mesh = (Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>);
+pub type Mesh = (Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<[u32; 3]>);
 
 /// Where on its picture an attachment's point `(u, v)` (0..1 across its
 /// part, as the picture is) is, in pixels.
@@ -37,9 +37,85 @@ fn picture_point(a: &Attachment, [u, v]: [f32; 2]) -> [f32; 2] {
 }
 
 impl Rig {
+    /// Slot `s`'s attachment `ai` in `pose`: its points on the canvas (bent
+    /// by the pose's deform, if `deform`), their picture points (0..1) and
+    /// its triangles.
+    pub fn attachment_mesh(&self, pose: &Pose, s: usize, ai: usize, deform: bool) -> Option<Mesh> {
+        let slot = self.slots.get(s)?;
+        let a = slot.attachments.get(ai)?;
+        let to_canvas = self.to_canvas();
+        let bone = pose.world.get(slot.bone).copied().unwrap_or_default();
+        let deform = (pose.deforms.iter())
+            .filter(|_| deform)
+            .find(|(key, _)| *key == (s, ai))
+            .map(|(_, d)| d.as_slice());
+        Some(match &a.shape {
+            Shape::Region {
+                x,
+                y,
+                rotation,
+                scale,
+                width,
+                height,
+                trim,
+            } => {
+                let local = super::Affine::local(*x, *y, *rotation, *scale, [0.0, 0.0]);
+                let frame = to_canvas.then(&bone).then(&local);
+                let [l, t, r, b] = *trim;
+                // The picture's top is the rig's up (or down).
+                let up = if self.y_up { 1.0 } else { -1.0 };
+                let corner =
+                    |u: f32, v: f32| frame.apply([(u - 0.5) * width, (0.5 - v) * height * up]);
+                let points = vec![corner(l, t), corner(r, t), corner(r, b), corner(l, b)];
+                let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+                (points, uvs, vec![[0, 1, 2], [0, 2, 3]])
+            }
+            Shape::Mesh {
+                uvs,
+                triangles,
+                vertices,
+            } => {
+                let points = match vertices {
+                    MeshVertices::Plain(v) => {
+                        let frame = to_canvas.then(&bone);
+                        (v.iter().enumerate())
+                            .map(|(i, &p)| {
+                                let d = deform.and_then(|d| d.get(i)).copied().unwrap_or_default();
+                                frame.apply([p[0] + d[0], p[1] + d[1]])
+                            })
+                            .collect()
+                    }
+                    MeshVertices::Weighted(v) => {
+                        // Each bone's offset in turn, through the list.
+                        let mut k = 0;
+                        v.iter()
+                            .map(|influences| {
+                                let mut sum = [0.0, 0.0];
+                                for &(b, p, w) in influences {
+                                    let d =
+                                        deform.and_then(|d| d.get(k)).copied().unwrap_or_default();
+                                    k += 1;
+                                    let at = pose
+                                        .world
+                                        .get(b)
+                                        .copied()
+                                        .unwrap_or_default()
+                                        .apply([p[0] + d[0], p[1] + d[1]]);
+                                    sum[0] += at[0] * w;
+                                    sum[1] += at[1] * w;
+                                }
+                                to_canvas.apply(sum)
+                            })
+                            .collect()
+                    }
+                };
+                (points, uvs.clone(), triangles.clone())
+            }
+        })
+    }
+
     /// The triangles of the rig in `pose`, in draw order.
     fn triangles(&self, pose: &Pose) -> Vec<Tri> {
-        let to_canvas = self.to_canvas();
         let mut out = Vec::new();
         for (s, slot) in self.slots.iter().enumerate() {
             let Some(ai) = pose.attachments[s] else {
@@ -57,75 +133,8 @@ impl Rig {
             }
             let lin = |v: f32| eframe::egui::ecolor::linear_from_gamma(v.clamp(0.0, 1.0));
             let tint = [lin(r) * alpha, lin(g) * alpha, lin(b) * alpha, alpha];
-            let bone = pose.world.get(slot.bone).copied().unwrap_or_default();
-            let deform = (pose.deforms.iter())
-                .find(|(key, _)| *key == (s, ai))
-                .map(|(_, d)| d.as_slice());
-            let (points, uvs, tris): Mesh = match &a.shape {
-                Shape::Region {
-                    x,
-                    y,
-                    rotation,
-                    scale,
-                    width,
-                    height,
-                    trim,
-                } => {
-                    let local = super::Affine::local(*x, *y, *rotation, *scale, [0.0, 0.0]);
-                    let frame = to_canvas.then(&bone).then(&local);
-                    let [l, t, r, b] = *trim;
-                    // The picture's top is the rig's up (or down).
-                    let up = if self.y_up { 1.0 } else { -1.0 };
-                    let corner =
-                        |u: f32, v: f32| frame.apply([(u - 0.5) * width, (0.5 - v) * height * up]);
-                    let points = vec![corner(l, t), corner(r, t), corner(r, b), corner(l, b)];
-                    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-                    (points, uvs, vec![[0, 1, 2], [0, 2, 3]])
-                }
-                Shape::Mesh {
-                    uvs,
-                    triangles,
-                    vertices,
-                } => {
-                    let points = match vertices {
-                        MeshVertices::Plain(v) => {
-                            let frame = to_canvas.then(&bone);
-                            (v.iter().enumerate())
-                                .map(|(i, &p)| {
-                                    let d =
-                                        deform.and_then(|d| d.get(i)).copied().unwrap_or_default();
-                                    frame.apply([p[0] + d[0], p[1] + d[1]])
-                                })
-                                .collect()
-                        }
-                        MeshVertices::Weighted(v) => {
-                            // Each bone's offset in turn, through the list.
-                            let mut k = 0;
-                            v.iter()
-                                .map(|influences| {
-                                    let mut sum = [0.0, 0.0];
-                                    for &(b, p, w) in influences {
-                                        let d = deform
-                                            .and_then(|d| d.get(k))
-                                            .copied()
-                                            .unwrap_or_default();
-                                        k += 1;
-                                        let at = pose
-                                            .world
-                                            .get(b)
-                                            .copied()
-                                            .unwrap_or_default()
-                                            .apply([p[0] + d[0], p[1] + d[1]]);
-                                        sum[0] += at[0] * w;
-                                        sum[1] += at[1] * w;
-                                    }
-                                    to_canvas.apply(sum)
-                                })
-                                .collect()
-                        }
-                    };
-                    (points, uvs.clone(), triangles.clone())
-                }
+            let Some((points, uvs, tris)) = self.attachment_mesh(pose, s, ai, true) else {
+                continue;
             };
             for t in tris {
                 let idx = t.map(|i| i as usize);

@@ -28,6 +28,8 @@ pub enum Action {
     Eyedropper,
     Fill,
     Liquify,
+    PuppetWarp,
+    BoneTool,
     Blend,
     // Brush & colour
     SmallerBrush,
@@ -294,6 +296,20 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Liquify",
         "Tools",
         &[b!(NONE, W)],
+    ),
+    info(
+        Action::PuppetWarp,
+        "puppet_warp",
+        "Puppet Warp (pins bend the paint)",
+        "Tools",
+        &[b!(SHIFT, W)],
+    ),
+    info(
+        Action::BoneTool,
+        "bone_tool",
+        "Bones (draw and pose a rig's bones)",
+        "Tools",
+        &[b!(NONE, Y)],
     ),
     info(
         Action::Blend,

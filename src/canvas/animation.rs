@@ -231,7 +231,33 @@ impl Canvas {
                 self.set_layer_tile_data(i, tx, ty, data);
             }
         }
+        self.render_rig_onions();
         any
+    }
+
+    /// Each rig layer's onion skins (the rig posed at the frames around
+    /// the one showing, within the timeline) while onion skins are on.
+    pub fn render_rig_onions(&self) {
+        let fps = self.timeline.fps.max(1) as f32;
+        let (w, h, ts) = (self.width(), self.height(), self.tile_size());
+        for layer in &self.layers {
+            let Some(rig) = &layer.rig else {
+                continue;
+            };
+            let mut onions = Vec::new();
+            if self.onion.enabled {
+                let before = (1..=self.onion.before as i32).map(|k| -k);
+                for k in before.chain(1..=self.onion.after as i32) {
+                    let t = self.time as i64 + k as i64;
+                    if t < self.timeline.start as i64 || t > self.timeline.end as i64 {
+                        continue;
+                    }
+                    let tiles = rig.render(&rig.pose(t as f32 / fps), w, h, ts);
+                    onions.push((k, std::sync::Arc::new(tiles.into_iter().collect())));
+                }
+            }
+            *layer.rig_onion.lock().unwrap_or_else(|e| e.into_inner()) = onions;
+        }
     }
 
     /// Make paint layer `i` animated: a new animated layer in its place,

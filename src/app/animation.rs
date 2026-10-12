@@ -363,6 +363,7 @@ impl PainterApp {
                 let onion = &mut self.canvas_mut().onion;
                 onion.enabled = !onion.enabled;
                 self.canvas.pose_motions();
+                self.canvas.render_rig_onions();
                 self.mark_all_tiles_dirty();
             }
             Action::KeyMotion => {

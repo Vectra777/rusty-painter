@@ -614,6 +614,7 @@ pub fn import(json: &[u8], stem: &str, siblings: &dyn Siblings) -> Result<Import
                 slot,
                 attachment: att,
                 keys: keys(Some(list), read, |_| 0.0, false),
+                pins: Vec::new(),
             };
             track.keys.iter().for_each(|k| seen(k.time));
             anim.deforms.push(track);

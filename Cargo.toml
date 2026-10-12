@@ -51,6 +51,9 @@ rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 lcms2 = { version = "6.2", features = ["static"] }
 # SVG brush tips (Krita's), drawn at the size they paint at.
 resvg = { version = "0.48", default-features = false }
+# Puppet Warp: meshes that follow the paint's outline (constrained
+# Delaunay triangulation).
+spade = "2.15"
 
 [dev-dependencies]
 pollster = "0.4"

@@ -15,6 +15,7 @@ use crate::app::tools::{
     gradient::GradientSettings,
     gradient_colors::{GradientColors, PRESETS},
     liquify::LiquifySettings,
+    puppet::PuppetSettings,
     select::{ColorRangeSettings, WandSettings},
     shape::{ShapeKind, ShapeSettings},
 };
@@ -62,6 +63,7 @@ pub struct AppSettings {
     fill_source: FillSource,
     fill: FillSettings,
     liquify: LiquifySettings,
+    puppet: PuppetSettings,
     blend: BlendToolSettings,
     shape: ShapeSettings,
     shape_kind: ShapeKind,
@@ -158,6 +160,7 @@ impl AppSettings {
             fill_source: ws.fill.source,
             fill: ws.fill.settings,
             liquify: ws.liquify,
+            puppet: ws.puppet,
             blend: ws.blend.clone(),
             shape: ws.shapes.settings,
             shape_kind: ws.shapes.last_kind,
@@ -225,6 +228,7 @@ impl AppSettings {
         ws.fill.source = self.fill_source;
         ws.fill.settings = self.fill;
         ws.liquify = self.liquify;
+        ws.puppet = self.puppet;
         ws.blend = self.blend;
         ws.shapes.settings = self.shape;
         ws.shapes.last_kind = self.shape_kind;

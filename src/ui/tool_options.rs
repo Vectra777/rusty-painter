@@ -39,6 +39,8 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Eyedropper => eyedropper_options(app, ui),
         Tool::Fill => fill_options(app, ui, true),
         Tool::Liquify => liquify_options(app, ui, true),
+        Tool::Puppet => puppet_options(app, ui),
+        Tool::Bone => bone_options(app, ui),
         Tool::Smudge | Tool::Blur => blend_options(app, ui),
         Tool::Shape(kind) => shape_options(app, ui, kind),
         Tool::Gradient => gradient_options(app, ui, true),
@@ -923,6 +925,271 @@ pub(crate) fn liquify_options(
         }
     });
     "Drag to push  ·  hold still to twirl / pinch / bloat  ·  [ ] size  ·  Enter apply  ·  Esc cancel"
+}
+
+/// Puppet Warp: mode, mesh spacing and reach, the mesh shown; the
+/// selected pins' turn and depth; remove pins; apply and cancel.
+fn puppet_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
+    use crate::canvas::puppet::arap::PuppetMode;
+    tool_title(ui, "Puppet Warp");
+    if app.puppet_on_rig() {
+        return puppet_rig_options(app, ui);
+    }
+    let s = &mut app.workspace.puppet;
+    let label = PuppetMode::ALL
+        .iter()
+        .find(|m| m.0 == s.mode)
+        .map_or("", |m| m.1);
+    egui::ComboBox::from_id_salt("puppet_mode")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            for (mode, name) in PuppetMode::ALL {
+                ui.selectable_value(&mut s.mode, mode, name);
+            }
+        })
+        .response
+        .on_hover_text(
+            "Rigid keeps lengths; Normal lets parts grow or shrink a little; Distort stretches freely",
+        );
+    vdivider(ui);
+    ui.label(RichText::new("Density").color(TEXT_DIM));
+    ui.add(crate::ui::widgets::reset(&mut s.density, |v| {
+        BarSlider::new(v, 6.0..=80.0)
+            .logarithmic(true)
+            .max_decimals(0)
+            .suffix(" px")
+    }))
+    .on_hover_text("How far apart the mesh's points are: closer bends more finely, further is stiffer and faster");
+    ui.label(RichText::new("Expansion").color(TEXT_DIM));
+    ui.add(crate::ui::widgets::reset(&mut s.expansion, |v| {
+        BarSlider::new(v, 0.0..=60.0).max_decimals(0).suffix(" px")
+    }))
+    .on_hover_text(
+        "How far past the paint the mesh reaches (a soft glow or a shadow around it bends along)",
+    );
+    ui.checkbox(&mut s.show_mesh, "Show mesh");
+    vdivider(ui);
+    // The selected pin's turn: left to the bend, or fixed at an angle.
+    // (Each control greyed on its own: a nested scope here wraps badly when
+    // the bar runs out of room.)
+    let turn = app.puppet_selected_turn();
+    let (angle, fixed) = turn.unwrap_or((0.0, false));
+    let toggle = ui
+        .add_enabled(
+            turn.is_some(),
+            egui::SelectableLabel::new(fixed, "Fixed turn"),
+        )
+        .on_hover_text(
+            "The selected pin holds the paint round it at an angle (else the bend turns it); \
+             Alt+drag near a pin turns it",
+        );
+    if toggle.clicked() {
+        app.puppet_set_turn((!fixed).then_some(angle));
+    }
+    let mut degrees = angle.to_degrees();
+    if ui
+        .add_enabled(
+            fixed,
+            egui::DragValue::new(&mut degrees)
+                .speed(0.5)
+                .max_decimals(1)
+                .suffix("°"),
+        )
+        .changed()
+    {
+        app.puppet_set_turn(Some(degrees.to_radians()));
+    }
+    let (has_selected, has_pins) = app.puppet_pins_state();
+    if ui
+        .add_enabled(has_selected, egui::Button::new("Depth ▲"))
+        .on_hover_text("The selected pins' part goes in front where the paint folds over itself")
+        .clicked()
+    {
+        app.puppet_depth(1);
+    }
+    if ui
+        .add_enabled(has_selected, egui::Button::new("▼"))
+        .on_hover_text("The selected pins' part goes behind where the paint folds over itself")
+        .clicked()
+    {
+        app.puppet_depth(-1);
+    }
+    vdivider(ui);
+    if ui
+        .add_enabled(has_selected, egui::Button::new("Remove pins"))
+        .on_hover_text("The selected pins (Delete, or Alt+click a pin)")
+        .clicked()
+    {
+        app.puppet_remove_pins();
+    }
+    if ui
+        .add_enabled(has_pins, egui::Button::new("Remove all"))
+        .on_hover_text("Every pin: the paint back as it was")
+        .clicked()
+    {
+        app.puppet_remove_all_pins();
+    }
+    let active = app.layer_state.puppet.is_some();
+    if ui
+        .add_enabled(active, egui::Button::new("Apply"))
+        .on_hover_text("Keep the result (Enter); picking Puppet Warp on the layer again reopens it")
+        .clicked()
+    {
+        app.puppet_commit();
+    }
+    if ui
+        .add_enabled(active, egui::Button::new("Cancel"))
+        .on_hover_text("Put the layer back (Esc)")
+        .clicked()
+    {
+        app.puppet_cancel();
+    }
+    "Click the paint to pin it, drag to bend  ·  Shift+click: pick several  ·  Alt+click a pin: remove  ·  Alt+drag near a pin: turn  ·  Ctrl+Z steps back  ·  Enter apply  ·  Esc cancel"
+}
+
+/// Puppet Warp on a rig layer: the mode and mesh shown; the selected pin's
+/// turn; the part's key at this frame (made, removed, eased); remove pins.
+fn puppet_rig_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
+    use crate::canvas::puppet::arap::PuppetMode;
+    use crate::canvas::rig::Curve;
+    let s = &mut app.workspace.puppet;
+    let label = PuppetMode::ALL
+        .iter()
+        .find(|m| m.0 == s.mode)
+        .map_or("", |m| m.1);
+    egui::ComboBox::from_id_salt("puppet_mode")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            for (mode, name) in PuppetMode::ALL {
+                ui.selectable_value(&mut s.mode, mode, name);
+            }
+        })
+        .response
+        .on_hover_text(
+            "Rigid keeps lengths; Normal lets parts grow or shrink a little; Distort stretches freely",
+        );
+    ui.checkbox(&mut s.show_mesh, "Show mesh");
+    vdivider(ui);
+    let turn = app.puppet_selected_turn();
+    let (angle, fixed) = turn.unwrap_or((0.0, false));
+    if ui
+        .add_enabled(
+            turn.is_some(),
+            egui::SelectableLabel::new(fixed, "Fixed turn"),
+        )
+        .on_hover_text(
+            "The selected pin holds the part round it at an angle (Alt+drag near a pin turns it)",
+        )
+        .clicked()
+    {
+        app.puppet_set_turn((!fixed).then_some(angle));
+    }
+    vdivider(ui);
+    let part = app.layer_state.rig_pins.is_some();
+    let here = app.rig_pins_key_here();
+    if ui
+        .add_enabled(part, egui::Button::new("Key this frame"))
+        .on_hover_text("Keep the part's shape as it is at this frame (to hold it here before bending it at another)")
+        .clicked()
+    {
+        app.rig_pins_key_now();
+    }
+    if ui
+        .add_enabled(here.is_some(), egui::Button::new("Delete key"))
+        .on_hover_text("Take out the part's key at this frame")
+        .clicked()
+    {
+        app.rig_pins_delete_key();
+    }
+    const EASES: [(&str, Curve); 5] = [
+        ("Linear", Curve::Linear),
+        ("Ease in-out", Curve::Bezier([0.42, 0.0, 0.58, 1.0])),
+        ("Ease in", Curve::Bezier([0.42, 0.0, 1.0, 1.0])),
+        ("Ease out", Curve::Bezier([0.0, 0.0, 0.58, 1.0])),
+        ("Hold", Curve::Stepped),
+    ];
+    let current = here.map_or("—", |c| {
+        EASES.iter().find(|e| e.1 == c).map_or("Custom", |e| e.0)
+    });
+    ui.add_enabled_ui(here.is_some(), |ui| {
+        egui::ComboBox::from_id_salt("rig_pin_ease")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for (name, curve) in EASES {
+                    if ui.selectable_label(here == Some(curve), name).clicked() {
+                        app.rig_pins_set_ease(curve);
+                    }
+                }
+            })
+            .response
+            .on_hover_text("How the part goes from its key at this frame to the next");
+    });
+    vdivider(ui);
+    let (has_selected, has_pins) = app.puppet_pins_state();
+    if ui
+        .add_enabled(has_selected, egui::Button::new("Remove pins"))
+        .on_hover_text("The selected pins (Delete, or Alt+click a pin); the part keeps its shape")
+        .clicked()
+    {
+        app.puppet_remove_pins();
+    }
+    if ui
+        .add_enabled(has_pins, egui::Button::new("Remove all"))
+        .on_hover_text("Every pin of the part; it keeps its shape")
+        .clicked()
+    {
+        app.puppet_remove_all_pins();
+    }
+    "Click a part to pin it, drag pins to bend it: a key at this frame (keys at two frames, and the frames between follow)  ·  Shift+click: pick several  ·  Alt+click a pin: remove  ·  Alt+drag near a pin: turn"
+}
+
+/// The Bone tool: setup or pose, binding the parts, removing a bone.
+fn bone_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
+    tool_title(ui, "Bones");
+    let on_rig = app.active_rig().is_some();
+    let pose = &mut app.workspace.bone.settings.pose;
+    ui.selectable_value(pose, false, "Setup")
+        .on_hover_text("Draw bones and place them (the rig as it is at rest)");
+    ui.selectable_value(pose, true, "Pose")
+        .on_hover_text("Turn and move bones: keys at this frame when the rig has an animation");
+    vdivider(ui);
+    let several = app.active_rig().is_some_and(|r| r.bones.len() > 1);
+    if ui
+        .add_enabled(several, egui::Button::new("Bind smooth"))
+        .on_hover_text("Each part's points follow the bones near them (along the part), blended")
+        .clicked()
+    {
+        app.bind_rig(true);
+    }
+    if ui
+        .add_enabled(several, egui::Button::new("Bind rigid"))
+        .on_hover_text("Each part follows the one bone nearest most of it (hard parts: a head)")
+        .clicked()
+    {
+        app.bind_rig(false);
+    }
+    vdivider(ui);
+    let removable = app
+        .workspace
+        .bone
+        .selected
+        .zip(app.active_rig())
+        .is_some_and(|(b, r)| r.bones.get(b).is_some_and(|x| x.parent.is_some()));
+    if ui
+        .add_enabled(removable, egui::Button::new("Remove bone"))
+        .on_hover_text("The selected bone (Delete): its children and parts go to its parent")
+        .clicked()
+    {
+        app.bone_remove_selected();
+    }
+    if !on_rig {
+        return "Pick a rig layer (Layer → Rig → Make Rig from Layers)";
+    }
+    if app.workspace.bone.settings.pose {
+        "Drag a bone to turn it round its head  ·  Shift+drag (or the root) to move it  ·  keys at this frame"
+    } else {
+        "Drag from empty canvas to draw a bone (a child of the selected one)  ·  Shift+drag from a tail: its child  ·  drag a head to move, a tail to aim  ·  Delete removes"
+    }
 }
 
 fn eyedropper_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {

@@ -193,6 +193,7 @@ impl PsdDocument {
             reference: false,
             anim: None,
             rig: None,
+            warps: Vec::new(),
             motion: None,
             tiles: background.unwrap_or_default(),
         });
@@ -253,6 +254,7 @@ impl PsdDocument {
                 reference: false,
                 anim: None,
                 rig: None,
+                warps: Vec::new(),
                 motion: None,
                 tiles,
             });
@@ -280,6 +282,7 @@ impl PsdDocument {
                     reference: false,
                     anim: None,
                     rig: None,
+                    warps: Vec::new(),
                     motion: None,
                     tiles: mask_tiles(&mask, self.width, self.height, ts),
                 });

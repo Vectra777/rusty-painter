@@ -38,7 +38,7 @@ Part 2: Everything else
 
 Animation (K, C, P, I)
 
-- Frame-by-frame animation and rig layers (Spine, DragonBones and Lottie imports) are in. Still missing for rigs: drawing bones on the canvas and dragging them (they're edited by numbers), building a rig from layers, weight painting, Spine's transform and path constraints and other skins, exporting rigs back to Spine or Lottie, and Moho's and Alight Motion's own project files (no published format: their exported videos and GIFs come in as frames). Keyed motion is in too: any layer's (or animated layer's) position, scale, turn and opacity keyed on the canvas with the Animate tool or by numbers, eased per key (presets or a curve), layers following others, motion paths, and the timeline showing every layer with its keys. The look is keyed too (blur, brightness, contrast, saturation, hue, tint) as is the pivot; every tool (fill, gradient, smudge, shapes, liquify, filters, selections) works on a moved layer where it shows; frames can be picked across layers and copied, cut, pasted, deleted or dragged together; frames are rendered ahead in the background and played from memory. Still missing for frames: audio, keyed filters beyond those six, and opening Krita's animated documents with their frames.
+- Frame-by-frame animation and rig layers (Spine, DragonBones and Lottie imports) are in. Rigs can be built here (Layer → Rig → Make Rig from Layers), their bones drawn, bound (smooth or rigid) and posed on the canvas with the Bone tool, and their parts pinned and keyed with Puppet Warp. Still missing for rigs: IK dragged on the canvas, weight painting, editing a rig's parts as paint again, Spine's transform and path constraints and other skins, exporting rigs back to Spine or Lottie, and Moho's and Alight Motion's own project files (no published format: their exported videos and GIFs come in as frames). Keyed motion is in too: any layer's (or animated layer's) position, scale, turn and opacity keyed on the canvas with the Animate tool or by numbers, eased per key (presets or a curve), layers following others, motion paths, and the timeline showing every layer with its keys. The look is keyed too (blur, brightness, contrast, saturation, hue, tint) as is the pivot; every tool (fill, gradient, smudge, shapes, liquify, filters, selections) works on a moved layer where it shows; frames can be picked across layers and copied, cut, pasted, deleted or dragged together; frames are rendered ahead in the background and played from memory. Still missing for frames: audio, keyed filters beyond those six, and opening Krita's animated documents with their frames.
 
 Animation to-do, from what Toon Boom Harmony (TB), TVPaint (TV), Moho (M), After Effects (AE), Alight Motion (AM), Procreate Dreams (PD), Callipeg (CP), Clip Studio Paint (C) and Rive (R) do, most needed first:
 
@@ -48,7 +48,7 @@ Animation to-do, from what Toon Boom Harmony (TB), TVPaint (TV), Moho (M), After
 - [ ] Bones built on the canvas: drawing bones joint to joint, binding layers or drawings to them, posing by dragging, IK by dragging the end (M, TB, R).
 - [ ] Meshes and weights: one drawing bending smoothly around bones, with painted weights (R, M, Spine).
 - [ ] Smart bones / corrective poses: a bone's turn driving drawings or shapes (M).
-- [ ] Puppet pins: bending part of a raster drawing by pins placed on it (AE).
+- [x] Puppet pins over time: Puppet Warp's pins keyed at frames on a rig layer's parts, the drawing bending between keys, eased per key (AE). Limits: the frames between move each point straight from key to key (a wide swing needs a key in the middle, as in Spine), and a pin's fixed turn isn't kept past the drag.
 - [ ] A full graph editor: each property's value and speed as curves across the timeline, keys with tangent handles, several keys eased at once (AE, AM).
 - [ ] Procedural motion: wiggle, loops (cycle, ping-pong), linked properties (expressions), and constraints (follow a path, keep a distance, aim) (AE, R).
 - [ ] Physics and dynamics: springy follow-through on keyed or followed layers, particles, gravity and wind (M, R).
@@ -88,7 +88,7 @@ Layers
 Selection and transform
 
 - AI "select subject".
-- Cage transform and puppet warp (K, PS).
+- Cage transform (K). Puppet Warp is in, with what Photoshop's has (pin depth, expansion, fixed turns, several pins, re-editable warps kept with the layer); on a rig layer its pins are keys at frames.
 
 Workflow
 

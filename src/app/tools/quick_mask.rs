@@ -56,6 +56,7 @@ impl PainterApp {
     fn quick_mask_settle_sessions(&mut self) {
         crate::app::tools::transform::commit_floating_layer(self);
         self.liquify_commit();
+        self.puppet_commit();
         self.gradient_commit();
         self.shape_commit();
         self.filter_cancel();

@@ -229,6 +229,11 @@ impl eframe::App for PainterApp {
                 // This frame's liquify dabs: into the layer, or zoomed out
                 // with the pen down, a screen-sized preview.
                 self.liquify_frame(&screen);
+                // Pins moved: the layer bent to them, once a frame (and a
+                // layer's remembered warp opened when the tool is on it).
+                self.puppet_check_remembered();
+                self.puppet_flush();
+                needs_repaint |= self.puppet_settling();
                 self.workspace.frame_stats.mark(Stage::Tools);
                 // 5. Pixels: let the stroke worker catch up, upload dirty
                 // tiles, paint the canvas, then the overlays on top.
@@ -495,11 +500,16 @@ impl PainterApp {
             self.magnetic_close();
         }
         self.quick_mask_settle();
-        // Likewise for liquify.
+        // Likewise for liquify and puppet warp.
         if self.layer_state.liquify.is_some()
             && !matches!(self.active_tool, crate::app::tools::Tool::Liquify)
         {
             self.liquify_commit();
+        }
+        if (self.layer_state.puppet.is_some() || self.layer_state.rig_pins.is_some())
+            && !matches!(self.active_tool, crate::app::tools::Tool::Puppet)
+        {
+            self.puppet_commit();
         }
     }
 
@@ -542,6 +552,8 @@ impl PainterApp {
             ctx.set_cursor_icon(self.animate_cursor(canvas, ctx.input(|i| i.modifiers.alt)));
         }
         crate::app::tools::vector::draw_line_edit(self, ui.painter(), &map);
+        crate::app::tools::puppet::draw_puppet(self, ui.painter(), &|p| map.to_screen(p));
+        crate::app::tools::bone::draw_bones(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::blend::draw_clone_source(self, ui.painter(), &|p| map.to_screen(p));
         // A hand over the guide handles: they can be dragged.
         if let Some(canvas) = self.viewport.cursor_canvas
@@ -727,6 +739,14 @@ impl PainterApp {
         // outright left nothing to redo).
         if self.layer_state.liquify.is_some() {
             self.liquify_commit();
+        }
+        // Inside a puppet warp, undo and redo step through its pins; undo
+        // past its first pin cancels it.
+        if self.layer_state.puppet.is_some() {
+            if !self.puppet_step(redo) && !redo {
+                self.puppet_cancel();
+            }
+            return;
         }
         if crate::app::tools::transform::transform_running(self) {
             crate::app::tools::transform::commit_floating_layer(self);

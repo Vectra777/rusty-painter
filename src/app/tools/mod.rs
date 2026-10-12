@@ -4,6 +4,7 @@
 pub(crate) mod animate;
 pub(crate) mod assistants;
 pub(crate) mod blend;
+pub(crate) mod bone;
 pub(crate) mod fill;
 pub(crate) mod filter;
 pub(crate) mod gradient;
@@ -12,6 +13,8 @@ pub(crate) mod guides;
 pub(crate) mod liquify;
 pub(crate) mod palette;
 pub(crate) mod patch;
+pub(crate) mod puppet;
+pub(crate) mod puppet_rig;
 pub(crate) mod quick_mask;
 pub(crate) mod quickshape;
 pub(crate) mod select;
@@ -53,6 +56,10 @@ pub enum Tool {
     VectorEdit,
     /// Move, scale and turn the selected layer, keyed at the frame showing.
     Animate,
+    /// Bend the selected layer's paint by pins placed on it.
+    Puppet,
+    /// Draw a rig layer's bones, and pose them.
+    Bone,
 }
 
 impl Tool {
@@ -75,6 +82,8 @@ impl Tool {
             Tool::Text => "Text",
             Tool::VectorEdit => "Edit line",
             Tool::Animate => "Animate",
+            Tool::Puppet => "Puppet Warp",
+            Tool::Bone => "Bones",
         }
     }
 }

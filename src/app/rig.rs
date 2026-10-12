@@ -5,7 +5,7 @@
 //! Rig edits are undo steps, one a gesture.
 
 use crate::PainterApp;
-use crate::canvas::rig::Rig;
+use crate::canvas::rig::{Rig, RigAnimation};
 use crate::project::anim_import::ImportedRig;
 use std::path::{Path, PathBuf};
 
@@ -126,6 +126,155 @@ impl PainterApp {
         self.mark_unsaved();
     }
 
+    /// Layer → Rig → Make Rig from Layers: the picked layers (or the
+    /// picked folder's) as one rig layer above them, each a part with a
+    /// mesh, the timeline set to key it. The layers stay, hidden. One undo
+    /// step (text and vector layers are rasterised first, each its own).
+    pub(crate) fn make_rig_from_layers(&mut self) {
+        self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
+        self.liquify_commit();
+        self.puppet_commit();
+        use crate::canvas::storage::LayerKind;
+        let picked = self.selected_indices();
+        // Folders stand for what's in them.
+        let folders: Vec<_> = (picked.iter())
+            .filter(|&&i| self.canvas.layers[i].kind == LayerKind::Group)
+            .map(|&i| self.canvas.layers[i].id)
+            .collect();
+        let mut candidates: Vec<usize> = (0..self.canvas.layers.len())
+            .filter(|&i| {
+                let l = &self.canvas.layers[i];
+                picked.contains(&i)
+                    || folders
+                        .iter()
+                        .any(|&f| l.id != f && self.canvas.is_within(l.id, f))
+            })
+            .filter(|&i| self.canvas.layers[i].kind == LayerKind::Paint)
+            .collect();
+        let before = candidates.len();
+        candidates.retain(|&i| {
+            let l = &self.canvas.layers[i];
+            !l.locked
+                && l.rig.is_none()
+                && l.adjustment.is_none()
+                && l.shader.is_none()
+                && l.anim.is_none()
+                && l.motion.is_none()
+        });
+        let left_out = before - candidates.len();
+        if candidates.is_empty() {
+            self.report(
+                "Make Rig from Layers needs unlocked paint layers (pick them, or their folder)"
+                    .into(),
+            );
+            return;
+        }
+        for &i in &candidates {
+            if self.canvas.layers[i].text.is_some() {
+                self.rasterise_text_layer(i);
+            } else if self.canvas.layers[i].vector.is_some() {
+                self.rasterise_vector_layer(i);
+            }
+            self.bake_impasto(i);
+        }
+        let settings = self.workspace.puppet;
+        let (mut rig, mut notes) = rig_from_layers(
+            &self.canvas,
+            &candidates,
+            settings.density,
+            settings.expansion,
+        );
+        if left_out > 0 {
+            notes.push(format!(
+                "{left_out} layer(s) left out (locked, animated, moved, or not paint)"
+            ));
+        }
+        if rig.slots.is_empty() {
+            self.report(format!("Nothing to make a rig of: {}", notes.join("; ")));
+            return;
+        }
+        rig.animations
+            .push(timeline_animation("Animation", &self.canvas.timeline));
+        rig.animation = Some(0);
+        // Above the topmost one (or the folder), beside it.
+        let top = if let [only] = picked[..]
+            && folders.len() == 1
+        {
+            only
+        } else {
+            *candidates.iter().max().unwrap_or(&0)
+        };
+        let parent = self.canvas.layers[top].parent;
+        let hide: Vec<_> = if folders.len() == 1 && picked.len() == 1 {
+            folders.clone()
+        } else {
+            candidates
+                .iter()
+                .map(|&i| self.canvas.layers[i].id)
+                .collect()
+        };
+        let name = if folders.len() == 1 && picked.len() == 1 {
+            format!("{} rig", self.canvas.layers[top].name)
+        } else {
+            "Rig".to_string()
+        };
+        let mut rig = Some(Box::new(rig));
+        self.document_step(|canvas| {
+            let id = canvas.insert_new_layer(top + 1, name, LayerKind::Paint, parent);
+            let Some(i) = canvas.layer_index_of(id) else {
+                return false;
+            };
+            canvas.layers[i].rig = rig.take();
+            for l in &mut canvas.layers {
+                if hide.contains(&l.id) {
+                    l.visible = false;
+                }
+            }
+            canvas.active_layer_idx = i;
+            canvas.render_rigs();
+            true
+        });
+        self.layer_state.selected.clear();
+        self.workspace.animation.show_timeline = true;
+        self.mark_unsaved();
+        self.report(if notes.is_empty() {
+            "Made a rig: draw bones with the Bone tool, or pin parts with Puppet Warp to key them"
+                .into()
+        } else {
+            format!("Made a rig, but: {}", notes.join("; "))
+        });
+    }
+
+    /// Bind every mesh part of the selected rig to its bones (`smooth`:
+    /// each point weighted between the bones near it). One undo step.
+    pub(crate) fn bind_rig(&mut self, smooth: bool) {
+        if self.active_rig().is_none_or(|r| r.bones.len() < 2) {
+            self.report("Draw bones with the Bone tool first".into());
+            return;
+        }
+        self.rig_edit(|rig| {
+            for s in 0..rig.slots.len() {
+                rig.bind(s, smooth);
+            }
+        });
+        self.rig_edit_done();
+    }
+
+    /// A new animation in the selected rig, as long as the timeline, picked.
+    pub(crate) fn new_rig_animation(&mut self) {
+        let timeline = self.canvas.timeline;
+        self.rig_edit(|rig| {
+            let name = (1..)
+                .map(|n| format!("Animation {n}"))
+                .find(|n| rig.animations.iter().all(|a| &a.name != n))
+                .unwrap_or_default();
+            rig.animations.push(timeline_animation(&name, &timeline));
+            rig.animation = Some(rig.animations.len() - 1);
+        });
+        self.rig_edit_done();
+    }
+
     /// The gesture ended: the next change is a new undo step.
     pub(crate) fn rig_edit_done(&mut self) {
         self.workspace.rig.in_gesture = false;
@@ -206,6 +355,148 @@ impl PainterApp {
     }
 }
 
+/// A new animation for a rig made here: as long as the timeline (the rig
+/// is posed at the document's time in seconds, and an animation loops at
+/// its length, so it covers every frame).
+pub(crate) fn timeline_animation(
+    name: &str,
+    timeline: &crate::canvas::animation::Timeline,
+) -> RigAnimation {
+    RigAnimation {
+        name: name.into(),
+        duration: (timeline.end + 1) as f32 / timeline.fps.max(1) as f32,
+        ..Default::default()
+    }
+}
+
+/// A rig of `sources` (layer indices, bottom first): each layer a slot
+/// with its paint as a mesh picture (the mesh Puppet Warp makes, points
+/// `density` pixels apart), on one root bone in the canvas's middle. Rig
+/// units are canvas pixels. Also what's left out of it, to say.
+pub(crate) fn rig_from_layers(
+    canvas: &crate::canvas::Canvas,
+    sources: &[usize],
+    density: f32,
+    expansion: f32,
+) -> (Rig, Vec<String>) {
+    use crate::canvas::blend_modes::LayerBlend;
+    use crate::canvas::puppet::mesh::PuppetShape;
+    use crate::canvas::rig::{Attachment, Bone, MeshVertices, RigImage, Shape, Slot, SlotBlend};
+    use eframe::egui::Color32;
+    let ts = canvas.tile_size() as i32;
+    let root = [canvas.width() as f32 / 2.0, canvas.height() as f32 / 2.0];
+    let mut rig = Rig {
+        bones: vec![Bone {
+            name: "root".into(),
+            x: root[0],
+            y: root[1],
+            ..Default::default()
+        }],
+        origin: [0.0, 0.0],
+        scale: 1.0,
+        y_up: false,
+        ..Default::default()
+    };
+    let mut notes = Vec::new();
+    for &i in sources {
+        let layer = &canvas.layers[i];
+        let tiles = canvas.capture_layer_pixels(i);
+        // Where its paint is.
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for (&(tx, ty), data) in &tiles {
+            for (k, c) in data.iter().enumerate() {
+                if c.a() > 0 {
+                    let (x, y) = (tx * ts + k as i32 % ts, ty * ts + k as i32 / ts);
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+                }
+            }
+        }
+        if x0 >= x1 {
+            notes.push(format!("{} is empty", layer.name));
+            continue;
+        }
+        let at = |x: i32, y: i32| -> Color32 {
+            let (tx, ty) = (x.div_euclid(ts), y.div_euclid(ts));
+            tiles.get(&(tx, ty)).map_or(Color32::TRANSPARENT, |d| {
+                d[(y.rem_euclid(ts) * ts + x.rem_euclid(ts)) as usize]
+            })
+        };
+        let Some((mesh, _)) = PuppetShape::from_paint(
+            [x0, y0, x1, y1],
+            density,
+            expansion.max(0.0).round() as usize,
+            |x, y| at(x, y).a() > 0,
+        )
+        .and_then(|shape| shape.mesh(&[])) else {
+            notes.push(format!("{} couldn't be meshed", layer.name));
+            continue;
+        };
+        // Its picture: the paint and a margin as wide as the mesh reaches.
+        let (mut px0, mut py0, mut px1, mut py1) = (x0, y0, x1, y1);
+        for p in &mesh.rest {
+            px0 = px0.min(p[0].floor() as i32 - 1);
+            py0 = py0.min(p[1].floor() as i32 - 1);
+            px1 = px1.max(p[0].ceil() as i32 + 1);
+            py1 = py1.max(p[1].ceil() as i32 + 1);
+        }
+        let (w, h) = ((px1 - px0) as usize, (py1 - py0) as usize);
+        let pixels = (0..w * h)
+            .map(|k| at(px0 + (k % w) as i32, py0 + (k / w) as i32))
+            .collect();
+        let image = rig.images.len();
+        rig.images.push(RigImage {
+            name: layer.name.clone(),
+            width: w,
+            height: h,
+            pixels: std::sync::Arc::new(pixels),
+        });
+        let uvs = (mesh.rest.iter())
+            .map(|p| {
+                [
+                    (p[0] - px0 as f32) / w as f32,
+                    (p[1] - py0 as f32) / h as f32,
+                ]
+            })
+            .collect();
+        let vertices = (mesh.rest.iter())
+            .map(|p| [p[0] - root[0], p[1] - root[1]])
+            .collect();
+        let blend = match layer.blend {
+            LayerBlend::Normal => SlotBlend::Normal,
+            LayerBlend::Multiply => SlotBlend::Multiply,
+            LayerBlend::Screen => SlotBlend::Screen,
+            LayerBlend::LinearDodge => SlotBlend::Additive,
+            _ => {
+                notes.push(format!("{}'s blend mode is Normal in the rig", layer.name));
+                SlotBlend::Normal
+            }
+        };
+        let mut name = layer.name.clone();
+        while rig.slot_index(&name).is_some() {
+            name.push('\'');
+        }
+        rig.slots.push(Slot {
+            name: name.clone(),
+            bone: 0,
+            color: [1.0, 1.0, 1.0, layer.opacity],
+            attachment: layer.visible.then(|| name.clone()),
+            blend,
+            attachments: vec![Attachment {
+                name,
+                image,
+                region: [0.0, 0.0, w as f32, h as f32],
+                rotated: false,
+                shape: Shape::Mesh {
+                    uvs,
+                    triangles: mesh.tris,
+                    vertices: MeshVertices::Plain(vertices),
+                },
+            }],
+        });
+    }
+    (rig, notes)
+}
+
 /// Bone `b`'s turn and place at `seconds` (its setup plus the animation
 /// playing).
 pub(crate) fn bone_now(rig: &Rig, b: usize, seconds: f32) -> (f32, f32, f32) {
@@ -230,7 +521,7 @@ pub(crate) fn bone_now(rig: &Rig, b: usize, seconds: f32) -> (f32, f32, f32) {
 /// Turn and place bone `b` at `seconds`: a key in the animation playing
 /// (its setup pose left as it is), or its setup pose without one.
 pub(crate) fn set_bone(rig: &mut Rig, b: usize, seconds: f32, rotation: f32, at: [f32; 2]) {
-    use crate::canvas::rig::{BoneTrack, Curve, Key};
+    use crate::canvas::rig::{BoneTrack, set_key};
     let Some(a) = rig.animation.filter(|&a| a < rig.animations.len()) else {
         let bone = &mut rig.bones[b];
         (bone.rotation, bone.x, bone.y) = (rotation, at[0], at[1]);
@@ -253,25 +544,9 @@ pub(crate) fn set_bone(rig: &mut Rig, b: usize, seconds: f32, rotation: f32, at:
             anim.bones.len() - 1
         }
     };
-    fn key<T>(keys: &mut Vec<Key<T>>, t: f32, value: T) {
-        match keys.iter().position(|k| (k.time - t).abs() < 1e-4) {
-            Some(i) => keys[i].value = value,
-            None => {
-                let at = keys.iter().position(|k| k.time > t).unwrap_or(keys.len());
-                keys.insert(
-                    at,
-                    Key {
-                        time: t,
-                        value,
-                        curve: Curve::Linear,
-                    },
-                );
-            }
-        }
-    }
     let track = &mut anim.bones[i];
-    key(&mut track.rotate, t, rotation - setup_rot);
-    key(&mut track.translate, t, [at[0] - setup_x, at[1] - setup_y]);
+    set_key(&mut track.rotate, t, rotation - setup_rot);
+    set_key(&mut track.translate, t, [at[0] - setup_x, at[1] - setup_y]);
     anim.duration = anim.duration.max(t);
 }
 

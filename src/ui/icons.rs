@@ -30,6 +30,8 @@ pub(crate) enum Icon {
     SelectBrush,
     Bucket,
     Liquify,
+    Pin,
+    Bone,
     Palette,
     Smudge,
     Blur,
@@ -74,7 +76,7 @@ pub(crate) enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub(crate) const ALL: [Icon; 55] = [
+    pub(crate) const ALL: [Icon; 57] = [
         Icon::Brush,
         Icon::Eraser,
         Icon::SelectRect,
@@ -97,6 +99,8 @@ impl Icon {
         Icon::SelectBrush,
         Icon::Bucket,
         Icon::Liquify,
+        Icon::Pin,
+        Icon::Bone,
         Icon::Palette,
         Icon::Smudge,
         Icon::Blur,
@@ -162,6 +166,8 @@ impl Icon {
             Icon::SelectBrush => phosphor!("selection-plus"),
             Icon::Bucket => phosphor!("paint-bucket"),
             Icon::Liquify => phosphor!("waves"),
+            Icon::Pin => phosphor!("push-pin"),
+            Icon::Bone => phosphor!("bone"),
             Icon::Palette => phosphor!("palette"),
             Icon::Smudge => phosphor!("hand-pointing"),
             Icon::Blur => phosphor!("drop"),

@@ -170,6 +170,8 @@ fn handle_pen_drag(
         }
         Tool::Fill => app.fill_drag(pos),
         Tool::Liquify => app.liquify_drag(pos),
+        Tool::Puppet => app.puppet_drag(pos),
+        Tool::Bone => app.bone_drag(pos),
         Tool::Smudge | Tool::Blur => app.blend_drag(pos, pressure),
         Tool::Eyedropper => {
             if inside {
@@ -192,6 +194,7 @@ fn on_layer(app: &PainterApp, p: Vec2) -> Vec2 {
     match app.active_tool {
         Tool::Fill
         | Tool::Liquify
+        | Tool::Puppet
         | Tool::Smudge
         | Tool::Blur
         | Tool::Shape(_)
@@ -422,6 +425,14 @@ fn handle_primary_press(
         Tool::Eyedropper => app.pick_color(canvas_pos.0),
         Tool::Fill => app.fill_press(canvas_pos.0),
         Tool::Liquify => app.liquify_press(canvas_pos.0),
+        Tool::Puppet => {
+            let m = response.ctx.input(|i| i.modifiers);
+            app.puppet_press(canvas_pos.0, m.shift, m.alt);
+        }
+        Tool::Bone => {
+            let shift = response.ctx.input(|i| i.modifiers.shift);
+            app.bone_press(canvas_pos.0, shift);
+        }
         Tool::Smudge
             if app.workspace.blend.smudge_mode == crate::app::tools::blend::SmudgeMode::Clone
                 && response.ctx.input(|i| i.modifiers.command) =>
@@ -454,6 +465,8 @@ fn handle_primary_release(app: &mut PainterApp) {
         Tool::Eyedropper => {}
         Tool::Fill => app.fill_release(),
         Tool::Liquify => app.liquify_release(),
+        Tool::Puppet => app.puppet_release(),
+        Tool::Bone => app.bone_release(),
         Tool::Smudge | Tool::Blur => app.blend_release(),
         Tool::Transform(_) => transform::transform_release(app),
         Tool::Shape(_) => app.shape_release(),
@@ -468,6 +481,7 @@ fn handle_keyboard(app: &mut PainterApp, key: egui::Key, pressed: bool) {
     if pressed && key == egui::Key::Enter {
         transform::commit_floating_layer(app);
         app.liquify_commit();
+        app.puppet_commit();
         app.magnetic_close();
         // Enter finishes a polygon being built, then applies the shape.
         if app
@@ -594,6 +608,18 @@ fn handle_tool_move(
         Tool::Liquify => {
             if app.viewport.is_primary_down {
                 app.liquify_drag(pos);
+                ctx.request_repaint();
+            }
+        }
+        Tool::Puppet => {
+            if app.viewport.is_primary_down {
+                app.puppet_drag(pos);
+                ctx.request_repaint();
+            }
+        }
+        Tool::Bone => {
+            if app.viewport.is_primary_down {
+                app.bone_drag(pos);
                 ctx.request_repaint();
             }
         }

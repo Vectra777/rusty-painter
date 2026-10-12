@@ -626,7 +626,155 @@ struct StoredLayer {
     /// Its keyed motion; absent in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     motion: Option<crate::canvas::motion::Motion>,
+    /// Puppet warps it remembers, and the paint they bent (each kept once
+    /// however many warps share it); absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warps: Vec<StoredWarp>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warp_paints: Vec<Vec<StoredTile>>,
     tiles: Vec<StoredTile>,
+}
+
+/// A remembered puppet warp as saved: its paint by index into the layer's
+/// `warp_paints`.
+#[derive(Serialize, Deserialize)]
+struct StoredWarp {
+    paint: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    part: Option<StoredCoverage>,
+    pins: Vec<crate::canvas::puppet::Pin>,
+    mode: crate::canvas::puppet::arap::PuppetMode,
+    density: f32,
+    expansion: f32,
+    result: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredCoverage {
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    data_zstd: StoredBlob,
+}
+
+/// A layer's remembered warps as saved: the warps, and the paint they bent.
+fn store_warps(
+    warps: &[std::sync::Arc<crate::canvas::puppet::WarpMemory>],
+    blobs: &mut Vec<u8>,
+) -> Result<(Vec<StoredWarp>, Vec<Vec<StoredTile>>), String> {
+    let mut paints: Vec<std::sync::Arc<crate::canvas::puppet::Tiles>> = Vec::new();
+    let mut stored_paints = Vec::new();
+    let mut out = Vec::new();
+    for w in warps {
+        let paint = match paints
+            .iter()
+            .position(|p| std::sync::Arc::ptr_eq(p, &w.original))
+        {
+            Some(i) => i,
+            None => {
+                let mut keys: Vec<&(i32, i32)> = w.original.keys().collect();
+                keys.sort_unstable();
+                let raws: Vec<Vec<u8>> = keys
+                    .iter()
+                    .map(|k| colors_to_bytes(&w.original[*k]))
+                    .collect();
+                let stored = push_blobs(blobs, &raws)?;
+                stored_paints.push(
+                    keys.iter()
+                        .zip(stored)
+                        .map(|(k, rgba_zstd)| StoredTile {
+                            tx: k.0,
+                            ty: k.1,
+                            rgba_zstd,
+                            deep_zstd: None,
+                        })
+                        .collect(),
+                );
+                paints.push(w.original.clone());
+                paints.len() - 1
+            }
+        };
+        let part = match &w.part {
+            Some(c) => Some(StoredCoverage {
+                x0: c.x0,
+                y0: c.y0,
+                w: c.w,
+                h: c.h,
+                data_zstd: push_blobs(blobs, std::slice::from_ref(&c.data))?
+                    .pop()
+                    .ok_or("Couldn't store a warp's selection")?,
+            }),
+            None => None,
+        };
+        out.push(StoredWarp {
+            paint,
+            part,
+            pins: w.pins.clone(),
+            mode: w.mode,
+            density: w.density,
+            expansion: w.expansion,
+            result: w.result,
+        });
+    }
+    Ok((out, stored_paints))
+}
+
+/// Saved warps back as a layer's remembered warps (warps sharing a paint
+/// share it again).
+fn load_warps(
+    warps: Vec<StoredWarp>,
+    paints: Vec<Vec<StoredTile>>,
+    tile_size: usize,
+    blobs: &[u8],
+) -> Result<Vec<std::sync::Arc<crate::canvas::puppet::WarpMemory>>, String> {
+    let paints: Vec<std::sync::Arc<crate::canvas::puppet::Tiles>> = paints
+        .into_iter()
+        .map(|tiles| {
+            tiles
+                .into_iter()
+                .map(|t| {
+                    let s = t.into_snapshot(tile_size, Depth::U8, blobs)?;
+                    Ok(((s.tx, s.ty), s.data))
+                })
+                .collect::<Result<_, String>>()
+                .map(std::sync::Arc::new)
+        })
+        .collect::<Result<_, _>>()?;
+    warps
+        .into_iter()
+        .map(|w| {
+            let original = paints
+                .get(w.paint)
+                .ok_or("A warp's paint is missing")?
+                .clone();
+            let part = match w.part {
+                Some(c) => {
+                    let data = read_blob(blobs, &c.data_zstd)?;
+                    if data.len() != c.w * c.h {
+                        return Err("Invalid warp selection".to_string());
+                    }
+                    Some(std::sync::Arc::new(crate::canvas::puppet::Coverage {
+                        x0: c.x0,
+                        y0: c.y0,
+                        w: c.w,
+                        h: c.h,
+                        data,
+                    }))
+                }
+                None => None,
+            };
+            Ok(std::sync::Arc::new(crate::canvas::puppet::WarpMemory {
+                original,
+                part,
+                pins: w.pins,
+                mode: w.mode,
+                density: w.density,
+                expansion: w.expansion,
+                result: w.result,
+            }))
+        })
+        .collect()
 }
 
 /// A rig as saved: its bones, slots and animations, its pictures as blobs.
@@ -693,7 +841,10 @@ fn default_expanded() -> bool {
 
 impl StoredLayer {
     fn from_snapshot(layer: CanvasLayerSnapshot, blobs: &mut Vec<u8>) -> Result<Self, String> {
+        let (warps, warp_paints) = store_warps(&layer.warps, blobs)?;
         Ok(Self {
+            warps,
+            warp_paints,
             name: layer.name,
             visible: layer.visible,
             opacity: layer.opacity,
@@ -774,7 +925,9 @@ impl StoredLayer {
         depth: Depth,
         blobs: &[u8],
     ) -> Result<CanvasLayerSnapshot, String> {
+        let warps = load_warps(self.warps, self.warp_paints, tile_size, blobs)?;
         Ok(CanvasLayerSnapshot {
+            warps,
             id: LayerId(self.id.unwrap_or(fallback_idx as u64)),
             name: self.name,
             visible: self.visible,

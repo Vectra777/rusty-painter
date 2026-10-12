@@ -337,6 +337,26 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
     if tool_button(ui, app, Icon::Liquify, liquify_active, "Liquify (W)") {
         app.active_tool = Tool::Liquify;
     }
+    let puppet_active = matches!(app.active_tool, Tool::Puppet);
+    if tool_button(
+        ui,
+        app,
+        Icon::Pin,
+        puppet_active,
+        "Puppet Warp (Shift+W): pin the paint and drag the pins to bend it",
+    ) {
+        app.active_tool = Tool::Puppet;
+    }
+    let bone_active = matches!(app.active_tool, Tool::Bone);
+    if tool_button(
+        ui,
+        app,
+        Icon::Bone,
+        bone_active,
+        "Bones (Y): draw a rig layer's bones, and pose them",
+    ) {
+        app.active_tool = Tool::Bone;
+    }
     separator(ui, size);
     let palette_open = app.workspace.palette.open;
     if icon_button(

@@ -338,6 +338,9 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     ) {
         app.content_aware_fill();
     }
+    if menu_item(ui, "Puppet Warp", keys(app, ctx, Action::PuppetWarp)) {
+        app.active_tool = crate::app::tools::Tool::Puppet;
+    }
     ui.separator();
     if menu_item(ui, "Define Brush Tip from Selection", None) {
         let ctx = ui.ctx().clone();
@@ -456,6 +459,50 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     })
     .response
     .on_disabled_hover_text("For layers painted with impasto (Brush → Impasto)");
+    ui.menu_button("Rig", |ui| {
+        // One layer or several, or a folder (not a rig already).
+        let makeable = app.selected_indices().len() > 1
+            || app
+                .canvas
+                .layers
+                .get(active)
+                .is_some_and(|l| l.rig.is_none());
+        if ui
+            .add_enabled_ui(makeable, |ui| menu_item(ui, "Make Rig from Layers", None))
+            .inner
+        {
+            app.make_rig_from_layers();
+        }
+        let rig = app.active_rig().is_some();
+        let bones = app.active_rig().is_some_and(|r| r.bones.len() > 1);
+        if ui
+            .add_enabled_ui(bones, |ui| {
+                menu_item(ui, "Bind Parts to Bones (smooth)", None)
+            })
+            .inner
+        {
+            app.bind_rig(true);
+        }
+        if ui
+            .add_enabled_ui(bones, |ui| {
+                menu_item(ui, "Bind Parts to Bones (rigid)", None)
+            })
+            .inner
+        {
+            app.bind_rig(false);
+        }
+        if ui
+            .add_enabled_ui(rig, |ui| menu_item(ui, "New Animation", None))
+            .inner
+        {
+            app.new_rig_animation();
+        }
+    })
+    .response
+    .on_hover_text(
+        "Make Rig from Layers: the picked layers (or folder) as one rig layer, each a part \
+         Puppet Warp can pin at frames and bones can move",
+    );
     ui.menu_button("Wet Paint", |ui| {
         let wet = app
             .canvas
@@ -851,8 +898,9 @@ mod top_bar_tests {
     use crate::app::tools::{Tool, shape::ShapeKind};
     use crate::selection::SelectionType;
 
-    /// However many options a tool has, they stay left of the view controls
-    /// and no bar sizes itself to the scroll area's endless width.
+    /// However many options a tool has, they stay left of the view controls,
+    /// no bar sizes itself to the scroll area's endless width, and on a wide
+    /// window they fit in a row or two.
     #[test]
     fn tool_options_fit_the_top_bar() {
         let tools = [
@@ -861,6 +909,7 @@ mod top_bar_tests {
             Tool::Blur,
             Tool::Fill,
             Tool::Liquify,
+            Tool::Puppet,
             Tool::Gradient,
             Tool::Text,
             Tool::Eyedropper,
@@ -873,7 +922,7 @@ mod top_bar_tests {
             Tool::Shape(ShapeKind::Rectangle),
             Tool::Shape(ShapeKind::Curve),
         ];
-        for width in [900.0, 1400.0] {
+        for width in [900.0, 1400.0, 1780.0] {
             for tool in tools {
                 let mut app = crate::project::tests::test_app_pub(crate::canvas::Canvas::new(
                     64,
@@ -886,6 +935,7 @@ mod top_bar_tests {
                 let ctx = egui::Context::default();
                 crate::ui::theme::apply_global_style(&ctx);
                 let mut widest = 0.0_f32;
+                let mut bar = 0.0_f32;
                 for _ in 0..8 {
                     crate::ui::bar_slider::DRAWN.with(|d| d.borrow_mut().clear());
                     let _ = ctx.run(
@@ -896,7 +946,10 @@ mod top_bar_tests {
                             )),
                             ..Default::default()
                         },
-                        |ctx| top_bar(&mut app, ctx),
+                        |ctx| {
+                            top_bar(&mut app, ctx);
+                            bar = ctx.available_rect().top();
+                        },
                     );
                     // A bar cut off by the edge of the row it's in.
                     widest = crate::ui::bar_slider::DRAWN.with(|d| {
@@ -911,6 +964,17 @@ mod top_bar_tests {
                     widest, 0.0,
                     "{tool:?} at {width}: a bar is cut off at {widest}"
                 );
+                // On a wide window the options take a row or two (a group
+                // of controls squeezed into what's left of a wrapped row
+                // stood its labels one letter a line, the bar a screen
+                // tall).
+                let row = crate::ui::style::metrics(&ctx).menu_height;
+                if width >= 1700.0 {
+                    assert!(
+                        bar <= row * 2.0 + 1.0,
+                        "{tool:?} at {width}: the bar is {bar} tall"
+                    );
+                }
             }
         }
     }

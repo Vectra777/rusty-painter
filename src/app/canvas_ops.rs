@@ -250,6 +250,7 @@ impl PainterApp {
         // Sessions hold tiles or coordinates of the document as it is now.
         crate::app::tools::transform::commit_floating_layer(self);
         self.liquify_commit();
+        self.puppet_commit();
         self.gradient_commit();
         self.shape_commit();
         self.filter_cancel();
@@ -275,6 +276,7 @@ impl PainterApp {
         self.quick_mask_leave();
         crate::app::tools::transform::commit_floating_layer(self);
         self.liquify_commit();
+        self.puppet_commit();
         self.gradient_commit();
         self.shape_commit();
         self.filter_cancel();
@@ -330,6 +332,7 @@ impl PainterApp {
         // Sessions hold tiles or indices of the layers as they are now.
         crate::app::tools::transform::commit_floating_layer(self);
         self.liquify_commit();
+        self.puppet_commit();
         self.gradient_commit();
         self.shape_commit();
         self.filter_cancel();
@@ -747,6 +750,7 @@ impl PainterApp {
         // Leave any running session first; it would target the old layer.
         crate::app::tools::transform::commit_floating_layer(self);
         self.liquify_commit();
+        self.puppet_commit();
         self.release_canvas();
         let active_before = self.canvas.active_layer_idx;
         let (index, parent) = self.insertion_point(true);
@@ -811,6 +815,9 @@ impl PainterApp {
     }
 
     fn history_jump_now(&mut self, undo_len: usize) {
+        // A puppet warp being made is kept first (undo inside it only steps
+        // through its pins).
+        self.puppet_commit();
         loop {
             let (undo, redo) = self.layer_state.history.labels();
             let (have, can_redo) = (undo.len(), redo.len());
