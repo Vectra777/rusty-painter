@@ -260,6 +260,8 @@ jobs:
           merge-multiple: true
       - name: Source archive
         run: |
+          # Already inside the Windows zip; not release files of their own.
+          rm -f dist/ffmpeg.exe dist/ffprobe.exe
           V="${VERSION#v}"
           git archive --format=zip -o "dist/rusty-painter-${V}-source.zip" HEAD
       - name: Tag name
