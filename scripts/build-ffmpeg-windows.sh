@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Cross-builds ffmpeg.exe and ffprobe.exe for Windows x86_64 from Linux, for
+# Cross-builds ffmpeg.exe for Windows x86_64 from Linux, for
 # the release zip: only what the app uses (H.264 and VP9 out, ffmpeg's own
-# decoders and dav1d in), linked statically, so they run on a fresh Windows.
+# decoders and dav1d in), linked statically, so it runs on a fresh Windows.
 # The same slim build as the Flatpak's (flatpak/io.vectra.rustypainter.yml).
 # Needs (Ubuntu): mingw-w64 nasm meson ninja-build pkg-config git curl make
-# Writes target/ffmpeg-windows/{ffmpeg,ffprobe}.exe.
+# Writes target/ffmpeg-windows/ffmpeg.exe.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="$PWD/target/ffmpeg-windows"
@@ -56,6 +56,6 @@ tar xf ffmpeg.tar.xz
 (cd "ffmpeg-${FFMPEG}" && ./configure --prefix="$P" --arch=x86_64 --target-os=mingw32 \
   --cross-prefix="$HOST-" --pkg-config=pkg-config --pkg-config-flags=--static \
   --extra-ldflags=-static --enable-gpl --enable-libx264 --enable-libvpx --enable-libdav1d \
-  --disable-ffplay --disable-doc --disable-debug && make -j"$JOBS")
-cp "ffmpeg-${FFMPEG}/ffmpeg.exe" "ffmpeg-${FFMPEG}/ffprobe.exe" "$OUT/"
-echo "Built $OUT/ffmpeg.exe and ffprobe.exe"
+  --disable-ffplay --disable-ffprobe --disable-doc --disable-debug && make -j"$JOBS")
+cp "ffmpeg-${FFMPEG}/ffmpeg.exe" "$OUT/"
+echo "Built $OUT/ffmpeg.exe"

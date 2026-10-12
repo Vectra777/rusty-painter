@@ -21,8 +21,8 @@ finish-args:
   # autosave next to the document), not only through the file portal.
   - --filesystem=home
 modules:
-  # Video export and import run ffmpeg and ffprobe (src/project/video.rs,
-  # src/app/rig.rs); the runtime has neither. H.264 needs x264; libvpx (VP9)
+  # Video export and import run ffmpeg (src/project/video.rs,
+  # src/app/rig.rs); the runtime has none. H.264 needs x264; libvpx (VP9)
   # and dav1d (AV1) come with the SDK.
   - name: x264
     # Headers, static libraries and docs; only the programs are needed.
@@ -44,6 +44,7 @@ modules:
       - --enable-libvpx
       - --enable-libdav1d
       - --disable-ffplay
+      - --disable-ffprobe
       - --disable-doc
       - --disable-debug
     sources:

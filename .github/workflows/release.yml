@@ -132,7 +132,7 @@ jobs:
         with:
           key: release-windows
       - run: cargo build --locked --release
-      # Video export and import (MP4, WebM) run them from the app's folder.
+      # Video export and import (MP4, WebM) run it from the app's folder.
       - uses: actions/download-artifact@v4
         with:
           name: ffmpeg-windows
@@ -143,7 +143,7 @@ jobs:
           $v = $env:VERSION -replace '^v', ''
           $name = "rusty-painter-$v-windows-x86_64"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/release/$env:BIN_NAME.exe", README.md, ffmpeg/ffmpeg.exe, ffmpeg/ffprobe.exe "dist/$name/"
+          Copy-Item "target/release/$env:BIN_NAME.exe", README.md, ffmpeg/ffmpeg.exe "dist/$name/"
           if (Test-Path LICENSE) { Copy-Item LICENSE "dist/$name/" }
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
       - uses: actions/upload-artifact@v4
@@ -260,8 +260,8 @@ jobs:
           merge-multiple: true
       - name: Source archive
         run: |
-          # Already inside the Windows zip; not release files of their own.
-          rm -f dist/ffmpeg.exe dist/ffprobe.exe
+          # Already inside the Windows zip; not a release file of its own.
+          rm -f dist/ffmpeg.exe
           V="${VERSION#v}"
           git archive --format=zip -o "dist/rusty-painter-${V}-source.zip" HEAD
       - name: Tag name

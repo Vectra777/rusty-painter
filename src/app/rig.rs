@@ -610,15 +610,16 @@ fn decode_with_ffmpeg(path: &Path) -> Result<(Vec<image::RgbaImage>, u32), Strin
             .map_or(0, |d| d.as_nanos())
     ));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let status = std::process::Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
+    // At the info level ffmpeg's log names the frame rate (no ffprobe).
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostats", "-i"])
         .arg(path)
         .args(["-frames:v", &MAX_FRAMES.to_string()])
         .arg(dir.join("f_%05d.png"))
-        .status()
+        .output()
         .map_err(|_| "Videos need ffmpeg installed (GIFs and animated PNGs don't)".to_string())?;
     let result = (|| {
-        if !status.success() {
+        if !output.status.success() {
             return Err("ffmpeg couldn't read the video".to_string());
         }
         let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -638,25 +639,7 @@ fn decode_with_ffmpeg(path: &Path) -> Result<(Vec<image::RgbaImage>, u32), Strin
         if frames.is_empty() {
             return Err("The video has no frames".to_string());
         }
-        let fps = std::process::Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=r_frame_rate",
-                "-of",
-                "csv=p=0",
-            ])
-            .arg(path)
-            .output()
-            .ok()
-            .and_then(|o| {
-                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                let (n, d) = text.split_once('/')?;
-                Some((n.parse::<f32>().ok()? / d.parse::<f32>().ok()?.max(1.0)).round() as u32)
-            })
+        let fps = fps_in_ffmpeg_log(&String::from_utf8_lossy(&output.stderr))
             .unwrap_or(24)
             .clamp(1, 120);
         Ok((frames, fps))
@@ -665,9 +648,31 @@ fn decode_with_ffmpeg(path: &Path) -> Result<(Vec<image::RgbaImage>, u32), Strin
     result
 }
 
+/// The first video stream's frame rate in ffmpeg's log: its input line reads
+/// "Stream #0:0…: Video: h264 …, 1280x720, 29.97 fps, 29.97 tbr, …".
+fn fps_in_ffmpeg_log(log: &str) -> Option<u32> {
+    let line = log
+        .lines()
+        .find(|l| l.contains("Stream #0") && l.contains("Video:"))?;
+    let fps = line
+        .split(", ")
+        .find_map(|part| part.strip_suffix(" fps"))?;
+    Some(fps.trim().parse::<f32>().ok()?.round() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::canvas::Canvas;
+
+    #[test]
+    fn the_frame_rate_comes_from_ffmpegs_log() {
+        let log = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'a.mp4':\n  Duration: 00:00:01.00\n  \
+            Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), \
+            320x240, 41 kb/s, 29.97 fps, 29.97 tbr, 30k tbn (default)\nOutput #0, image2, to 'f.png':\n  \
+            Stream #0:0: Video: png, rgb24, 320x240, q=2-31, 200 kb/s, 25 fps, 25 tbn\n";
+        assert_eq!(super::fps_in_ffmpeg_log(log), Some(30));
+        assert_eq!(super::fps_in_ffmpeg_log("no video here"), None);
+    }
     use eframe::egui::Color32;
 
     #[test]
