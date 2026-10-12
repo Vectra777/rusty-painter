@@ -21,6 +21,10 @@ on:
         description: "Build Android (arm64 APK)"
         type: boolean
         default: true
+      flatpak:
+        description: "Build the Linux Flatpak (x86_64, with ffmpeg)"
+        type: boolean
+        default: true
       publish:
         description: "Publish a GitHub release (off = builds only, downloadable from this run)"
         type: boolean
@@ -82,7 +86,8 @@ jobs:
           V="${VERSION#v}"
           NAME="rusty-painter-${V}-linux-x86_64"
           mkdir -p "dist/${NAME}"
-          cp "target/release/${BIN_NAME}" README.md "dist/${NAME}/"
+          cp "target/release/${BIN_NAME}" README.md assets/linux/install.sh assets/linux/io.vectra.rustypainter.desktop "dist/${NAME}/"
+          cp assets/icon/icon-256.png "dist/${NAME}/rusty-painter.png"
           if [ -f LICENSE ]; then cp LICENSE "dist/${NAME}/"; fi
           tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
       - uses: actions/upload-artifact@v4
@@ -91,9 +96,33 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  windows-ffmpeg:
+    name: ffmpeg for Windows
+    needs: [version]
+    if: ${{ github.event_name == 'push' || inputs.windows }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: target/ffmpeg-windows
+          # Rebuilt only when the script (its versions) changes.
+          key: ffmpeg-windows-${{ hashFiles('scripts/build-ffmpeg-windows.sh') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mingw-w64 nasm meson ninja-build
+          scripts/build-ffmpeg-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-windows
+          path: target/ffmpeg-windows/*.exe
+          if-no-files-found: error
+
   windows:
     name: Windows build
-    needs: [ci, version]
+    needs: [ci, version, windows-ffmpeg]
     if: ${{ github.event_name == 'push' || inputs.windows }}
     runs-on: windows-latest
     steps:
@@ -103,13 +132,18 @@ jobs:
         with:
           key: release-windows
       - run: cargo build --locked --release
+      # Video export and import (MP4, WebM) run them from the app's folder.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows
+          path: ffmpeg
       - name: Package
         shell: pwsh
         run: |
           $v = $env:VERSION -replace '^v', ''
           $name = "rusty-painter-$v-windows-x86_64"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/release/$env:BIN_NAME.exe", README.md "dist/$name/"
+          Copy-Item "target/release/$env:BIN_NAME.exe", README.md, ffmpeg/ffmpeg.exe, ffmpeg/ffprobe.exe "dist/$name/"
           if (Test-Path LICENSE) { Copy-Item LICENSE "dist/$name/" }
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
       - uses: actions/upload-artifact@v4
@@ -183,9 +217,36 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
 
+  flatpak:
+    name: Flatpak build
+    needs: [ci, version]
+    if: ${{ github.event_name == 'push' || inputs.flatpak }}
+    runs-on: ubuntu-latest
+    # The runtime, SDK and flatpak-builder (flatpak/io.vectra.rustypainter.yml).
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bundle name
+        id: name
+        run: echo "bundle=rusty-painter-${VERSION#v}-linux-x86_64.flatpak" >> "$GITHUB_OUTPUT"
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: flatpak/io.vectra.rustypainter.yml
+          bundle: ${{ steps.name.outputs.bundle }}
+          # x264 and ffmpeg are rebuilt only when the manifest changes.
+          cache-key: flatpak-${{ hashFiles('flatpak/io.vectra.rustypainter.yml') }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: ${{ steps.name.outputs.bundle }}
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: [linux, windows, android]
+    needs: [linux, windows, android, flatpak]
     # Runs if every selected build succeeded (unselected ones are skipped).
     if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (github.event_name == 'push' || inputs.publish) }}
     runs-on: ubuntu-latest

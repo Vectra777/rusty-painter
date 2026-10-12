@@ -52,6 +52,9 @@ pub fn run() -> eframe::Result<()> {
         eframe::egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([480.0, 360.0])
+            .with_icon(window_icon())
+            // Wayland matches it to assets/linux/io.vectra.rustypainter.desktop's icon.
+            .with_app_id("io.vectra.rustypainter")
     };
     let options = eframe::NativeOptions {
         viewport,
@@ -71,6 +74,19 @@ pub fn run() -> eframe::Result<()> {
         log::error!("The app couldn't start or its event loop failed: {err}");
     }
     result
+}
+
+/// The window and taskbar icon (the .exe's own is set in build.rs).
+#[cfg(not(target_os = "android"))]
+fn window_icon() -> eframe::egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon/icon-256.png"))
+        .expect("the bundled icon is a PNG")
+        .into_rgba8();
+    eframe::egui::IconData {
+        width: img.width(),
+        height: img.height(),
+        rgba: img.into_raw(),
+    }
 }
 
 /// Android's private storage, set at start-up (the data folder there).

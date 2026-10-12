@@ -11,6 +11,15 @@ fn main() {
     if matches!(os.as_str(), "android" | "ios") {
         println!("cargo::rustc-cfg=mobile");
     }
+    // The .exe's icon, in Explorer and shortcuts (needs a Windows host).
+    #[cfg(windows)]
+    if os == "windows" {
+        println!("cargo::rerun-if-changed=assets/icon/icon.ico");
+        winresource::WindowsResource::new()
+            .set_icon("assets/icon/icon.ico")
+            .compile()
+            .expect("embedding the .exe's icon");
+    }
     if unix && !matches!(os.as_str(), "android" | "macos" | "ios") {
         println!("cargo::rustc-cfg=winit_pen");
     }

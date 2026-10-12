@@ -34,7 +34,7 @@ APP="${OUT}/RustyPainter.app"
 rm -rf "${APP}"
 mkdir -p "${APP}"
 cp "${OUT}/rusty-painter" "${APP}/"
-cp ios/Info.plist ios/PrivacyInfo.xcprivacy "${APP}/"
+cp ios/Info.plist ios/PrivacyInfo.xcprivacy ios/AppIcon*~ipad.png "${APP}/"
 
 VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 plutil -replace CFBundleShortVersionString -string "${VERSION}" "${APP}/Info.plist"

@@ -913,7 +913,7 @@ impl Filter {
         }
     }
 
-    /// The filters that mix neighbouring pixels, on a [`to_mixable`]
+    /// The filters that mix neighbouring pixels, on a `to_mixable`
     /// buffer (and giving one back).
     /// [`Self::apply`] at full depth, for the filters that have it (the
     /// Gaussian blur and sharpening): `src` is premultiplied sRGB (0..1), as

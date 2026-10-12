@@ -69,7 +69,8 @@ rfd = "0.17.2"
 # Waiting on rfd's file dialogs off the UI thread.
 pollster = "0.4"
 # Images on the system clipboard (copy / paste between apps).
-arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# On Wayland it talks to the compositor, so it also works without X (Flatpak).
+arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 
 # X11 pen pressure: the patched winit queues the pen's samples.
 [target.'cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "ios"))))'.dependencies]
@@ -118,12 +119,19 @@ android_logger = "0.14"
 jni = "0.21"
 ndk-context = "0.1"
 
+# The .exe's icon (build.rs); build scripts run on the host, so a Windows host.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [package.metadata.android]
 package = "io.vectra.rustypainter"
 build_targets = ["aarch64-linux-android"]
+# Launcher icons (scripts/make-icons.sh).
+resources = "android/res"
 
 [package.metadata.android.application]
 label = "Rusty Painter"
+icon = "@mipmap/ic_launcher"
 theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
 
 # Photo library access, to import images (Android has no file dialog
