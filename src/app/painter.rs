@@ -85,6 +85,8 @@ impl eframe::App for PainterApp {
                 return;
             }
         }
+        #[cfg(not(target_os = "android"))]
+        crate::app::dev_shot::tick(self, ctx);
         self.workspace.frame_stats.begin(frame.info().cpu_usage);
         self.refresh_display_transform();
         self.animation_tick(ctx);

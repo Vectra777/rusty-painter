@@ -20,6 +20,8 @@ const PANEL_MIN_WIDTH: f32 = 230.0;
 const COLOUR_BELOW_WHEEL: f32 = 240.0;
 /// Touch dropdowns: the layers header and its option rows fit at this width.
 const DROPDOWN_WIDTH: f32 = 340.0;
+/// Shorter than this (points), the colour dropdown lays out sideways.
+const SHORT_SCREEN: f32 = 520.0;
 /// Canvas a floating panel leaves uncovered on a narrow screen.
 const MIN_CANVAS_WIDTH: f32 = 56.0;
 
@@ -127,8 +129,15 @@ pub(crate) fn show_dropdowns(app: &mut PainterApp, ctx: &egui::Context) {
         let Some(anchor) = ctx.data(|d| d.get_temp::<egui::Rect>(dropdown.anchor_id())) else {
             continue;
         };
-        let width = DROPDOWN_WIDTH.min(screen.width() - 40.0);
+        let short = screen.height() < SHORT_SCREEN;
+        let width = match dropdown {
+            // A phone held sideways: the wheel and the sliders side by side.
+            Dropdown::Colour if short => DROPDOWN_WIDTH * 1.8,
+            _ => DROPDOWN_WIDTH,
+        }
+        .min(screen.width() - 40.0);
         let height = match dropdown {
+            Dropdown::Colour if short => screen.height() - 80.0,
             // The wheel, the colour pair and the four sliders, unscrolled.
             Dropdown::Colour => {
                 let wheel = width.min(metrics(ctx).wheel_max);
@@ -318,7 +327,7 @@ pub(crate) fn show_panels(app: &mut PainterApp, ctx: &egui::Context) {
             .resizable(false)
             .frame(frame)
             .show_animated(ctx, app.workspace.show_left_panel, |ui| {
-                ui.set_clip_rect(ui.max_rect());
+                ui.set_clip_rect(ui.max_rect().expand2(egui::vec2(5.0, 0.0)));
                 brush_panel(app, ui);
             });
         let right = egui::SidePanel::right("panel_right")
@@ -326,7 +335,7 @@ pub(crate) fn show_panels(app: &mut PainterApp, ctx: &egui::Context) {
             .resizable(false)
             .frame(frame)
             .show_animated(ctx, right_open, |ui| {
-                ui.set_clip_rect(ui.max_rect());
+                ui.set_clip_rect(ui.max_rect().expand2(egui::vec2(5.0, 0.0)));
                 right_panel(app, ui);
             });
         let mut resized = false;
@@ -385,7 +394,7 @@ pub(crate) fn show_panels(app: &mut PainterApp, ctx: &egui::Context) {
                 frame.stroke(Stroke::new(1.0_f32, BORDER)).show(ui, |ui| {
                     ui.set_width(width - 14.0);
                     ui.set_height(area.height() - 10.0);
-                    ui.set_clip_rect(ui.max_rect());
+                    ui.set_clip_rect(ui.max_rect().expand2(egui::vec2(5.0, 0.0)));
                     contents(ui);
                 });
             });

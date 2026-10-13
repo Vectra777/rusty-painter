@@ -30,6 +30,8 @@ pub(crate) mod brush_library;
 pub(crate) mod canvas_ops;
 pub(crate) mod clipboard;
 pub(crate) mod color_management;
+#[cfg(not(target_os = "android"))]
+pub(crate) mod dev_shot;
 pub(crate) mod document;
 pub(crate) mod files;
 pub(crate) mod frame_stats;

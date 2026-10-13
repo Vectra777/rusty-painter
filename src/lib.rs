@@ -50,8 +50,8 @@ pub fn run() -> eframe::Result<()> {
         eframe::egui::ViewportBuilder::default().with_fullscreen(true)
     } else {
         eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([480.0, 360.0])
+            .with_inner_size(app::dev_shot::size().unwrap_or([1440.0, 900.0]))
+            .with_min_inner_size(app::dev_shot::size().unwrap_or([480.0, 360.0]))
             .with_icon(window_icon())
             // Wayland matches it to assets/linux/io.vectra.rustypainter.desktop's icon.
             .with_app_id("io.vectra.rustypainter")

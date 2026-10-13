@@ -274,7 +274,11 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     // What the panel changes in the layers' settings is one undo step.
     app.settings_watch();
     let m = metrics(ctx);
-    let row_height = m.layer_row_height;
+    // Tall enough for the name over the opacity bar, whatever the font
+    // (a touch screen's bigger one cut the bar off).
+    let body = ui.text_style_height(&egui::TextStyle::Body);
+    let bar = ui.spacing().interact_size.y.max(body + 4.0);
+    let row_height = m.layer_row_height.max(body + 2.0 + bar + 12.0);
     let mut add_layer = false;
     let mut add_folder = false;
     let mut add_mask = false;
@@ -449,7 +453,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         ui.add(
             egui::TextEdit::singleline(&mut query)
                 .hint_text("Search layers")
-                .desired_width((ui.available_width() - combo_width - 8.0).max(40.0)),
+                .desired_width((ui.available_width() - combo_width - 16.0).max(40.0)),
         );
         egui::ComboBox::from_id_salt("layers_filter_kind")
             .width(combo_width)
@@ -663,7 +667,12 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         if is_group {
                             text = text.strong();
                         }
+                        // A line of text tall, not a button's height (on a
+                        // touch screen that pushed the bar out of the row).
+                        let interact = ui.spacing().interact_size.y;
+                        ui.spacing_mut().interact_size.y = 0.0;
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().interact_size.y = interact;
                             if clipped {
                                 ui.label(RichText::new("↓").color(accent()))
                                     .on_hover_text("Clipped to the layer below");
@@ -716,6 +725,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                                     .on_hover_text("Reference layer for fills and the magic wand");
                             }
                         });
+                        ui.spacing_mut().interact_size.y = interact;
                     }
                     ui.horizontal(|ui| {
                         if !m.touch {

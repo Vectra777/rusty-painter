@@ -55,7 +55,9 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                         .range(1.0..=MAX_CANVAS_DIMENSION as f32)
                         .suffix(settings.unit.label()),
                 );
-                egui::ComboBox::from_label("Units")
+                // (Not `from_label`: a combo and label in a row of their
+                // own never wrap, and ran off a phone's screen.)
+                egui::ComboBox::from_id_salt("canvas_units")
                     .selected_text(settings.unit.label())
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut settings.unit, CanvasUnit::Pixels, "Pixels");

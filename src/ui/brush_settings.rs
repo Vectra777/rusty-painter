@@ -250,9 +250,11 @@ fn brush_settings_contents(
     );
 
     section(ui, "Tip", true, |ui| {
+        // Three rows of tips at most, whole (more scroll).
+        let side = metrics(ui.ctx()).tip_swatch;
         egui::ScrollArea::vertical()
             .id_salt("pixel_tip_selector")
-            .max_height(112.0)
+            .max_height(3.0 * side + 2.0 * 4.0 + 1.0)
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);

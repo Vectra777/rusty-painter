@@ -106,9 +106,18 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
     // Too many tool options for one row (found the frame before): more.
     let rows_id = egui::Id::new("top_bar_option_rows");
     let rows = ctx.data(|d| d.get_temp::<u8>(rows_id)).unwrap_or(1);
+    // egui's menu bar keeps its row at the top: the room it leaves goes
+    // above it instead, so the row sits in the bar's middle.
+    let row = ctx.style().spacing.interact_size.y;
+    let top = ((m.menu_height - row) / 2.0).max(0.0);
     egui::TopBottomPanel::top("top_bar")
         .exact_height(m.menu_height * rows as f32)
-        .frame(bar_frame(BG_PANEL))
+        .frame(bar_frame(BG_PANEL).inner_margin(egui::Margin {
+            left: 8.0,
+            right: 8.0,
+            top,
+            bottom: 0.0,
+        }))
         .show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.spacing_mut().button_padding = egui::vec2(7.0, 3.0);
@@ -164,11 +173,8 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                             crate::ui::widgets::vdivider(ui);
                         }
                         crate::ui::frame_times::status_readout(app, ui);
-                        if two_rows {
-                            // Pinching zooms: Fit is the one view control
-                            // a phone needs at hand.
-                            crate::ui::status_bar::fit_button(app, ui);
-                        } else {
+                        // On two rows the second has them.
+                        if !two_rows {
                             crate::ui::status_bar::view_controls(app, ui);
                         }
                         ui.min_rect().width()
@@ -186,17 +192,22 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
                     ui.spacing_mut().button_padding = egui::vec2(7.0, 3.0);
                     // The two sliders share what the toggles and their
                     // number boxes leave.
-                    let toggles = 2.0 * (m.menu_height + ui.spacing().item_spacing.x)
+                    // (Three toggles and Fit; pinching zooms, so Fit is
+                    // the one other view control a phone needs at hand.)
+                    let toggle = (m.menu_height - 2.0).clamp(18.0, 36.0);
+                    let toggles = 3.0 * (toggle + ui.spacing().item_spacing.x)
+                        + FIT_WIDTH
                         + if app.viewport.rotation.rem_euclid(std::f32::consts::TAU) > 1e-3 {
                             ROTATION_WIDTH
                         } else {
                             0.0
                         };
                     let numbers = 2.0 * (SLIDER_NUMBER_WIDTH + 2.0 * ui.spacing().item_spacing.x);
-                    let width = ((ui.available_width() - toggles - numbers) / 2.0).max(40.0);
+                    let width = ((ui.available_width() - toggles - numbers) / 2.0).max(0.0);
                     crate::ui::canvas_sliders::bar_sliders(app, ui, Some(width));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         crate::ui::status_bar::view_toggles(app, ui);
+                        crate::ui::status_bar::fit_button(app, ui);
                         crate::ui::status_bar::rotation_reset(app, ui);
                     });
                 });
@@ -208,6 +219,8 @@ pub fn top_bar(app: &mut PainterApp, ctx: &egui::Context) {
 const TWO_ROW_WIDTH: f32 = 840.0;
 /// Room for the rotation's reset button and angle.
 const ROTATION_WIDTH: f32 = 100.0;
+/// Room for the Fit button.
+const FIT_WIDTH: f32 = 52.0;
 /// Room for a slider's number box ("100%", "1000 px").
 const SLIDER_NUMBER_WIDTH: f32 = 64.0;
 
@@ -814,10 +827,35 @@ pub fn menu_sheet(app: &mut PainterApp, ctx: &egui::Context) {
 }
 
 fn sheet_tabs(app: &mut PainterApp, ui: &mut egui::Ui) {
-    let width = ui.available_width() / MenuSection::ALL.len() as f32;
+    // One row, or two of four on a phone held upright (the last ones ran
+    // off its edge).
+    let all = MenuSection::ALL.len();
+    let per_row = if ui.available_width() / all as f32 >= SHEET_TAB_MIN {
+        all
+    } else {
+        all / 2
+    };
+    let width = ui.available_width() / per_row as f32;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for row in MenuSection::ALL.chunks(per_row) {
+            sheet_tab_row(app, ui, row, width);
+        }
+    });
+}
+
+/// Narrower than this (points), the sheet's tabs take two rows.
+const SHEET_TAB_MIN: f32 = 76.0;
+
+fn sheet_tab_row(
+    app: &mut PainterApp,
+    ui: &mut egui::Ui,
+    row: &[(MenuSection, &'static str)],
+    width: f32,
+) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        for (section, title) in MenuSection::ALL {
+        for &(section, title) in row {
             let selected = app.modal_state.menu_sheet_section == section;
             let text = RichText::new(title).color(if selected { TEXT_STRONG } else { TEXT });
             let button = egui::Button::new(text)

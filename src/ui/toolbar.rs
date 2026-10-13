@@ -9,42 +9,62 @@ use crate::ui::style::*;
 use crate::ui::widgets::{icon_button, paint_swatch};
 use eframe::egui::{self, Sense, Stroke};
 
-/// Smallest a tool button shrinks to on short screens before the strip scrolls.
+/// Smallest a tool button shrinks to on short screens before the strip
+/// takes another column (and, past three, scrolls).
 const MIN_TOOL_BUTTON: f32 = 28.0;
-const MIN_TOOL_BUTTON_TOUCH: f32 = 34.0;
+const MIN_TOOL_BUTTON_TOUCH: f32 = 30.0;
 const SEPARATOR_HEIGHT: f32 = 9.0;
 const ITEM_SPACING: f32 = 2.0;
 const MARGIN_Y: f32 = 6.0;
+/// The tool buttons (`tool_buttons`), the brush settings button and,
+/// desktop only, the presets one.
+const TOOLS: f32 = 16.0;
 
-/// Button side that fits every tool (and the colors) in `height`, if any.
-fn fitting_button_size(height: f32, touch: bool, preferred: f32) -> Option<f32> {
-    // The tools, and the brush presets and settings buttons.
-    let buttons = 15.0;
-    let separators = 3.0;
-    // The color pair is about 1.22 buttons tall.
-    let fixed = 2.0 * MARGIN_Y
-        + separators * SEPARATOR_HEIGHT
-        + (buttons + separators + 1.0) * ITEM_SPACING;
-    let size = ((height - fixed) / (buttons + 1.22)).floor().min(preferred);
+/// Columns and button side that fit every tool (and the colors) in
+/// `height`, if any: one column while it can, more on a short screen (a
+/// phone held sideways) rather than tools out of reach.
+fn fitting_layout(height: f32, touch: bool, preferred: f32) -> Option<(usize, f32)> {
+    let buttons = TOOLS + if touch { 1.0 } else { 2.0 };
     let min = if touch {
         MIN_TOOL_BUTTON_TOUCH
     } else {
         MIN_TOOL_BUTTON
     };
-    (size >= min).then_some(size)
+    // The color pair is about 1.22 buttons tall.
+    let one = {
+        let separators = 3.0;
+        let fixed = 2.0 * MARGIN_Y
+            + separators * SEPARATOR_HEIGHT
+            + (buttons + separators + 1.0) * ITEM_SPACING;
+        ((height - fixed) / (buttons + 1.22)).floor().min(preferred)
+    };
+    if one >= min {
+        return Some((1, one));
+    }
+    // Several columns: no separators, the settings buttons in the grid.
+    (2..=3).find_map(|cols| {
+        let rows = (buttons / cols as f32).ceil();
+        let fixed = 2.0 * MARGIN_Y + (rows + 1.0) * ITEM_SPACING;
+        let size = ((height - fixed) / (rows + 1.22)).floor().min(preferred);
+        (size >= min).then_some((cols, size))
+    })
 }
 
 pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
     let m = metrics(ctx);
-    let fitting = fitting_button_size(ctx.available_rect().height(), m.touch, m.tool_button);
+    let fitting = fitting_layout(ctx.available_rect().height(), m.touch, m.tool_button);
     // Too short even for the smallest buttons: keep them usable and scroll.
-    let size = fitting.unwrap_or(if m.touch {
-        MIN_TOOL_BUTTON_TOUCH
-    } else {
-        MIN_TOOL_BUTTON
-    });
+    let (cols, size) = fitting.unwrap_or((
+        1,
+        if m.touch {
+            MIN_TOOL_BUTTON_TOUCH
+        } else {
+            MIN_TOOL_BUTTON
+        },
+    ));
     let mut anchors = Anchors::default();
-    let width = size + m.toolbar_width - m.tool_button;
+    let grid = cols as f32 * size + (cols - 1) as f32 * ITEM_SPACING;
+    let width = grid + m.toolbar_width - m.tool_button;
     let frame = egui::Frame::none()
         .fill(BG_PANEL)
         .inner_margin(egui::Margin::symmetric(5.0, MARGIN_Y));
@@ -60,7 +80,23 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
     let (offset, _) = crate::app::layout::left_slide(app, ctx, width);
     let mut strip = |ui: &mut egui::Ui| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, ITEM_SPACING);
-        if fitting.is_some() {
+        if cols > 1 {
+            // Rows of tools, wrapping (separators drop out of a wrapping
+            // layout), the colors under them.
+            ui.spacing_mut().item_spacing.x = ITEM_SPACING;
+            ui.allocate_ui_with_layout(
+                egui::vec2(grid, ui.available_height()),
+                egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
+                |ui| {
+                    anchors = tool_buttons(app, ui, size, m.touch);
+                    settings_button(app, ui, size);
+                    presets_button(app, ui, size, m.touch);
+                },
+            );
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                color_pair(app, ui, size);
+            });
+        } else if fitting.is_some() {
             anchors = tool_buttons(app, ui, size, m.touch);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 color_pair(app, ui, size);
@@ -546,6 +582,10 @@ fn settings_button(app: &mut PainterApp, ui: &mut egui::Ui, size: f32) {
 }
 
 fn separator(ui: &mut egui::Ui, width: f32) {
+    // Tools in several columns: rows, no lines between groups.
+    if ui.layout().main_wrap() {
+        return;
+    }
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, SEPARATOR_HEIGHT), Sense::hover());
     ui.painter().hline(
         rect.x_range().shrink(4.0),

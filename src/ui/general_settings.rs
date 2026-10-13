@@ -38,7 +38,7 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
             .strong()
             .color(crate::ui::style::TEXT_DIM),
     );
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Color blending");
         let mut space = app.canvas.blend_space;
         if crate::ui::canvas_creation::blend_space_picker(ui, &mut space) {
@@ -56,7 +56,7 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
     ui.separator();
     touch_and_pen_settings(app, ui);
     ui.separator();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         // Mobile apps can't open another app on a folder.
         #[cfg(not(mobile))]
         if ui.button("Open Brush Folder").clicked() {
@@ -161,7 +161,7 @@ fn touch_and_pen_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
     );
     // Live readout: press with the pen to see what it sends.
     let (raw, mapped) = ws.last_pressure.unwrap_or((0.0, 0.0));
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(
             egui::RichText::new("Pen")
                 .small()
@@ -231,7 +231,7 @@ fn calibration_pad(ui: &mut egui::Ui, ws: &mut crate::app::state::WorkspaceState
     let fitted = fit_pressure_curve(&calibration.samples);
     let count = calibration.samples.len();
     let (mut apply, mut clear, mut cancel) = (false, false, false);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         apply = ui
             .add_enabled(fitted.is_some(), egui::Button::new("Apply"))
             .on_disabled_hover_text(format!(
@@ -277,7 +277,7 @@ fn keyboard_layout_row(app: &mut PainterApp, ui: &mut egui::Ui) {
     use crate::app::input::keyboard::KeyboardLayout;
     let keyboard = &mut app.workspace.keyboard;
     let auto = format!("Automatic ({})", keyboard.detected().label());
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Keyboard");
         egui::ComboBox::from_id_salt("keyboard_layout")
             .selected_text(
@@ -408,7 +408,7 @@ pub fn shortcuts_window(app: &mut PainterApp, ctx: &egui::Context) {
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(
                         "Click a shortcut, then press the new keys (Esc: cancel). \
@@ -518,7 +518,7 @@ fn shortcut_group(app: &mut PainterApp, ui: &mut egui::Ui, group: &str) {
 fn action_keys(app: &mut PainterApp, ui: &mut egui::Ui, action: Action) {
     let ws = &mut app.workspace;
     let recording = ws.recording_shortcut.filter(|r| r.0 == action);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
         let text = match recording {
             Some(_) => "Press keys…".to_string(),

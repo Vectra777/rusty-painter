@@ -28,7 +28,7 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
             ui.horizontal(|ui| {
                 ui.label("Format");
-                egui::ComboBox::from_label("Format")
+                egui::ComboBox::from_id_salt("export_format")
                     .selected_text(settings.format.label())
                     .show_ui(ui, |ui| {
                         for format in ExportFormat::ALL {

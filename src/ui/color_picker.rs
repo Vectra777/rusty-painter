@@ -540,8 +540,35 @@ pub fn color_picker_panel(
     // leave, measured the frame before.
     let rest_id = id.with("below_wheel");
     let rest: f32 = ui.data(|d| d.get_temp(rest_id)).unwrap_or(0.0);
-    let wheel_cap = (ui.available_height() - rest).max(MIN_WHEEL);
+    // Never small beside the panel's width, though: what's under it
+    // scrolls rather than the wheel shrinking to a thumbnail.
+    let wheel_cap = (ui.available_height() - rest)
+        .max(MIN_WHEEL)
+        .max((ui.available_width() * 0.8).min(ui.available_height() * 0.55));
     let mut wheel_side = 0.0;
+    // Wide and short (a phone held sideways): the wheel on the left, as
+    // tall as the panel, the rest beside it.
+    let (w, h) = (ui.available_width(), ui.available_height());
+    let wide = color_model == ColorModel::Rgba && w >= 400.0 && w > 1.4 * h;
+    let mut right_ui;
+    let ui = if wide {
+        let side = h.min(w * 0.45);
+        let full = ui.available_rect_before_wrap();
+        let (left, right) = full.split_left_right_at_x(full.left() + side + 8.0);
+        ui.allocate_rect(full, Sense::hover());
+        let mut left_ui = ui.new_child(egui::UiBuilder::new().max_rect(left));
+        if hue_wheel(&mut left_ui, &mut state, side) {
+            let alpha = color.a() as f32 / 255.0;
+            new_color = Some((
+                Color32::from_hsva(state.hue, state.sat, state.val, alpha),
+                false,
+            ));
+        }
+        right_ui = ui.new_child(egui::UiBuilder::new().max_rect(right));
+        &mut right_ui
+    } else {
+        ui
+    };
     let scroll = egui::ScrollArea::vertical()
         .id_salt("color_picker_scroll")
         .auto_shrink([false; 2])
@@ -550,7 +577,7 @@ pub fn color_picker_panel(
             match color_model {
                 ColorModel::Rgba => {
                     let top = ui.cursor().top();
-                    let changed = hue_wheel(ui, &mut state, wheel_cap);
+                    let changed = !wide && hue_wheel(ui, &mut state, wheel_cap);
                     wheel_side = ui.cursor().top() - top;
                     if changed {
                         new_color = Some((

@@ -150,7 +150,7 @@ const DESKTOP_METRICS: Metrics = Metrics {
     label_width: LABEL_WIDTH,
     value_box_width: 52.0,
     tip_swatch: TIP_SWATCH_SIZE,
-    wheel_max: 210.0,
+    wheel_max: 340.0,
 };
 
 const TOUCH_METRICS: Metrics = Metrics {
@@ -165,7 +165,7 @@ const TOUCH_METRICS: Metrics = Metrics {
     label_width: 84.0,
     value_box_width: 64.0,
     tip_swatch: 44.0,
-    wheel_max: 280.0,
+    wheel_max: 380.0,
 };
 
 fn metrics_id() -> eframe::egui::Id {
