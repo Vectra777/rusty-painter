@@ -1,28 +1,59 @@
 [package]
 name = "rusty-painter"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Valentin Belougne <valentin.belougne@gmail.com>"]
 edition = "2024"
 description = "Native tiled painting playground built with egui."
 readme = "README.md"
+license = "GPL-3.0-only"
 publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-eframe = { version = "0.29", features = ["wgpu", "android-native-activity"] }
+# eframe's defaults minus `glow`: the app always runs on wgpu, and glutin
+# (glow's GL loader) has no iOS backend.
+eframe = { version = "0.29", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wayland",
+    "x11",
+    "wgpu",
+    "android-native-activity",
+] }
 env_logger = "0.11"
 log = "0.4"
 rand = "0.9"
 rayon = "1.9"
 rustc-hash = "2"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
-egui_dock = "0.14.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff", "gif", "webp"] }
 wide = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zstd = "0.13"
+# TIFF written directly (an ICC profile, CMYK): the version `image` uses.
+tiff = "0.10"
+crc32fast = "1.5"
+# Importing other apps' brushes: deflated ZIP entries (`.bundle` sets),
+# PNG text chunks (`.kpp` presets), their XML, Clip Studio's SQLite files.
+miniz_oxide = "0.8"
+png = "0.18"
+# The Text tool: glyph outlines (egui already uses it).
+ab_glyph = "0.2"
+quick-xml = "0.41"
+# Shader layers: GLSL (Shadertoy style) compiled with naga, handed to wgpu
+# as naga modules.
+naga = { version = "22", features = ["glsl-in"] }
+wgpu = { version = "22.1", default-features = false, features = ["naga-ir"] }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# Colour management (ICC profiles, CMYK): Little CMS, built from its source.
+lcms2 = { version = "6.2", features = ["static"] }
+# SVG brush tips (Krita's), drawn at the size they paint at.
+resvg = { version = "0.48", default-features = false }
+# Puppet Warp: meshes that follow the paint's outline (constrained
+# Delaunay triangulation).
+spade = "2.15"
 
 [dev-dependencies]
 pollster = "0.4"
@@ -32,9 +63,55 @@ criterion = "0.5"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 
 # desktop-only helpers
-[target.'cfg(not(target_os = "android"))'.dependencies]
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 octotablet = "0.1"
 rfd = "0.17.2"
+# Waiting on rfd's file dialogs off the UI thread.
+pollster = "0.4"
+# Images on the system clipboard (copy / paste between apps).
+# On Wayland it talks to the compositor, so it also works without X (Flatpak).
+arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
+
+# X11 pen pressure: the patched winit queues the pen's samples.
+[target.'cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "ios"))))'.dependencies]
+# The Wayland features too: eframe's defaults (off, see above) turned them on.
+winit = { version = "0.30.12", default-features = false, features = [
+    "x11",
+    "wayland",
+    "wayland-dlopen",
+    "wayland-csd-adwaita",
+] }
+
+# iOS: the patched winit's Pencil samples, and UIKit (document picker,
+# Photos picker, share sheet) at the objc2 versions winit already uses.
+[target.'cfg(target_os = "ios")'.dependencies]
+winit = { version = "0.30.12", default-features = false }
+objc2 = "0.5.2"
+block2 = "0.5.1"
+objc2-foundation = { version = "0.2.2", features = [
+    "block2",
+    "NSArray",
+    "NSError",
+    "NSGeometry",
+    "NSItemProvider",
+    "NSString",
+    "NSURL",
+] }
+objc2-ui-kit = { version = "0.2.2", features = [
+    "block2",
+    "objc2-uniform-type-identifiers",
+    "UIActivity",
+    "UIActivityViewController",
+    "UIApplication",
+    "UIDocumentPickerViewController",
+    "UIPopoverPresentationController",
+    "UIPresentationController",
+    "UIResponder",
+    "UIView",
+    "UIViewController",
+    "UIWindow",
+] }
+objc2-uniform-type-identifiers = { version = "0.2.2", features = ["UTType"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30.12", features = ["android-native-activity"] }
@@ -42,12 +119,19 @@ android_logger = "0.14"
 jni = "0.21"
 ndk-context = "0.1"
 
+# The .exe's icon (build.rs); build scripts run on the host, so a Windows host.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [package.metadata.android]
 package = "io.vectra.rustypainter"
 build_targets = ["aarch64-linux-android"]
+# Launcher icons (scripts/make-icons.sh).
+resources = "android/res"
 
 [package.metadata.android.application]
-label = "Rust Dab Painter"
+label = "Rusty Painter"
+icon = "@mipmap/ic_launcher"
 theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
 
 # Photo library access, to import images (Android has no file dialog
@@ -88,10 +172,35 @@ opt-level = 2
 [profile.dev.package."*"]
 opt-level = 2
 
+# Tests run pixel loops over whole canvases: at opt-level 1 they run about
+# three times faster for a couple of seconds more compiling.
+[profile.test]
+opt-level = 1
+
+[features]
+default = ["sut-import"]
+# Exposes `bench_api` for `benches/app_bench.rs`; off in normal builds.
+bench = []
+# Importing Clip Studio Paint brushes (.sut, SQLite: builds SQLite from C).
+sut-import = ["dep:rusqlite"]
+
+[[example]]
+name = "profile_presets"
+required-features = ["bench"]
+
+[[bench]]
+name = "app_bench"
+harness = false
+required-features = ["bench"]
+
 [[bench]]
 name = "brush_bench"
 harness = false
 
 [[bench]]
 name = "blend_bench"
+harness = false
+
+[[bench]]
+name = "tools_bench"
 harness = false

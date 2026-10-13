@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,7 @@ use crate::error::EventLoopError;
 use crate::event::{self, Force, InnerSizeWriter, StartCause};
 use crate::event_loop::{self, ActiveEventLoop as RootAEL, ControlFlow, DeviceEvents};
 use crate::platform::pump_events::PumpStatus;
+use crate::platform::android::{PenPhase, PenSample};
 use crate::platform_impl::Fullscreen;
 use crate::window::{
     self, CursorGrabMode, CustomCursor, CustomCursorSource, ImePurpose, ResizeDirection, Theme,
@@ -28,26 +29,118 @@ use crate::window::{
 mod keycodes;
 
 // rusty-painter patch: winit reports a stylus as mouse events, which carry no
-// pressure or tool type. Keep the latest pen sample here so the app can read it
-// through `platform::android::pen_state`.
-static PEN_PRESSURE_BITS: AtomicU32 = AtomicU32::new(0x3f80_0000); // 1.0f32
-static PEN_IS_ERASER: AtomicBool = AtomicBool::new(false);
-static PEN_IS_STYLUS: AtomicBool = AtomicBool::new(false);
+// pressure or tool type, and only the newest of the samples Android batches into
+// each event. Queue every stylus sample for the app to read through
+// `platform::android::take_pen_samples`.
+static PEN_SAMPLES: Mutex<VecDeque<PenSample>> = Mutex::new(VecDeque::new());
+/// Samples kept if the app stops draining the queue.
+const MAX_PEN_SAMPLES: usize = 4096;
+/// `AMOTION_EVENT_FLAG_CANCELED` (API 33): an up event that ends a contact the
+/// system rejected, such as a palm.
+const FLAG_CANCELED: u32 = 0x20;
 
-fn record_pen(pointer: &android_activity::input::Pointer<'_>) {
-    let tool = pointer.tool_type();
-    PEN_PRESSURE_BITS.store(pointer.pressure().to_bits(), Ordering::Relaxed);
-    PEN_IS_ERASER.store(matches!(tool, ToolType::Eraser), Ordering::Relaxed);
-    PEN_IS_STYLUS.store(!matches!(tool, ToolType::Mouse), Ordering::Relaxed);
+/// A pen sample's pose: position, pressure, tilt and orientation.
+struct PenPose {
+    x: f32,
+    y: f32,
+    pressure: f32,
+    tilt: f32,
+    orientation: f32,
 }
 
-/// Latest pen sample: `(pressure, is_eraser, is_stylus)`.
-pub(crate) fn pen_state() -> (f32, bool, bool) {
-    (
-        f32::from_bits(PEN_PRESSURE_BITS.load(Ordering::Relaxed)),
-        PEN_IS_ERASER.load(Ordering::Relaxed),
-        PEN_IS_STYLUS.load(Ordering::Relaxed),
-    )
+fn push_pen(pose: PenPose, tool: ToolType, phase: PenPhase) {
+    let Ok(mut queue) = PEN_SAMPLES.lock() else {
+        return;
+    };
+    if queue.len() >= MAX_PEN_SAMPLES {
+        queue.pop_front();
+    }
+    queue.push_back(PenSample {
+        x: pose.x,
+        y: pose.y,
+        pressure: pose.pressure,
+        tilt: pose.tilt,
+        orientation: pose.orientation,
+        is_eraser: matches!(tool, ToolType::Eraser),
+        phase,
+    });
+}
+
+fn is_pen(tool: ToolType) -> bool {
+    matches!(tool, ToolType::Stylus | ToolType::Eraser)
+}
+
+fn push_pen_pointer(pointer: &android_activity::input::Pointer<'_>, phase: PenPhase) {
+    let tool = pointer.tool_type();
+    if is_pen(tool) {
+        push_pen(pointer_pose(pointer), tool, phase);
+    }
+}
+
+fn pointer_pose(p: &android_activity::input::Pointer<'_>) -> PenPose {
+    use android_activity::input::Axis;
+    PenPose {
+        x: p.x(),
+        y: p.y(),
+        pressure: p.pressure(),
+        tilt: p.axis_value(Axis::Tilt),
+        orientation: p.axis_value(Axis::Orientation),
+    }
+}
+
+/// Queue a pen move with the samples batched into it, oldest first.
+fn push_pen_move(
+    motion_event: &android_activity::input::MotionEvent<'_>,
+    pointer: &android_activity::input::Pointer<'_>,
+) {
+    let tool = pointer.tool_type();
+    if !is_pen(tool) {
+        return;
+    }
+    if let Some(ndk_event) = ndk_motion_event(motion_event) {
+        let index = pointer.pointer_index();
+        for historical in ndk_event.history() {
+            if let Some(p) = historical.pointers().find(|p| p.pointer_index() == index) {
+                use ndk::event::Axis;
+                let pose = PenPose {
+                    x: p.x(),
+                    y: p.y(),
+                    pressure: p.pressure(),
+                    tilt: p.axis_value(Axis::Tilt),
+                    orientation: p.axis_value(Axis::Orientation),
+                };
+                push_pen(pose, tool, PenPhase::Move);
+            }
+        }
+    }
+    push_pen(pointer_pose(pointer), tool, PenPhase::Move);
+}
+
+/// The NDK event behind android-activity's wrapper, which doesn't expose the
+/// batched history.
+#[cfg(feature = "android-native-activity")]
+fn ndk_motion_event<'a>(
+    motion_event: &'a android_activity::input::MotionEvent<'_>,
+) -> Option<&'a ndk::event::MotionEvent> {
+    // With NativeActivity the wrapper is the ndk event plus a lifetime marker.
+    const _: () = assert!(
+        std::mem::size_of::<android_activity::input::MotionEvent<'static>>()
+            == std::mem::size_of::<ndk::event::MotionEvent>()
+    );
+    // SAFETY: same layout (checked above); the ndk event only holds the
+    // `AInputEvent` pointer, which stays valid for the borrow.
+    Some(unsafe { &*(motion_event as *const _ as *const ndk::event::MotionEvent) })
+}
+
+#[cfg(not(feature = "android-native-activity"))]
+fn ndk_motion_event<'a>(
+    _motion_event: &'a android_activity::input::MotionEvent<'_>,
+) -> Option<&'a ndk::event::MotionEvent> {
+    None
+}
+
+pub(crate) fn take_pen_samples() -> Vec<PenSample> {
+    PEN_SAMPLES.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default()
 }
 
 pub(crate) use crate::cursor::{
@@ -406,7 +499,7 @@ impl<T: 'static> EventLoop<T> {
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                         match pointer.tool_type() {
                             ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
-                                record_pen(&pointer);
+                                push_pen_pointer(&pointer, PenPhase::Down);
                                 trace!(
                                     "Pointer input {device_id:?}, press, loc={location:?}, \
                                      pointer={pointer:?}"
@@ -461,9 +554,12 @@ impl<T: 'static> EventLoop<T> {
                         let pointer = motion_event.pointer_at_index(motion_event.pointer_index());
                         let location =
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
+                        // A contact the system rejected (a palm) ends as a cancel.
+                        let canceled = motion_event.flags().0 & FLAG_CANCELED != 0;
                         match pointer.tool_type() {
                             ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
-                                record_pen(&pointer);
+                                let phase = if canceled { PenPhase::Cancel } else { PenPhase::Up };
+                                push_pen_pointer(&pointer, phase);
                                 trace!(
                                     "Pointer input {device_id:?}, release, loc={location:?}, \
                                      pointer={pointer:?}"
@@ -501,7 +597,11 @@ impl<T: 'static> EventLoop<T> {
                                         window_id,
                                         event: event::WindowEvent::Touch(event::Touch {
                                             device_id,
-                                            phase: event::TouchPhase::Ended,
+                                            phase: if canceled {
+                                                event::TouchPhase::Cancelled
+                                            } else {
+                                                event::TouchPhase::Ended
+                                            },
                                             location,
                                             id: pointer.pointer_id() as u64,
                                             force: Some(Force::Normalized(
@@ -520,7 +620,7 @@ impl<T: 'static> EventLoop<T> {
                                 PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                             match pointer.tool_type() {
                                 ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
-                                    record_pen(&pointer);
+                                    push_pen_move(motion_event, &pointer);
                                     trace!(
                                         "Pointer input {device_id:?}, move, loc={location:?}, \
                                          pointer={pointer:?}"
@@ -567,7 +667,7 @@ impl<T: 'static> EventLoop<T> {
                                 PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                             match pointer.tool_type() {
                                 ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
-                                    record_pen(&pointer);
+                                    push_pen_pointer(&pointer, PenPhase::Cancel);
                                     trace!(
                                         "Pointer input {device_id:?}, cancel, loc={location:?}, \
                                          pointer={pointer:?}"

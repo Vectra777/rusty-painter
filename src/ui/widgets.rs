@@ -2,9 +2,52 @@
 //! segmented controls, labeled property rows, section headers, icon buttons
 //! and color swatches.
 
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use eframe::egui::{self, Color32, Rect, Response, RichText, Sense, Stroke};
+
+/// Room kept between a floating window and the app's edges.
+const WINDOW_MARGIN: f32 = 8.0;
+
+/// Floating windows kept whole inside the app, whatever its size: never
+/// wider or taller than the window (or, after a resize, left past its
+/// edges).
+pub(crate) trait FitScreen: Sized {
+    /// Sized by its contents: what doesn't fit scrolls.
+    fn fit_screen(self, ctx: &egui::Context) -> Self;
+    /// Resizable (it scrolls its own contents): only capped.
+    fn fit_screen_size(self, ctx: &egui::Context) -> Self;
+}
+
+impl FitScreen for egui::Window<'_> {
+    fn fit_screen(self, ctx: &egui::Context) -> Self {
+        self.fit_screen_size(ctx).vscroll(true)
+    }
+
+    fn fit_screen_size(self, ctx: &egui::Context) -> Self {
+        let room = ctx.screen_rect().shrink(WINDOW_MARGIN);
+        // The cap is on the contents: without the title bar and the
+        // frame's margins and border, those stuck out past the app's edge.
+        let style = ctx.style();
+        let frame = egui::Frame::window(&style);
+        let title = ctx.fonts(|f| f.row_height(&egui::TextStyle::Body.resolve(&style)))
+            + frame.inner_margin.sum().y;
+        let chrome = frame.inner_margin.sum()
+            + frame.outer_margin.sum()
+            + egui::vec2(0.0, title)
+            + egui::Vec2::splat(2.0 * frame.stroke.width);
+        self.constrain_to(room)
+            .max_size((room.size() - chrome).max(egui::Vec2::splat(40.0)))
+    }
+}
+
+/// A bar's frame: flat `fill`, 8 px side padding.
+pub(crate) fn bar_frame(fill: Color32) -> egui::Frame {
+    egui::Frame::none()
+        .fill(fill)
+        .inner_margin(egui::Margin::symmetric(8.0, 0.0))
+}
 
 /// Paints a transparency checkerboard into `rect`.
 pub(crate) fn draw_checkerboard(painter: &egui::Painter, rect: Rect, cell: f32) {
@@ -27,7 +70,42 @@ pub(crate) fn paint_swatch(painter: &egui::Painter, rect: Rect, color: Color32) 
     if color.a() < 255 {
         draw_checkerboard(painter, rect, (rect.height() / 3.0).clamp(3.0, 8.0));
     }
-    painter.rect_filled(rect, 0.0, color);
+    // A checkerboard can't be rounded: see-through colours keep square corners.
+    let radius = if color.a() < 255 { 0.0 } else { RADIUS_SMALL };
+    painter.rect_filled(rect, radius, color);
+    painter.rect_stroke(rect, radius, Stroke::new(1.0_f32, BORDER));
+}
+
+/// A gradient's colours left to right across `rect`, over a checkerboard
+/// where they're see-through.
+pub(crate) fn paint_gradient_strip(
+    painter: &egui::Painter,
+    rect: Rect,
+    stops: &[crate::canvas::gradient::Stop],
+) {
+    let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
+        return;
+    };
+    if stops.iter().any(|s| s.color.a() < 255) {
+        draw_checkerboard(painter, rect, (rect.height() / 3.0).clamp(3.0, 8.0));
+    }
+    // The end colours carry on to the edges.
+    let points: Vec<(f32, Color32)> = std::iter::once((0.0, first.color))
+        .chain(stops.iter().map(|s| (s.pos.clamp(0.0, 1.0), s.color)))
+        .chain(std::iter::once((1.0, last.color)))
+        .collect();
+    let mut mesh = egui::Mesh::default();
+    for (pos, color) in points {
+        let x = egui::lerp(rect.left()..=rect.right(), pos);
+        let i = mesh.vertices.len() as u32;
+        mesh.colored_vertex(egui::pos2(x, rect.top()), color);
+        mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
+        if i > 0 {
+            mesh.add_triangle(i - 2, i - 1, i);
+            mesh.add_triangle(i - 1, i, i + 1);
+        }
+    }
+    painter.add(mesh);
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, BORDER));
 }
 
@@ -36,8 +114,11 @@ pub(crate) fn color_swatch(ui: &mut egui::Ui, color: Color32, size: egui::Vec2) 
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     paint_swatch(ui.painter(), rect, color);
     if response.hovered() {
-        ui.painter()
-            .rect_stroke(rect.expand(1.0), 0.0, Stroke::new(1.0_f32, TEXT_STRONG));
+        ui.painter().rect_stroke(
+            rect.expand(1.0),
+            RADIUS_SMALL,
+            Stroke::new(1.0_f32, TEXT_STRONG),
+        );
     }
     response
 }
@@ -52,7 +133,7 @@ pub(crate) fn icon_button(
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::click());
     let (bg, fg) = if selected {
-        (ACCENT, TEXT_STRONG)
+        (accent(), accent_text())
     } else if response.is_pointer_button_down_on() {
         (WIDGET_ACTIVE, TEXT_STRONG)
     } else if response.hovered() {
@@ -60,7 +141,8 @@ pub(crate) fn icon_button(
     } else {
         (Color32::TRANSPARENT, TEXT)
     };
-    ui.painter().rect_filled(rect, 0.0, bg);
+    ui.painter()
+        .rect_filled(rect, RADIUS_CARD.min(size * 0.2), bg);
     let inset = (size * 0.24).round();
     paint_icon(ui.painter(), rect.shrink(inset), icon, fg);
     if tooltip.is_empty() {
@@ -81,7 +163,7 @@ pub(crate) fn icon_toggle(
     let size = metrics(ui.ctx()).row_toggle;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::click());
     if response.hovered() {
-        ui.painter().rect_filled(rect, 0.0, WIDGET_HOVER);
+        ui.painter().rect_filled(rect, RADIUS_WIDGET, WIDGET_HOVER);
     }
     let (icon, color) = if *on {
         (icon_on, TEXT)
@@ -112,32 +194,51 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 1.0;
-        for (option, label) in options {
+        let last = options.len().saturating_sub(1);
+        for (i, (option, label)) in options.iter().enumerate() {
             let galley = ui
                 .painter()
                 .layout_no_wrap(label.to_string(), font.clone(), TEXT);
+            // Equal shares never wider than the row: a label too long for
+            // its share is cut, rather than pushing the row (and with it
+            // the whole panel) wider.
             let width = if compact {
                 galley.size().x + pad * 2.0
             } else {
-                (equal_width - 1.0).max(galley.size().x + 8.0)
+                (equal_width - 1.0).max(8.0)
             };
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
             let selected = *value == *option;
             let (bg, fg) = if selected {
-                (ACCENT, TEXT_STRONG)
+                (accent(), accent_text())
             } else if response.hovered() {
                 (WIDGET_HOVER, TEXT_STRONG)
             } else {
                 (WIDGET, TEXT)
             };
-            ui.painter().rect_filled(rect, 0.0, bg);
-            ui.painter().galley(
-                rect.center() - galley.size() * 0.5,
-                ui.painter()
-                    .layout_no_wrap(label.to_string(), font.clone(), fg),
-                fg,
+            // Joined: only the row's outer corners are rounded.
+            let (left, right) = (
+                if i == 0 { RADIUS_WIDGET } else { 0.0 },
+                if i == last { RADIUS_WIDGET } else { 0.0 },
             );
+            let rounding = egui::Rounding {
+                nw: left,
+                sw: left,
+                ne: right,
+                se: right,
+            };
+            ui.painter().rect_filled(rect, rounding, bg);
+            let text = ui
+                .painter()
+                .layout_no_wrap(label.to_string(), font.clone(), fg);
+            let at = egui::pos2(
+                (rect.center().x - text.size().x * 0.5).max(rect.left() + 4.0),
+                rect.center().y - text.size().y * 0.5,
+            );
+            ui.painter()
+                .with_clip_rect(rect.shrink2(egui::vec2(3.0, 0.0)))
+                .galley(at, text, fg);
             if response.clicked() && !selected {
                 *value = *option;
                 changed = true;
@@ -161,14 +262,16 @@ fn row_label(ui: &mut egui::Ui, label: &str) {
     );
 }
 
-/// `label  [slider ----------] [value]` on one line, the slider filling
-/// the space left by the label and value box.
-pub(crate) fn slider_row(ui: &mut egui::Ui, label: &str, slider: egui::Slider) -> Response {
+/// `label  [slider ------ value]` on one line, the bar filling the space
+/// the label leaves (a `BarSlider` is exactly `slider_width` plus its
+/// value's room wide in a row, so the row ends at the edge).
+pub(crate) fn slider_row(ui: &mut egui::Ui, label: &str, slider: impl egui::Widget) -> Response {
+    #[cfg(test)]
+    crate::ui::bar_slider::ROW.with(|r| *r.borrow_mut() = label.to_string());
     ui.horizontal(|ui| {
         row_label(ui, label);
-        let spacing = ui.spacing().item_spacing.x;
         let value_box = metrics(ui.ctx()).value_box_width;
-        ui.spacing_mut().slider_width = (ui.available_width() - value_box - spacing).max(40.0);
+        ui.spacing_mut().slider_width = (ui.available_width() - value_box).max(40.0);
         ui.add(slider)
     })
     .inner
@@ -180,6 +283,8 @@ pub(crate) fn property_row<R>(
     label: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    #[cfg(test)]
+    crate::ui::bar_slider::ROW.with(|r| *r.borrow_mut() = label.to_string());
     ui.horizontal(|ui| {
         row_label(ui, label);
         add_contents(ui)
@@ -188,7 +293,7 @@ pub(crate) fn property_row<R>(
 }
 
 /// Formats a 0..=1 value as a whole percentage and parses it back.
-pub(crate) fn percent_of_unit(slider: egui::Slider) -> egui::Slider {
+pub(crate) fn percent_of_unit(slider: BarSlider<'_>) -> BarSlider<'_> {
     slider
         .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
         .custom_parser(|s| {
@@ -201,6 +306,12 @@ pub(crate) fn percent_of_unit(slider: egui::Slider) -> egui::Slider {
         })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: every section shows open.
+    pub(crate) static SECTIONS_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Collapsible section: a hairline, a small uppercase title with a
 /// disclosure triangle, and an unindented body.
 pub(crate) fn section<R>(
@@ -211,6 +322,10 @@ pub(crate) fn section<R>(
 ) -> Option<R> {
     let id = ui.id().with(("section", title));
     let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(default_open);
+    #[cfg(test)]
+    {
+        open |= SECTIONS_OPEN.with(|o| o.get());
+    }
 
     ui.add_space(4.0);
     let header_height = if metrics(ui.ctx()).touch { 34.0 } else { 22.0 };
@@ -260,4 +375,319 @@ pub(crate) fn vdivider(ui: &mut egui::Ui) {
         rect.y_range().shrink(2.0),
         Stroke::new(1.0_f32, BORDER_LIGHT),
     );
+}
+
+/// A menu sliding out from a toolbar button (`anchor`) while `*open`;
+/// scrolls when taller than the screen, and closes on a click elsewhere.
+pub(crate) fn flyout(
+    ctx: &egui::Context,
+    id: &str,
+    open: &mut bool,
+    anchor: Rect,
+    width: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let t = ctx.animate_bool_with_time(egui::Id::new((id, "anim")), *open, 0.12);
+    if t <= 0.0 {
+        return;
+    }
+    let x = anchor.right() + 4.0 - (1.0 - t) * width;
+    let screen = ctx.screen_rect();
+    // Low buttons open upward enough to fit.
+    let top = anchor
+        .top()
+        .min((screen.bottom() - 260.0).max(screen.top()));
+    let response = egui::Area::new(egui::Id::new(id))
+        .fixed_pos(egui::pos2(x, top))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_opacity(t);
+            egui::Frame::none()
+                .fill(BG_PANEL)
+                .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.set_width(width - 16.0);
+                    egui::ScrollArea::vertical()
+                        .max_height((screen.bottom() - top - 24.0).max(120.0))
+                        .show(ui, add_contents);
+                });
+        })
+        .response;
+    let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
+        && ctx
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| !response.rect.contains(p) && !anchor.contains(p));
+    if *open && clicked_outside {
+        *open = false;
+    }
+}
+
+/// A small menu dropping from a top-bar button (`anchor`) while `*open`,
+/// its right edge under the button's; `size` is its content's. Closes on a
+/// tap on the canvas or a panel (not on its own popups, like a combo box).
+pub(crate) fn dropdown(
+    ctx: &egui::Context,
+    id: &str,
+    open: &mut bool,
+    anchor: Rect,
+    size: egui::Vec2,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let t = ctx.animate_bool_with_time(egui::Id::new((id, "anim")), *open, 0.12);
+    if t <= 0.0 {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let x = (anchor.right() - size.x - 16.0).max(screen.left());
+    let y = anchor.bottom() + 2.0 - (1.0 - t) * 12.0;
+    egui::Area::new(egui::Id::new(id))
+        .fixed_pos(egui::pos2(x, y))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_opacity(t);
+            egui::Frame::none()
+                .fill(BG_PANEL)
+                .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.set_width(size.x);
+                    ui.set_height(size.y);
+                    ui.set_clip_rect(ui.max_rect().expand(1.0));
+                    add_contents(ui);
+                });
+        });
+    let tapped_behind = ctx.input(|i| i.pointer.any_pressed())
+        && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| {
+            !anchor.contains(p)
+                && ctx
+                    .layer_id_at(p)
+                    .is_none_or(|l| l.order == egui::Order::Background)
+        });
+    if *open && tapped_behind {
+        *open = false;
+    }
+}
+
+thread_local! {
+    /// Sliders reset to this "default" epoch's first value; bumped when a
+    /// preset is chosen, so their defaults become the preset's. (The UI's
+    /// thread's own: tests running side by side each keep theirs.)
+    static DEFAULTS_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The brush changed wholesale (a preset): sliders take their current
+/// values as the ones a double-click returns to.
+pub(crate) fn new_slider_defaults() {
+    DEFAULTS_EPOCH.with(|e| e.set(e.get() + 1));
+}
+
+/// A slider that a double-click (or double-tap) resets: to its value when
+/// first shown since the last [`new_slider_defaults`] (the preset's, for
+/// brush settings; the default, for tools).
+pub(crate) fn reset<'a, T, F>(value: &'a mut T, build: F) -> Reset<'a, T, F>
+where
+    T: egui::emath::Numeric + Send + Sync + 'static,
+    F: for<'b> FnOnce(&'b mut T) -> BarSlider<'b>,
+{
+    Reset { value, build }
+}
+
+pub(crate) struct Reset<'a, T, F> {
+    value: &'a mut T,
+    build: F,
+}
+
+impl<T, F> egui::Widget for Reset<'_, T, F>
+where
+    T: egui::emath::Numeric + Send + Sync + 'static,
+    F: for<'b> FnOnce(&'b mut T) -> BarSlider<'b>,
+{
+    fn ui(self, ui: &mut egui::Ui) -> Response {
+        let before = *self.value;
+        let mut response = ui.add((self.build)(self.value));
+        let epoch = DEFAULTS_EPOCH.with(std::cell::Cell::get);
+        let key = response.id.with(("slider_default", epoch));
+        let default = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(key, || before));
+        // The second click of a double-click is also a press the slider acts
+        // on (it jumps to the pointer): the reset holds until the button is
+        // let go.
+        let holding = response.id.with("slider_resetting");
+        // A slider senses drags, not clicks, so its response never reports
+        // a double-click: read it off the pointer (a finger's double-tap
+        // comes the same way).
+        let double = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| response.rect.contains(p))
+        });
+        if double {
+            ui.data_mut(|d| d.insert_temp(holding, true));
+        }
+        if ui.data(|d| d.get_temp::<bool>(holding)).unwrap_or(false) {
+            if *self.value != default {
+                *self.value = default;
+                response.mark_changed();
+            }
+            if !ui.input(|i| i.pointer.any_down()) {
+                ui.data_mut(|d| d.remove::<bool>(holding));
+            }
+        }
+        response
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+
+    /// Runs one frame showing a slider on `value`; `events` are this frame's
+    /// input. Returns the slider's rect.
+    fn frame(ctx: &egui::Context, value: &mut f32, events: Vec<egui::Event>, t: f64) -> Rect {
+        let mut rect = Rect::NOTHING;
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                time: Some(t),
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    rect = ui.add(reset(value, |v| BarSlider::new(v, 0.0..=1.0))).rect;
+                });
+            },
+        );
+        rect
+    }
+
+    fn click(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// Two clicks in quick succession, each press and release in its own
+    /// frame as real input comes.
+    fn double_click(ctx: &egui::Context, value: &mut f32, at: egui::Pos2, t: f64) {
+        frame(ctx, value, vec![egui::Event::PointerMoved(at)], t);
+        for (i, pressed) in [true, false, true, false].into_iter().enumerate() {
+            frame(
+                ctx,
+                value,
+                vec![click(at, pressed)],
+                t + 0.05 * (i + 1) as f64,
+            );
+        }
+        frame(ctx, value, vec![], t + 0.3);
+    }
+
+    #[test]
+    fn a_double_click_returns_a_slider_to_its_default() {
+        let ctx = egui::Context::default();
+        let mut value = 0.5;
+        let rect = frame(&ctx, &mut value, vec![], 0.0);
+        value = 0.8;
+        frame(&ctx, &mut value, vec![], 0.1);
+        // On the track, away from where a click would move it much.
+        let at = rect.left_center() + egui::vec2(20.0, 0.0);
+        double_click(&ctx, &mut value, at, 1.0);
+        assert!((value - 0.5).abs() < 1e-6, "reset to 0.5, got {value}");
+
+        // New defaults (a preset chosen): the current value becomes it.
+        value = 0.3;
+        new_slider_defaults();
+        frame(&ctx, &mut value, vec![], 2.0);
+        value = 0.9;
+        double_click(&ctx, &mut value, at, 3.0);
+        assert!(
+            (value - 0.3).abs() < 1e-6,
+            "reset to the new default, got {value}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod growth_tests {
+    use super::*;
+
+    /// Width of an auto-sized window over `frames` frames with the pointer moving.
+    fn window_widths(frames: usize, contents: impl Fn(&mut egui::Ui)) -> Vec<f32> {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_global_style(&ctx);
+        let mut widths = Vec::new();
+        for i in 0..frames {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 1000.0),
+                )),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(egui::pos2(
+                800.0 + i as f32,
+                700.0,
+            )));
+            let mut w = 0.0;
+            let _ = ctx.run(input, |ctx| {
+                let r = egui::Window::new("t")
+                    .resizable(false)
+                    .default_width(340.0)
+                    .show(ctx, |ui| contents(ui));
+                w = r.unwrap().response.rect.width();
+            });
+            widths.push(w);
+        }
+        widths
+    }
+
+    #[test]
+    fn slider_rows_do_not_grow_their_window() {
+        let widths = window_widths(30, |ui| {
+            let mut a = 1000.0_f32;
+            slider_row(
+                ui,
+                "Radius",
+                BarSlider::new(&mut a, 0.0..=1000.0).suffix(" px"),
+            );
+            let mut b = 0.5_f32;
+            slider_row(
+                ui,
+                "A much longer label",
+                percent_of_unit(BarSlider::new(&mut b, 0.0..=1.0)),
+            );
+        });
+        let last = widths[widths.len() - 1];
+        assert!(
+            (last - widths[widths.len() - 10]).abs() < 0.5 && last < 400.0,
+            "window kept growing: {widths:?}"
+        );
+    }
+
+    #[test]
+    fn filter_dialogs_do_not_grow() {
+        use crate::canvas::filters::Filter;
+        for group in Filter::MENU {
+            for f in group.iter() {
+                let widths = window_widths(40, |ui| {
+                    let mut f = *f;
+                    crate::ui::filter_dialog::settings(ui, &mut f);
+                });
+                let last = widths[widths.len() - 1];
+                assert!(
+                    (last - widths[widths.len() - 20]).abs() < 0.5,
+                    "{} keeps resizing: {widths:?}",
+                    f.name()
+                );
+            }
+        }
+    }
 }

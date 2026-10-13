@@ -75,22 +75,43 @@ use crate::window::{Window, WindowAttributes};
 
 use self::activity::{AndroidApp, ConfigurationRef, Rect};
 
-/// Latest stylus sample (rusty-painter patch). Winit delivers a stylus as mouse
-/// events without pressure; read this alongside them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PenState {
-    /// Normalized pressure (0..=1) of the most recent stylus/mouse event.
-    pub pressure: f32,
-    /// The pen's eraser end is in use.
-    pub is_eraser: bool,
-    /// The most recent pointer was a stylus rather than a mouse.
-    pub is_stylus: bool,
+/// Where a stylus sample falls in a contact (rusty-painter patch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PenPhase {
+    /// The pen touched the screen.
+    Down,
+    /// The pen moved while touching.
+    Move,
+    /// The pen lifted.
+    Up,
+    /// The system cancelled the contact (palm rejection, a system gesture):
+    /// it was not intended input.
+    Cancel,
 }
 
-/// The most recent stylus sample.
-pub fn pen_state() -> PenState {
-    let (pressure, is_eraser, is_stylus) = crate::platform_impl::pen_state();
-    PenState { pressure, is_eraser, is_stylus }
+/// One stylus sample (rusty-painter patch). Winit delivers a stylus as mouse
+/// events without pressure, and only the newest of the samples Android batches
+/// into each event; every sample is also queued here, in order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenSample {
+    /// Position in physical pixels, relative to the window.
+    pub x: f32,
+    pub y: f32,
+    /// Normalized pressure (0..=1).
+    pub pressure: f32,
+    /// Angle from perpendicular in radians (0 = upright, π/2 = flat), and
+    /// the direction the pen points in radians (0 = up the screen,
+    /// positive clockwise), as Android reports them.
+    pub tilt: f32,
+    pub orientation: f32,
+    /// The pen's eraser end is in use.
+    pub is_eraser: bool,
+    pub phase: PenPhase,
+}
+
+/// Take the stylus samples queued since the last call, oldest first.
+pub fn take_pen_samples() -> Vec<PenSample> {
+    crate::platform_impl::take_pen_samples()
 }
 
 /// Additional methods on [`EventLoop`] that are specific to Android.

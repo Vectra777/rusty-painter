@@ -149,23 +149,23 @@ declare_class!(
         }
 
         #[method(touchesBegan:withEvent:)]
-        fn touches_began(&self, touches: &NSSet<UITouch>, _event: Option<&UIEvent>) {
-            self.handle_touches(touches)
+        fn touches_began(&self, touches: &NSSet<UITouch>, event: Option<&UIEvent>) {
+            self.handle_touches(touches, event)
         }
 
         #[method(touchesMoved:withEvent:)]
-        fn touches_moved(&self, touches: &NSSet<UITouch>, _event: Option<&UIEvent>) {
-            self.handle_touches(touches)
+        fn touches_moved(&self, touches: &NSSet<UITouch>, event: Option<&UIEvent>) {
+            self.handle_touches(touches, event)
         }
 
         #[method(touchesEnded:withEvent:)]
-        fn touches_ended(&self, touches: &NSSet<UITouch>, _event: Option<&UIEvent>) {
-            self.handle_touches(touches)
+        fn touches_ended(&self, touches: &NSSet<UITouch>, event: Option<&UIEvent>) {
+            self.handle_touches(touches, event)
         }
 
         #[method(touchesCancelled:withEvent:)]
-        fn touches_cancelled(&self, touches: &NSSet<UITouch>, _event: Option<&UIEvent>) {
-            self.handle_touches(touches)
+        fn touches_cancelled(&self, touches: &NSSet<UITouch>, event: Option<&UIEvent>) {
+            self.handle_touches(touches, event)
         }
 
         #[method(pinchGesture:)]
@@ -474,7 +474,8 @@ impl WinitView {
         }
     }
 
-    fn handle_touches(&self, touches: &NSSet<UITouch>) {
+    fn handle_touches(&self, touches: &NSSet<UITouch>, event: Option<&UIEvent>) {
+        super::pen::queue_pencil_touches(self, touches, event);
         let window = self.window().unwrap();
         let mut touch_events = Vec::new();
         let os_supports_force = app_state::os_capabilities().force_touch;

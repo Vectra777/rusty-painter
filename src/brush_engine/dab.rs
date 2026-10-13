@@ -1,3 +1,6 @@
+//! Dabs: one stamp of the brush, placed on the canvas and grouped by
+//! the tiles it touches.
+
 use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
 use rayon::ThreadPool;
@@ -12,7 +15,7 @@ pub(super) struct TileRegion {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct DabBounds {
+pub(crate) struct DabBounds {
     pub start_x: usize,
     pub start_y: usize,
     pub end_x: usize,
@@ -64,7 +67,7 @@ pub(super) fn calc_dab_bounds(
 /// A dab position resolved against the canvas: clipped bounds plus the
 /// quantized placement the Gaussian mask kernel uses.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct PlacedDab {
+pub(crate) struct PlacedDab {
     pub center: Vec2,
     pub bounds: DabBounds,
     /// Mask origin in canvas pixels (`floor(center) - r_ceil`).
@@ -73,10 +76,71 @@ pub(super) struct PlacedDab {
     /// Sub-pixel center offset, quantized to 1/16 px.
     pub frac_x: f32,
     pub frac_y: f32,
+    /// How the tip is turned and squashed for this dab (its dynamics, mirror
+    /// copies): maps canvas offsets from the centre to tip offsets,
+    /// row-major.
+    pub orient: [f32; 4],
+    /// Tip radius.
+    pub r: f32,
+    /// How far from the centre the dab can reach (a turned square tip's
+    /// corners reach past its radius).
+    pub reach: f32,
+    /// Strength factor on top of the brush's (dynamics), 0..1.
+    pub strength: f32,
+    /// `orient` only turns or mirrors (a round tip stays round), worked out
+    /// once when placed rather than per row.
+    pub rigid: bool,
+    /// The dab's colour, unmultiplied in the document's blend space (only
+    /// read for strokes whose dabs differ in colour).
+    pub color: [f32; 3],
+    /// Which of the brush's tips it uses.
+    pub tip: u8,
+    /// A ribbon's segment this dab paints (see `Brush::ribbon`).
+    pub seg: u32,
+    /// A hatching brush: how many directions it hatches in (1..=3).
+    pub hatch: u8,
+    /// Hardness added to the brush's (its input mappings), and its
+    /// texture's strength factor.
+    pub hardness: f32,
+    pub texture: f32,
+    /// Wash mode: the dab's opacity, which the stroke's coverage moves
+    /// toward and never past, and the stroke's running average of it (see
+    /// `Brush::paint_prepared`).
+    pub opacity: f32,
+    pub average: f32,
+    /// Hard edges' strength factor from the dab's inputs (1 = the brush's).
+    pub sharp: f32,
+    /// How soft a round or square tip is, in [`SOFT_LEVELS`]ths (all of
+    /// them: the tip as it is); see `DabSetting::Softness`.
+    pub soft: u8,
+    /// Flow factor from the dab's inputs (1 = the brush's).
+    pub flow: f32,
+    /// A lightness-mapped tip's strength from the dab's inputs (1 = full).
+    pub lightness: f32,
+    /// A mixing brush's smudge length and colour rate factors (its
+    /// inputs).
+    pub smudge: f32,
+    pub color_rate: f32,
+    pub thickness: f32,
+}
+
+/// Steps a dab's softness comes in (each a falloff of its own).
+pub const SOFT_LEVELS: u8 = 32;
+
+/// A Softness input's factor as a level, a tenth to full.
+pub fn soft_level(softness: f32) -> u8 {
+    (softness.clamp(0.1, 1.0) * SOFT_LEVELS as f32).round() as u8
 }
 
 impl PlacedDab {
-    pub fn new(center: Vec2, bounds: DabBounds, r_ceil: i32) -> Self {
+    /// Its softness factor (1: the tip as it is).
+    #[inline]
+    pub fn softness(&self) -> f32 {
+        self.soft as f32 / SOFT_LEVELS as f32
+    }
+
+    pub fn new(center: Vec2, bounds: DabBounds, r: f32) -> Self {
+        let r_ceil = r.ceil() as i32;
         let quantize =
             |v: f32| ((v - v.floor()) * 16.0).floor().clamp(0.0, 15.0) as u8 as f32 / 16.0;
         Self {
@@ -86,7 +150,58 @@ impl PlacedDab {
             base_y: center.y.floor() as i32 - r_ceil,
             frac_x: quantize(center.x),
             frac_y: quantize(center.y),
+            orient: [1.0, 0.0, 0.0, 1.0],
+            r,
+            reach: r,
+            strength: 1.0,
+            rigid: true,
+            color: [0.0; 3],
+            tip: 0,
+            seg: 0,
+            hatch: 1,
+            hardness: 0.0,
+            texture: 1.0,
+            opacity: 1.0,
+            average: 1.0,
+            sharp: 1.0,
+            soft: SOFT_LEVELS,
+            flow: 1.0,
+            lightness: 1.0,
+            smudge: 1.0,
+            color_rate: 1.0,
+            thickness: 1.0,
         }
+    }
+
+    /// The tip isn't turned or squashed.
+    #[inline]
+    pub fn upright(&self) -> bool {
+        self.orient == [1.0, 0.0, 0.0, 1.0]
+    }
+
+    /// The tip's squash (height over width), from `orient`.
+    #[inline]
+    pub fn ratio(&self) -> f32 {
+        let [a, b, c, d] = self.orient;
+        ((a * a + b * b) / (c * c + d * d).max(1e-12))
+            .sqrt()
+            .min(1.0)
+    }
+
+    /// A number telling this dab apart from others (for per-pixel
+    /// randomness that stays put when the stroke is redrawn).
+    #[inline]
+    pub fn seed(&self) -> u32 {
+        self.center.x.to_bits()
+            ^ self.center.y.to_bits().rotate_left(13)
+            ^ ((self.tip as u32) << 24)
+    }
+
+    /// `(dx, dy)` (canvas offset from the centre) in the tip's frame.
+    #[inline]
+    pub fn tip_offset(&self, dx: f32, dy: f32) -> (f32, f32) {
+        let [a, b, c, d] = self.orient;
+        (a * dx + b * dy, c * dx + d * dy)
     }
 }
 
@@ -157,7 +272,7 @@ pub(super) fn tile_overlap(
 /// Pixel work (dab area) that justifies one more thread. Below this per
 /// thread, extra threads mostly hand off work and spin: measured on a
 /// 16-thread pool, a 20 px brush used 3.5 cores to paint no faster than one.
-const PIXELS_PER_THREAD: usize = 16384;
+pub(super) const PIXELS_PER_THREAD: usize = 16384;
 
 /// Run `draw_tile` over every bucket: serially for a small batch, otherwise
 /// once through the thread pool (one dispatch per batch, not per dab).

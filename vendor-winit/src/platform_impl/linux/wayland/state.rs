@@ -12,6 +12,8 @@ use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Connection, Proxy, QueueHandle};
 
 use sctk::compositor::{CompositorHandler, CompositorState};
+use sctk::data_device_manager::data_device::DataDevice;
+use sctk::data_device_manager::DataDeviceManagerState;
 use sctk::output::{OutputHandler, OutputState};
 use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::seat::pointer::ThemedPointer;
@@ -27,7 +29,7 @@ use crate::platform_impl::wayland::event_loop::sink::EventSink;
 use crate::platform_impl::wayland::output::MonitorHandle;
 use crate::platform_impl::wayland::seat::{
     PointerConstraintsState, RelativePointerState, TextInputState, WinitPointerData,
-    WinitPointerDataExt, WinitSeatState,
+    WinitPointerDataExt, WinitSeatState, TabletState,
 };
 use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
 use crate::platform_impl::wayland::types::wp_fractional_scaling::FractionalScalingManager;
@@ -78,11 +80,20 @@ pub struct WinitState {
     /// Currently handled seats.
     pub seats: AHashMap<ObjectId, WinitSeatState>,
 
+    /// Drag and drop, when the compositor has it.
+    pub data_device_manager: Option<DataDeviceManagerState>,
+
+    /// Each seat's data device (drops onto our windows), by seat.
+    pub data_devices: AHashMap<ObjectId, DataDevice>,
+
     /// Currently present cursor surfaces.
     pub pointer_surfaces: AHashMap<ObjectId, Arc<ThemedPointer<WinitPointerData>>>,
 
     /// The state of the text input on the client.
     pub text_input_state: Option<TextInputState>,
+
+    /// Pens (rusty-painter patch: see `seat::tablet`).
+    pub tablet_state: Option<TabletState>,
 
     /// Observed monitors.
     pub monitors: Arc<Mutex<Vec<MonitorHandle>>>,
@@ -148,6 +159,18 @@ impl WinitState {
             seats.insert(seat.id(), WinitSeatState::new());
         }
 
+        let tablet_state = TabletState::new(globals, queue_handle, seat_state.seats()).ok();
+
+        let data_device_manager = DataDeviceManagerState::bind(globals, queue_handle).ok();
+        let data_devices = seat_state
+            .seats()
+            .filter_map(|seat| {
+                let device =
+                    super::dnd::data_device(data_device_manager.as_ref(), queue_handle, &seat)?;
+                Some((seat.id(), device))
+            })
+            .collect();
+
         let (viewporter_state, fractional_scaling_manager) =
             if let Ok(fsm) = FractionalScalingManager::new(globals, queue_handle) {
                 (ViewporterState::new(globals, queue_handle).ok(), Some(fsm))
@@ -179,7 +202,10 @@ impl WinitState {
             kwin_blur_manager: KWinBlurManager::new(globals, queue_handle).ok(),
 
             seats,
+            data_device_manager,
+            data_devices,
             text_input_state: TextInputState::new(globals, queue_handle).ok(),
+            tablet_state,
 
             relative_pointer: RelativePointerState::new(globals, queue_handle).ok(),
             pointer_constraints: PointerConstraintsState::new(globals, queue_handle)

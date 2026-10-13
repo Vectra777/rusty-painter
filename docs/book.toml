@@ -1,0 +1,10 @@
+[book]
+title = "Rusty Painter"
+authors = ["Valentin Belougne"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/Vectra777/rusty-painter"
+edit-url-template = "https://github.com/Vectra777/rusty-painter/edit/master/docs/{path}"
+site-url = "/rusty-painter/"

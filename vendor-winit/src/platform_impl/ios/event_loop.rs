@@ -190,15 +190,29 @@ impl<T: 'static> EventLoop<T> {
             &center,
             // `applicationDidBecomeActive:`
             unsafe { UIApplicationDidBecomeActiveNotification },
-            move |_| {
+            move |notification| {
                 app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Resumed));
+                // rusty-painter patch: see `send_focused_event_for_all_windows`.
+                if let Some(app) = unsafe { notification.object() } {
+                    // SAFETY: the object of an application notification is
+                    // the `UIApplication`.
+                    let app: Retained<UIApplication> = unsafe { Retained::cast(app) };
+                    app_state::send_focused_event_for_all_windows(&app, true);
+                }
             },
         );
         let _will_resign_active_observer = create_observer(
             &center,
             // `applicationWillResignActive:`
             unsafe { UIApplicationWillResignActiveNotification },
-            move |_| {
+            move |notification| {
+                // rusty-painter patch: see `send_focused_event_for_all_windows`.
+                if let Some(app) = unsafe { notification.object() } {
+                    // SAFETY: the object of an application notification is
+                    // the `UIApplication`.
+                    let app: Retained<UIApplication> = unsafe { Retained::cast(app) };
+                    app_state::send_focused_event_for_all_windows(&app, false);
+                }
                 app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Suspended));
             },
         );

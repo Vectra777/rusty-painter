@@ -17,7 +17,8 @@ use crate::selection::{SelectionMask, SelectionShape};
 use eframe::egui::{Color32, Vec2};
 use rayon::prelude::*;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct FillSettings {
     /// Largest per-channel difference (0..=255) still counted as the same area.
     pub tolerance: u8,
@@ -236,22 +237,37 @@ impl Grid {
     fn into_mask(self, region: &[u8], antialias: bool) -> Option<SelectionMask> {
         let (w, h) = (self.w, self.h);
         let data: Vec<u8> = if antialias {
-            (0..w * h)
-                .into_par_iter()
-                .map(|i| {
-                    if region[i] != 0 {
-                        return 255;
+            // Filled neighbours in each 3×3 block, as a row sum then a
+            // column sum (separable: two reads a pixel instead of nine).
+            let mut across = vec![0u8; w * h];
+            across
+                .par_chunks_mut(w.max(1))
+                .zip(region.par_chunks(w.max(1)))
+                .for_each(|(out, row)| {
+                    let at = |x: usize| (row[x] != 0) as u8;
+                    for (x, o) in out.iter_mut().enumerate() {
+                        let left = if x > 0 { at(x - 1) } else { 0 };
+                        let right = if x + 1 < w { at(x + 1) } else { 0 };
+                        *o = left + at(x) + right;
                     }
-                    let (x, y) = (i % w, i / w);
-                    let mut n = 0u32;
-                    for ny in y.saturating_sub(1)..(y + 2).min(h) {
-                        for nx in x.saturating_sub(1)..(x + 2).min(w) {
-                            n += (region[ny * w + nx] != 0) as u32;
+                });
+            let mut data = vec![0u8; w * h];
+            data.par_chunks_mut(w.max(1))
+                .enumerate()
+                .for_each(|(y, out)| {
+                    for (x, o) in out.iter_mut().enumerate() {
+                        let i = y * w + x;
+                        if region[i] != 0 {
+                            *o = 255;
+                            continue;
                         }
+                        let up = if y > 0 { across[i - w] } else { 0 };
+                        let down = if y + 1 < h { across[i + w] } else { 0 };
+                        let n = (up + across[i] + down) as u32;
+                        *o = (n * 255 / 9) as u8;
                     }
-                    (n * 255 / 9) as u8
-                })
-                .collect()
+                });
+            data
         } else {
             region
                 .iter()
@@ -671,6 +687,95 @@ pub fn enclose_fill(
 }
 
 /// Most frequent colour (bucketed to 5 bits per channel).
+/// How [`select_color`] decides a pixel matches the target colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ColorMatch {
+    /// Like the bucket fill: every channel (premultiplied) within
+    /// `tolerance`; hard-edged.
+    Channels { tolerance: u8 },
+    /// By how different the colours look (Oklab, in percent of the black to
+    /// white distance, alpha included): fully selected up to `tolerance`,
+    /// fading out over `softness` beyond it.
+    Perceptual { tolerance: f32, softness: f32 },
+}
+
+/// Every pixel of the `width`×`height` reference that matches `target`,
+/// wherever it is (not only the connected area), as coverage.
+pub fn select_color(
+    reference: &dyn Reference,
+    width: usize,
+    height: usize,
+    target: Color32,
+    matching: ColorMatch,
+) -> Option<SelectionMask> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    // Oklab of the colour behind a premultiplied pixel, and its alpha.
+    let lab_alpha = |c: Color32| {
+        let [r, g, b, a] = crate::canvas::blend::unmultiply(c);
+        (
+            crate::canvas::palette::Lab::from_rgb(r, g, b).0,
+            a as f32 / 255.0,
+        )
+    };
+    let (target_lab, target_a) = lab_alpha(target);
+    let coverage = |c: Color32| -> u8 {
+        match matching {
+            ColorMatch::Channels { tolerance } => {
+                if diff(c, target) <= tolerance {
+                    255
+                } else {
+                    0
+                }
+            }
+            ColorMatch::Perceptual {
+                tolerance,
+                softness,
+            } => {
+                let (lab, a) = lab_alpha(c);
+                let d2 = (0..3)
+                    .map(|i| (lab[i] - target_lab[i]).powi(2))
+                    .sum::<f32>();
+                // Colour counts as much as both pixels show it; transparent
+                // pixels match each other whatever their (invisible) colour.
+                let d = 100.0 * (d2.sqrt() * a.min(target_a) + (a - target_a).abs());
+                if d <= tolerance {
+                    255
+                } else if softness > 0.0 && d < tolerance + softness {
+                    (255.0 * (1.0 - (d - tolerance) / softness)).round() as u8
+                } else {
+                    0
+                }
+            }
+        }
+    };
+    let mut data = vec![0u8; width * height];
+    data.par_chunks_mut(width * BLOCK)
+        .enumerate()
+        .for_each(|(i, strip)| {
+            let rows = strip.len() / width;
+            let pixels = reference.render(0, (i * BLOCK) as i32, width, rows);
+            // Pictures repeat colours (runs, flat areas, palettes): a small
+            // cache of recent answers skips most colour conversions.
+            const SLOTS: usize = 1024;
+            let mut cache = vec![(Color32::TRANSPARENT, 0u8, false); SLOTS];
+            for (out, &px) in strip.iter_mut().zip(&pixels) {
+                let key = u32::from_le_bytes(px.to_array());
+                let slot = (key.wrapping_mul(0x9E37_79B1) >> 22) as usize % SLOTS;
+                let entry = &mut cache[slot];
+                *out = if entry.2 && entry.0 == px {
+                    entry.1
+                } else {
+                    let v = coverage(px);
+                    *entry = (px, v, true);
+                    v
+                };
+            }
+        });
+    SelectionMask::new(0, 0, width, height, data).cropped()
+}
+
 fn most_common(pixels: impl Iterator<Item = Color32>) -> Option<Color32> {
     // A flat table over 5-bit-per-channel buckets (4 MB) beats hashing
     // millions of pixels; a spread-out sample finds the same winner.
@@ -698,6 +803,63 @@ fn most_common(pixels: impl Iterator<Item = Color32>) -> Option<Color32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_select_finds_every_matching_area() {
+        let mut img = Image::new(32, 8);
+        let red = Color32::from_rgb(220, 30, 30);
+        for x in [2usize, 3, 20, 21] {
+            img.px[4 * 32 + x] = red;
+        }
+        // A slightly different red matches perceptually, not by channels.
+        img.px[4 * 32 + 10] = Color32::from_rgb(210, 36, 32);
+        let reference = img.reference();
+        let strict = select_color(
+            &reference,
+            32,
+            8,
+            red,
+            ColorMatch::Channels { tolerance: 0 },
+        )
+        .unwrap();
+        assert_eq!(strict.value(2, 4), 255);
+        assert_eq!(strict.value(21, 4), 255, "not only the connected area");
+        assert_eq!(strict.value(10, 4), 0);
+        assert_eq!(strict.value(5, 4), 0);
+        let loose = select_color(
+            &reference,
+            32,
+            8,
+            red,
+            ColorMatch::Perceptual {
+                tolerance: 5.0,
+                softness: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(loose.value(10, 4), 255);
+        assert_eq!(loose.value(5, 4), 0, "white is far from red");
+    }
+
+    #[test]
+    fn color_select_softness_fades_coverage() {
+        let img = Image::new(4, 1);
+        let reference = img.reference();
+        let grey = Color32::from_gray(200);
+        let mask = select_color(
+            &reference,
+            4,
+            1,
+            grey,
+            ColorMatch::Perceptual {
+                tolerance: 0.0,
+                softness: 100.0,
+            },
+        )
+        .unwrap();
+        let v = mask.value(0, 0);
+        assert!(v > 0 && v < 255, "partly selected: {v}");
+    }
 
     /// A white canvas with black axis-aligned rectangles outlined (1 px).
     struct Image {
@@ -821,6 +983,38 @@ mod timing {
             };
             let m = bucket_fill(&reference, w, h, (100, 100), &settings).unwrap();
             eprintln!("gap {gap}: {:?} ({}x{})", t.elapsed(), m.w, m.h);
+        }
+    }
+
+    #[test]
+    #[ignore = "timing; run with --release --ignored"]
+    fn color_select_4k() {
+        let (w, h) = (4096usize, 4096usize);
+        let px: Vec<Color32> = (0..w * h)
+            .map(|i| Color32::from_rgb((i % 251) as u8, (i % 241) as u8, 128))
+            .collect();
+        let reference = |x: i32, y: i32, rw: usize, rh: usize| {
+            let mut out = Vec::with_capacity(rw * rh);
+            for yy in y as usize..y as usize + rh {
+                out.extend_from_slice(&px[yy * w + x as usize..yy * w + x as usize + rw]);
+            }
+            out
+        };
+        let target = Color32::from_rgb(100, 100, 128);
+        for matching in [
+            ColorMatch::Channels { tolerance: 20 },
+            ColorMatch::Perceptual {
+                tolerance: 8.0,
+                softness: 6.0,
+            },
+        ] {
+            let t = std::time::Instant::now();
+            let m = select_color(&reference, w, h, target, matching);
+            eprintln!(
+                "{matching:?}: {:?} ({:?})",
+                t.elapsed(),
+                m.map(|m| (m.w, m.h))
+            );
         }
     }
 }

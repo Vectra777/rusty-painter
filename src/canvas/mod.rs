@@ -1,10 +1,31 @@
-//! Canvas storage, compositing, and history helpers.
+//! The document model: tiled layers ([`storage`]), blending and
+//! compositing, undo history, and the pixel algorithms tools run on it
+//! (fill, filters, gradient, liquify, inpaint, palette, text).
+pub mod animation;
 pub mod blend;
 pub mod blend_modes;
+pub mod color;
+pub mod color_profile;
+pub mod effects;
 pub mod fill;
+#[cfg(test)]
+mod filter_quality;
+pub mod filters;
+pub mod geometry;
+pub mod gradient;
 pub mod history;
+pub mod impasto;
+pub mod inpaint;
+pub mod layer_style;
 pub mod liquify;
+pub mod motion;
 pub mod palette;
+pub mod puppet;
+pub mod rig;
+pub mod shader;
 pub mod storage;
+pub mod text;
+pub mod vector;
+pub mod wet;
 
 pub use storage::Canvas;

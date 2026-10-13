@@ -43,6 +43,7 @@ mod event_processor;
 pub mod ffi;
 mod ime;
 mod monitor;
+pub(crate) mod pen;
 mod util;
 mod window;
 mod xdisplay;
@@ -975,6 +976,8 @@ fn mkdid(w: xinput::DeviceId) -> crate::event::DeviceId {
 pub struct Device {
     _name: String,
     scroll_axes: Vec<(i32, ScrollAxis)>,
+    /// rusty-painter patch: the pen axes, when this is a tablet pen.
+    pub(crate) pen: Option<pen::Pen>,
     // For master devices, this is the paired device (pointer <-> keyboard).
     // For slave devices, this is the master.
     attachment: c_int,
@@ -994,7 +997,7 @@ enum ScrollOrientation {
 }
 
 impl Device {
-    fn new(info: &ffi::XIDeviceInfo) -> Self {
+    fn new(xconn: &XConnection, info: &ffi::XIDeviceInfo) -> Self {
         let name = unsafe { CStr::from_ptr(info.name).to_string_lossy() };
         let mut scroll_axes = Vec::new();
 
@@ -1017,8 +1020,10 @@ impl Device {
             }
         }
 
+        let pen =
+            if Device::physical_device(info) { pen::Pen::from_device(xconn, info) } else { None };
         let mut device =
-            Device { _name: name.into_owned(), scroll_axes, attachment: info.attachment };
+            Device { _name: name.into_owned(), scroll_axes, pen, attachment: info.attachment };
         device.reset_scroll_position(info);
         device
     }

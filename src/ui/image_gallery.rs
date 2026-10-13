@@ -4,13 +4,14 @@
 
 use crate::PainterApp;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use eframe::egui::{self, RichText};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 #[cfg(target_os = "android")]
-use crate::utils::android as photos;
+use crate::android as photos;
 
 /// Desktop builds import through the file dialog; these keep the gallery
 /// compiling (and checked) there.
@@ -73,6 +74,8 @@ pub struct GalleryState {
     /// Tells the thumbnail thread to stop (gallery closed).
     cancel: Arc<AtomicBool>,
     last_access_check: f64,
+    /// The picked image becomes the reference image, not a new layer.
+    for_reference: bool,
 }
 
 impl Default for GalleryState {
@@ -86,6 +89,7 @@ impl Default for GalleryState {
             rx,
             cancel: Arc::new(AtomicBool::new(false)),
             last_access_check: 0.0,
+            for_reference: false,
         }
     }
 }
@@ -98,6 +102,7 @@ impl GalleryState {
             return;
         }
         self.error = None;
+        self.for_reference = false;
         if photos::has_image_access() {
             self.start_listing();
         } else {
@@ -106,6 +111,14 @@ impl GalleryState {
             }
             self.phase = Phase::NeedAccess;
         }
+    }
+
+    /// Open the gallery to pick the reference image (View → Reference
+    /// Image).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn open_for_reference(&mut self) {
+        self.open();
+        self.for_reference = true;
     }
 
     fn close(&mut self) {
@@ -204,7 +217,11 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
     match decoded {
         Some(Ok((name, img))) => {
             app.workspace.gallery.close();
-            app.import_rgba(&name, img);
+            if std::mem::take(&mut app.workspace.gallery.for_reference) {
+                app.set_reference_image(&name, img);
+            } else {
+                app.import_rgba(&name, img);
+            }
             return;
         }
         Some(Err(e)) => {
@@ -232,6 +249,7 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = true;
     let mut pick = None;
     egui::Window::new("Import image")
+        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -286,7 +304,7 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
                                 continue;
                             }
                             let painter = ui.painter();
-                            painter.rect_filled(rect, 0.0, BG_RAISED);
+                            painter.rect_filled(rect, RADIUS_CARD, BG_RAISED);
                             if let Some(tex) = &item.texture {
                                 // Fit inside the square, keeping proportions.
                                 let size = tex.size_vec2();
@@ -299,7 +317,11 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
                                 painter.image(tex.id(), r, uv, egui::Color32::WHITE);
                             }
                             if response.hovered() {
-                                painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0_f32, ACCENT));
+                                painter.rect_stroke(
+                                    rect,
+                                    RADIUS_CARD,
+                                    egui::Stroke::new(2.0_f32, accent()),
+                                );
                             }
                             if response.on_hover_text(&item.image.name).clicked() {
                                 pick = Some(item.image.clone());

@@ -23,6 +23,44 @@ use crate::window::{Window, WindowAttributes};
 
 pub use crate::window::Theme;
 
+/// Where a pen sample falls in a contact (rusty-painter patch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PenPhase {
+    /// The pen touched the tablet.
+    Down,
+    /// The pen moved while touching.
+    Move,
+    /// The pen lifted.
+    Up,
+}
+
+/// One tablet pen sample (rusty-painter patch). A compositor sends a pen
+/// through the tablet protocol, which winit turns into pointer events (the
+/// tip the left button); each frame of a pen touching is also queued here,
+/// in order, with what the pointer events can't carry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenSample {
+    /// Position in physical pixels, relative to the window.
+    pub x: f32,
+    pub y: f32,
+    /// Normalized pressure (0..=1).
+    pub pressure: f32,
+    /// Tilt along x and y in radians from upright (positive: leaning right
+    /// and towards the user), when the pen reports it.
+    pub tilt: Option<[f32; 2]>,
+    /// An Art Pen's barrel rotation or an airbrush's finger wheel (0..=1),
+    /// when the pen has one.
+    pub wheel: Option<f32>,
+    /// The tool is an eraser (a pen's eraser end).
+    pub is_eraser: bool,
+    pub phase: PenPhase,
+}
+
+/// Take the pen samples queued since the last call, oldest first.
+pub fn take_pen_samples() -> Vec<PenSample> {
+    crate::platform_impl::wayland::take_pen_samples()
+}
+
 /// Additional methods on [`ActiveEventLoop`] that are specific to Wayland.
 pub trait ActiveEventLoopExtWayland {
     /// True if the [`ActiveEventLoop`] uses Wayland.

@@ -9,3 +9,8 @@ linker = "./scripts/linkers/i686-linux-android-clang"
 
 [target.x86_64-linux-android]
 linker = "./scripts/linkers/x86_64-linux-android-clang"
+
+# The C runtime inside the .exe, so it starts on a fresh Windows (no Visual
+# C++ Redistributable to install).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

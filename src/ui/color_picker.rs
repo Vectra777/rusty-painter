@@ -1,9 +1,12 @@
+//! The colour panel: HSV triangle picker with colour harmonies, opacity,
+//! hex entry and recent colours.
+
 use crate::ColorModel;
-use crate::app::painter_state::BrushState;
+use crate::app::state::BrushState;
+use crate::canvas::color::ColorManipulation;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use crate::ui::widgets::{color_swatch, draw_checkerboard, paint_swatch, section};
-use crate::utils::color::ColorManipulation;
 use eframe::egui::{self, Color32, Pos2, RichText, Sense, Stroke};
 use std::f32::consts::TAU;
 
@@ -19,6 +22,59 @@ struct PickerState {
     val: f32,
     last_color: Color32,
     drag: WheelDrag,
+    harmony: Harmony,
+}
+
+/// Colours that go with the current one, shown around the wheel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Harmony {
+    #[default]
+    None,
+    /// Opposite on the wheel.
+    Complementary,
+    /// Either side of the opposite.
+    SplitComplementary,
+    /// The neighbours.
+    Analogous,
+    /// A third of the way round, each way.
+    Triadic,
+    /// A square: every quarter.
+    Tetradic,
+}
+
+impl Harmony {
+    pub const ALL: [Harmony; 6] = [
+        Harmony::None,
+        Harmony::Complementary,
+        Harmony::SplitComplementary,
+        Harmony::Analogous,
+        Harmony::Triadic,
+        Harmony::Tetradic,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Harmony::None => "No harmony",
+            Harmony::Complementary => "Complementary",
+            Harmony::SplitComplementary => "Split complementary",
+            Harmony::Analogous => "Analogous",
+            Harmony::Triadic => "Triadic",
+            Harmony::Tetradic => "Tetradic",
+        }
+    }
+
+    /// The other hues (0..1) that go with `hue`.
+    pub fn hues(self, hue: f32) -> Vec<f32> {
+        let offsets: &[f32] = match self {
+            Harmony::None => &[],
+            Harmony::Complementary => &[0.5],
+            Harmony::SplitComplementary => &[5.0 / 12.0, 7.0 / 12.0],
+            Harmony::Analogous => &[-1.0 / 12.0, 1.0 / 12.0],
+            Harmony::Triadic => &[1.0 / 3.0, 2.0 / 3.0],
+            Harmony::Tetradic => &[0.25, 0.5, 0.75],
+        };
+        offsets.iter().map(|o| (hue + o).rem_euclid(1.0)).collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,25 +93,45 @@ fn gradient_slider(
     checker: bool,
 ) -> bool {
     ui.horizontal(|ui| {
+        let touch = metrics(ui.ctx()).touch;
+        let bar_height: f32 = if touch { 26.0 } else { 16.0 };
+        let box_height = bar_height.max(18.0);
+        if touch {
+            // The number box as tall as the bar, so they line up.
+            ui.spacing_mut().interact_size.y = box_height;
+        }
         ui.add_sized(
             egui::vec2(14.0, 18.0),
             egui::Label::new(RichText::new(label).small().color(TEXT_DIM)),
         );
-        let value_width = 36.0;
+        // No narrower than egui draws a number box, or the row overflows.
+        let value_width = ui.spacing().interact_size.x.max(36.0);
         let width = (ui.available_width() - value_width - ui.spacing().item_spacing.x).max(40.0);
-        let bar_height = if metrics(ui.ctx()).touch { 26.0 } else { 14.0 };
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, bar_height), Sense::click_and_drag());
         let painter = ui.painter();
+        // A pill: the gradient between two round ends of its end colours.
+        // The handle travels between the ends' centres, so it never sticks
+        // out past the bar (and every bar is as long as the others).
+        let r = bar_height * 0.5;
+        let track = egui::Rangef::new(rect.left() + r, rect.right() - r);
+        let cap = |x: f32, color: Color32| {
+            if checker {
+                painter.circle_filled(egui::pos2(x, rect.center().y), r, CHECKERBOARD_LIGHT);
+            }
+            painter.circle_filled(egui::pos2(x, rect.center().y), r, color);
+        };
+        cap(track.min, color_at(0.0));
+        cap(track.max, color_at(1.0));
+        let middle = egui::Rect::from_x_y_ranges(track, rect.y_range());
         if checker {
-            draw_checkerboard(painter, rect, 7.0);
+            draw_checkerboard(painter, middle, 7.0);
         }
-
         let steps = 48;
         let mut mesh = egui::Mesh::default();
         for i in 0..=steps {
             let t = i as f32 / steps as f32;
-            let x = egui::lerp(rect.x_range(), t);
+            let x = egui::lerp(track, t);
             let color = color_at(t);
             mesh.colored_vertex(egui::pos2(x, rect.top()), color);
             mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
@@ -66,21 +142,24 @@ fn gradient_slider(
             }
         }
         painter.add(egui::Shape::mesh(mesh));
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, BORDER));
+        painter.rect_stroke(rect, r, Stroke::new(1.0_f32, BORDER));
 
-        let handle_x = egui::lerp(rect.x_range(), value.clamp(0.0, 1.0));
-        let handle = egui::Rect::from_center_size(
-            egui::pos2(handle_x, rect.center().y),
-            egui::vec2(5.0, bar_height + 4.0),
-        );
-        painter.rect_filled(handle, 0.0, Color32::WHITE);
-        painter.rect_stroke(handle, 0.0, Stroke::new(1.0_f32, Color32::BLACK));
+        // A round handle filled with the colour it picks.
+        let center = egui::pos2(egui::lerp(track, value.clamp(0.0, 1.0)), rect.center().y);
+        let knob = r + 2.0;
+        painter.circle_filled(center, knob + 1.0, Color32::from_black_alpha(90));
+        painter.circle_filled(center, knob, Color32::WHITE);
+        let inner = color_at(value.clamp(0.0, 1.0));
+        if checker {
+            painter.circle_filled(center, knob - 2.5, CHECKERBOARD_DARK);
+        }
+        painter.circle_filled(center, knob - 2.5, inner);
 
         let mut changed = false;
         if (response.dragged() || response.clicked())
             && let Some(pos) = response.interact_pointer_pos()
         {
-            let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let t = ((pos.x - track.min) / track.span().max(1.0)).clamp(0.0, 1.0);
             if (t - *value).abs() > f32::EPSILON {
                 *value = t;
                 changed = true;
@@ -89,7 +168,7 @@ fn gradient_slider(
 
         let mut percent = (*value * 100.0).round();
         let drag = ui.add_sized(
-            egui::vec2(value_width, 18.0),
+            egui::vec2(value_width, box_height),
             egui::DragValue::new(&mut percent)
                 .range(0.0..=100.0)
                 .speed(0.5)
@@ -118,10 +197,17 @@ fn barycentric(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> (f32, f32, f32) {
     (1.0 - wb - wc, wb, wc)
 }
 
-/// Hue ring with a saturation/value triangle inside. The triangle rotates
-/// so its pure-hue corner points at the selected hue on the ring.
-fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState) -> bool {
-    let side = ui.available_width().min(metrics(ui.ctx()).wheel_max);
+/// The smallest the wheel gets to make room for the rest.
+const MIN_WHEEL: f32 = 120.0;
+
+/// Hue ring with a saturation/value triangle inside, at most `max_side`
+/// across. The triangle rotates so its pure-hue corner points at the
+/// selected hue on the ring.
+fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState, max_side: f32) -> bool {
+    let side = ui
+        .available_width()
+        .min(metrics(ui.ctx()).wheel_max)
+        .min(max_side);
     let (outer_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), side), Sense::hover());
     let rect = egui::Rect::from_center_size(outer_rect.center(), egui::vec2(side, side));
@@ -167,6 +253,27 @@ fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState) -> bool {
     tri.colored_vertex(p_black, Color32::BLACK);
     tri.add_triangle(0, 1, 2);
     painter.add(egui::Shape::mesh(tri));
+
+    // Harmony hues: dots on the ring; a click on one picks it.
+    let ring_mid_r = (r_in + r_out) * 0.5;
+    let harmony_dots: Vec<(f32, Pos2)> = (state.harmony.hues(state.hue).into_iter())
+        .map(|h| {
+            let (sin, cos) = (h * TAU).sin_cos();
+            (h, center + egui::vec2(cos, sin) * ring_mid_r)
+        })
+        .collect();
+    for &(h, p) in &harmony_dots {
+        painter.circle_filled(p, 5.0, Color32::from_hsva(h, state.sat, state.val, 1.0));
+        painter.circle_stroke(p, 5.0, Stroke::new(1.5_f32, Color32::WHITE));
+    }
+    if response.clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+        && let Some(&(h, _)) = harmony_dots.iter().find(|(_, p)| p.distance(pos) <= 8.0)
+    {
+        state.hue = h;
+        state.drag = WheelDrag::None;
+        return true;
+    }
 
     // Interaction: the press position decides whether the drag edits hue
     // (ring) or saturation/value (triangle) for the whole gesture.
@@ -252,6 +359,28 @@ fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState) -> bool {
     changed
 }
 
+/// The harmony picker and its colours as swatches; the hue of the one
+/// clicked.
+fn harmony_row(ui: &mut egui::Ui, state: &mut PickerState) -> Option<f32> {
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_id_salt("colour_harmony")
+            .selected_text(state.harmony.label())
+            .show_ui(ui, |ui| {
+                for h in Harmony::ALL {
+                    ui.selectable_value(&mut state.harmony, h, h.label());
+                }
+            });
+        for hue in state.harmony.hues(state.hue) {
+            let c = Color32::from_hsva(hue, state.sat, state.val, 1.0);
+            if color_swatch(ui, c, egui::vec2(28.0, 22.0)).clicked() {
+                picked = Some(hue);
+            }
+        }
+    });
+    picked
+}
+
 fn to_hex(color: Color32) -> String {
     let [r, g, b, _] = color.to_srgba_unmultiplied();
     format!("{r:02X}{g:02X}{b:02X}")
@@ -291,7 +420,7 @@ fn swatch_row(ui: &mut egui::Ui, brush_state: &mut BrushState) -> Option<Color32
         let swap_clicked = swap.on_hover_text("Swap colors (X)").clicked();
         let secondary_clicked =
             color_swatch(ui, brush_state.secondary_color, egui::vec2(28.0, 22.0))
-                .on_hover_text("Secondary color — click to swap")
+                .on_hover_text("Secondary color: click to swap")
                 .clicked();
         if swap_clicked || secondary_clicked {
             std::mem::swap(
@@ -392,6 +521,7 @@ pub fn color_picker_panel(
                 val,
                 last_color: color,
                 drag: WheelDrag::None,
+                harmony: Harmony::None,
             }
         });
 
@@ -405,18 +535,60 @@ pub fn color_picker_panel(
     // HSV controls (hex field, recent colors) so HSV must be re-derived.
     let mut new_color: Option<(Color32, bool)> = None;
 
-    egui::ScrollArea::vertical()
+    // The wheel gives way to the rest (sliders, recent colours, swatches)
+    // when the panel is short (shared with the layers): it takes what they
+    // leave, measured the frame before.
+    let rest_id = id.with("below_wheel");
+    let rest: f32 = ui.data(|d| d.get_temp(rest_id)).unwrap_or(0.0);
+    // Never small beside the panel's width, though: what's under it
+    // scrolls rather than the wheel shrinking to a thumbnail.
+    let wheel_cap = (ui.available_height() - rest)
+        .max(MIN_WHEEL)
+        .max((ui.available_width() * 0.8).min(ui.available_height() * 0.55));
+    let mut wheel_side = 0.0;
+    // Wide and short (a phone held sideways): the wheel on the left, as
+    // tall as the panel, the rest beside it.
+    let (w, h) = (ui.available_width(), ui.available_height());
+    let wide = color_model == ColorModel::Rgba && w >= 400.0 && w > 1.4 * h;
+    let mut right_ui;
+    let ui = if wide {
+        let side = h.min(w * 0.45);
+        let full = ui.available_rect_before_wrap();
+        let (left, right) = full.split_left_right_at_x(full.left() + side + 8.0);
+        ui.allocate_rect(full, Sense::hover());
+        let mut left_ui = ui.new_child(egui::UiBuilder::new().max_rect(left));
+        if hue_wheel(&mut left_ui, &mut state, side) {
+            let alpha = color.a() as f32 / 255.0;
+            new_color = Some((
+                Color32::from_hsva(state.hue, state.sat, state.val, alpha),
+                false,
+            ));
+        }
+        right_ui = ui.new_child(egui::UiBuilder::new().max_rect(right));
+        &mut right_ui
+    } else {
+        ui
+    };
+    let scroll = egui::ScrollArea::vertical()
         .id_salt("color_picker_scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             let mut alpha = color.a() as f32 / 255.0;
             match color_model {
                 ColorModel::Rgba => {
-                    if hue_wheel(ui, &mut state) {
+                    let top = ui.cursor().top();
+                    let changed = !wide && hue_wheel(ui, &mut state, wheel_cap);
+                    wheel_side = ui.cursor().top() - top;
+                    if changed {
                         new_color = Some((
                             Color32::from_hsva(state.hue, state.sat, state.val, alpha),
                             false,
                         ));
+                    }
+                    if let Some(hue) = harmony_row(ui, &mut state) {
+                        state.hue = hue;
+                        new_color =
+                            Some((Color32::from_hsva(hue, state.sat, state.val, alpha), false));
                     }
                     ui.add_space(6.0);
                     if let Some(c) = swatch_row(ui, brush_state) {
@@ -500,12 +672,18 @@ pub fn color_picker_panel(
                 new_color = Some((c, true));
             }
             ui.add_space(4.0);
-            if let Some(c) =
-                crate::ui::palette_window::swatches(&mut brush_state.swatches, color, ui)
-            {
+            let (picked, changed) =
+                crate::ui::palette_window::swatches(&mut brush_state.swatches, color, ui);
+            if let Some(c) = picked {
                 new_color = Some((c, true));
             }
+            brush_state.swatches_dirty |= changed;
         });
+    let below = scroll.content_size.y - wheel_side;
+    if (below - rest).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(rest_id, below));
+        ui.ctx().request_repaint();
+    }
 
     if let Some((c, external)) = new_color {
         brush_state.brush.brush_options.color = c;
@@ -525,6 +703,26 @@ pub fn color_picker_panel(
 mod tests {
     use super::*;
 
+    #[test]
+    fn harmonies_place_their_hues_round_the_wheel() {
+        let close = |a: Vec<f32>, b: &[f32]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+        };
+        assert!(Harmony::None.hues(0.3).is_empty());
+        assert!(close(Harmony::Complementary.hues(0.75), &[0.25]));
+        assert!(close(Harmony::Triadic.hues(0.0), &[1.0 / 3.0, 2.0 / 3.0]));
+        assert!(close(Harmony::Tetradic.hues(0.1), &[0.35, 0.6, 0.85]));
+        // Wrapping round below zero.
+        assert!(close(
+            Harmony::Analogous.hues(0.0),
+            &[11.0 / 12.0, 1.0 / 12.0]
+        ));
+        assert!(close(
+            Harmony::SplitComplementary.hues(0.0),
+            &[5.0 / 12.0, 7.0 / 12.0]
+        ));
+    }
+
     fn state(hue: f32, sat: f32, val: f32) -> PickerState {
         PickerState {
             hue,
@@ -532,6 +730,7 @@ mod tests {
             val,
             last_color: Color32::BLACK,
             drag: WheelDrag::None,
+            harmony: Harmony::None,
         }
     }
 

@@ -687,6 +687,33 @@ pub(crate) fn send_occluded_event_for_all_windows(application: &UIApplication, o
     handle_nonuser_events(mtm, events);
 }
 
+// rusty-painter patch: the window's focus follows the app's: lost when the
+// app resigns active (the app switcher, another app, the Home screen) and
+// back when it's active again. UIKit doesn't take key status from the window
+// then, and egui ignores `Suspended` and `Occluded`: this is how the app
+// learns it should save while it still runs.
+pub(crate) fn send_focused_event_for_all_windows(application: &UIApplication, focused: bool) {
+    let mtm = MainThreadMarker::from(application);
+
+    let mut events = Vec::new();
+    #[allow(deprecated)]
+    for window in application.windows().iter() {
+        if window.is_kind_of::<WinitUIWindow>() {
+            // SAFETY: We just checked that the window is a `winit` window
+            let window = unsafe {
+                let ptr: *const UIWindow = window;
+                let ptr: *const WinitUIWindow = ptr.cast();
+                &*ptr
+            };
+            events.push(EventWrapper::StaticEvent(Event::WindowEvent {
+                window_id: RootWindowId(window.id()),
+                event: WindowEvent::Focused(focused),
+            }));
+        }
+    }
+    handle_nonuser_events(mtm, events);
+}
+
 pub fn handle_main_events_cleared(mtm: MainThreadMarker) {
     let mut this = AppState::get_mut(mtm);
     if !this.has_launched() || this.has_terminated() {

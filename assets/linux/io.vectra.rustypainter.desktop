@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Rusty Painter
+Comment=Digital painting
+Exec=rusty-painter
+Icon=io.vectra.rustypainter
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+StartupWMClass=io.vectra.rustypainter

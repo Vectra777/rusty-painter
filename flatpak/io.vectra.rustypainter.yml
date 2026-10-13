@@ -1,0 +1,74 @@
+# Flatpak of the working tree:
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#     target/flatpak flatpak/io.vectra.rustypainter.yml
+# or, for a file to hand out, scripts/build-flatpak.sh.
+# Cargo downloads the crates during the build (network on), which is fine
+# locally; Flathub wants them vendored (flatpak-cargo-generator) instead.
+id: io.vectra.rustypainter
+runtime: org.freedesktop.Platform
+runtime-version: "25.08"
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: rusty-painter
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # The GPU (wgpu), and tablets.
+  - --device=all
+  # Opening and saving where the paintings are, by path (recent files,
+  # autosave next to the document), not only through the file portal.
+  - --filesystem=home
+modules:
+  # Video export and import run ffmpeg (src/project/video.rs,
+  # src/app/rig.rs); the runtime has none. H.264 needs x264; libvpx (VP9)
+  # and dav1d (AV1) come with the SDK.
+  - name: x264
+    # Headers, static libraries and docs; only the programs are needed.
+    cleanup: [/include, /lib, /share]
+    config-opts:
+      - --enable-static
+      - --enable-pic
+      - --disable-cli
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/x264.git
+        commit: b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+  - name: ffmpeg
+    # Headers, static libraries and docs; only the programs are needed.
+    cleanup: [/include, /lib, /share]
+    config-opts:
+      - --enable-gpl
+      - --enable-libx264
+      - --enable-libvpx
+      - --enable-libdav1d
+      - --disable-ffplay
+      - --disable-ffprobe
+      - --disable-doc
+      - --disable-debug
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+        sha256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+  - name: rusty-painter
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      build-args:
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/rusty-painter/cargo
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/rusty-painter /app/bin/rusty-painter
+      - install -Dm644 assets/linux/io.vectra.rustypainter.desktop /app/share/applications/io.vectra.rustypainter.desktop
+      - install -Dm644 assets/icon/icon-256.png /app/share/icons/hicolor/256x256/apps/io.vectra.rustypainter.png
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - graphify-out
+          - export.webp
+          - .git

@@ -4,21 +4,106 @@
 
 use crate::PainterApp;
 use crate::app::tools::Tool;
-use crate::canvas::history::{TileSnapshot, UndoAction};
-use crate::canvas::storage::LayerKind;
 use crate::selection::transform::TransformInfo;
 use eframe::egui::Color32;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Where a file's bytes come from: read on a job's thread.
+#[derive(Clone)]
+pub(crate) enum FileSource {
+    Path(PathBuf),
+    /// Already in memory (dropped on the window on the web, Android's
+    /// gallery).
+    Bytes(Arc<[u8]>),
+}
+
+impl FileSource {
+    pub(crate) fn read(&self) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+        match self {
+            Self::Path(path) => std::fs::read(path)
+                .map(std::borrow::Cow::Owned)
+                .map_err(|e| format!("Couldn't read {}: {e}", path.display())),
+            Self::Bytes(bytes) => Ok(std::borrow::Cow::Borrowed(bytes)),
+        }
+    }
+}
+
+/// A picture's pixels, in sRGB (converted from the profile it carries).
+pub(crate) fn decode_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    decode_image_in(bytes, &crate::canvas::color_profile::ColorProfile::Srgb)
+}
+
+/// A picture's pixels, converted from the colour profile it carries (sRGB
+/// if none) to `to`.
+pub(crate) fn decode_image_in(
+    bytes: &[u8],
+    to: &crate::canvas::color_profile::ColorProfile,
+) -> Result<image::RgbaImage, String> {
+    use crate::canvas::color_profile::{ColorProfile, RenderingIntent, RgbTransform};
+    use image::ImageDecoder;
+    let failed = |e: image::ImageError| format!("Couldn't open the image: {e}");
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("Couldn't open the image: {e}"))?
+        .into_decoder()
+        .map_err(failed)?;
+    let from = (decoder.icc_profile().ok().flatten())
+        .and_then(|icc| ColorProfile::from_icc(icc, "Picture's profile").ok())
+        .unwrap_or_default();
+    let mut img = image::DynamicImage::from_decoder(decoder)
+        .map_err(failed)?
+        .to_rgba8();
+    if &from != to
+        && let Ok(t) = RgbTransform::new(&from, to, RenderingIntent::Perceptual)
+    {
+        let mut rgb: Vec<[f32; 3]> = img
+            .pixels()
+            .map(|p| [p[0], p[1], p[2]].map(|v| v as f32 / 255.0))
+            .collect();
+        t.convert(&mut rgb);
+        for (p, c) in img.pixels_mut().zip(rgb) {
+            let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            p.0 = [r, g, b, p[3]];
+        }
+    }
+    Ok(img)
+}
+
+/// `img` scaled down to fit `w`×`h` if it's bigger.
+pub(crate) fn fit_image(img: image::RgbaImage, (cw, ch): (u32, u32)) -> image::RgbaImage {
+    if img.width() <= cw && img.height() <= ch {
+        return img;
+    }
+    let k = (cw as f32 / img.width() as f32).min(ch as f32 / img.height() as f32);
+    let (w, h) = (
+        ((img.width() as f32 * k).round() as u32).max(1),
+        ((img.height() as f32 * k).round() as u32).max(1),
+    );
+    downscale(&img, w, h)
+}
 
 impl PainterApp {
-    pub(crate) fn import_image_path(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
-        let name = path
-            .file_stem()
-            .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
-        self.import_image_bytes(&name, &bytes)
+    /// Import a picture as a new layer: read, decoded and fitted to the
+    /// canvas on another thread.
+    pub(crate) fn import_image_in_background(&mut self, name: String, source: FileSource) {
+        let size = (self.canvas.width() as u32, self.canvas.height() as u32);
+        // In the document's colours.
+        let profile = self.canvas.profile.clone();
+        self.spawn_job(None, move || {
+            let result = source
+                .read()
+                .and_then(|bytes| decode_image_in(&bytes, &profile))
+                .map(|img| fit_image(img, size));
+            Box::new(move |app: &mut PainterApp| match result {
+                // (Fitted again if the canvas changed size meanwhile.)
+                Ok(img) => app.import_rgba(&name, img),
+                Err(err) => app.report(err),
+            })
+        });
     }
 
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn import_image_bytes(&mut self, name: &str, bytes: &[u8]) -> Result<(), String> {
         let img = image::load_from_memory(bytes)
             .map_err(|e| format!("Couldn't open the image: {e}"))?
@@ -28,90 +113,22 @@ impl PainterApp {
     }
 
     /// Put `img` on a new layer above the selected one.
-    pub(crate) fn import_rgba(&mut self, name: &str, mut img: image::RgbaImage) {
+    pub(crate) fn import_rgba(&mut self, name: &str, img: image::RgbaImage) {
         let (cw, ch) = (self.canvas.width() as u32, self.canvas.height() as u32);
-        if img.width() > cw || img.height() > ch {
-            let k = (cw as f32 / img.width() as f32).min(ch as f32 / img.height() as f32);
-            let (w, h) = (
-                ((img.width() as f32 * k).round() as u32).max(1),
-                ((img.height() as f32 * k).round() as u32).max(1),
-            );
-            img = downscale(&img, w, h);
-        }
+        let img = fit_image(img, (cw, ch));
         let (w, h) = (img.width() as i32, img.height() as i32);
         let (ox, oy) = ((cw as i32 - w) / 2, (ch as i32 - h) / 2);
 
-        // Leave any running session first; it would target the old layer.
-        crate::app::transform::commit_floating_layer(self);
-        self.liquify_commit();
-        self.release_canvas();
-
-        let (index, parent) = self.insertion_point(true);
-        let idx = self.insert_entry(index, name.to_string(), LayerKind::Paint, parent, true);
-        let Some(layer_id) = self.canvas.layer_id_at(idx) else {
-            return;
-        };
-
         let ts = self.canvas.tile_size() as i32;
-        let keys: Vec<(i32, i32)> = (oy.div_euclid(ts)..=(oy + h - 1).div_euclid(ts))
-            .flat_map(|ty| {
-                (ox.div_euclid(ts)..=(ox + w - 1).div_euclid(ts)).map(move |tx| (tx, ty))
-            })
-            .collect();
-        let tiles: Vec<((i32, i32), Vec<Color32>)> = {
-            use rayon::prelude::*;
-            let img = &img;
-            keys.par_iter()
-                .filter_map(|&(tx, ty)| {
-                    let mut tile = vec![Color32::TRANSPARENT; (ts * ts) as usize];
-                    let mut any = false;
-                    for ly in 0..ts {
-                        let y = ty * ts + ly - oy;
-                        if y < 0 || y >= h {
-                            continue;
-                        }
-                        for lx in 0..ts {
-                            let x = tx * ts + lx - ox;
-                            if x < 0 || x >= w {
-                                continue;
-                            }
-                            let [r, g, b, a] = img.get_pixel(x as u32, y as u32).0;
-                            if a > 0 {
-                                tile[(ly * ts + lx) as usize] =
-                                    Color32::from_rgba_unmultiplied(r, g, b, a);
-                                any = true;
-                            }
-                        }
-                    }
-                    any.then_some(((tx, ty), tile))
-                })
-                .collect()
-        };
-        let mut snapshots = Vec::with_capacity(tiles.len());
-        for ((tx, ty), tile) in tiles {
-            self.canvas.set_layer_tile_data(idx, tx, ty, tile);
-            snapshots.push(TileSnapshot {
-                tx,
-                ty,
-                layer_id,
-                x0: 0,
-                y0: 0,
-                width: ts as usize,
-                height: ts as usize,
-                data: vec![Color32::TRANSPARENT; (ts * ts) as usize].into(),
-            });
-        }
-        // The pixels as their own step on top of the layer's creation, so
-        // redo brings them back too.
-        if !snapshots.is_empty()
-            && let Some(history) = self.layer_state.histories.get_mut(idx)
+        let tiles = pixels_to_tiles(ts, (ox, oy), (w, h), |x, y| {
+            let [r, g, b, a] = img.get_pixel(x as u32, y as u32).0;
+            Color32::from_rgba_unmultiplied(r, g, b, a)
+        });
+        if self
+            .add_layer_with_tiles(name.to_string(), tiles, |_| {})
+            .is_none()
         {
-            history.push_action(UndoAction {
-                tiles: snapshots,
-                selection: None,
-                transform: None,
-                layer_action: None,
-            });
+            return;
         }
         self.selection_manager.clear_selection();
         self.active_tool = Tool::Transform(TransformInfo::default());
@@ -119,28 +136,74 @@ impl PainterApp {
         self.layer_state.thumbnails_dirty = true;
     }
 
-    /// Import every image file dropped on the window this frame.
+    /// Import every image file dropped on the window this frame. Dropped on
+    /// the open Palette window, a picture gives its colours instead; on the
+    /// Reference window, it becomes the reference image.
     pub(crate) fn import_dropped_files(&mut self, ctx: &eframe::egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        let to_palette = self.drop_is_on_palette(ctx);
+        let to_reference = self.drop_is_on_reference(ctx);
         for file in dropped {
-            let result = if let Some(bytes) = &file.bytes {
-                let name = std::path::Path::new(&file.name)
-                    .file_stem()
-                    .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
-                self.import_image_bytes(&name, bytes)
-            } else if let Some(path) = &file.path {
-                // Projects open; everything else is imported as a picture.
-                if path.extension().is_some_and(|e| e == "rpainter") {
-                    self.load_project_from_path(path)
-                } else {
-                    self.import_image_path(path)
-                }
-            } else {
-                continue;
+            let path = file.path.as_deref();
+            let name = path
+                .unwrap_or_else(|| std::path::Path::new(&file.name))
+                .file_stem()
+                .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
+            let extension = |ext: &str| {
+                path.unwrap_or_else(|| std::path::Path::new(&file.name))
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext))
             };
-            if let Err(err) = result {
-                log::error!("{err}");
-                self.export_state.message = Some(err);
+            let project = path.filter(|_| {
+                extension("rpainter")
+                    || crate::project::FOREIGN_EXTENSIONS
+                        .iter()
+                        .any(|e| extension(e))
+            });
+            let source = match (&file.bytes, path) {
+                (Some(bytes), _) => FileSource::Bytes(Arc::clone(bytes)),
+                (None, Some(path)) => FileSource::Path(path.to_path_buf()),
+                (None, None) => continue,
+            };
+            // All read and decoded on other threads.
+            if let Some(project) = project {
+                // Projects open (as File → Open does).
+                self.open_picked(
+                    &crate::app::files::OpenFor::Document,
+                    file.name.clone(),
+                    source,
+                    Some(project.to_path_buf()),
+                );
+            } else if Self::is_brush_file(&file.name)
+                || path.is_some_and(|p| Self::is_brush_file(&p.to_string_lossy()))
+            {
+                // Brushes (ours or another app's) join the library.
+                let name = path
+                    .and_then(|p| p.file_name())
+                    .map_or_else(|| file.name.clone(), |n| n.to_string_lossy().into_owned());
+                self.import_brushes_in_background(name, source);
+            } else if let Some(path) = path.filter(|p| {
+                extension("json")
+                    && std::fs::read(p).is_ok_and(|b| crate::project::anim_import::is_rig_json(&b))
+            }) {
+                // Spine, DragonBones or Lottie: a rig layer.
+                self.import_animation_in_background(path.to_path_buf());
+            } else if let Some(path) = path.filter(|_| {
+                ["mp4", "webm", "mov", "mkv", "avi"]
+                    .iter()
+                    .any(|e| extension(e))
+            }) {
+                // Videos: an animated layer.
+                self.import_frames_in_background(path.to_path_buf());
+            } else if to_reference {
+                self.open_reference_in_background(file.name.clone(), source);
+            } else if to_palette {
+                self.palette_from_image_in_background(name, source);
+            } else {
+                self.import_image_in_background(name, source);
             }
         }
     }
@@ -216,24 +279,71 @@ pub(crate) fn downscale(src: &image::RgbaImage, w: u32, h: u32) -> image::RgbaIm
     image::RgbaImage::from_raw(w as u32, h as u32, out).expect("sized to w×h")
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(mobile))]
 pub(crate) fn import_image_dialog(app: &mut PainterApp) {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
-        .pick_file()
-    else {
-        return;
-    };
-    if let Err(err) = app.import_image_path(&path) {
-        log::error!("{err}");
-        app.export_state.message = Some(err);
-    }
+    let dialog = crate::app::settings::file_dialog()
+        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"]);
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::File, |app, paths| {
+        let path = paths[0].clone();
+        let name = path
+            .file_stem()
+            .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
+        app.import_image_in_background(name, FileSource::Path(path));
+    });
 }
 
 /// No file dialog on Android: pick from the photo library instead.
 #[cfg(target_os = "android")]
 pub(crate) fn import_image_dialog(app: &mut PainterApp) {
     app.workspace.gallery.open();
+}
+
+/// iOS: the system's photo picker.
+#[cfg(target_os = "ios")]
+pub(crate) fn import_image_dialog(app: &mut PainterApp) {
+    app.pick_open(crate::app::files::OpenFor::Image);
+}
+
+/// The `w`×`h` pixels `pixel(x, y)` returns (premultiplied), placed with
+/// their top-left at canvas `origin`, cut into whole tiles of `ts`; tiles
+/// left fully transparent are skipped.
+pub(crate) fn pixels_to_tiles(
+    ts: i32,
+    (ox, oy): (i32, i32),
+    (w, h): (i32, i32),
+    pixel: impl Fn(i32, i32) -> Color32 + Sync,
+) -> Vec<((i32, i32), Vec<Color32>)> {
+    use rayon::prelude::*;
+    if w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    let keys: Vec<(i32, i32)> = (oy.div_euclid(ts)..=(oy + h - 1).div_euclid(ts))
+        .flat_map(|ty| (ox.div_euclid(ts)..=(ox + w - 1).div_euclid(ts)).map(move |tx| (tx, ty)))
+        .collect();
+    keys.par_iter()
+        .filter_map(|&(tx, ty)| {
+            let mut tile = vec![Color32::TRANSPARENT; (ts * ts) as usize];
+            let mut any = false;
+            for ly in 0..ts {
+                let y = ty * ts + ly - oy;
+                if y < 0 || y >= h {
+                    continue;
+                }
+                for lx in 0..ts {
+                    let x = tx * ts + lx - ox;
+                    if x < 0 || x >= w {
+                        continue;
+                    }
+                    let p = pixel(x, y);
+                    if p.a() > 0 {
+                        tile[(ly * ts + lx) as usize] = p;
+                        any = true;
+                    }
+                }
+            }
+            any.then_some(((tx, ty), tile))
+        })
+        .collect()
 }
 
 #[cfg(test)]

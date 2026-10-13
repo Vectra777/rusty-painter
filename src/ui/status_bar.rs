@@ -1,9 +1,11 @@
-//! Bottom status bar: document info on the left, view controls on the right.
+//! The top bar's right end: zoom and view controls (and, on touch
+//! screens, the menu sheet and finger-painting buttons at its left).
 
-use crate::app::viewport::{MAX_ZOOM, MIN_ZOOM};
+use crate::PainterApp;
+use crate::app::view::viewport::{MAX_ZOOM, MIN_ZOOM};
+use crate::ui::icons::Icon;
 use crate::ui::style::*;
-use crate::ui::widgets::vdivider;
-use crate::{ColorModel, PainterApp};
+use crate::ui::widgets::{icon_button, vdivider};
 use eframe::egui::{self, RichText};
 
 fn dim(text: impl Into<String>) -> RichText {
@@ -19,95 +21,122 @@ fn small_button(ui: &mut egui::Ui, text: &str, tooltip: &str) -> bool {
     ui.add(button).on_hover_text(tooltip).clicked()
 }
 
-pub fn status_bar(app: &mut PainterApp, ctx: &egui::Context) {
-    egui::TopBottomPanel::bottom("status_bar")
-        .exact_height(metrics(ctx).status_height)
-        .frame(
-            egui::Frame::none()
-                .fill(BG_CANVAS)
-                .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
-        )
-        .show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                if !metrics(ctx).touch {
-                    ui.spacing_mut().interact_size.y = 18.0;
-                }
-
-                let model = match app.workspace.color_model {
-                    ColorModel::Rgba => "RGBA",
-                    ColorModel::Grayscale => "Grayscale",
-                };
-                ui.label(dim(format!(
-                    "{} × {} px  ·  {model}",
-                    app.canvas.width(),
-                    app.canvas.height()
-                )));
-                vdivider(ui);
-                let layer = app
-                    .canvas
-                    .layers
-                    .get(app.canvas.active_layer_idx)
-                    .map(|l| l.name.clone())
-                    .unwrap_or_default();
-                ui.label(dim(format!("Layer: {layer}")));
-                vdivider(ui);
-                let cursor = app
-                    .viewport
-                    .cursor_canvas
-                    .map(|p| format!("{:.0}, {:.0}", p.x, p.y))
-                    .unwrap_or_else(|| "–".to_string());
-                ui.label(dim(cursor));
-
-                if let Some(message) = app.export_state.message.clone() {
-                    vdivider(ui);
-                    ui.label(RichText::new(message).small().color(TEXT));
-                    if small_button(ui, "✕", "Dismiss") {
-                        app.export_state.message = None;
-                    }
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    view_controls(app, ui);
-                });
-            });
-        });
+/// Touch mode: the menu sheet toggle (the menus live there instead of a top
+/// bar) and one-finger painting on/off.
+pub(crate) fn touch_buttons(app: &mut PainterApp, ui: &mut egui::Ui, bar_height: f32) {
+    let size = bar_height - 4.0;
+    let open = app.modal_state.menu_sheet_open;
+    if icon_button(ui, Icon::Menu, size, open, "File, Edit, View and Help").clicked() {
+        app.modal_state.menu_sheet_open = !open;
+    }
+    let ws = &mut app.workspace;
+    let tip = if ws.finger_painting {
+        "Finger painting on: one finger paints. Tap to paint with the stylus only."
+    } else {
+        "Finger painting off: only the stylus paints, one finger pans. Tap to turn on."
+    };
+    if icon_button(ui, Icon::Finger, size, ws.finger_painting, tip).clicked() {
+        ws.finger_painting = !ws.finger_painting;
+    }
+    // No keyboard on a touch screen: undo/redo need buttons.
+    crate::ui::widgets::vdivider(ui);
+    if icon_button(ui, Icon::Undo, size, false, "Undo (two-finger tap)").clicked() {
+        app.apply_history(false);
+    }
+    if icon_button(ui, Icon::Redo, size, false, "Redo (three-finger tap)").clicked() {
+        app.apply_history(true);
+    }
 }
 
-/// Right-to-left: [1:1] [Fit] [+] [zoom%] [−]  rotation
-fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
-    if small_button(ui, "1:1", "Actual pixels (Ctrl+1)") {
-        app.set_zoom_from_center(1.0);
+/// Right-to-left: `[flip] [ruler] [Fit] [zoom%]`, then the rotation if
+/// the view is turned. The zoom's tooltip tells the canvas size.
+pub(crate) fn view_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
+    view_toggles(app, ui);
+    fit_button(app, ui);
+    zoom_value(app, ui);
+    rotation_reset(app, ui);
+}
+
+/// The timeline, flip and ruler toggles.
+pub(crate) fn view_toggles(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let flipped = app.viewport.flip_x;
+    let size = (ui.available_height() - 2.0).clamp(18.0, 36.0);
+    let timeline = app.workspace.animation.show_timeline;
+    if icon_button(
+        ui,
+        Icon::Timeline,
+        size,
+        timeline,
+        "Timeline: frames, drawings and keys",
+    )
+    .clicked()
+    {
+        app.workspace.animation.show_timeline = !timeline;
     }
-    if small_button(ui, "Fit", "Fit to window (Ctrl+0)") {
+    if icon_button(
+        ui,
+        Icon::Flip,
+        size,
+        flipped,
+        "Flip the view horizontally (H); the picture itself is unchanged",
+    )
+    .clicked()
+    {
+        app.viewport.flip_x = !flipped;
+    }
+    let ruler = app.workspace.guides.ruler.enabled;
+    if icon_button(
+        ui,
+        Icon::Ruler,
+        size,
+        ruler,
+        "Ruler (R): strokes run along it, or parallel to it",
+    )
+    .clicked()
+    {
+        app.set_ruler(!ruler);
+    }
+}
+
+pub(crate) fn fit_button(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let fit_tip = crate::app::input::keyboard::with_keycaps(
+        ui.ctx(),
+        "Fit to window (Ctrl+{0}); actual pixels: Ctrl+{1}",
+    );
+    if small_button(ui, "Fit", &fit_tip) {
         app.fit_view();
     }
-    if small_button(ui, "+", "Zoom in (Ctrl+=)") {
-        app.zoom_by_from_center(1.25);
-    }
+}
 
+fn zoom_value(app: &mut PainterApp, ui: &mut egui::Ui) {
     let mut percent = app.viewport.zoom * 100.0;
-    let response = ui.add(
-        egui::DragValue::new(&mut percent)
-            .range(MIN_ZOOM * 100.0..=MAX_ZOOM * 100.0)
-            .speed(1.0)
-            .max_decimals(0)
-            .suffix("%"),
+    let size = format!(
+        "Zoom (drag or type). Canvas {} × {} px",
+        app.canvas.width(),
+        app.canvas.height()
     );
+    let response = ui
+        .add(
+            egui::DragValue::new(&mut percent)
+                .range(MIN_ZOOM * 100.0..=MAX_ZOOM * 100.0)
+                .speed(1.0)
+                .max_decimals(0)
+                .suffix("%"),
+        )
+        .on_hover_text(size);
     if response.changed() {
         app.set_zoom_from_center(percent / 100.0);
     }
+}
 
-    if small_button(ui, "−", "Zoom out (Ctrl+-)") {
-        app.zoom_by_from_center(0.8);
-    }
-
+/// When the view is turned: its angle and a reset.
+pub(crate) fn rotation_reset(app: &mut PainterApp, ui: &mut egui::Ui) {
     let degrees = app.viewport.rotation.to_degrees().rem_euclid(360.0);
     if degrees > 0.05 && degrees < 359.95 {
         vdivider(ui);
         if small_button(ui, "Reset", "Reset rotation") {
             app.viewport.rotation = 0.0;
         }
-        ui.label(dim(format!("Rotation {degrees:.0}°")));
+        ui.label(dim(format!("{degrees:.0}°")));
     }
 }

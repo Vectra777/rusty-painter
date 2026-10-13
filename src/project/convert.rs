@@ -1,8 +1,12 @@
+//! Conversions between in-memory types (colours, selections, transforms,
+//! undo steps) and their stored, serialisable forms.
+
 use crate::{
-    app::state::ColorModel,
+    app::document::ColorModel,
     canvas::blend_modes::LayerBlend,
     canvas::history::{LayerHistoryOp, LayerMeta, RemovedLayer},
     canvas::storage::{LayerId, LayerKind},
+    canvas::text::{TextLayer, TextStyle},
     selection::{
         SelectionShape,
         transform::{TransformInfo, TransformState},
@@ -117,6 +121,17 @@ pub(super) struct StoredTransformInfo {
     state: StoredTransformState,
     #[serde(default)]
     corners: Option<[StoredVec2; 4]>,
+    /// Saved by one earlier build: the four corners stretched evenly (now
+    /// a two-point warp grid).
+    #[serde(default, skip_serializing)]
+    bilinear: bool,
+    /// Distort mode: points along a side, then the points row by row.
+    #[serde(default)]
+    warp: Option<(usize, Vec<StoredVec2>)>,
+    #[serde(default)]
+    warp_size: Option<usize>,
+    #[serde(default)]
+    warp_mode: bool,
 }
 
 impl From<&TransformInfo> for StoredTransformInfo {
@@ -129,12 +144,19 @@ impl From<&TransformInfo> for StoredTransformInfo {
             bounds: info.bounds.map(StoredRect::from),
             state: StoredTransformState::from(info.state),
             corners: info.corners.map(|c| c.map(StoredVec2::from)),
+            bilinear: false,
+            warp: info
+                .warp
+                .map(|w| (w.n, w.used().iter().map(|&p| StoredVec2::from(p)).collect())),
+            warp_size: Some(info.warp_size),
+            warp_mode: info.distort_kind == crate::canvas::storage::DistortKind::Warp,
         }
     }
 }
 
 impl StoredTransformInfo {
     pub(super) fn into_info(self) -> TransformInfo {
+        let warp = self.stored_warp();
         TransformInfo {
             start_pos: self.start_pos.map(Into::into),
             offset: self.offset.into(),
@@ -142,8 +164,47 @@ impl StoredTransformInfo {
             scale: self.scale.into(),
             bounds: self.bounds.map(Into::into),
             state: self.state.into(),
-            corners: self.corners.map(|c| c.map(Into::into)),
+            corners: if self.bilinear {
+                None
+            } else {
+                self.corners.map(|c| c.map(Into::into))
+            },
+            warp,
+            distort_kind: if self.warp_mode || self.bilinear {
+                crate::canvas::storage::DistortKind::Warp
+            } else {
+                crate::canvas::storage::DistortKind::Perspective
+            },
+            warp_size: self.warp_size.unwrap_or(4).clamp(
+                crate::canvas::storage::warp::MIN_POINTS,
+                crate::canvas::storage::warp::MAX_POINTS,
+            ),
         }
+    }
+
+    fn stored_warp(&self) -> Option<crate::canvas::storage::warp::WarpGrid> {
+        use crate::canvas::storage::warp::{MAX_POINTS, MIN_POINTS, WarpGrid};
+        let mut grid = WarpGrid {
+            n: 2,
+            points: [eframe::egui::Vec2::ZERO; MAX_POINTS * MAX_POINTS],
+        };
+        if self.bilinear {
+            // Corners clockwise → a 2×2 grid row by row.
+            let c = self.corners.as_ref()?;
+            for (slot, k) in [0, 1, 3, 2].into_iter().enumerate() {
+                grid.points[slot] = c[k].into();
+            }
+            return Some(grid);
+        }
+        let (n, points) = self.warp.as_ref()?;
+        if !(MIN_POINTS..=MAX_POINTS).contains(n) || points.len() != n * n {
+            return None;
+        }
+        grid.n = *n;
+        for (slot, p) in grid.points.iter_mut().zip(points) {
+            *slot = (*p).into();
+        }
+        Some(grid)
     }
 }
 
@@ -288,6 +349,47 @@ impl From<StoredLayerKind> for LayerKind {
     }
 }
 
+/// Mirrors `TextLayer`: a text layer's source. Absent in older files.
+#[derive(Serialize, Deserialize)]
+pub(super) struct StoredText {
+    text: String,
+    font: String,
+    #[serde(default)]
+    style: TextStyle,
+    color: StoredColor,
+    pos: StoredVec2,
+}
+
+impl From<&TextLayer> for StoredText {
+    fn from(text: &TextLayer) -> Self {
+        Self {
+            text: text.text.clone(),
+            font: text.font.clone(),
+            style: text.style,
+            color: StoredColor::from_color(text.color),
+            pos: text.pos.into(),
+        }
+    }
+}
+
+impl StoredText {
+    pub(super) fn from_layer(text: Option<&TextLayer>) -> Option<Self> {
+        text.map(Self::from)
+    }
+
+    pub(super) fn into_layer(stored: Option<Self>) -> Option<Box<TextLayer>> {
+        stored.map(|s| {
+            Box::new(TextLayer {
+                text: s.text,
+                font: s.font,
+                style: s.style,
+                color: s.color.to_color(),
+                pos: s.pos.into(),
+            })
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredLayerMeta {
     name: String,
@@ -303,6 +405,35 @@ pub(super) struct StoredLayerMeta {
     /// Blend mode key (`LayerBlend::key`); absent in older files = Normal.
     #[serde(default)]
     blend: Option<String>,
+    #[serde(default)]
+    clipped: bool,
+    #[serde(default)]
+    adjustment: Option<crate::canvas::filters::Filter>,
+    /// Fill layer and border; absent in older files.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::canvas::layer_style::LayerStyle::is_plain"
+    )]
+    style: crate::canvas::layer_style::LayerStyle,
+    #[serde(default)]
+    text: Option<StoredText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vector: Option<crate::canvas::vector::VectorLayer>,
+    /// Impasto heights, tile by tile; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heights: Option<Vec<(i32, i32, Vec<u16>)>>,
+    shader: Option<crate::canvas::shader::ShaderLayer>,
+    position_locked: bool,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    reference: bool,
+    /// Its part in an animation; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anim: Option<crate::canvas::storage::Anim>,
+    /// Its keyed motion; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    motion: Option<crate::canvas::motion::Motion>,
 }
 
 impl From<&LayerMeta> for StoredLayerMeta {
@@ -316,6 +447,22 @@ impl From<&LayerMeta> for StoredLayerMeta {
             kind: meta.kind.into(),
             parent: meta.parent.map(|p| p.0),
             blend: Some(meta.blend.key().to_string()),
+            clipped: meta.clipped,
+            adjustment: meta.adjustment,
+            style: meta.style,
+            text: StoredText::from_layer(meta.text.as_deref()),
+            vector: meta.vector.as_deref().cloned(),
+            heights: meta.height.as_ref().map(|m| {
+                (m.tiles().into_iter())
+                    .map(|((tx, ty), h)| (tx, ty, h))
+                    .collect()
+            }),
+            shader: meta.shader.as_deref().cloned(),
+            position_locked: meta.position_locked,
+            draft: meta.draft,
+            reference: meta.reference,
+            anim: meta.anim,
+            motion: meta.motion.as_deref().cloned(),
         }
     }
 }
@@ -335,6 +482,27 @@ impl StoredLayerMeta {
                 .as_deref()
                 .and_then(LayerBlend::from_key)
                 .unwrap_or_default(),
+            clipped: self.clipped,
+            adjustment: self.adjustment,
+            style: self.style,
+            text: StoredText::into_layer(self.text),
+            vector: self.vector.map(Box::new),
+            height: self.heights.map(|tiles| {
+                let map = crate::canvas::impasto::HeightMap::default();
+                for (tx, ty, h) in tiles {
+                    map.set_tile((tx, ty), Some(h));
+                }
+                Box::new(map)
+            }),
+            shader: self.shader.map(Box::new),
+            position_locked: self.position_locked,
+            draft: self.draft,
+            reference: self.reference,
+            anim: self.anim,
+            // (Pictures aren't kept in history entries: a removed rig layer
+            // comes back from a file as its last pixels.)
+            rig: None,
+            motion: self.motion.map(Box::new),
         }
     }
 }
@@ -379,6 +547,48 @@ pub(super) enum StoredLayerHistoryOp {
         active_before: usize,
         active_after: usize,
     },
+    /// Text layers' source on the other side of the step, then the step's
+    /// own layer change.
+    Text {
+        layers: Vec<(u64, Option<StoredText>)>,
+        #[serde(default)]
+        inner: Option<Box<StoredLayerHistoryOp>>,
+    },
+    /// Vector layers' lines on the other side of the step, then the step's
+    /// own layer change.
+    Vector {
+        layers: Vec<(u64, Option<crate::canvas::vector::VectorLayer>)>,
+        #[serde(default)]
+        inner: Option<Box<StoredLayerHistoryOp>>,
+    },
+    /// Impasto heights on the other side of the step (tiles, and the whole
+    /// map when the step added or took it away), then its layer change.
+    Height {
+        layer: u64,
+        tiles: crate::canvas::impasto::HeightTiles,
+        #[serde(default)]
+        map: Option<Option<crate::canvas::impasto::MapTiles>>,
+        #[serde(default)]
+        inner: Option<Box<StoredLayerHistoryOp>>,
+    },
+    /// Several adds and moves as one step, in the order they were done.
+    Batch(Vec<StoredLayerHistoryOp>),
+    /// Layers' settings on the other side of the step.
+    Settings(Vec<(u64, StoredLayerSettings)>),
+}
+
+/// Mirrors `LayerSettings`.
+#[derive(Serialize, Deserialize)]
+pub(super) struct StoredLayerSettings {
+    visible: bool,
+    opacity: f32,
+    locked: bool,
+    alpha_locked: bool,
+    blend: String,
+    clipped: bool,
+    position_locked: bool,
+    draft: bool,
+    reference: bool,
 }
 
 impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
@@ -435,6 +645,66 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                 parent_after: parent_after.map(|p| p.0),
                 active_before: *active_before,
                 active_after: *active_after,
+            },
+            LayerHistoryOp::Document(_) => {
+                unreachable!("a resize step is saved as StoredUndoAction::document")
+            }
+            LayerHistoryOp::Replaced(_) => {
+                unreachable!("a merge step is saved as StoredUndoAction::merge")
+            }
+            LayerHistoryOp::Batch(ops) => Self::Batch(ops.iter().map(Self::from).collect()),
+            LayerHistoryOp::Settings(layers) => Self::Settings(
+                layers
+                    .iter()
+                    .map(|(id, s)| {
+                        let stored = StoredLayerSettings {
+                            visible: s.visible,
+                            opacity: s.opacity,
+                            locked: s.locked,
+                            alpha_locked: s.alpha_locked,
+                            blend: s.blend.key().to_string(),
+                            clipped: s.clipped,
+                            position_locked: s.position_locked,
+                            draft: s.draft,
+                            reference: s.reference,
+                        };
+                        (id.0, stored)
+                    })
+                    .collect(),
+            ),
+            LayerHistoryOp::Text { layers, inner } => Self::Text {
+                layers: layers
+                    .iter()
+                    .map(|(id, text)| (id.0, StoredText::from_layer(text.as_deref())))
+                    .collect(),
+                inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
+            },
+            LayerHistoryOp::Vector { layers, inner } => Self::Vector {
+                layers: layers
+                    .iter()
+                    .map(|(id, v)| (id.0, v.as_deref().cloned()))
+                    .collect(),
+                inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
+            },
+            // Wet paint isn't saved (it's as it shows, dry): what it carries,
+            // or nothing.
+            LayerHistoryOp::Wet { inner, .. } => match inner.as_deref() {
+                Some(op) => Self::from(op),
+                None => Self::Vector {
+                    layers: Vec::new(),
+                    inner: None,
+                },
+            },
+            LayerHistoryOp::Height {
+                layer,
+                tiles,
+                map,
+                inner,
+            } => Self::Height {
+                layer: layer.0,
+                tiles: tiles.clone(),
+                map: map.as_ref().map(|m| m.as_ref().map(|m| m.tiles())),
+                inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
             },
         }
     }
@@ -495,6 +765,60 @@ impl StoredLayerHistoryOp {
                 active_before,
                 active_after,
             },
+            Self::Text { layers, inner } => LayerHistoryOp::Text {
+                layers: layers
+                    .into_iter()
+                    .map(|(id, text)| (LayerId(id), StoredText::into_layer(text)))
+                    .collect(),
+                inner: inner.map(|op| Box::new(op.into_op())),
+            },
+            Self::Vector { layers, inner } => LayerHistoryOp::Vector {
+                layers: layers
+                    .into_iter()
+                    .map(|(id, v)| (LayerId(id), v.map(Box::new)))
+                    .collect(),
+                inner: inner.map(|op| Box::new(op.into_op())),
+            },
+            Self::Height {
+                layer,
+                tiles,
+                map,
+                inner,
+            } => LayerHistoryOp::Height {
+                layer: LayerId(layer),
+                tiles,
+                map: map.map(|m| {
+                    m.map(|tiles| {
+                        let map = crate::canvas::impasto::HeightMap::default();
+                        for (key, h) in tiles {
+                            map.set_tile(key, Some(h));
+                        }
+                        Box::new(map)
+                    })
+                }),
+                inner: inner.map(|op| Box::new(op.into_op())),
+            },
+            Self::Batch(ops) => LayerHistoryOp::Batch(ops.into_iter().map(Self::into_op).collect()),
+            Self::Settings(layers) => LayerHistoryOp::Settings(
+                layers
+                    .into_iter()
+                    .map(|(id, s)| {
+                        let settings = crate::canvas::history::LayerSettings {
+                            visible: s.visible,
+                            opacity: s.opacity,
+                            locked: s.locked,
+                            alpha_locked: s.alpha_locked,
+                            blend: crate::canvas::blend_modes::LayerBlend::from_key(&s.blend)
+                                .unwrap_or_default(),
+                            clipped: s.clipped,
+                            position_locked: s.position_locked,
+                            draft: s.draft,
+                            reference: s.reference,
+                        };
+                        (LayerId(id), settings)
+                    })
+                    .collect(),
+            ),
         }
     }
 }

@@ -1,45 +1,124 @@
-use super::{
+//! Building the app at startup: default brushes and presets, workspace
+//! settings, the first canvas and the tablet input.
+
+use crate::app::{
     PainterApp,
-    gpu_canvas::GpuCanvas,
-    layout,
-    painter_state::{
+    document::{ColorModel, NewCanvasSettings, TILE_SIZE},
+    state::{
         BrushState, ExportState, LayerState, ModalState, RenderCache, ViewportState, WorkspaceState,
     },
-    state::{ColorModel, NewCanvasSettings, TILE_SIZE},
+    view::gpu_canvas::GpuCanvas,
 };
-use crate::brush_engine::{
-    brush::{Brush, BrushPreset},
-    brush_options::BlendMode,
-};
+use crate::brush_engine::brush::{Brush, BrushPreset};
 use eframe::egui::{Color32, Vec2};
 use rayon::ThreadPoolBuilder;
 use std::{path::PathBuf, thread};
+
+/// Where the app keeps what it saves: `$RUSTY_PAINTER_DATA` if set, else
+/// the user's data folder (`~/.local/share`, `%APPDATA%`, `~/Library/
+/// Application Support`, the app's own storage on Android), else the
+/// folder it was started in.
+pub(crate) fn data_dir() -> PathBuf {
+    let var = |name: &str| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = || var("HOME");
+    let base = if let Some(dir) = var("RUSTY_PAINTER_DATA") {
+        return dir;
+    } else if cfg!(target_os = "android") {
+        return crate::ANDROID_DATA.get().cloned().unwrap_or_default();
+    } else if cfg!(windows) {
+        var("APPDATA")
+    } else if cfg!(any(target_os = "macos", target_os = "ios")) {
+        // On iOS, `HOME` is the app's container.
+        home().map(|h| h.join("Library/Application Support"))
+    } else {
+        var("XDG_DATA_HOME").or_else(|| home().map(|h| h.join(".local/share")))
+    };
+    base.map_or_else(
+        || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        |b| b.join("rusty-painter"),
+    )
+}
+
+/// The app's Documents folder on iOS: what the Files app shows (Info.plist's
+/// `UIFileSharingEnabled`), where exports and the log go.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub(crate) fn ios_documents() -> PathBuf {
+    std::env::var_os("HOME")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join("Documents")
+}
+
+type LoadStep = fn(&mut PainterApp, &eframe::egui::Context);
+
+/// What start-up loads after the window is up, in order, with what the
+/// splash screen says meanwhile.
+pub(crate) const LOAD_STEPS: [(&str, LoadStep); 7] = [
+    ("Loading brush tips", |app, ctx| {
+        app.load_brush_tips(ctx.clone())
+    }),
+    ("Loading your brushes", |app, _| app.load_user_presets()),
+    ("Loading the brush library", |app, _| {
+        app.load_brush_library()
+    }),
+    ("Installing default brushes", |app, _| {
+        app.install_default_presets();
+        app.brush_state.pick_eraser();
+    }),
+    ("Loading gradients and swatches", |app, _| {
+        // The user's gradients sit next to the brushes folder.
+        let gradients = app
+            .brush_state
+            .brushes_path
+            .with_file_name("gradients.json");
+        app.workspace.gradient.library =
+            crate::app::tools::gradient::GradientLibrary::load(gradients);
+        app.load_swatches();
+    }),
+    ("Loading settings", |app, ctx| {
+        app.load_view_settings();
+        app.load_color_profiles();
+        app.load_panel_widths(ctx);
+        app.load_settings();
+    }),
+    ("Checking for unsaved work", |app, _| {
+        app.workspace.autosave = crate::app::autosave::AutosaveState::new(&app.autosave_path());
+    }),
+];
 
 impl PainterApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let canvas_w = 4000;
         let canvas_h = 4000;
-        let canvas = crate::canvas::Canvas::new(canvas_w, canvas_h, Color32::WHITE, TILE_SIZE);
+        let mut canvas = crate::canvas::Canvas::new(canvas_w, canvas_h, Color32::WHITE, TILE_SIZE);
+        // New documents blend stored values (gamma); the New Canvas
+        // dialog starts from this.
+        canvas.blend_space = crate::canvas::blend_modes::BlendSpace::Gamma;
         let layer_count = canvas.layers.len();
         let new_canvas = NewCanvasSettings::from_canvas(&canvas);
         let color_model = new_canvas.color_model;
         let black = Color32::from_rgba_unmultiplied(0, 0, 0, 255);
 
-        let presets = Self::create_default_brush_presets(black);
         let workspace = Self::create_workspace(color_model);
         let render_cache = RenderCache::new(canvas_w, canvas_h);
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            log::info!(
+                "GPU: {:?}; surface format {:?}",
+                render_state.adapter.get_info(),
+                render_state.target_format
+            );
             let gpu = GpuCanvas::new(&render_state.device, render_state.target_format);
             render_state.renderer.write().callback_resources.insert(gpu);
         } else {
             log::error!("No wgpu render state: the canvas cannot be displayed");
         }
-        let dock_left = layout::default_left_dock();
-        let dock_right = layout::default_right_dock();
 
         let brush_state = BrushState::new(
             Brush::new(24.0, 20.0, black, 25.0),
-            presets,
+            Vec::new(),
             Self::get_brushes_path(),
             true,
         );
@@ -58,87 +137,55 @@ impl PainterApp {
             modal_state,
             export_state,
             workspace,
-            active_tool: super::tools::Tool::Brush,
+            active_tool: crate::app::tools::Tool::Brush,
             selection_manager: crate::selection::SelectionManager::new(),
-            dock_left,
-            dock_right,
             tablet: crate::tablet::TabletInput::new(cc),
         };
 
-        app.load_brush_tips(cc.egui_ctx.clone());
+        app.workspace.shaders.gpu = cc.wgpu_render_state.clone();
+        // The rest loads a step a frame behind the splash screen (see
+        // `run_load_step`), so the window shows at once.
+        app.workspace.loading = Some(0);
         app
     }
 
-    fn create_default_brush_presets(black: Color32) -> Vec<BrushPreset> {
-        vec![
-            BrushPreset {
-                name: "Pencil (Sketch)".to_string(),
-                brush: {
-                    let mut b = Brush::new(6.0, 60.0, black, 10.0);
-                    b.brush_options.flow = 30.0;
-                    b.brush_options.opacity = 0.8;
-                    b.brush_options.pressure_min_size = 0.4;
-                    b.brush_options.pressure_opacity = true;
-                    b.jitter = 0.5;
-                    b
-                },
-            },
-            BrushPreset {
-                name: "Ink Pen".to_string(),
-                brush: {
-                    let mut b = Brush::new(8.0, 100.0, black, 5.0);
-                    b.stabilizer = 0.2;
-                    b.brush_options.flow = 100.0;
-                    b
-                },
-            },
-            BrushPreset {
-                name: "Soft Airbrush".to_string(),
-                brush: {
-                    let mut b = Brush::new(50.0, 0.0, black, 10.0);
-                    b.brush_options.flow = 8.0;
-                    b.brush_options.opacity = 0.6;
-                    b.brush_options.pressure_size = false;
-                    b.brush_options.pressure_flow = true;
-                    b
-                },
-            },
-            BrushPreset {
-                name: "Hard Round".to_string(),
-                brush: Brush::new(20.0, 100.0, black, 10.0),
-            },
-            BrushPreset {
-                name: "Eraser (Soft)".to_string(),
-                brush: {
-                    let mut b = Brush::new(40.0, 20.0, black, 10.0);
-                    b.brush_options.blend_mode = BlendMode::Eraser;
-                    b.brush_options.opacity = 0.8;
-                    b
-                },
-            },
-            BrushPreset {
-                name: "Eraser (Hard)".to_string(),
-                brush: {
-                    let mut b = Brush::new(20.0, 100.0, black, 5.0);
-                    b.brush_options.blend_mode = BlendMode::Eraser;
-                    b
-                },
-            },
-            BrushPreset {
-                name: "Chalk".to_string(),
-                brush: {
-                    let mut b = Brush::new(30.0, 80.0, black, 40.0);
-                    b.jitter = 5.0;
-                    b.brush_options.flow = 50.0;
-                    b.brush_options.pressure_opacity = true;
-                    b
-                },
-            },
-            BrushPreset {
-                name: "Pixel Art".to_string(),
-                brush: Brush::new_pixel(1.0, black),
-            },
-        ]
+    /// Run the next start-up step; `true` once all are done.
+    pub(crate) fn run_load_step(&mut self, ctx: &eframe::egui::Context) -> bool {
+        let Some(step) = self.workspace.loading else {
+            return true;
+        };
+        if let Some((label, load)) = LOAD_STEPS.get(step) {
+            let started = std::time::Instant::now();
+            load(self, ctx);
+            log::info!("Start-up: {label} in {:.1?}", started.elapsed());
+        }
+        let next = step + 1;
+        self.workspace.loading = (next < LOAD_STEPS.len()).then_some(next);
+        self.workspace.loading.is_none()
+    }
+
+    /// The presets that come with the app, from `assets/default-brushes.rpbrush`
+    /// (built into the program, and copied into the user's library on first
+    /// start: see [`Self::install_default_presets`]).
+    pub(crate) fn default_brush_presets() -> Vec<BrushPreset> {
+        // Decoded once: the file holds Krita's tips and textures too (a
+        // few MB), and tips are shared (`Arc`) between the copies.
+        static PRESETS: std::sync::OnceLock<Vec<BrushPreset>> = std::sync::OnceLock::new();
+        PRESETS
+            .get_or_init(|| {
+                let started = std::time::Instant::now();
+                let presets =
+                    crate::brush_engine::preset_file::decode(Self::default_brushes_file())
+                        .expect("the default brushes load");
+                log::info!("Default brushes decoded in {:.1?}", started.elapsed());
+                presets
+            })
+            .clone()
+    }
+
+    /// The bytes of `assets/default-brushes.rpbrush`.
+    pub(crate) fn default_brushes_file() -> &'static [u8] {
+        include_bytes!("../../assets/default-brushes.rpbrush")
     }
 
     fn create_workspace(color_model: ColorModel) -> WorkspaceState {
@@ -158,9 +205,11 @@ impl PainterApp {
         )
     }
 
+    /// `brushes/` in the app's data folder, which also holds the settings,
+    /// swatches, gradients and autosave (siblings of `brushes/`).
     fn get_brushes_path() -> PathBuf {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("brushes")
+        let data = data_dir();
+        let _ = std::fs::create_dir_all(&data);
+        data.join("brushes")
     }
 }

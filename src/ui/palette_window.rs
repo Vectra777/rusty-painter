@@ -2,7 +2,9 @@
 //! and recolour a layer with it.
 
 use crate::PainterApp;
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
+use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::{color_swatch, segmented};
 use eframe::egui::{self, RichText};
 
@@ -13,7 +15,8 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
     }
     let touch = metrics(ctx).touch;
     let swatch = if touch { 34.0 } else { 24.0 };
-    egui::Window::new("Palette")
+    let response = egui::Window::new("Palette")
+        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
@@ -24,11 +27,25 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
             segmented(ui, &mut p.from_layer, &[(false, "Whole picture"), (true, "Selected layer")], false);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Colours").color(TEXT_DIM));
-                ui.add(egui::Slider::new(&mut p.count, 2..=64));
+                ui.add(crate::ui::widgets::reset(&mut p.count, |v| BarSlider::new(v, 2..=64)));
             });
-            if ui.button("Extract palette").clicked() {
-                app.extract_palette();
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Extract palette").clicked() {
+                    app.extract_palette();
+                }
+                if ui
+                    .button("From an image…")
+                    .on_hover_text("Take the colours of a picture file")
+                    .clicked()
+                {
+                    palette_from_image_dialog(app);
+                }
+            });
+            let hint = match &app.workspace.palette.source_image {
+                Some(name) => format!("Colours of {name}"),
+                None => "Or drop a picture on this window".to_string(),
+            };
+            ui.label(RichText::new(hint).small().color(TEXT_DIM));
 
             let extracted = app.workspace.palette.extracted.clone();
             if !extracted.is_empty() {
@@ -37,7 +54,7 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
                     ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
                     for c in &extracted {
                         let [r, g, b, _] = c.to_srgba_unmultiplied();
-                        let tip = format!("#{r:02X}{g:02X}{b:02X} — click to paint with it");
+                        let tip = format!("#{r:02X}{g:02X}{b:02X}: click to paint with it");
                         if color_swatch(ui, *c, egui::vec2(swatch, swatch)).on_hover_text(tip).clicked() {
                             app.brush_state.brush.brush_options.color = *c;
                             app.brush_state.brush_preview.dirty = true;
@@ -72,16 +89,23 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
                 app.recolor_layer(&palette);
             }
         });
+    app.workspace.palette.window_rect = response.map(|r| r.response.rect);
     app.workspace.palette.open = open;
 }
 
-/// Swatches in the colour panel: click to pick, right-click to remove,
-/// + to add the brush colour. Returns the picked colour.
+fn palette_from_image_dialog(app: &mut PainterApp) {
+    app.pick_open(crate::app::files::OpenFor::Palette);
+}
+
+/// Swatches in the colour panel: click to pick, right-click or long-press
+/// to remove, + to add the brush colour. Returns the picked colour, and
+/// whether the swatches changed (to save them).
 pub(crate) fn swatches(
     app_swatches: &mut Vec<eframe::egui::Color32>,
     current: egui::Color32,
     ui: &mut egui::Ui,
-) -> Option<egui::Color32> {
+) -> (Option<egui::Color32>, bool) {
+    let mut changed = false;
     let size = metrics(ui.ctx()).recent_swatch;
     let mut picked = None;
     let mut remove = None;
@@ -90,12 +114,12 @@ pub(crate) fn swatches(
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
         for (i, &c) in app_swatches.iter().enumerate() {
             let r = color_swatch(ui, c, egui::vec2(size, size))
-                .on_hover_text("Click to use · right-click to remove");
-            if r.clicked() {
-                picked = Some(c);
-            }
-            if r.secondary_clicked() {
+                .on_hover_text("Click to use · right-click or long-press to remove");
+            // A long press (pen or finger) removes rather than picks.
+            if r.secondary_clicked() || r.long_touched() {
                 remove = Some(i);
+            } else if r.clicked() {
+                picked = Some(c);
             }
         }
         if ui
@@ -105,10 +129,12 @@ pub(crate) fn swatches(
             && !app_swatches.contains(&current)
         {
             app_swatches.push(current);
+            changed = true;
         }
     });
     if let Some(i) = remove {
         app_swatches.remove(i);
+        changed = true;
     }
-    picked
+    (picked, changed)
 }

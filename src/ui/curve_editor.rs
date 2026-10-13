@@ -1,6 +1,6 @@
 //! Softness curve editor (brush falloff from the dab center to its edge).
 //!
-//! Interaction, like the curve tools in Photoshop/Krita:
+//! Interaction, like the curve tools in Photoshop:
 //! - press on a point to grab it (picked where the press happened, so a quick
 //!   drag can't miss it); points can pass their neighbours;
 //! - press on empty space to add a point there and keep dragging it;
@@ -18,8 +18,11 @@ const DELETE_DISTANCE: f32 = 36.0;
 /// Closest two points may get horizontally.
 const MIN_GAP: f32 = 0.002;
 
-/// Quick shapes offered under the editor.
-const PRESETS: [(&str, &[(f32, f32)]); 4] = [
+/// A named quick shape offered under the editor.
+pub(crate) type CurvePreset = (&'static str, &'static [(f32, f32)]);
+
+/// Quick falloff shapes (centre to edge).
+const PRESETS: [CurvePreset; 4] = [
     ("Linear", &[(0.0, 1.0), (1.0, 0.0)]),
     ("Soft", &[(0.0, 1.0), (0.25, 0.5), (0.6, 0.12), (1.0, 0.0)]),
     (
@@ -29,13 +32,43 @@ const PRESETS: [(&str, &[(f32, f32)]); 4] = [
     ("Hard", &[(0.0, 1.0), (0.75, 0.97), (0.92, 0.4), (1.0, 0.0)]),
 ];
 
+/// Input responses for brush inputs: a direction's "Peak" makes one way of
+/// travel the strongest and the opposite the weakest.
+pub(crate) const INPUT_PRESETS: [CurvePreset; 4] = [
+    ("Linear", &[(0.0, 0.0), (1.0, 1.0)]),
+    ("Reverse", &[(0.0, 1.0), (1.0, 0.0)]),
+    ("Soft", &[(0.0, 0.0), (0.55, 0.2), (1.0, 1.0)]),
+    ("Peak", &[(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]),
+];
+
 #[derive(Clone, Copy, Default)]
 struct DragState {
     /// Index of the grabbed point (kept up to date as points pass each other).
     point: Option<usize>,
 }
 
+/// Pressure responses (pen pressure in, effect out).
+pub(crate) const PRESSURE_PRESETS: [CurvePreset; 4] = [
+    ("Linear", &[(0.0, 0.0), (1.0, 1.0)]),
+    ("Soft", &[(0.0, 0.0), (0.55, 0.2), (1.0, 1.0)]),
+    ("Firm", &[(0.0, 0.0), (0.3, 0.65), (1.0, 1.0)]),
+    (
+        "S-curve",
+        &[(0.0, 0.0), (0.3, 0.12), (0.7, 0.88), (1.0, 1.0)],
+    ),
+];
+
+/// The falloff editor (centre to edge).
 pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool {
+    curve_editor_with(ui, curve, &PRESETS)
+}
+
+/// A curve editor with `presets` as its quick shapes.
+pub(crate) fn curve_editor_with(
+    ui: &mut egui::Ui,
+    curve: &mut SoftnessCurve,
+    presets: &[CurvePreset],
+) -> bool {
     let touch = metrics(ui.ctx()).touch;
     let hit_radius = if touch { 24.0 } else { 12.0 };
     let mut changed = false;
@@ -153,7 +186,7 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool
     ui.data_mut(|d| d.insert_temp(state_id, state));
 
     // --- Drawing ---
-    painter.rect_filled(outer, 0.0, BG_INSET);
+    painter.rect_filled(outer, RADIUS_WIDGET, BG_INSET);
     for q in [0.25, 0.5, 0.75] {
         let x = egui::lerp(rect.x_range(), q);
         let y = egui::lerp(rect.y_range(), q);
@@ -184,10 +217,10 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool
         painter.add(egui::Shape::Path(egui::epaint::PathShape {
             points: fill,
             closed: true,
-            fill: ACCENT.gamma_multiply(0.12),
+            fill: accent().gamma_multiply(0.12),
             stroke: egui::epaint::PathStroke::NONE,
         }));
-        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, ACCENT)));
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, accent())));
     }
 
     let hovered_point = response.hover_pos().and_then(|p| nearest(curve, p));
@@ -202,7 +235,7 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool
         let fill = if grabbed && delete_pending {
             Color32::from_rgb(214, 76, 76)
         } else if grabbed {
-            ACCENT
+            accent()
         } else {
             TEXT_STRONG
         };
@@ -228,7 +261,7 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool
                 "Release to remove".to_string()
             } else {
                 format!(
-                    "{:.0}% from center → {:.0}% opacity",
+                    "{:.0}% from center: {:.0}% opacity",
                     p.x * 100.0,
                     p.y * 100.0
                 )
@@ -254,7 +287,7 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut SoftnessCurve) -> bool
     // Quick shapes.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        for (name, shape) in PRESETS {
+        for &(name, shape) in presets {
             if ui.small_button(name).clicked() {
                 curve.points = shape.iter().map(|&(x, y)| CurvePoint::new(x, y)).collect();
                 changed = true;

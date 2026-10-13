@@ -1,7 +1,12 @@
+//! The project file's blob area: payloads stored zstd-compressed (in
+//! parallel) or raw, addressed by offset and length.
+
 use serde::{Deserialize, Serialize};
-use std::io::Cursor;
 
 const ZSTD_LEVEL: i32 = 6;
+
+/// The most one blob can hold: a selection mask over the largest canvas.
+const MAX_BLOB: u64 = crate::app::document::MAX_CANVAS_PIXELS as u64;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredBlob {
@@ -16,32 +21,38 @@ fn default_compressed() -> bool {
     true
 }
 
-pub(super) fn push_blob(blobs: &mut Vec<u8>, raw: &[u8]) -> Result<StoredBlob, String> {
-    push_blob_impl(blobs, raw, true)
-}
-
-/// Like [`push_blob`], but stores `raw` uncompressed. Use for payloads that are
-/// already compressed (e.g. PNG-encoded previews), where a second zstd pass
-/// only burns CPU for no size benefit.
-pub(super) fn push_blob_raw(blobs: &mut Vec<u8>, raw: &[u8]) -> Result<StoredBlob, String> {
-    push_blob_impl(blobs, raw, false)
-}
-
-fn push_blob_impl(blobs: &mut Vec<u8>, raw: &[u8], compress: bool) -> Result<StoredBlob, String> {
-    let payload = if compress {
-        zstd::stream::encode_all(Cursor::new(raw), ZSTD_LEVEL)
-            .map_err(|err| format!("Compression failed: {err}"))?
-    } else {
-        raw.to_vec()
-    };
-    let offset = blobs.len() as u64;
-    blobs.extend_from_slice(&payload);
-    Ok(StoredBlob {
-        offset,
-        len: payload.len() as u64,
-        raw_len: raw.len() as u64,
-        compressed: compress,
-    })
+/// Store zstd-compressed payloads: compressed in parallel, stored in
+/// order (the file is the same as pushing them one by one).
+pub(super) fn push_blobs(blobs: &mut Vec<u8>, raws: &[Vec<u8>]) -> Result<Vec<StoredBlob>, String> {
+    use rayon::prelude::*;
+    // One compressor per thread, reused: making one per tile (MBs of
+    // state) cost more than compressing.
+    let compressed: Vec<Vec<u8>> = raws
+        .par_iter()
+        .map_init(
+            || zstd::bulk::Compressor::new(ZSTD_LEVEL),
+            |compressor, raw| match compressor {
+                Ok(c) => c
+                    .compress(raw)
+                    .map_err(|err| format!("Compression failed: {err}")),
+                Err(err) => Err(format!("Compression failed: {err}")),
+            },
+        )
+        .collect::<Result<_, _>>()?;
+    Ok(raws
+        .iter()
+        .zip(compressed)
+        .map(|(raw, payload)| {
+            let offset = blobs.len() as u64;
+            blobs.extend_from_slice(&payload);
+            StoredBlob {
+                offset,
+                len: payload.len() as u64,
+                raw_len: raw.len() as u64,
+                compressed: true,
+            }
+        })
+        .collect())
 }
 
 pub(super) fn read_blob(blobs: &[u8], blob: &StoredBlob) -> Result<Vec<u8>, String> {
@@ -53,11 +64,23 @@ pub(super) fn read_blob(blobs: &[u8], blob: &StoredBlob) -> Result<Vec<u8>, Stri
     if end > blobs.len() {
         return Err("Project blob is out of range".to_string());
     }
-    let raw_len = usize::try_from(blob.raw_len).map_err(|_| "Blob raw length is too large")?;
+    let raw_len = usize::try_from(blob.raw_len)
+        .ok()
+        .filter(|_| blob.raw_len <= MAX_BLOB)
+        .ok_or("Blob raw length is too large")?;
     let raw = if blob.compressed {
-        // Bounded by the stored raw_len so a corrupt/malicious blob claiming a huge
-        // decompressed size errors out instead of exhausting memory.
-        zstd::bulk::decompress(&blobs[start..end], raw_len)
+        let payload = &blobs[start..end];
+        // The length is the file's word, and room for it is made before
+        // decompressing: a damaged one claiming gigabytes must not get
+        // them. zstd's own frame says how long it really is.
+        match zstd::zstd_safe::get_frame_content_size(payload) {
+            Ok(Some(n)) if n != blob.raw_len => {
+                return Err("Decompressed blob size mismatch".to_string());
+            }
+            Err(_) => return Err("Damaged compressed blob".to_string()),
+            _ => {}
+        }
+        zstd::bulk::decompress(payload, raw_len)
             .map_err(|err| format!("Decompression failed: {err}"))?
     } else {
         blobs[start..end].to_vec()

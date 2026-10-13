@@ -1,269 +1,794 @@
-use crate::canvas::Canvas;
-use eframe::egui::Color32;
+//! The app's state, grouped by concern: brush, viewport, render cache,
+//! layers (undo history, floating layer), modals, export and workspace
+//! (tool settings and panel layout).
 
-pub const TILE_SIZE: usize = 64;
-pub const ATLAS_SIZE: usize = 2048;
-pub const MAX_CANVAS_DIMENSION: usize = 65_536;
-pub const MAX_CANVAS_PIXELS: usize = 268_435_456;
-pub const MAX_CANVAS_DPI: f32 = 4_800.0;
+use crate::app::document::{CanvasTile, ColorModel, NewCanvasSettings, TILE_SIZE};
+use crate::app::view::gpu_canvas::TILES_PER_ATLAS;
+use crate::canvas::storage::LayerId;
+use crate::{
+    brush_engine::{
+        brush::{Brush, BrushPreset},
+        brush_options::{BlendMode, PixelBrushShape},
+    },
+    canvas::history::History,
+    ui::{brush_settings::BrushPreviewState, export_modal::ExportProgress},
+};
+use eframe::egui::{self, Color32, Rgba, Vec2};
+use rayon::ThreadPool;
+use rustc_hash::FxHashMap;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CanvasUnit {
-    Pixels,
-    Inches,
-    Millimeters,
-    Centimeters,
+/// Brush-related state and resources
+pub struct BrushState {
+    pub brush: Brush,
+    pub brush_preview: BrushPreviewState,
+    pub presets: Vec<BrushPreset>,
+    pub preset_previews: HashMap<String, egui::TextureHandle>,
+    /// Draws the presets' previews off the UI thread.
+    pub preset_preview_worker: crate::ui::preview_worker::PreviewWorker,
+    pub loaded_brush_tips: Vec<LoadedTip>,
+    /// Paper textures from `brushes/textures/` (besides the built-in ones).
+    pub loaded_textures: Vec<Arc<crate::brush_engine::texture::Pattern>>,
+    pub brushes_path: PathBuf,
+    pub is_drawing: bool,
+    pub use_masked_brush: bool,
+    pub show_new_preset_modal: bool,
+    pub new_preset_name: String,
+    /// Background color; `X` swaps it with the brush color.
+    pub secondary_color: Color32,
+    /// Most recently painted colors, newest first.
+    pub recent_colors: Vec<Color32>,
+    /// Colours kept on purpose (the palette), in order.
+    pub swatches: Vec<Color32>,
+    /// The swatches changed: saved at the end of the frame.
+    pub swatches_dirty: bool,
+    /// Brush, eraser, smudge and blur keep separate settings (tip, size,
+    /// preset...): `brush` is the active slot's, these are the others' with
+    /// their presets, swapped in when the tool changes. `None` for the
+    /// active slot, and for smudge and blur until first used (they start
+    /// as a copy of the brush).
+    pub parked: [Option<(Brush, Option<String>)>; 4],
+    /// Whose brush `brush` is.
+    pub slot: BrushSlot,
+    /// Name of the preset the active slot's brush came from.
+    pub active_preset: Option<String>,
+    /// The floating presets window is open.
+    pub show_presets: bool,
+    /// The smudge / blur stroke in progress.
+    pub blend_stroke: Option<crate::app::tools::blend::ActiveBlend>,
+    /// Brushes just imported from other apps: per file, how many presets
+    /// and what was approximated (shown until dismissed).
+    pub import_report: Option<Vec<(String, usize, Vec<String>)>>,
+    /// The pulled string of the stroke being drawn, shown on the canvas.
+    pub string: Option<crate::app::stroke_ops::PulledString>,
+    /// Tags, favourites and recent presets, and the pop-up palette.
+    pub library: crate::app::brush_library::BrushLibrary,
+    /// The paint a mixing brush that isn't cleaned after each stroke
+    /// still carries.
+    pub dirty_brush: Arc<crate::app::tools::blend::DirtyBrush>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Orientation {
-    Portrait,
-    Landscape,
+/// Which tool a brush belongs to: each keeps its own (Clip Studio's
+/// sub-tools), while the colour and the stabiliser follow the hand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BrushSlot {
+    #[default]
+    Brush,
+    Eraser,
+    Smudge,
+    Blur,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackgroundChoice {
-    Transparent,
-    White,
-    Black,
-    Custom,
+impl BrushSlot {
+    pub const ALL: [Self; 4] = [Self::Brush, Self::Eraser, Self::Smudge, Self::Blur];
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColorModel {
-    Rgba,
-    Grayscale,
+/// Give `to` what's the artist's rather than the brush's: `from`'s colour
+/// and stabiliser.
+pub fn keep_hand(to: &mut Brush, from: &Brush) {
+    to.brush_options.color = from.brush_options.color;
+    to.stabilizer_algorithm = from.stabilizer_algorithm;
+    to.stabilizer = from.stabilizer;
+    to.stabilizer_mass = from.stabilizer_mass;
+    to.stabilizer_drag = from.stabilizer_drag;
+    to.stabilizer_modes = from.stabilizer_modes;
 }
 
-#[derive(Clone)]
-pub struct NewCanvasSettings {
+/// A tip in the brush settings' tip list: one tip, or a set the dabs take
+/// in turn (a folder of pictures in `brushes/`).
+pub struct LoadedTip {
     pub name: String,
-    pub width: f32,
-    pub height: f32,
-    pub unit: CanvasUnit,
-    pub resolution: f32,
-    pub orientation: Orientation,
-    pub background: BackgroundChoice,
-    pub custom_bg: Color32,
-    pub color_model: ColorModel,
-    /// Colour space the new document blends in.
-    pub blend_space: crate::canvas::blend_modes::BlendSpace,
+    pub shape: PixelBrushShape,
+    /// The set's other tips (empty for a single tip).
+    pub extra: Vec<Arc<crate::brush_engine::tip::TipMask>>,
+    pub texture: Option<egui::TextureHandle>,
 }
 
-/// A changed rectangle inside one tile, in tile-local pixels:
-/// `[x0, y0, x1, y1)` (end exclusive).
-pub type TileRect = [usize; 4];
+/// How many colors the recent-colors strip remembers.
+pub const MAX_RECENT_COLORS: usize = 18;
 
-pub struct CanvasTile {
-    pub dirty: bool,
-    pub tx: usize,
-    pub ty: usize,
-    /// When only part of a dirty tile changed (brush strokes), that part;
-    /// `None` means the whole tile. Redraw composites and uploads just this.
-    pub damage: Option<TileRect>,
-}
-
-impl CanvasTile {
-    /// The whole tile needs redrawing.
-    pub fn mark_full(&mut self) {
-        self.dirty = true;
-        self.damage = None;
-    }
-
-    /// `rect` changed. Grows an existing partial damage; a tile already
-    /// fully dirty stays fully dirty.
-    pub fn mark_rect(&mut self, rect: TileRect) {
-        if !self.dirty {
-            self.dirty = true;
-            self.damage = Some(rect);
-        } else if let Some(d) = &mut self.damage {
-            *d = [
-                d[0].min(rect[0]),
-                d[1].min(rect[1]),
-                d[2].max(rect[2]),
-                d[3].max(rect[3]),
-            ];
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.dirty = false;
-        self.damage = None;
-    }
-}
-
-impl CanvasUnit {
-    pub fn label(&self) -> &'static str {
-        match self {
-            CanvasUnit::Pixels => "px",
-            CanvasUnit::Inches => "in",
-            CanvasUnit::Millimeters => "mm",
-            CanvasUnit::Centimeters => "cm",
-        }
-    }
-}
-
-impl NewCanvasSettings {
-    pub fn from_canvas(canvas: &Canvas) -> Self {
-        let width = canvas.width() as f32;
-        let height = canvas.height() as f32;
-        let orientation = if width >= height {
-            Orientation::Landscape
-        } else {
-            Orientation::Portrait
+impl BrushState {
+    pub fn new(
+        brush: Brush,
+        presets: Vec<BrushPreset>,
+        brushes_path: PathBuf,
+        use_masked_brush: bool,
+    ) -> Self {
+        let mut state = Self {
+            brush: brush.clone(),
+            brush_preview: BrushPreviewState::default(),
+            presets,
+            preset_previews: HashMap::new(),
+            preset_preview_worker: Default::default(),
+            loaded_brush_tips: Vec::new(),
+            loaded_textures: Vec::new(),
+            brushes_path,
+            is_drawing: false,
+            use_masked_brush,
+            show_new_preset_modal: false,
+            new_preset_name: String::new(),
+            secondary_color: Color32::WHITE,
+            recent_colors: Vec::new(),
+            swatches: vec![Color32::BLACK, Color32::WHITE],
+            swatches_dirty: false,
+            parked: Default::default(),
+            slot: BrushSlot::Brush,
+            active_preset: None,
+            show_presets: false,
+            blend_stroke: None,
+            import_report: None,
+            string: None,
+            library: Default::default(),
+            dirty_brush: Default::default(),
         };
-        Self {
-            name: "Untitled".to_string(),
-            width,
-            height,
-            unit: CanvasUnit::Pixels,
-            resolution: 300.0,
-            orientation,
-            background: BackgroundChoice::White,
-            custom_bg: Color32::WHITE,
-            color_model: ColorModel::Rgba,
-            blend_space: canvas.blend_space,
+        state.pick_eraser();
+        state
+    }
+
+    /// The eraser starts from the first eraser preset, else from the brush.
+    pub fn pick_eraser(&mut self) {
+        if self.slot == BrushSlot::Eraser {
+            return;
+        }
+        let eraser =
+            (self.presets.iter()).find(|p| p.brush.brush_options.blend_mode == BlendMode::Eraser);
+        let preset = eraser.map(|p| p.name.clone());
+        let mut eraser_brush = eraser.map_or_else(|| self.brush.clone(), |p| p.brush.clone());
+        eraser_brush.brush_options.blend_mode = BlendMode::Eraser;
+        eraser_brush.brush_options.color = self.brush.brush_options.color;
+        self.parked[BrushSlot::Eraser as usize] = Some((eraser_brush, preset));
+    }
+
+    pub fn eraser_active(&self) -> bool {
+        self.slot == BrushSlot::Eraser
+    }
+
+    /// `slot`'s brush and preset, active or parked (smudge and blur not
+    /// used yet: the brush's).
+    pub fn slot_brush(&self, slot: BrushSlot) -> (&Brush, &Option<String>) {
+        if slot == self.slot {
+            return (&self.brush, &self.active_preset);
+        }
+        match &self.parked[slot as usize] {
+            Some((brush, preset)) => (brush, preset),
+            None if slot == BrushSlot::Brush => (&self.brush, &self.active_preset),
+            None => self.slot_brush(BrushSlot::Brush),
         }
     }
 
-    pub fn sync_from_canvas(&mut self, canvas: &Canvas) {
-        self.width = canvas.width() as f32;
-        self.height = canvas.height() as f32;
-        self.orientation = if self.width >= self.height {
-            Orientation::Landscape
-        } else {
-            Orientation::Portrait
-        };
-    }
-
-    pub fn dimensions_in_pixels(&self) -> (usize, usize) {
-        self.validated_dimensions().unwrap_or((16_384, 16_384))
-    }
-
-    pub fn validated_dimensions(&self) -> Result<(usize, usize), String> {
-        let dpi = self.resolution.max(1.0);
-        validate_dpi(dpi)?;
-        let to_px = |value: f32| -> f32 {
-            match self.unit {
-                CanvasUnit::Pixels => value,
-                CanvasUnit::Inches => value * dpi,
-                CanvasUnit::Millimeters => value / 25.4 * dpi,
-                CanvasUnit::Centimeters => value / 2.54 * dpi,
+    /// Make `slot`'s brush the active one, parking the current one. Returns
+    /// whether it changed.
+    pub fn switch_slot(&mut self, slot: BrushSlot) -> bool {
+        if self.slot == slot {
+            return false;
+        }
+        let (mut brush, preset) = match self.parked[slot as usize].take() {
+            Some(parked) => parked,
+            None => {
+                let (b, p) = self.slot_brush(BrushSlot::Brush);
+                let mut b = b.clone();
+                if b.brush_options.blend_mode == BlendMode::Eraser {
+                    b.brush_options.blend_mode = BlendMode::Normal;
+                }
+                (b, p.clone())
             }
         };
+        keep_hand(&mut brush, &self.brush);
+        let old = std::mem::replace(&mut self.brush, brush);
+        let old_preset = std::mem::replace(&mut self.active_preset, preset);
+        self.parked[self.slot as usize] = Some((old, old_preset));
+        self.slot = slot;
+        self.brush.is_changed = true;
+        self.brush_preview.dirty = true;
+        true
+    }
 
-        let mut w = to_px(self.width.max(1.0));
-        let mut h = to_px(self.height.max(1.0));
+    /// Remember `color` at the front of the recent-colors strip.
+    pub fn remember_color(&mut self, color: Color32) {
+        self.recent_colors.retain(|&c| c != color);
+        self.recent_colors.insert(0, color);
+        self.recent_colors.truncate(MAX_RECENT_COLORS);
+    }
+}
 
-        match self.orientation {
-            Orientation::Portrait if w > h => std::mem::swap(&mut w, &mut h),
-            Orientation::Landscape if h > w => std::mem::swap(&mut w, &mut h),
-            _ => {}
+/// Viewport/camera transformation state
+pub struct ViewportState {
+    pub zoom: f32,
+    pub offset: Vec2,
+    pub rotation: f32,
+    pub is_panning: bool,
+    pub is_rotating: bool,
+    pub is_primary_down: bool,
+    /// Canvas-space position under the pointer.
+    pub cursor_canvas: Option<Vec2>,
+    /// Screen rect of the canvas area last frame, for zooming from the UI.
+    pub canvas_area: Option<egui::Rect>,
+    /// Finger tracking for touch gestures.
+    pub touch: crate::app::input::touch::TouchState,
+    /// Screen position of the previous pointer event, for pan/rotate deltas.
+    pub last_pointer_pos: Option<egui::Pos2>,
+    /// The view is mirrored left to right (the pixels are not).
+    pub flip_x: bool,
+}
+
+impl ViewportState {
+    pub fn new(zoom: f32, offset: Vec2) -> Self {
+        Self {
+            zoom,
+            offset,
+            rotation: 0.0,
+            is_panning: false,
+            is_rotating: false,
+            is_primary_down: false,
+            cursor_canvas: None,
+            canvas_area: None,
+            touch: Default::default(),
+            last_pointer_pos: None,
+            flip_x: false,
         }
+    }
+}
 
-        let width = w.round().max(1.0) as usize;
-        let height = h.round().max(1.0) as usize;
-        validate_canvas_size(width, height)?;
-        Ok((width, height))
+pub struct BelowCache {
+    /// `Canvas::composite_below_key` for the layers this was built from.
+    pub key: (Color32, Vec<(LayerId, bool, u32)>),
+    pub tiles: FxHashMap<(usize, usize), Vec<Rgba>>,
+}
+
+/// Display tiles and their GPU atlas grid.
+pub struct RenderCache {
+    pub tiles: Vec<CanvasTile>,
+    pub tiles_x: usize,
+    pub tiles_y: usize,
+    /// Atlas grid size; each atlas holds a `TILES_PER_ATLAS`² block of tiles.
+    pub atlases_x: usize,
+    pub atlases_y: usize,
+    /// Composite of the layers below the active one, per tile, valid for the
+    /// current stroke only (nothing but the active layer changes mid-stroke).
+    pub below_cache: Option<BelowCache>,
+    /// Bumped whenever the canvas is rebuilt, so the GPU recreates its atlases.
+    pub texture_generation: u64,
+    /// Tiles whose atlas content is only exact from this mip level up (a
+    /// zoomed-out stroke preview); finer levels still need a full upload.
+    pub preview_tiles: FxHashMap<(usize, usize), u32>,
+    /// Shader layers showing live: the stack split into runs, each with its
+    /// own atlases (see `canvas::shader::live_layout`).
+    pub live: Option<std::sync::Arc<crate::canvas::shader::LiveLayout>>,
+    /// The document's colours converted for the monitor (or proofing) as
+    /// tiles go to the GPU; `None` shows them as they are.
+    pub display: Option<std::sync::Arc<crate::canvas::color_profile::DisplayTransform>>,
+}
+
+impl RenderCache {
+    /// A render cache for a `width`×`height` canvas, every tile dirty.
+    pub fn new(width: usize, height: usize) -> Self {
+        let tiles_x = width.div_ceil(TILE_SIZE);
+        let tiles_y = height.div_ceil(TILE_SIZE);
+        let tiles = (0..tiles_y)
+            .flat_map(|ty| {
+                (0..tiles_x).map(move |tx| CanvasTile {
+                    dirty: true,
+                    tx,
+                    ty,
+                    damage: None,
+                })
+            })
+            .collect();
+        Self {
+            tiles,
+            tiles_x,
+            tiles_y,
+            atlases_x: tiles_x.div_ceil(TILES_PER_ATLAS),
+            atlases_y: tiles_y.div_ceil(TILES_PER_ATLAS),
+            below_cache: None,
+            texture_generation: 0,
+            preview_tiles: FxHashMap::default(),
+            live: None,
+            display: None,
+        }
     }
 
-    pub fn background_color32(&self, model: ColorModel) -> Color32 {
-        let base = match self.background {
-            BackgroundChoice::Transparent => Color32::TRANSPARENT,
-            BackgroundChoice::White => Color32::WHITE,
-            BackgroundChoice::Black => Color32::BLACK,
-            BackgroundChoice::Custom => self.custom_bg,
-        };
+    /// The atlas holding tile `(tx, ty)` and the tile's pixel offset in it.
+    pub fn atlas_slot(&self, tx: usize, ty: usize) -> (usize, usize, usize) {
+        let atlas = (ty / TILES_PER_ATLAS) * self.atlases_x + tx / TILES_PER_ATLAS;
+        let x = (tx % TILES_PER_ATLAS) * TILE_SIZE;
+        let y = (ty % TILES_PER_ATLAS) * TILE_SIZE;
+        (atlas, x, y)
+    }
+}
 
-        let color = base;
-        match model {
-            ColorModel::Rgba => color,
-            ColorModel::Grayscale => to_grayscale(color),
+/// A transform session's starting point: the source layer and its tiles
+/// (the ones the float lifted pixels from) as they were, plus the selection.
+/// Whole tiles by coordinate.
+pub type Tiles = HashMap<(i32, i32), Vec<Color32>>;
+
+pub struct FloatSession {
+    pub source_id: crate::canvas::storage::LayerId,
+    pub source_tiles: HashMap<(i32, i32), Vec<Color32>>,
+    /// In a deeper document, the source layer's tiles at full depth as they
+    /// were: the transform is done again from them when it's kept.
+    pub orig_deep: HashMap<(i32, i32), crate::canvas::storage::DeepTile>,
+    pub selection: Option<crate::selection::SelectionShape>,
+    /// Canvas area the floating layer last covered.
+    pub last_rect: Option<egui::Rect>,
+    /// Content bounds of the floating pixels before transforming.
+    pub src_bounds: Option<egui::Rect>,
+    /// The floating layer shows a quick (draft) preview right now.
+    pub draft_shown: bool,
+}
+
+/// A transform of several layers, each redrawn in place (see
+/// `transform::lift_in_place`).
+pub struct InPlaceTransform {
+    /// The selected layer.
+    pub source_id: crate::canvas::storage::LayerId,
+    pub layers: Vec<InPlaceLayer>,
+    pub selection: Option<crate::selection::SelectionShape>,
+    /// The layers show a quick (draft) preview right now.
+    pub draft_shown: bool,
+    /// A full-quality redraw took too long for a drag: drags show the
+    /// quick preview.
+    pub slow: bool,
+}
+
+/// One layer of an [`InPlaceTransform`].
+pub struct InPlaceLayer {
+    pub id: crate::canvas::storage::LayerId,
+    /// The pixels moving (taken out of the layer at the start).
+    pub lifted: Tiles,
+    pub src_bounds: Option<egui::Rect>,
+    /// The layer's tiles under `lifted` as they were.
+    pub before: Tiles,
+    /// What the layer has besides the moving pixels, where redraws went.
+    pub left: Tiles,
+    /// Tiles the last redraw wrote.
+    pub drawn: Vec<(i32, i32)>,
+    /// In a deeper document, the layer's tiles at full depth as they were
+    /// (see [`FloatSession::orig_deep`]).
+    pub orig_deep: HashMap<(i32, i32), crate::canvas::storage::DeepTile>,
+}
+
+/// The toolbar buttons that hold more than one tool: which one each shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ToolGroups {
+    /// The Transform button shows Animate.
+    pub animate: bool,
+    /// The Eraser button shows Lasso delete.
+    pub lasso_delete: bool,
+}
+
+/// See [`LayerState::float_overlay`].
+pub struct FloatOverlay {
+    pub texture: egui::TextureHandle,
+    /// Canvas area (pixel edges) the texture shows, before transforming.
+    pub area: egui::Rect,
+    /// Drawn this frame (while dragging, and until the re-rendered layer
+    /// has fully reached the screen after release).
+    pub showing: bool,
+    /// Released: the layer is rendered and shown again; hide the overlay
+    /// once every redrawn tile is on screen.
+    pub revealing: bool,
+}
+
+/// Layer UI state and undo history
+pub struct LayerState {
+    pub layer_ui_colors: Vec<Color32>,
+    pub layer_dragging: Option<usize>,
+    /// Rows picked together in the layers panel (Ctrl/Shift-click), by id.
+    /// Only counts while it holds the selected row (see
+    /// `PainterApp::selected_indices`).
+    pub selected: Vec<crate::canvas::storage::LayerId>,
+    /// The layers' settings as a layers panel edit started (see
+    /// `PainterApp::settings_watch`).
+    /// Alt+right-click's menu of the layers with paint under the pointer
+    /// (top first), at this screen position.
+    pub pick_menu: Option<(egui::Pos2, Vec<crate::canvas::storage::LayerId>)>,
+    pub settings_before: Option<
+        Vec<(
+            crate::canvas::storage::LayerId,
+            crate::canvas::history::LayerSettings,
+        )>,
+    >,
+    pub floating_layer_idx: Option<usize>,
+    pub floating_buffer: Option<HashMap<(i32, i32), Vec<Color32>>>,
+    /// What the running transform session needs to undo or cancel itself.
+    pub float_session: Option<FloatSession>,
+    /// The layers the Transform tool's idle box was fitted to (see
+    /// `transform::idle_box_key`).
+    pub idle_box_for: Vec<crate::canvas::storage::LayerId>,
+    /// The running transform of several layers, if any.
+    pub in_place: Option<InPlaceTransform>,
+    /// Transforming the selection outline alone (it had no pixels to
+    /// lift): the selection as it was, applied on commit.
+    pub selection_transform: Option<crate::selection::SelectionShape>,
+    /// The running session's transform, kept for when the Transform tool is
+    /// left (another tool picked): the session is applied as it was.
+    pub transform_info: Option<crate::selection::transform::TransformInfo>,
+    /// The floating pixels as a GPU texture, drawn transformed while the
+    /// box is dragged (instead of re-rendering the layer every frame).
+    pub float_overlay: Option<FloatOverlay>,
+    /// The transform changed; the floating layer is redrawn once per frame.
+    pub transform_preview_pending: bool,
+    /// The running liquify session, if any.
+    pub liquify: Option<crate::app::tools::liquify::LiquifySession>,
+    /// The running Puppet Warp session, if any.
+    pub puppet: Option<crate::app::tools::puppet::PuppetSession>,
+    /// Puppet Warp's pins on a rig part (its edits are keys, each drag an
+    /// undo step: nothing to apply or cancel).
+    pub rig_pins: Option<crate::app::tools::puppet_rig::RigPins>,
+    /// The document's undo history: one stack for every layer, in the
+    /// order things were done, so undo always takes back the last change
+    /// wherever it was.
+    pub history: History,
+    /// Per-layer thumbnail textures for the layers panel, by layer index.
+    pub thumbnails: Vec<Option<egui::TextureHandle>>,
+    /// Set when canvas content may have changed since thumbnails were built.
+    pub thumbnails_dirty: bool,
+    pub thumbnails_built_at: Option<std::time::Instant>,
+}
+
+impl LayerState {
+    pub fn new(layer_count: usize) -> Self {
+        Self {
+            layer_ui_colors: vec![Color32::from_gray(40); layer_count],
+            layer_dragging: None,
+            selected: Vec::new(),
+            settings_before: None,
+            pick_menu: None,
+            floating_layer_idx: None,
+            floating_buffer: None,
+            float_session: None,
+            idle_box_for: Vec::new(),
+            in_place: None,
+            selection_transform: None,
+            transform_info: None,
+            float_overlay: None,
+            transform_preview_pending: false,
+            liquify: None,
+            puppet: None,
+            rig_pins: None,
+            history: History::new(),
+            thumbnails: Vec::new(),
+            thumbnails_dirty: true,
+            thumbnails_built_at: None,
         }
     }
 }
 
-pub fn to_grayscale(color: Color32) -> Color32 {
-    let [r, g, b, a] = color.to_srgba_unmultiplied();
-    let y = (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32).round() as u8;
-    Color32::from_rgba_unmultiplied(y, y, y, a)
+/// Modal dialog state
+pub struct ModalState {
+    pub show_new_canvas_modal: bool,
+    pub new_canvas: NewCanvasSettings,
+    pub show_general_settings: bool,
+    pub show_shortcuts: bool,
+    /// Edit → History: the list of steps, click one to go back to it.
+    pub show_history: bool,
+    /// The selection tool's slide-out menu is open.
+    pub select_menu_open: bool,
+    /// The mirror painting menu is open.
+    pub symmetry_menu_open: bool,
+    /// The shape menu is open.
+    pub shape_menu_open: bool,
+    /// Touch mode: the File / Edit / View / Help sheet is slid up.
+    pub menu_sheet_open: bool,
+    /// Section the menu sheet shows when it is too narrow for all of them.
+    pub menu_sheet_section: crate::ui::menus::MenuSection,
+    /// The Canvas Size or Image Size dialog, while open.
+    pub size_dialog: Option<crate::ui::image_menu::SizeDialog>,
+    /// The New Canvas dialog's presets: the shelf shown, the user's own
+    /// (read when first shown), the name for saving one, and whether the
+    /// clipboard is pasted into the new canvas.
+    pub canvas_presets: crate::ui::canvas_creation::PresetsState,
 }
 
-pub fn validate_canvas_size(width: usize, height: usize) -> Result<(), String> {
-    if width == 0 || height == 0 {
-        return Err("Canvas dimensions must be at least 1 px".to_string());
+impl ModalState {
+    pub fn new(new_canvas: NewCanvasSettings) -> Self {
+        Self {
+            show_new_canvas_modal: false,
+            new_canvas,
+            show_general_settings: false,
+            show_shortcuts: false,
+            show_history: false,
+            select_menu_open: false,
+            symmetry_menu_open: false,
+            shape_menu_open: false,
+            menu_sheet_open: false,
+            menu_sheet_section: Default::default(),
+            size_dialog: None,
+            canvas_presets: Default::default(),
+        }
     }
-    if width > MAX_CANVAS_DIMENSION || height > MAX_CANVAS_DIMENSION {
-        return Err(format!(
-            "Canvas edge is too large. Maximum is {MAX_CANVAS_DIMENSION} px."
-        ));
-    }
-    let pixels = width
-        .checked_mul(height)
-        .ok_or_else(|| "Canvas dimensions overflow usize".to_string())?;
-    if pixels > MAX_CANVAS_PIXELS {
-        return Err(format!(
-            "Canvas is too large. Maximum is {} megapixels.",
-            MAX_CANVAS_PIXELS / 1_000_000
-        ));
-    }
-    Ok(())
 }
 
-pub fn validate_dpi(dpi: f32) -> Result<(), String> {
-    if !(1.0..=MAX_CANVAS_DPI).contains(&dpi) {
-        return Err(format!("DPI must be between 1 and {MAX_CANVAS_DPI:.0}."));
-    }
-    Ok(())
+/// Export operation state
+pub struct ExportState {
+    pub settings: crate::ui::export_modal::ExportSettings,
+    pub message: Option<String>,
+    pub in_progress: bool,
+    pub task: Option<std::thread::JoinHandle<Result<String, String>>>,
+    pub progress: f32,
+    pub progress_rx: Option<mpsc::Receiver<ExportProgress>>,
+    pub show_modal: bool,
+    /// Android: the last export's (URI, MIME type), for Share.
+    #[cfg_attr(not(mobile), allow(dead_code))]
+    pub share: Option<(String, String)>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validates_generous_canvas_limit() {
-        assert!(validate_canvas_size(16_384, 16_384).is_ok());
-        assert!(validate_canvas_size(16_384, 16_385).is_err());
-        assert!(validate_canvas_size(0, 10).is_err());
+impl ExportState {
+    pub fn new() -> Self {
+        Self {
+            settings: crate::ui::export_modal::ExportSettings::new(),
+            message: None,
+            in_progress: false,
+            task: None,
+            progress: 0.0,
+            progress_rx: None,
+            show_modal: false,
+            share: None,
+        }
     }
+}
 
-    #[test]
-    fn unit_conversion_is_capped() {
-        let settings = NewCanvasSettings {
-            width: 2.0,
-            height: 3.0,
-            unit: CanvasUnit::Inches,
-            resolution: MAX_CANVAS_DPI,
-            orientation: Orientation::Portrait,
-            name: "Huge".to_string(),
-            background: BackgroundChoice::White,
-            custom_bg: Color32::WHITE,
-            color_model: ColorModel::Rgba,
-            blend_space: Default::default(),
-        };
-        assert_eq!(settings.validated_dimensions().unwrap(), (9_600, 14_400));
+impl Default for ExportState {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
-    #[test]
-    fn grayscale_background_is_converted() {
-        let settings = NewCanvasSettings {
-            width: 1.0,
-            height: 1.0,
-            unit: CanvasUnit::Pixels,
-            resolution: 72.0,
-            orientation: Orientation::Portrait,
-            name: "Gray".to_string(),
-            background: BackgroundChoice::Custom,
-            custom_bg: Color32::from_rgb(255, 0, 0),
-            color_model: ColorModel::Grayscale,
-            blend_space: Default::default(),
-        };
+/// Threading and workspace-level settings
+pub struct WorkspaceState {
+    /// Start-up still loading: the next step of [`crate::app::init::LOAD_STEPS`]
+    /// (one a frame, behind the splash screen).
+    pub loading: Option<usize>,
+    pub thread_count: usize,
+    pub max_threads: usize,
+    pub pool: Arc<ThreadPool>,
+    pub color_model: ColorModel,
+    /// The monitor's profile, proofing and the print profile.
+    pub color: crate::app::color_management::ColorSettings,
+    /// Playback and the timeline panel.
+    pub animation: crate::app::animation::AnimationState,
+    /// Editing a rig layer.
+    pub rig: crate::app::rig::RigEditState,
+    /// Editing a layer's keyed motion.
+    pub motion: crate::app::motion::MotionEditState,
+    /// Fit the canvas to the panel whenever the panel size changes, until the
+    /// user pans, zooms or rotates the view.
+    pub auto_fit: bool,
+    /// Panel size the canvas was last auto-fitted to.
+    pub fitted_to: Option<egui::Vec2>,
+    /// Larger controls and gesture hints for touch screens.
+    pub touch_mode: bool,
+    /// The accent chosen in Settings.
+    pub accent: egui::Color32,
+    /// Which tool each grouped toolbar button shows (and picks on a click).
+    pub tool_groups: ToolGroups,
+    /// The touch mode and accent the egui style was last built for.
+    pub applied_style: Option<(bool, egui::Color32)>,
+    /// Let a single finger paint; when off, one finger pans and only a
+    /// stylus paints.
+    pub finger_painting: bool,
+    /// Touch mode: the tool strip and brush panel fade out while painting
+    /// and come back when the pen or mouse comes near them.
+    pub autohide_panels: bool,
+    /// How the pen's raw pressure maps to the pressure every brush sees (a
+    /// soft or firm pen, a heavy or light hand). What pressure drives (size,
+    /// opacity, flow) is set per brush, with its own curves on top.
+    pub pressure_curve: crate::brush_engine::hardness::SoftnessCurve,
+    /// The pen's last raw pressure and what the curve made of it, for the
+    /// live readout in Settings.
+    pub last_pressure: Option<(f32, f32)>,
+    /// Wet paint: which way is down (canvas pixels: its direction), the
+    /// time it last dried for, the history step on top that has taken it
+    /// in (see `History::top_token`), and how long a step of drying took
+    /// last (seconds).
+    pub wet_gravity: [f32; 2],
+    pub wet_clock: Option<std::time::Instant>,
+    pub wet_step: Option<(u64, usize)>,
+    /// Wet paint drying in the background (see
+    /// [`crate::app::stroke_ops::WetDrying`]).
+    pub wet_drying: Option<crate::app::stroke_ops::WetDrying>,
+    /// Test strokes for fitting the pressure curve, while that's open.
+    pub calibration: Option<crate::app::pressure_calibration::Calibration>,
+    /// The brush (tool settings) panel is open.
+    pub show_left_panel: bool,
+    /// The colour and layers panels are open (they share the right side).
+    pub show_color: bool,
+    pub show_layers: bool,
+    /// The mixing palette shows under the colours.
+    pub show_mixer: bool,
+    pub mixer: crate::app::tools::mixer::Mixer,
+    /// Window size last frame, to notice resizes and screen rotations.
+    pub screen_size: Option<egui::Vec2>,
+    /// Selection type the Select tool uses (last one picked).
+    pub select_type: crate::selection::SelectionType,
+    /// Fill tool mode and settings.
+    pub fill: crate::app::tools::fill::FillToolState,
+    /// Liquify brush mode and settings.
+    pub liquify: crate::app::tools::liquify::LiquifySettings,
+    /// Puppet Warp mode and mesh.
+    pub puppet: crate::app::tools::puppet::PuppetSettings,
+    /// The Bone tool: its mode, the selected bone and the drag going on.
+    pub bone: crate::app::tools::bone::BoneState,
+    /// The layer and document version Puppet Warp last looked for a
+    /// remembered warp at.
+    pub puppet_checked: Option<(
+        Option<crate::canvas::storage::LayerId>,
+        crate::app::autosave::Version,
+    )>,
+    /// Palette window state.
+    pub palette: crate::app::tools::palette::PaletteToolState,
+    /// Smudge and blur settings (the rest comes from the brush).
+    pub blend: crate::app::tools::blend::BlendToolSettings,
+    /// Transform tool: clicking another layer's pixels selects that layer.
+    pub transform_pick_layer: bool,
+    /// Select tool settings and drag state.
+    pub select: crate::app::tools::select::SelectToolState,
+    /// Mirror painting.
+    pub symmetry: crate::brush_engine::symmetry::Symmetry,
+    /// Wrap-around: painting past one edge comes in at the other, and the
+    /// view shows the canvas repeated (seamless tiles).
+    pub wrap_around: bool,
+    /// On-canvas guides and their handles.
+    pub guides: crate::app::tools::guides::GuideState,
+    /// The grid, guide lines, snapping, reference image and navigator.
+    pub view_aids: crate::app::view::aids::ViewAids,
+    /// Shape tool settings and the shape being edited.
+    pub shapes: crate::app::tools::shape::ShapeToolState,
+    /// Gradient tool settings and the gradient being placed.
+    pub gradient: crate::app::tools::gradient::GradientToolState,
+    /// Content-aware fill (smart patch).
+    pub patch: crate::app::tools::patch::PatchState,
+    /// Work running off the UI thread (files, decoding), applied when done.
+    pub jobs: crate::app::jobs::Jobs,
+    /// The filter being previewed (Filter menu).
+    pub filter: crate::app::tools::filter::FilterState,
+    /// Autosave and the recovery offer.
+    pub autosave: crate::app::autosave::AutosaveState,
+    /// Time-lapse recording.
+    pub timelapse: crate::app::timelapse::TimelapseState,
+    /// Text tool settings and the text being typed.
+    pub text: crate::app::tools::text::TextToolState,
+    /// Shader layers: compiled shaders, clocks, editor windows.
+    pub shaders: crate::app::shader_ops::ShaderState,
+    /// Hold a stroke still to turn it into a clean shape.
+    pub quickshape: crate::app::tools::quickshape::QuickShapeState,
+    /// Android's image picker (the photo library).
+    pub gallery: crate::ui::image_gallery::GalleryState,
+    /// The project library, and the file the document saves to.
+    pub library: crate::ui::library::LibraryState,
+    /// Android's file picker is open for this.
+    #[cfg_attr(not(mobile), allow(dead_code))]
+    pub file_pick: Option<crate::app::files::PendingPick>,
+    /// Textures dropped this frame, kept until the next one. egui-wgpu frees
+    /// a texture before submitting the frame's uploads, so one updated and
+    /// freed in the same frame fails the submit.
+    pub retired_textures: Vec<egui::TextureHandle>,
+    /// Frame timing for the readout (View → Frame Times).
+    pub frame_stats: crate::app::frame_stats::FrameStats,
+    /// Copied pixels (Ctrl+C / Ctrl+V).
+    pub clipboard: crate::app::clipboard::ClipboardState,
+    /// The display's refresh rate, measured from frame pacing.
+    pub refresh: crate::app::frame_stats::RefreshRate,
+    /// Keyboard layout, for where shortcuts are and how they're labelled.
+    pub keyboard: crate::app::input::keyboard::KeyboardState,
+    /// Vector layers: the line being drawn, the eraser's mode.
+    pub vector: crate::app::tools::vector::VectorState,
+    /// The keys each command has (Help → Keyboard Shortcuts changes them).
+    pub keymap: crate::app::input::keymap::Keymap,
+    /// The command whose new key is being waited for in the shortcuts
+    /// window, and whether it's added to its keys (else it replaces them).
+    pub recording_shortcut: Option<(crate::app::input::keymap::Action, bool)>,
+    /// The settings as last written (`None` until they're loaded).
+    pub settings_saved: Option<crate::app::settings::Saved>,
+    /// The documents open in tabs.
+    pub tabs: crate::app::tabs::Tabs,
+}
 
-        let [r, g, b, _] = settings
-            .background_color32(ColorModel::Grayscale)
-            .to_srgba_unmultiplied();
-        assert_eq!(r, g);
-        assert_eq!(g, b);
+impl WorkspaceState {
+    pub fn new(
+        thread_count: usize,
+        max_threads: usize,
+        pool: Arc<ThreadPool>,
+        color_model: ColorModel,
+    ) -> Self {
+        Self {
+            loading: None,
+            thread_count,
+            max_threads,
+            pool,
+            color_model,
+            color: Default::default(),
+            animation: Default::default(),
+            rig: Default::default(),
+            motion: Default::default(),
+            auto_fit: true,
+            fitted_to: None,
+            // Android, or a desktop touchscreen via RUSTY_PAINTER_TOUCH=1.
+            touch_mode: cfg!(mobile) || std::env::var_os("RUSTY_PAINTER_TOUCH").is_some(),
+            accent: crate::ui::style::DEFAULT_ACCENT,
+            tool_groups: ToolGroups::default(),
+            applied_style: None,
+            finger_painting: true,
+            autohide_panels: true,
+            pressure_curve: crate::brush_engine::hardness::SoftnessCurve {
+                points: vec![
+                    crate::brush_engine::hardness::CurvePoint::new(0.0, 0.0),
+                    crate::brush_engine::hardness::CurvePoint::new(1.0, 1.0),
+                ],
+            },
+            last_pressure: None,
+            calibration: None,
+            wet_gravity: [0.0, 1.0],
+            wet_clock: None,
+            wet_step: None,
+            wet_drying: None,
+            // Closed: the canvas gets the screen; the rails open them.
+            show_left_panel: false,
+            show_color: false,
+            show_mixer: false,
+            mixer: Default::default(),
+            show_layers: false,
+            screen_size: None,
+            select_type: crate::selection::SelectionType::Rectangle,
+            fill: Default::default(),
+            liquify: Default::default(),
+            puppet: Default::default(),
+            bone: Default::default(),
+            puppet_checked: None,
+            palette: Default::default(),
+            blend: Default::default(),
+            gallery: Default::default(),
+            library: Default::default(),
+            file_pick: None,
+            transform_pick_layer: true,
+            select: Default::default(),
+            symmetry: Default::default(),
+            wrap_around: false,
+            guides: Default::default(),
+            view_aids: Default::default(),
+            shapes: Default::default(),
+            gradient: Default::default(),
+            patch: Default::default(),
+            jobs: Default::default(),
+            filter: Default::default(),
+            autosave: crate::app::autosave::AutosaveState::new(std::path::Path::new("")),
+            timelapse: Default::default(),
+            text: Default::default(),
+            shaders: Default::default(),
+            quickshape: Default::default(),
+            retired_textures: Vec::new(),
+            frame_stats: Default::default(),
+            clipboard: Default::default(),
+            refresh: Default::default(),
+            keyboard: crate::app::input::keyboard::KeyboardState::new(),
+            vector: Default::default(),
+            keymap: Default::default(),
+            recording_shortcut: None,
+            settings_saved: None,
+            tabs: Default::default(),
+        }
     }
 }

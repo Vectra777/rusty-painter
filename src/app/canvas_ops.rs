@@ -1,10 +1,18 @@
-use super::{
+//! Document-level operations on the app: marking tiles for redraw,
+//! replacing the document (new canvas, opened project), and layer
+//! add/remove/move/merge with the per-layer state kept in step.
+
+use crate::app::stroke_ops::exclusive;
+use crate::app::{
     PainterApp,
-    painter_state::RenderCache,
-    state::{CanvasTile, ColorModel, TILE_SIZE},
+    document::{CanvasTile, ColorModel, TILE_SIZE},
+    state::{LayerState, RenderCache},
 };
 use crate::canvas::Canvas;
-use crate::canvas::history::{History, LayerHistoryOp, RemovedLayer, UndoAction};
+use crate::canvas::blend::Unmultiply;
+use crate::canvas::history::{
+    History, LayerHistoryOp, LayerSettings, RemovedLayer, TileSnapshot, UndoAction,
+};
 use crate::canvas::storage::{LayerId, LayerKind};
 use eframe::egui::{self, Color32, Vec2};
 
@@ -15,15 +23,10 @@ impl PainterApp {
     /// than by the type system, so any code path that resizes/reorders
     /// `canvas.layers` without going through the paired helpers here would
     /// otherwise corrupt data silently (wrong undo history applied to the
-    /// wrong layer, etc). Cheap (length checks only) — safe to call after
+    /// wrong layer, etc). Cheap (length checks only): safe to call after
     /// every mutation, and compiled out entirely in release builds.
     fn debug_assert_layer_state_in_sync(&self) {
         let layer_count = self.canvas.layers.len();
-        debug_assert_eq!(
-            self.layer_state.histories.len(),
-            layer_count,
-            "layer_state.histories desynced from canvas.layers"
-        );
         debug_assert_eq!(
             self.layer_state.layer_ui_colors.len(),
             layer_count,
@@ -36,8 +39,23 @@ impl PainterApp {
         &mut self,
         tx: usize,
         ty: usize,
-        rect: crate::app::state::TileRect,
+        rect: crate::app::document::TileRect,
     ) {
+        // A layer's border shows past its paint: the tiles around change too.
+        let reach = self.canvas.style_reach();
+        if reach > 0 {
+            let ts = TILE_SIZE;
+            let (ox, oy) = ((tx * ts) as i32, (ty * ts) as i32);
+            let [x0, y0, x1, y1] = rect.map(|v| v as i32);
+            let grown = [
+                ox + x0 - reach,
+                oy + y0 - reach,
+                ox + x1 + reach,
+                oy + y1 + reach,
+            ];
+            self.mark_rect_damage_exact(grown);
+            return;
+        }
         if let Some(tile) = self.tile_mut(tx, ty) {
             tile.mark_rect(rect);
         }
@@ -47,6 +65,17 @@ impl PainterApp {
     /// gets just its part as damage, so the display recomposites and
     /// uploads that part rather than whole tiles (as brush strokes do).
     pub(crate) fn mark_rect_damage(&mut self, rect: [i32; 4]) {
+        let reach = self.canvas.style_reach();
+        self.mark_rect_damage_exact([
+            rect[0] - reach,
+            rect[1] - reach,
+            rect[2] + reach,
+            rect[3] + reach,
+        ]);
+    }
+
+    /// [`Self::mark_rect_damage`] without growing it for borders.
+    fn mark_rect_damage_exact(&mut self, rect: [i32; 4]) {
         let ts = TILE_SIZE as i32;
         let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
         let [x0, y0, x1, y1] = [
@@ -67,14 +96,22 @@ impl PainterApp {
                     (x1.min(ox + ts) - ox) as usize,
                     (y1.min(oy + ts) - oy) as usize,
                 ];
-                self.mark_tile_damage(tx as usize, ty as usize, local);
+                if let Some(tile) = self.tile_mut(tx as usize, ty as usize) {
+                    tile.mark_rect(local);
+                }
             }
         }
     }
 
     pub(crate) fn mark_tile_dirty(&mut self, tx: usize, ty: usize) {
-        if let Some(tile) = self.tile_mut(tx, ty) {
-            tile.mark_full();
+        // A layer's border shows past its paint: the tiles around change too.
+        let around = if self.canvas.style_reach() > 0 { 1 } else { 0 };
+        for ny in ty.saturating_sub(around)..=ty + around {
+            for nx in tx.saturating_sub(around)..=tx + around {
+                if let Some(tile) = self.tile_mut(nx, ny) {
+                    tile.mark_full();
+                }
+            }
         }
     }
 
@@ -87,17 +124,77 @@ impl PainterApp {
     }
 
     fn rebuild_canvas(&mut self, width: usize, height: usize, background: Color32) {
-        self.reset_canvas_state(width, height, background);
-        self.recreate_render_cache(width, height);
-        self.reset_viewport_state();
+        let canvas = Canvas::new(width, height, background, TILE_SIZE);
+        self.replace_document(canvas, History::new());
     }
 
-    fn reset_canvas_state(&mut self, width: usize, height: usize, background: Color32) {
-        *self.canvas_mut() = Canvas::new(width, height, background, TILE_SIZE);
-        let layer_count = self.canvas.layers.len();
-        self.layer_state.histories = (0..layer_count).map(|_| History::new()).collect();
-        self.layer_state.layer_ui_colors = vec![Color32::from_gray(40); layer_count];
-        self.layer_state.layer_dragging = None;
+    /// Make `canvas` (with its undo `history`) the document, for a
+    /// new canvas or an opened project.
+    ///
+    /// Everything tied to the old document goes, in this order:
+    /// 1. background work holding it: the stroke worker is finished and a
+    ///    running content-aware fill is cancelled (its result would land in
+    ///    whichever new layer shares an id);
+    /// 2. tool sessions are dropped, not applied (a floating transform or
+    ///    liquify refers to old layer indices; a gradient or shape preview
+    ///    holds old tiles);
+    /// 3. the canvas, fresh per-layer state and render cache are installed;
+    /// 4. the selection is cleared and the view refits.
+    pub(crate) fn replace_document(&mut self, canvas: Canvas, history: History) {
+        // 0. A document with work in it stays open, in its own tab.
+        self.keep_document_in_tab();
+        // 1. Background work.
+        self.release_canvas();
+        self.patch_abandon();
+        // 2. Tool sessions.
+        self.end_tool_sessions();
+        // 3. The document and what mirrors its layers.
+        let (width, height) = (canvas.width(), canvas.height());
+        *self.canvas_mut() = canvas;
+        let old = std::mem::replace(
+            &mut self.layer_state,
+            LayerState::new(self.canvas.layers.len()),
+        );
+        // The thumbnails may have been updated this frame.
+        let retired = &mut self.workspace.retired_textures;
+        retired.extend(old.thumbnails.into_iter().flatten());
+        retired.extend(old.float_overlay.map(|o| o.texture));
+        self.layer_state.history = history;
+        self.canvas.render_rigs();
+        self.canvas.pose_motions();
+        self.recreate_render_cache(width, height);
+        // Shader state is per layer id, which the new document reuses.
+        self.workspace.shaders.forget_document();
+        // 4. Selection and view.
+        self.selection_manager.clear_selection();
+        self.selection_manager.canvas_size = [width, height];
+        self.workspace.select.saved.clear();
+        self.reset_viewport_state();
+        self.mark_saved();
+    }
+
+    /// Drop every in-progress tool session without applying it.
+    fn end_tool_sessions(&mut self) {
+        self.selection_manager.clear_selection();
+        self.select_cancel();
+        self.forget_last_pick();
+        self.brush_state.blend_stroke = None;
+        let ws = &mut self.workspace;
+        ws.shapes.session = None;
+        ws.gradient.session = None;
+        ws.filter.session = None;
+        ws.filter.editing = None;
+        ws.text.session = None;
+        ws.text.stroke_rasterised.clear();
+        ws.fill.path.clear();
+        ws.guides.end_drag();
+        ws.view_aids.guides.end_drag();
+        // Its layer and history belong to the old document.
+        ws.select.quick_mask = None;
+        self.viewport.touch.pen_on_canvas = false;
+        self.viewport.touch.action_mark = None;
+        // Transform and liquify sessions live in `layer_state`, which the
+        // caller replaces.
     }
 
     pub(crate) fn recreate_render_cache(&mut self, width: usize, height: usize) {
@@ -110,7 +207,7 @@ impl PainterApp {
         self.viewport.is_primary_down = false;
     }
 
-    fn reset_viewport_state(&mut self) {
+    pub(crate) fn reset_viewport_state(&mut self) {
         self.viewport.offset = Vec2::ZERO;
         self.viewport.zoom = 1.0;
         self.viewport.rotation = 0.0;
@@ -128,18 +225,298 @@ impl PainterApp {
             .new_canvas
             .background_color32(self.workspace.color_model);
         self.rebuild_canvas(width, height, background);
+        self.workspace.library.has_document = true;
         self.canvas_mut().blend_space = self.modal_state.new_canvas.blend_space;
+        let depth = self.modal_state.new_canvas.depth;
+        self.canvas_mut().convert_depth(depth);
         self.brush_state.brush.brush_options.color = Self::convert_color_for_model(
             self.brush_state.brush.brush_options.color,
             self.workspace.color_model,
         );
     }
 
-    fn convert_color_for_model(color: Color32, model: ColorModel) -> Color32 {
+    pub(crate) fn convert_color_for_model(color: Color32, model: ColorModel) -> Color32 {
         match model {
             ColorModel::Rgba => color,
-            ColorModel::Grayscale => super::state::to_grayscale(color),
+            ColorModel::Grayscale => crate::app::document::to_grayscale(color),
         }
+    }
+
+    /// Resize, crop, turn or flip the whole document (the Image menu), as
+    /// one undo step. Refused (with a message) past the size limits.
+    pub(crate) fn apply_image_op(&mut self, op: crate::canvas::geometry::ImageOp) {
+        self.quick_mask_leave();
+        let (w, h) = op.new_size(self.canvas.width(), self.canvas.height());
+        if let Err(err) = crate::app::document::validate_canvas_size(w, h) {
+            self.export_state.message = Some(err);
+            return;
+        }
+        // Sessions hold tiles or coordinates of the document as it is now.
+        crate::app::tools::transform::commit_floating_layer(self);
+        self.liquify_commit();
+        self.puppet_commit();
+        self.gradient_commit();
+        self.shape_commit();
+        self.filter_cancel();
+        self.release_canvas();
+        let before = exclusive(&mut self.canvas).apply_image_op(op);
+        self.layer_state.history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Document(std::sync::Arc::new(
+                std::sync::Mutex::new(before),
+            ))),
+        });
+        self.after_document_swap();
+    }
+
+    /// Keep `depth` bits for each channel from now on (Image → Colour
+    /// Depth), one undo step.
+    pub(crate) fn convert_depth(&mut self, depth: crate::canvas::storage::Depth) {
+        if self.canvas.depth() == depth {
+            return;
+        }
+        self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
+        self.liquify_commit();
+        self.puppet_commit();
+        self.gradient_commit();
+        self.shape_commit();
+        self.filter_cancel();
+        self.release_canvas();
+        let before = exclusive(&mut self.canvas).change_depth(depth);
+        self.layer_state.history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Document(std::sync::Arc::new(
+                std::sync::Mutex::new(before),
+            ))),
+        });
+        self.after_document_swap();
+    }
+
+    /// Merge the selected layer into the one below (Ctrl+Alt+E).
+    pub(crate) fn merge_down(&mut self) {
+        let idx = self.canvas.active_layer_idx;
+        self.apply_merge(move |canvas| canvas.plan_merge_down(idx));
+    }
+
+    /// Merge the rows picked in the layers panel into one, or the selected
+    /// layer down when only one is picked.
+    pub(crate) fn merge_selected(&mut self) {
+        let picked = self.selected_indices();
+        if picked.len() < 2 {
+            return self.merge_down();
+        }
+        self.apply_merge(move |canvas| canvas.plan_merge_selected(&picked));
+    }
+
+    /// Merge every layer that shows into one (Ctrl+Shift+E).
+    pub(crate) fn merge_visible(&mut self) {
+        self.apply_merge(Canvas::plan_merge_visible);
+    }
+
+    /// Flatten everything into the background (drafts stay).
+    pub(crate) fn flatten_image(&mut self) {
+        self.apply_merge(Canvas::plan_flatten_image);
+    }
+
+    /// Run a merge as one undo step, or say why it can't be done. The
+    /// layers are composited on the stroke worker (the frames go on); the
+    /// merged layer takes their place once that's done.
+    fn apply_merge(
+        &mut self,
+        plan: impl FnOnce(&Canvas) -> Result<crate::canvas::storage::MergePlan, &'static str>
+        + Send
+        + 'static,
+    ) {
+        self.settle_layers();
+        // Shader layers merge as their current frame.
+        self.bake_shader_layers();
+        let canvas = std::sync::Arc::clone(&self.canvas);
+        self.run_on_worker("Merging…", move || {
+            let plan = plan(&canvas);
+            drop(canvas);
+            Box::new(move |app: &mut PainterApp| app.finish_merge(plan))
+        });
+    }
+
+    /// Finish what's running on the layers before entries come and go:
+    /// sessions hold tiles or indices of the layers as they are now.
+    pub(crate) fn settle_layers(&mut self) {
+        self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
+        self.liquify_commit();
+        self.puppet_commit();
+        self.gradient_commit();
+        self.shape_commit();
+        self.filter_cancel();
+        self.release_canvas();
+    }
+
+    /// Put `swap` in (entries taken out, others put in) as one undo step.
+    pub(crate) fn apply_swap(&mut self, mut swap: crate::canvas::storage::LayerSwap, label: &str) {
+        self.canvas_mut().swap_layers(&mut swap);
+        let (out, put) = swap.applied.clone();
+        self.replace_layer_states(&out, &put);
+        self.layer_state.history.label_next(label);
+        self.layer_state.history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Replaced(std::sync::Arc::new(
+                std::sync::Mutex::new(swap),
+            ))),
+        });
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+    }
+
+    /// Entries `picked` with what goes with them (folders' contents, masks),
+    /// ascending.
+    pub(crate) fn with_contents(&self, picked: &[usize]) -> Vec<usize> {
+        let c = &self.canvas;
+        let ids: Vec<LayerId> = picked.iter().filter_map(|&i| c.layer_id_at(i)).collect();
+        let within = |id: LayerId| ids.iter().any(|&p| c.is_within(id, p));
+        (0..c.layers.len())
+            .filter(|&i| {
+                let l = &c.layers[i];
+                within(l.id) || matches!(l.kind, LayerKind::Mask { owner } if within(owner))
+            })
+            .collect()
+    }
+
+    /// Delete the picked rows (with their contents and masks) as one undo
+    /// step; or the selected layer alone.
+    pub(crate) fn delete_picked(&mut self) {
+        let roots = self.selected_roots();
+        if roots.len() < 2 {
+            return self.delete_selected_layer();
+        }
+        self.settle_layers();
+        let doomed = self.with_contents(&roots);
+        let below = (0..doomed[0])
+            .rev()
+            .find(|i| !doomed.contains(i))
+            .unwrap_or(0);
+        let remove = doomed
+            .iter()
+            .filter_map(|&i| self.canvas.layer_id_at(i))
+            .collect();
+        let swap = crate::canvas::storage::LayerSwap {
+            layers: Vec::new(),
+            remove,
+            active_layer_idx: below,
+            applied: (Vec::new(), Vec::new()),
+        };
+        self.apply_swap(swap, "Delete layers");
+        self.layer_state.selected.clear();
+    }
+
+    /// Take folder `idx`'s contents out where it was, in their order, and
+    /// remove it, as one undo step.
+    pub(crate) fn ungroup(&mut self, idx: usize) {
+        let Some(folder) = self.canvas.layers.get(idx) else {
+            return;
+        };
+        if folder.kind != LayerKind::Group || folder.anim.is_some() {
+            self.report("Only folders can be ungrouped".to_string());
+            return;
+        }
+        let (id, parent) = (folder.id, folder.parent);
+        self.settle_layers();
+        let children: Vec<LayerId> = self
+            .canvas
+            .layers
+            .iter()
+            .filter(|l| l.parent == Some(id) && !matches!(l.kind, LayerKind::Mask { .. }))
+            .map(|l| l.id)
+            .collect();
+        let steps = self.layer_state.history.top_token().1;
+        // Lowest first, each just under the folder: they keep their order.
+        for &child in &children {
+            self.move_next_to(child, id, false, parent);
+        }
+        if let Some(i) = self.canvas.layer_index_of(id) {
+            self.remove_layer(i);
+        }
+        if let Some(top) = children.last().and_then(|&c| self.canvas.layer_index_of(c)) {
+            self.canvas_mut().active_layer_idx = top;
+        }
+        self.layer_state.selected = children;
+        self.layer_state.history.label_next("Ungroup");
+        self.layer_state.history.squash_since(steps);
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+    }
+
+    fn finish_merge(&mut self, plan: Result<crate::canvas::storage::MergePlan, &'static str>) {
+        match plan.map(|plan| self.canvas_mut().apply_merge_plan(plan)) {
+            Ok(swap) => {
+                let (out, put) = swap.applied.clone();
+                self.replace_layer_states(&out, &put);
+                self.layer_state.history.push_action(UndoAction {
+                    tiles: Vec::new(),
+                    selection: None,
+                    transform: None,
+                    layer_action: Some(LayerHistoryOp::Replaced(std::sync::Arc::new(
+                        std::sync::Mutex::new(swap),
+                    ))),
+                });
+                self.mark_all_tiles_dirty();
+                self.layer_state.thumbnails_dirty = true;
+            }
+            Err(why) => self.export_state.message = Some(why.to_string()),
+        }
+    }
+
+    /// The document's size or layers were swapped wholesale (an Image menu
+    /// step, or its undo): rebuild what depends on them.
+    pub(crate) fn after_document_swap(&mut self) {
+        let (w, h) = (self.canvas.width(), self.canvas.height());
+        let resized = self.selection_manager.canvas_size != [w, h];
+        self.recreate_render_cache(w, h);
+        // The selection's coordinates belong to the old geometry.
+        self.selection_manager.clear_selection();
+        self.selection_manager.canvas_size = [w, h];
+        self.after_layers_change();
+        // A new size is fitted to the window; the same size stays as viewed.
+        if resized {
+            self.workspace.auto_fit = true;
+            self.workspace.fitted_to = None;
+        }
+    }
+
+    /// Layers were added, removed or rearranged wholesale (an animation
+    /// step, or its undo): what shows is drawn again.
+    pub(crate) fn after_layers_change(&mut self) {
+        let count = self.canvas.layers.len();
+        self.layer_state
+            .layer_ui_colors
+            .resize(count, Color32::from_gray(40));
+        self.layer_state.thumbnails_dirty = true;
+        self.canvas.pose_motions();
+        self.mark_all_tiles_dirty();
+    }
+
+    /// Clip the active layer (or folder) to the layer below, or unclip it
+    /// (Ctrl+Alt+G). A selected mask stands for its layer.
+    pub(crate) fn toggle_clip_active(&mut self) {
+        let idx = self.canvas.active_layer_idx;
+        let idx = match self.canvas.layers.get(idx).map(|l| l.kind) {
+            Some(LayerKind::Mask { owner }) => self.canvas.layer_index_of(owner),
+            Some(_) => Some(idx),
+            None => None,
+        };
+        let Some(idx) = idx.filter(|&i| i != 0) else {
+            return;
+        };
+        let layer = &mut self.canvas_mut().layers[idx];
+        layer.clipped = !layer.clipped;
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
     }
 
     pub(crate) fn mark_all_tiles_dirty(&mut self) {
@@ -152,6 +529,18 @@ impl PainterApp {
         if bounds.is_negative() {
             return;
         }
+        self.mark_bounds_dirty(bounds);
+        // (Painted on a moved layer: where that shows changed too.)
+        self.repose_active([bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y]);
+    }
+
+    /// [`Self::mark_tiles_in_bounds_dirty`] for `bounds` on the canvas only.
+    pub(crate) fn mark_bounds_dirty(&mut self, bounds: egui::Rect) {
+        if bounds.is_negative() {
+            return;
+        }
+        // A layer's border shows past its paint.
+        let bounds = bounds.expand(self.canvas.style_reach() as f32);
 
         let min_x = bounds.min.x.floor().max(0.0) as usize;
         let min_y = bounds.min.y.floor().max(0.0) as usize;
@@ -190,15 +579,12 @@ impl PainterApp {
                         cell_arc
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .data
+                            .data()
                             .is_some()
                     })
                     .unwrap_or(false);
                 if has_data {
-                    let idx = ty * tiles_x + tx;
-                    if let Some(tile) = self.render_cache.tiles.get_mut(idx) {
-                        tile.mark_full();
-                    }
+                    self.mark_tile_dirty(tx, ty);
                 }
             }
         }
@@ -208,6 +594,7 @@ impl PainterApp {
     /// `insert`) inside folder `parent`, with undo. The background (index 0)
     /// stays at the bottom, and a folder can't move into itself.
     pub(crate) fn move_layer(&mut self, from: usize, to: usize, parent: Option<LayerId>) {
+        self.quick_mask_leave();
         let len = self.canvas.layers.len();
         if from == 0 || from >= len {
             return;
@@ -258,31 +645,273 @@ impl PainterApp {
                 active_after,
             }),
         };
-        if let Some(hist) = self.layer_state.histories.get_mut(active_after) {
-            hist.push_action(action);
-        }
+        self.layer_state.history.push_action(action);
 
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;
         self.debug_assert_layer_state_in_sync();
     }
 
-    /// Move the side-car per-layer state (undo history, render cache,
-    /// cache-dirty set, UI color) from `from` to `to`, mirroring a move
+    /// The layers panel row standing for the selected entry: a mask's
+    /// layer, a drawing's animated layer, or the entry itself.
+    pub(crate) fn active_row(&self) -> usize {
+        let active = self.canvas.active_layer_idx;
+        match self
+            .canvas
+            .layers
+            .get(active)
+            .map(|l| (l.kind, l.anim, l.parent))
+        {
+            Some((LayerKind::Mask { owner }, ..)) => {
+                self.canvas.layer_index_of(owner).unwrap_or(active)
+            }
+            Some((_, Some(crate::canvas::storage::Anim::Frame(_)), Some(track))) => {
+                self.canvas.layer_index_of(track).unwrap_or(active)
+            }
+            _ => active,
+        }
+    }
+
+    /// Rows picked in the layers panel, ascending: the multi-selection while
+    /// it holds the selected row, else just that row.
+    pub(crate) fn selected_indices(&self) -> Vec<usize> {
+        let row = self.active_row();
+        let mut picked: Vec<usize> = self
+            .layer_state
+            .selected
+            .iter()
+            .filter_map(|&id| self.canvas.layer_index_of(id))
+            .collect();
+        if !picked.contains(&row) {
+            return vec![row];
+        }
+        picked.sort_unstable();
+        picked.dedup();
+        picked
+    }
+
+    /// [`Self::selected_indices`] without the background and without those
+    /// inside another picked folder (they go with it).
+    pub(crate) fn selected_roots(&self) -> Vec<usize> {
+        let picked = self.selected_indices();
+        let ids: Vec<LayerId> = picked.iter().map(|&i| self.canvas.layers[i].id).collect();
+        picked
+            .into_iter()
+            .filter(|&i| {
+                let l = &self.canvas.layers[i];
+                i != 0
+                    && l.parent
+                        .is_none_or(|p| !ids.iter().any(|&a| self.canvas.is_within(p, a)))
+            })
+            .collect()
+    }
+
+    /// Note the layers' settings before the layers panel edits them (once
+    /// per edit: a drag goes on over several frames).
+    pub(crate) fn settings_watch(&mut self) {
+        if self.layer_state.settings_before.is_none() {
+            let now = self
+                .canvas
+                .layers
+                .iter()
+                .map(|l| (l.id, LayerSettings::of(l)))
+                .collect();
+            self.layer_state.settings_before = Some(now);
+        }
+    }
+
+    /// Once the pointer is up, keep the settings changed since
+    /// [`Self::settings_watch`] as one undo step.
+    pub(crate) fn settings_record(&mut self, pointer_down: bool) {
+        if pointer_down {
+            return;
+        }
+        let Some(before) = self.layer_state.settings_before.take() else {
+            return;
+        };
+        let changed: Vec<_> = before
+            .into_iter()
+            .filter(|(id, was)| {
+                self.canvas
+                    .layer_index_of(*id)
+                    .is_some_and(|i| LayerSettings::of(&self.canvas.layers[i]) != *was)
+            })
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        self.layer_state.history.push_action(UndoAction {
+            tiles: Vec::new(),
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Settings(changed)),
+        });
+    }
+
+    /// The layers showing paint at canvas pixel `(x, y)`, top first: the
+    /// one alone is selected, several are offered in a menu at `screen`.
+    pub(crate) fn pick_layer_at(&mut self, screen: egui::Pos2, x: i32, y: i32) {
+        let c = &self.canvas;
+        let ts = c.tile_size() as i32;
+        let (tx, ty) = (x.div_euclid(ts), y.div_euclid(ts));
+        let k = (y.rem_euclid(ts) * ts + x.rem_euclid(ts)) as usize;
+        let shows = |i: usize| {
+            let l = &c.layers[i];
+            let mut parent = l.parent;
+            while let Some(p) = parent.and_then(|p| c.layer_index_of(p)) {
+                if !c.layers[p].visible {
+                    return false;
+                }
+                parent = c.layers[p].parent;
+            }
+            match (l.anim, l.parent) {
+                (Some(crate::canvas::storage::Anim::Frame(_)), Some(track)) => {
+                    c.frame_at(track, c.time) == Some(i)
+                }
+                _ => l.visible,
+            }
+        };
+        let hits: Vec<LayerId> = (0..c.layers.len())
+            .rev()
+            .filter(|&i| {
+                let l = &c.layers[i];
+                l.kind == LayerKind::Paint
+                    && l.adjustment.is_none()
+                    && shows(i)
+                    && c.get_layer_tile_data(i, tx, ty)
+                        .is_some_and(|t| t.get(k).is_some_and(|p| p.a() > 0))
+            })
+            .map(|i| c.layers[i].id)
+            .collect();
+        match hits.as_slice() {
+            [] => self.report("No layer has paint there".to_string()),
+            [one] => self.pick_row(*one),
+            _ => self.layer_state.pick_menu = Some((screen, hits)),
+        }
+    }
+
+    /// Select entry `id` alone.
+    pub(crate) fn pick_row(&mut self, id: LayerId) {
+        if let Some(i) = self.canvas.layer_index_of(id) {
+            self.canvas_mut().active_layer_idx = i;
+            self.layer_state.selected = vec![id];
+            self.layer_state.pick_menu = None;
+        }
+    }
+
+    /// Pick every layers panel row tagged `tag`, the topmost selected.
+    pub(crate) fn pick_tagged(&mut self, tag: Color32) {
+        let rows: Vec<usize> = (0..self.canvas.layers.len())
+            .filter(|&i| {
+                let l = &self.canvas.layers[i];
+                self.layer_state.layer_ui_colors.get(i) == Some(&tag)
+                    && !matches!(l.kind, LayerKind::Mask { .. })
+                    && !matches!(l.anim, Some(crate::canvas::storage::Anim::Frame(_)))
+            })
+            .collect();
+        let Some(&top) = rows.last() else {
+            return;
+        };
+        self.layer_state.selected = rows.iter().map(|&i| self.canvas.layers[i].id).collect();
+        self.canvas_mut().active_layer_idx = top;
+    }
+
+    /// Ctrl+G: the picked rows grouped into a folder, or a new empty one.
+    pub(crate) fn folder_or_group(&mut self) {
+        if self.selected_indices().len() > 1 {
+            self.group_selected();
+        } else {
+            self.add_folder();
+        }
+    }
+
+    /// Put the picked rows into a new folder where the topmost of them was,
+    /// in their order, as one undo step (Ctrl+G).
+    pub(crate) fn group_selected(&mut self) {
+        let roots = self.selected_roots();
+        let Some(&top) = roots.last() else {
+            self.report("The background can't go in a folder".to_string());
+            return;
+        };
+        let ids: Vec<LayerId> = roots.iter().map(|&i| self.canvas.layers[i].id).collect();
+        let parent = self.canvas.layers[top].parent;
+        let steps = self.layer_state.history.top_token().1;
+        let name = self.next_layer_name("Folder");
+        let folder = self.insert_entry(top + 1, name, LayerKind::Group, parent, true);
+        let folder = self.canvas.layers[folder].id;
+        // Lowest first, each just under the folder: they keep their order.
+        for id in ids {
+            self.move_next_to(id, folder, false, Some(folder));
+        }
+        self.layer_state.selected = vec![folder];
+        self.layer_state.history.label_next("Group layers");
+        self.layer_state.history.squash_since(steps);
+    }
+
+    /// Move layer `from` (as [`Self::move_layer`]) with the other picked
+    /// rows, which stay next to it in their order, as one undo step.
+    pub(crate) fn move_selected(&mut self, from: usize, to: usize, parent: Option<LayerId>) {
+        let roots = self.selected_roots();
+        let Some(dragged) = self.canvas.layer_id_at(from) else {
+            return;
+        };
+        let Some(at) = roots.iter().position(|&i| i == from) else {
+            return self.move_layer(from, to, parent);
+        };
+        if roots.len() < 2 {
+            return self.move_layer(from, to, parent);
+        }
+        let ids: Vec<LayerId> = roots.iter().map(|&i| self.canvas.layers[i].id).collect();
+        let steps = self.layer_state.history.top_token().1;
+        self.move_layer(from, to, parent);
+        // Nearest first, each next to the one placed before it.
+        let mut anchor = dragged;
+        for &id in ids[..at].iter().rev() {
+            self.move_next_to(id, anchor, false, parent);
+            anchor = id;
+        }
+        anchor = dragged;
+        for &id in &ids[at + 1..] {
+            self.move_next_to(id, anchor, true, parent);
+            anchor = id;
+        }
+        self.layer_state.history.label_next("Move layers");
+        self.layer_state.history.squash_since(steps);
+    }
+
+    /// Move entry `id` directly above (or below) entry `anchor` in the
+    /// list, into folder `parent`.
+    fn move_next_to(&mut self, id: LayerId, anchor: LayerId, above: bool, parent: Option<LayerId>) {
+        let (Some(from), Some(a)) = (
+            self.canvas.layer_index_of(id),
+            self.canvas.layer_index_of(anchor),
+        ) else {
+            return;
+        };
+        // As `Vec::remove` then `insert`: taking `from` out shifts what's above it.
+        let to = match (above, from < a) {
+            (true, true) => a,
+            (true, false) => a + 1,
+            (false, true) => a - 1,
+            (false, false) => a,
+        };
+        self.move_layer(from, to, parent);
+    }
+
+    /// Move the side-car per-layer state (UI color) from `from` to `to`,
+    /// mirroring a move
     /// already applied to `canvas.layers` itself. Shared by the UI reorder
     /// entry point (`reorder_layers`) and undo/redo of a layer move, which
     /// moves `canvas.layers` itself inside `History::undo`/`redo` and can't
     /// also reach into `LayerState`/`RenderCache` from there.
     pub(crate) fn reorder_layer_state(&mut self, from: usize, to: usize) {
-        let hist = self.layer_state.histories.remove(from);
-        self.layer_state.histories.insert(to, hist);
         let ui_color = self.layer_state.layer_ui_colors.remove(from);
         self.layer_state.layer_ui_colors.insert(to, ui_color);
         self.debug_assert_layer_state_in_sync();
     }
 
     /// "`base` N" with N one more than the highest number already used.
-    fn next_layer_name(&self, base: &str) -> String {
+    pub(crate) fn next_layer_name(&self, base: &str) -> String {
         let prefix = format!("{base} ");
         let highest = self
             .canvas
@@ -322,6 +951,152 @@ impl PainterApp {
         }
     }
 
+    /// A new paint layer just above the selected one holding `tiles`
+    /// (whole tiles by coordinate), selected, as one undo step: undo takes
+    /// the layer away, redo brings it back with its pixels. `setup` adjusts
+    /// the layer (opacity, blend...) before it's recorded. Returns its index.
+    pub(crate) fn add_layer_with_tiles(
+        &mut self,
+        name: String,
+        tiles: Vec<((i32, i32), Vec<Color32>)>,
+        setup: impl FnOnce(&mut crate::canvas::storage::Layer),
+    ) -> Option<usize> {
+        self.quick_mask_leave();
+        // Leave any running session first; it would target the old layer.
+        crate::app::tools::transform::commit_floating_layer(self);
+        self.liquify_commit();
+        self.puppet_commit();
+        self.release_canvas();
+        let active_before = self.canvas.active_layer_idx;
+        let (index, parent) = self.insertion_point(true);
+        let id = self
+            .canvas_mut()
+            .insert_new_layer(index, name, LayerKind::Paint, parent);
+        let idx = self.canvas.layer_index_of(id)?;
+        setup(&mut self.canvas_mut().layers[idx]);
+        self.insert_layer_state(idx);
+        self.canvas_mut().active_layer_idx = idx;
+        let ts = self.canvas.tile_size();
+        let snapshots = tiles
+            .into_iter()
+            .map(|((tx, ty), data)| {
+                self.canvas.set_layer_tile_data(idx, tx, ty, data);
+                TileSnapshot {
+                    tx,
+                    ty,
+                    layer_id: id,
+                    x0: 0,
+                    y0: 0,
+                    width: ts,
+                    height: ts,
+                    data: vec![Color32::TRANSPARENT; ts * ts].into(),
+                }
+            })
+            .collect();
+        self.layer_state.history.push_action(UndoAction {
+            tiles: snapshots,
+            selection: None,
+            transform: None,
+            layer_action: Some(LayerHistoryOp::Added {
+                index: idx,
+                id,
+                meta: self.canvas.layer_meta_at(idx),
+                active_before,
+                active_after: idx,
+            }),
+        });
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+        Some(idx)
+    }
+
+    /// Record a pixel edit as one undo step. A text layer it paints on
+    /// becomes plain pixels in that same step (undo brings the text back).
+    /// Run `command`; the undo step it makes (if any) is called `label`
+    /// in the History panel.
+    pub(crate) fn labelled(&mut self, label: &str, command: impl FnOnce(&mut Self)) {
+        let before = self.layer_state.history.push_count();
+        command(self);
+        if self.layer_state.history.push_count() > before {
+            self.layer_state.history.rename_last(label);
+        }
+    }
+
+    /// Go back or forward through the history until `undo_len` steps can
+    /// be undone (the History panel's click).
+    pub(crate) fn history_jump(&mut self, undo_len: usize) {
+        // Once the strokes queued are painted (they're steps too).
+        self.when_strokes_painted(move |app| app.history_jump_now(undo_len));
+    }
+
+    fn history_jump_now(&mut self, undo_len: usize) {
+        // A puppet warp being made is kept first (undo inside it only steps
+        // through its pins).
+        self.puppet_commit();
+        loop {
+            let (undo, redo) = self.layer_state.history.labels();
+            let (have, can_redo) = (undo.len(), redo.len());
+            if have > undo_len {
+                self.apply_history_now(false);
+            } else if have < undo_len && can_redo > 0 {
+                self.apply_history_now(true);
+            } else {
+                break;
+            }
+            // A step that couldn't move (nothing changed): stop.
+            if self.layer_state.history.labels().0.len() == have {
+                break;
+            }
+        }
+    }
+
+    pub(crate) fn push_undo(&mut self, mut action: UndoAction) {
+        self.rasterise_painted_text(&mut action);
+        self.rasterise_painted_vector(&mut action);
+        self.layer_state.history.push_action(action);
+        // A moved layer shows its changed pixels where it's moved.
+        if self.active_is_posed() {
+            self.canvas.pose_motions();
+            self.mark_all_tiles_dirty();
+        }
+    }
+
+    /// Whether the selected layer shows moved (see [`crate::canvas::motion`]).
+    pub(crate) fn active_is_posed(&self) -> bool {
+        (self.canvas.layers.get(self.canvas.active_layer_idx)).is_some_and(|l| l.is_posed())
+    }
+
+    /// Display tile `(tx, ty)` of the selected layer's own pixels changed:
+    /// where the layer is moved, where it shows is redrawn too.
+    pub(crate) fn mark_layer_tile_dirty(&mut self, tx: usize, ty: usize) {
+        self.mark_tile_dirty(tx, ty);
+        let ts = TILE_SIZE as f32;
+        let rect = [
+            tx as f32 * ts,
+            ty as f32 * ts,
+            (tx + 1) as f32 * ts,
+            (ty + 1) as f32 * ts,
+        ];
+        self.repose_active(rect);
+    }
+
+    /// Pose again the selected layer's part `rect` (its own pixels) if
+    /// it's moved, marking where that shows.
+    fn repose_active(&mut self, rect: [f32; 4]) {
+        if !self.active_is_posed() {
+            return;
+        }
+        if let Some(shown) = self
+            .canvas
+            .repose_region(self.canvas.active_layer_idx, rect)
+        {
+            self.mark_bounds_dirty(egui::Rect::from_min_max(
+                egui::pos2(shown[0], shown[1]),
+                egui::pos2(shown[2], shown[3]),
+            ));
+        }
+    }
+
     /// Insert a new entry with undo; returns its index.
     pub(crate) fn insert_entry(
         &mut self,
@@ -331,11 +1106,27 @@ impl PainterApp {
         parent: Option<LayerId>,
         select: bool,
     ) -> usize {
+        self.insert_entry_with(index, name, kind, parent, select, |_| {})
+    }
+
+    /// [`Self::insert_entry`], with `setup` adjusting the entry before it's
+    /// recorded (so undo and redo bring it back as set up).
+    pub(crate) fn insert_entry_with(
+        &mut self,
+        index: usize,
+        name: String,
+        kind: LayerKind,
+        parent: Option<LayerId>,
+        select: bool,
+        setup: impl FnOnce(&mut crate::canvas::storage::Layer),
+    ) -> usize {
+        self.quick_mask_leave();
         let active_before = self.canvas.active_layer_idx;
         let id = self
             .canvas_mut()
             .insert_new_layer(index, name, kind, parent);
         let idx = self.canvas.layer_index_of(id).unwrap_or(index);
+        setup(&mut self.canvas_mut().layers[idx]);
         self.insert_layer_state(idx);
         let active_after = if select {
             idx
@@ -358,9 +1149,7 @@ impl PainterApp {
                 active_after,
             }),
         };
-        if let Some(hist) = self.layer_state.histories.get_mut(idx) {
-            hist.push_action(action);
-        }
+        self.layer_state.history.push_action(action);
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;
         idx
@@ -369,13 +1158,86 @@ impl PainterApp {
     /// Add a paint layer above the selected one (inside a selected folder)
     /// and select it.
     pub(crate) fn add_layer_and_select(&mut self) {
+        self.quick_mask_leave();
         let (index, parent) = self.insertion_point(true);
         let name = self.next_layer_name("Layer");
         self.insert_entry(index, name, LayerKind::Paint, parent, true);
     }
 
+    /// Add an adjustment layer (`filter` over everything below it) above the
+    /// selected layer, select it and open its settings. It's locked: its own
+    /// pixels don't show (add a mask to limit where it applies).
+    pub(crate) fn add_adjustment_layer(&mut self, filter: crate::canvas::filters::Filter) {
+        self.quick_mask_leave();
+        let (index, parent) = self.insertion_point(true);
+        let name = filter.name().to_string();
+        let idx = self.insert_entry_with(index, name, LayerKind::Paint, parent, true, |l| {
+            l.adjustment = Some(filter);
+            l.locked = true;
+        });
+        self.workspace.filter.editing = self.canvas.layer_id_at(idx);
+    }
+
+    /// Add a fill layer (a colour or gradient everywhere) above the
+    /// selected layer, select it and open its settings. It's locked: it
+    /// can't be painted on (a mask or clipping says where it shows).
+    pub(crate) fn add_fill_layer(&mut self, fill: crate::canvas::layer_style::LayerFill) {
+        self.quick_mask_leave();
+        let (index, parent) = self.insertion_point(true);
+        let name = self.next_layer_name(fill.name());
+        let idx = self.insert_entry_with(index, name, LayerKind::Paint, parent, true, |l| {
+            l.style.fill = Some(fill);
+            l.locked = true;
+        });
+        // Unlike a new empty layer, it changes the whole picture.
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+        self.workspace.filter.fill_editing = self.canvas.layer_id_at(idx);
+    }
+
+    /// A colour fill in the brush colour.
+    pub(crate) fn add_colour_fill_layer(&mut self) {
+        let [r, g, b, _] = self.brush_state.brush.brush_options.color.unmultiplied();
+        self.add_fill_layer(crate::canvas::layer_style::LayerFill::Colour([r, g, b]));
+    }
+
+    /// A gradient fill from the brush colour to the secondary colour,
+    /// left to right across the canvas.
+    pub(crate) fn add_gradient_fill_layer(&mut self) {
+        let rgb = |c: Color32| {
+            let [r, g, b, _] = c.unmultiplied();
+            [r, g, b]
+        };
+        let colours = crate::canvas::filters::GradientMap::from_stops(&[
+            (0.0, rgb(self.brush_state.brush.brush_options.color)),
+            (1.0, rgb(self.brush_state.secondary_color)),
+        ]);
+        let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
+        self.add_fill_layer(crate::canvas::layer_style::LayerFill::Gradient {
+            colours,
+            shape: crate::canvas::gradient::GradientShape::Linear,
+            start: [0.0, h / 2.0],
+            end: [w, h / 2.0],
+        });
+    }
+
+    /// Change layer `idx`'s fill or border (live, from their dialogs).
+    pub(crate) fn set_layer_style(
+        &mut self,
+        idx: usize,
+        style: crate::canvas::layer_style::LayerStyle,
+    ) {
+        if self.canvas.layers.get(idx).is_none_or(|l| l.style == style) {
+            return;
+        }
+        self.canvas_mut().layers[idx].style = style;
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+    }
+
     /// Add an empty folder above the selected layer and select it.
     pub(crate) fn add_folder(&mut self) {
+        self.quick_mask_leave();
         let (index, parent) = self.insertion_point(false);
         let name = self.next_layer_name("Folder");
         self.insert_entry(index, name, LayerKind::Group, parent, true);
@@ -384,6 +1246,7 @@ impl PainterApp {
     /// Give the selected paint layer a mask (showing everything) and select
     /// the mask for painting; selects the existing mask if there is one.
     pub(crate) fn add_mask_to_active(&mut self) {
+        self.quick_mask_leave();
         let active = self.canvas.active_layer_idx;
         let Some(layer) = self.canvas.layers.get(active) else {
             return;
@@ -405,7 +1268,30 @@ impl PainterApp {
 
     /// Delete a layer with undo, together with its mask, or a folder with
     /// everything inside it.
+    /// Delete the selected layer (with undo): a drawing's whole animated
+    /// layer, as the layers panel shows it. Not the background.
+    pub(crate) fn delete_selected_layer(&mut self) {
+        let active = self.canvas.active_layer_idx;
+        let Some(layer) = self.canvas.layers.get(active) else {
+            return;
+        };
+        let idx = match (layer.anim, layer.parent) {
+            (Some(crate::canvas::storage::Anim::Frame(_)), Some(track)) => {
+                self.canvas.layer_index_of(track).unwrap_or(active)
+            }
+            _ => active,
+        };
+        if idx == 0 {
+            self.report("The background can't be deleted".to_string());
+            return;
+        }
+        self.remove_layer(idx);
+        self.mark_all_tiles_dirty();
+        self.layer_state.thumbnails_dirty = true;
+    }
+
     pub(crate) fn remove_layer(&mut self, idx: usize) {
+        self.quick_mask_leave();
         let len = self.canvas.layers.len();
         if idx == 0 || idx >= len || len <= 1 {
             return;
@@ -494,9 +1380,7 @@ impl PainterApp {
                 active_after,
             }),
         };
-        if let Some(hist) = self.layer_state.histories.get_mut(active_after) {
-            hist.push_action(action);
-        }
+        self.layer_state.history.push_action(action);
 
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;
@@ -504,7 +1388,6 @@ impl PainterApp {
 
     pub(crate) fn insert_layer_state(&mut self, idx: usize) {
         let idx = idx.min(self.canvas.layers.len());
-        self.layer_state.histories.insert(idx, History::new());
         self.layer_state
             .layer_ui_colors
             .insert(idx, Color32::from_gray(40));
@@ -512,9 +1395,6 @@ impl PainterApp {
     }
 
     pub(crate) fn remove_layer_state(&mut self, idx: usize) {
-        if idx < self.layer_state.histories.len() {
-            self.layer_state.histories.remove(idx);
-        }
         if idx < self.layer_state.layer_ui_colors.len() {
             self.layer_state.layer_ui_colors.remove(idx);
         }
@@ -526,11 +1406,27 @@ impl PainterApp {
     /// final positions; the per-layer state is only in sync after all of them.
     pub(crate) fn insert_layer_states(&mut self, ascending: &[usize]) {
         for &idx in ascending {
-            let idx = idx.min(self.layer_state.histories.len());
-            self.layer_state.histories.insert(idx, History::new());
+            let idx = idx.min(self.layer_state.layer_ui_colors.len());
             self.layer_state
                 .layer_ui_colors
                 .insert(idx, Color32::from_gray(40));
+        }
+        self.debug_assert_layer_state_in_sync();
+    }
+
+    /// Mirror a [`LayerSwap`](crate::canvas::storage::LayerSwap): entries
+    /// taken out from positions `out` (before), others put in at `put`
+    /// (after).
+    pub(crate) fn replace_layer_states(&mut self, out: &[usize], put: &[usize]) {
+        let colors = &mut self.layer_state.layer_ui_colors;
+        for &idx in out.iter().rev() {
+            if idx < colors.len() {
+                colors.remove(idx);
+            }
+        }
+        for &idx in put {
+            let idx = idx.min(colors.len());
+            colors.insert(idx, Color32::from_gray(40));
         }
         self.debug_assert_layer_state_in_sync();
     }
@@ -541,13 +1437,907 @@ impl PainterApp {
         let mut descending = indices.to_vec();
         descending.sort_unstable_by(|a, b| b.cmp(a));
         for idx in descending {
-            if idx < self.layer_state.histories.len() {
-                self.layer_state.histories.remove(idx);
-            }
             if idx < self.layer_state.layer_ui_colors.len() {
                 self.layer_state.layer_ui_colors.remove(idx);
             }
         }
         self.debug_assert_layer_state_in_sync();
+    }
+}
+
+#[cfg(test)]
+mod document_tests {
+    use crate::canvas::Canvas;
+    use crate::project::tests::test_app_pub;
+    use eframe::egui::{self, Color32, Vec2};
+
+    /// A 256 px app with layer 1 active.
+    fn app() -> crate::PainterApp {
+        let mut app = test_app_pub(Canvas::new(256, 256, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        app.selection_manager.canvas_size = [256, 256];
+        app
+    }
+
+    /// Start a new 128 px canvas the way the New Canvas dialog does.
+    fn new_canvas(app: &mut crate::PainterApp) {
+        app.modal_state.new_canvas.width = 128.0;
+        app.modal_state.new_canvas.height = 128.0;
+        app.modal_state.new_canvas.unit = crate::app::document::CanvasUnit::Pixels;
+        app.apply_new_canvas();
+    }
+
+    #[test]
+    fn a_new_canvas_drops_the_old_documents_selection_and_sessions() {
+        let mut app = app();
+        app.select_all();
+        app.gradient_press(Vec2::new(0.0, 0.0));
+        app.gradient_drag(Vec2::new(200.0, 0.0), false);
+        app.gradient_update();
+        app.shape_press(
+            crate::app::tools::shape::ShapeKind::Line,
+            Vec2::new(10.0, 10.0),
+        );
+        new_canvas(&mut app);
+
+        assert!(!app.selection_manager.has_selection(), "selection kept");
+        assert!(app.workspace.gradient.session.is_none(), "gradient kept");
+        assert!(app.workspace.shapes.session.is_none(), "shape kept");
+        // Applying whatever was left must not touch the new document.
+        app.gradient_commit();
+        app.shape_commit();
+        assert_eq!(app.layer_state.history.stacks().0.len(), 0);
+    }
+
+    #[test]
+    fn a_new_canvas_keeps_the_old_thumbnails_until_the_next_frame() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let image = egui::ColorImage::new([4, 4], Color32::RED);
+        app.layer_state.thumbnails = vec![Some(ctx.load_texture(
+            "layer_thumb_0",
+            image,
+            egui::TextureOptions::LINEAR,
+        ))];
+        new_canvas(&mut app);
+        // Freed this frame, egui-wgpu would destroy it before submitting
+        // this frame's update to it.
+        assert_eq!(app.workspace.retired_textures.len(), 1);
+    }
+
+    #[test]
+    fn a_new_canvas_drops_a_floating_transform() {
+        let mut app = app();
+        // Something to float.
+        app.canvas_mut()
+            .set_layer_tile_data(1, 0, 0, vec![Color32::RED; 64 * 64]);
+        app.active_tool = crate::app::tools::Tool::Transform(Default::default());
+        crate::app::tools::transform::transform_press(&mut app, Vec2::new(10.0, 10.0));
+        crate::app::tools::transform::transform_release(&mut app);
+        assert!(app.layer_state.floating_layer_idx.is_some());
+        new_canvas(&mut app);
+        assert!(app.layer_state.floating_layer_idx.is_none());
+        assert_eq!(app.canvas.layers.len(), 2, "no stray floating layer");
+        // Leaving the tool (which applies a float) is harmless now.
+        crate::app::tools::transform::commit_floating_layer(&mut app);
+        assert_eq!(app.canvas.layers.len(), 2);
+    }
+
+    #[test]
+    fn opening_a_project_drops_the_old_sessions() {
+        let mut app = app();
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let path = std::env::temp_dir().join(format!("rp-open-{}.rpainter", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        app.select_all();
+        app.gradient_press(Vec2::new(0.0, 0.0));
+        app.gradient_drag(Vec2::new(200.0, 0.0), false);
+        app.gradient_update();
+        app.load_project_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(app.workspace.gradient.session.is_none(), "gradient kept");
+        assert!(!app.selection_manager.has_selection(), "selection kept");
+        app.gradient_commit();
+        assert_eq!(app.layer_state.history.stacks().0.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use crate::PainterApp;
+    use crate::canvas::Canvas;
+    use crate::canvas::blend_modes::LayerBlend;
+    use crate::canvas::filters::Filter;
+    use crate::canvas::storage::{LayerId, LayerKind};
+    use crate::project::tests::test_app_pub;
+    use eframe::egui::{Color32, Vec2};
+
+    fn solid(c: Color32) -> Vec<Color32> {
+        vec![c; 64 * 64]
+    }
+
+    /// Top half of a tile painted `c`, the rest transparent.
+    fn half(c: Color32) -> Vec<Color32> {
+        let mut t = vec![Color32::TRANSPARENT; 64 * 64];
+        t[..64 * 32].fill(c);
+        t
+    }
+
+    /// A 128×128 document with most things a merge must honour: a painted
+    /// layer, a folder (Screen, 80 %) holding a Multiply layer at 60 % with
+    /// a mask and a layer clipped to it, an Invert adjustment over half the
+    /// picture, and a hidden layer.
+    fn app() -> PainterApp {
+        let mut app = test_app_pub(Canvas::new(128, 128, Color32::from_rgb(230, 220, 200), 64));
+        let c = app.canvas_mut();
+        c.set_layer_tile_data(
+            1,
+            0,
+            0,
+            solid(Color32::from_rgba_unmultiplied(200, 40, 40, 200)),
+        );
+        c.set_layer_tile_data(1, 1, 1, half(Color32::from_rgb(20, 90, 200)));
+        let folder = c.insert_new_layer(2, "Folder".into(), LayerKind::Group, None);
+        c.layers[2].blend = LayerBlend::Screen;
+        c.layers[2].opacity = 0.8;
+        let shade = c.insert_new_layer(3, "Shade".into(), LayerKind::Paint, Some(folder));
+        c.set_layer_tile_data(3, 0, 0, half(Color32::from_gray(120)));
+        c.set_layer_tile_data(3, 1, 0, solid(Color32::from_rgb(90, 160, 60)));
+        c.layers[3].blend = LayerBlend::Multiply;
+        c.layers[3].opacity = 0.6;
+        c.insert_new_layer(4, "Clipped".into(), LayerKind::Paint, Some(folder));
+        c.set_layer_tile_data(4, 0, 0, solid(Color32::from_rgb(250, 200, 0)));
+        c.set_layer_tile_data(4, 1, 0, solid(Color32::from_rgb(0, 0, 250)));
+        c.layers[4].clipped = true;
+        let adjust = c.insert_new_layer(5, "Invert".into(), LayerKind::Paint, None);
+        c.layers[5].adjustment = Some(Filter::Invert);
+        c.layers[5].opacity = 0.5;
+        c.insert_new_layer(6, "Hidden".into(), LayerKind::Paint, None);
+        c.set_layer_tile_data(6, 0, 1, solid(Color32::BLUE));
+        c.layers[6].visible = false;
+        c.insert_new_layer(
+            7,
+            "Shade mask".into(),
+            LayerKind::Mask { owner: shade },
+            None,
+        );
+        c.set_layer_tile_data(7, 0, 0, half(Color32::BLACK));
+        c.insert_new_layer(
+            8,
+            "Invert mask".into(),
+            LayerKind::Mask { owner: adjust },
+            None,
+        );
+        c.set_layer_tile_data(8, 1, 0, solid(Color32::BLACK));
+        c.set_layer_tile_data(8, 1, 1, solid(Color32::BLACK));
+        let n = app.canvas.layers.len();
+        app.layer_state
+            .layer_ui_colors
+            .resize(n, Color32::from_gray(40));
+        app.canvas_mut().active_layer_idx = 4;
+        app
+    }
+
+    /// Largest channel difference between two pictures.
+    fn worst(a: &[Color32], b: &[Color32]) -> u8 {
+        a.iter()
+            .zip(b)
+            .flat_map(|(x, y)| {
+                let (x, y) = (x.to_array(), y.to_array());
+                (0..4).map(move |i| x[i].abs_diff(y[i]))
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// One entry of the layer list: id, name, kind, folder, shown,
+    /// opacity, clipped, and its tiles' pixels.
+    type Entry = (
+        LayerId,
+        String,
+        LayerKind,
+        Option<LayerId>,
+        bool,
+        u32,
+        bool,
+        Vec<Vec<Color32>>,
+    );
+
+    /// Everything about the layer list: ids, settings and pixels.
+    fn tree(app: &PainterApp) -> Vec<Entry> {
+        let c = &app.canvas;
+        (0..c.layers.len())
+            .map(|i| {
+                let l = &c.layers[i];
+                let mut keys = c.layer_tile_keys(i);
+                keys.sort_unstable();
+                let tiles = keys
+                    .into_iter()
+                    .filter_map(|(tx, ty)| c.get_layer_tile_data(i, tx, ty))
+                    .collect();
+                (
+                    l.id,
+                    l.name.clone(),
+                    l.kind,
+                    l.parent,
+                    l.visible,
+                    l.opacity.to_bits(),
+                    l.clipped,
+                    tiles,
+                )
+            })
+            .collect()
+    }
+
+    /// Run `merge`, check the picture didn't change and that it's one undo
+    /// step which puts everything back (and redo does it again).
+    fn check(app: &mut PainterApp, merge: fn(&mut PainterApp), layers_after: usize) {
+        let before = app.canvas.flatten().pixels;
+        let tree_before = tree(app);
+        merge(app);
+        let merged = app.canvas.flatten().pixels;
+        let off = worst(&before, &merged);
+        assert!(off <= 2, "off by {off}");
+        assert_eq!(app.canvas.layers.len(), layers_after);
+        assert_eq!(app.layer_state.layer_ui_colors.len(), layers_after);
+        let tree_after = tree(app);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        app.apply_history(false);
+        assert!(tree(app) == tree_before, "undo restores the layers");
+        assert_eq!(app.canvas.flatten().pixels, before);
+        app.apply_history(true);
+        assert!(tree(app) == tree_after, "redo merges again");
+    }
+
+    #[test]
+    fn merge_down_keeps_the_picture_and_undoes_in_one_step() {
+        let mut app = app();
+        // The clipped layer into the masked Multiply one, inside the folder.
+        check(&mut app, PainterApp::merge_down, 7);
+        let shade = &app.canvas.layers[3];
+        assert_eq!(shade.name, "Shade");
+        assert_eq!(shade.blend, LayerBlend::Multiply, "keeps its blend mode");
+        assert_eq!(app.canvas.layers[2].kind, LayerKind::Group);
+        assert_eq!(shade.parent, Some(app.canvas.layers[2].id));
+        assert_eq!(app.canvas.active_layer_idx, 3);
+        assert!(
+            app.canvas.mask_index_of(shade.id).is_none(),
+            "mask baked in"
+        );
+    }
+
+    #[test]
+    fn merge_selected_keeps_the_picture_and_undoes_in_one_step() {
+        let mut app = app();
+        // Both layers of the folder: merged as they show in it, kept in it.
+        check(
+            &mut app,
+            |app| {
+                app.layer_state.selected = vec![app.canvas.layers[3].id, app.canvas.layers[4].id];
+                app.merge_selected();
+            },
+            7,
+        );
+        let merged = &app.canvas.layers[3];
+        assert_eq!(merged.name, "Shade");
+        assert_eq!(
+            merged.parent,
+            Some(app.canvas.layers[2].id),
+            "stays in the folder"
+        );
+    }
+
+    /// Names of the entries in `folder`, bottom to top.
+    fn children(app: &PainterApp, folder: LayerId) -> Vec<String> {
+        let c = &app.canvas;
+        c.layers
+            .iter()
+            .filter(|l| l.parent == Some(folder))
+            .map(|l| l.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn group_selected_puts_the_picked_layers_in_one_folder_in_one_step() {
+        let mut app = app();
+        let tree_before = tree(&app);
+        let (base, hidden) = (app.canvas.layers[1].id, app.canvas.layers[6].id);
+        app.canvas_mut().active_layer_idx = 6;
+        // The background and a folder's contents with it don't count twice.
+        app.layer_state.selected = vec![LayerId(0), base, hidden];
+        app.group_selected();
+        let folder = app.canvas.layers[app.canvas.active_layer_idx].id;
+        assert_eq!(
+            app.canvas.layers[app.canvas.active_layer_idx].kind,
+            LayerKind::Group
+        );
+        let names: Vec<String> = [base, hidden]
+            .iter()
+            .map(|&id| {
+                app.canvas.layers[app.canvas.layer_index_of(id).unwrap()]
+                    .name
+                    .clone()
+            })
+            .collect();
+        assert_eq!(children(&app, folder), names, "in their order");
+        assert_eq!(
+            app.layer_state.layer_ui_colors.len(),
+            app.canvas.layers.len()
+        );
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        let tree_after = tree(&app);
+        app.apply_history(false);
+        assert!(tree(&app) == tree_before, "undo takes the folder away");
+        assert_eq!(
+            app.layer_state.layer_ui_colors.len(),
+            app.canvas.layers.len()
+        );
+        app.apply_history(true);
+        assert!(tree(&app) == tree_after, "redo groups again");
+        // Saved as one step: the reopened file undoes it in one.
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let loaded = crate::project::decode_project(&bytes).unwrap();
+        let mut reopened = test_app_pub(Canvas::new(8, 8, Color32::WHITE, 64));
+        reopened.replace_document(loaded.canvas, loaded.history);
+        reopened.apply_history(false);
+        assert!(tree(&reopened) == tree_before, "undo after reopening");
+    }
+
+    #[test]
+    fn dragging_picked_layers_moves_them_together_in_one_step() {
+        let mut app = app();
+        let tree_before = tree(&app);
+        let folder = app.canvas.layers[2].id;
+        let (base, hidden) = (app.canvas.layers[1].id, app.canvas.layers[6].id);
+        app.canvas_mut().active_layer_idx = 1;
+        app.layer_state.selected = vec![base, hidden];
+        // Base dragged to the top of the folder; Hidden comes along above it.
+        app.move_selected(1, 4, Some(folder));
+        assert_eq!(
+            children(&app, folder),
+            ["Shade", "Clipped", "Layer 1", "Hidden"].map(String::from)
+        );
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        app.apply_history(false);
+        assert!(tree(&app) == tree_before, "undo puts them back");
+    }
+
+    /// Undo, check the layers are `before`, redo, check they're `after`.
+    fn undo_redo(app: &mut PainterApp, before: &[Entry], after: &[Entry]) {
+        app.apply_history(false);
+        assert!(tree(app) == before, "undo puts the layers back");
+        assert_eq!(
+            app.layer_state.layer_ui_colors.len(),
+            app.canvas.layers.len()
+        );
+        app.apply_history(true);
+        assert!(tree(app) == after, "redo does it again");
+        assert_eq!(
+            app.layer_state.layer_ui_colors.len(),
+            app.canvas.layers.len()
+        );
+    }
+
+    #[test]
+    fn layer_settings_changes_undo_in_one_step() {
+        let mut app = app();
+        let before = tree(&app);
+        app.settings_watch();
+        app.canvas_mut().layers[1].opacity = 0.25;
+        app.canvas_mut().layers[6].visible = true;
+        // Still dragging: not kept yet.
+        app.settings_record(true);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 0);
+        app.settings_record(false);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        let after = tree(&app);
+        undo_redo(&mut app, &before, &after);
+        // Nothing changed: no step.
+        app.settings_watch();
+        app.settings_record(false);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+    }
+
+    #[test]
+    fn deleting_picked_layers_is_one_step() {
+        let mut app = app();
+        let before = tree(&app);
+        // The folder (with its layers and their masks) and the hidden layer.
+        app.canvas_mut().active_layer_idx = 6;
+        app.layer_state.selected = vec![app.canvas.layers[2].id, app.canvas.layers[6].id];
+        app.delete_picked();
+        let names: Vec<&str> = app.canvas.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Background", "Layer 1", "Invert", "Invert mask"]);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        let after = tree(&app);
+        undo_redo(&mut app, &before, &after);
+    }
+
+    #[test]
+    fn ungroup_takes_the_layers_out_in_one_step() {
+        let mut app = app();
+        let before = tree(&app);
+        let folder = app.canvas.layers[2].id;
+        app.ungroup(2);
+        assert!(
+            app.canvas.layer_index_of(folder).is_none(),
+            "the folder goes"
+        );
+        let top: Vec<(&str, Option<LayerId>)> = app.canvas.layers[..5]
+            .iter()
+            .map(|l| (l.name.as_str(), l.parent))
+            .collect();
+        assert_eq!(
+            top,
+            [
+                ("Background", None),
+                ("Layer 1", None),
+                ("Shade", None),
+                ("Clipped", None),
+                ("Invert", None)
+            ]
+        );
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        let after = tree(&app);
+        undo_redo(&mut app, &before, &after);
+    }
+
+    #[test]
+    fn copied_layers_paste_as_copies_with_their_masks_in_one_step() {
+        let mut app = app();
+        // The folder: its layers and Shade's mask come along.
+        app.canvas_mut().active_layer_idx = 2;
+        app.copy_layers();
+        app.canvas_mut().active_layer_idx = 6;
+        let before = tree(&app);
+        let pixels = app.canvas.get_layer_tile_data(3, 0, 0);
+        app.paste_layers();
+        assert_eq!(app.canvas.layers.len(), 9 + 4);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        let folder = app.canvas.layers[app.canvas.active_layer_idx].id;
+        assert_eq!(app.layer_state.selected, vec![folder]);
+        assert_eq!(
+            children(&app, folder),
+            ["Shade", "Clipped"].map(String::from)
+        );
+        let shade = app
+            .canvas
+            .layers
+            .iter()
+            .position(|l| l.parent == Some(folder))
+            .unwrap();
+        assert_eq!(
+            app.canvas.get_layer_tile_data(shade, 0, 0),
+            pixels,
+            "same pixels"
+        );
+        let shade_id = app.canvas.layers[shade].id;
+        assert!(
+            app.canvas.mask_index_of(shade_id).is_some(),
+            "the copy has its own mask"
+        );
+        let after = tree(&app);
+        undo_redo(&mut app, &before, &after);
+    }
+
+    #[test]
+    fn duplicating_picked_layers_is_one_step() {
+        let mut app = app();
+        let before = tree(&app);
+        app.canvas_mut().active_layer_idx = 6;
+        app.layer_state.selected = vec![app.canvas.layers[1].id, app.canvas.layers[6].id];
+        app.duplicate_picked();
+        let names: Vec<&str> = app.canvas.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(&names[7..9], ["Layer 1 copy", "Hidden copy"]);
+        assert_eq!(app.selected_indices(), vec![7, 8]);
+        let after = tree(&app);
+        undo_redo(&mut app, &before, &after);
+    }
+
+    #[test]
+    fn alt_right_click_picks_the_layers_with_paint_there() {
+        let mut app = app();
+        // Only Layer 1 shows paint at (100, 70) (the hidden layer's tile is elsewhere).
+        app.pick_layer_at(eframe::egui::pos2(0.0, 0.0), 100, 70);
+        assert_eq!(app.canvas.active_layer_idx, 1);
+        assert!(app.layer_state.pick_menu.is_none());
+        // At (10, 10): Clipped, Shade and Layer 1: a menu, top first.
+        app.pick_layer_at(eframe::egui::pos2(0.0, 0.0), 10, 10);
+        let (_, ids) = app.layer_state.pick_menu.clone().unwrap();
+        let names: Vec<&str> = ids
+            .iter()
+            .map(|&id| {
+                app.canvas.layers[app.canvas.layer_index_of(id).unwrap()]
+                    .name
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(names, ["Clipped", "Shade", "Layer 1"]);
+    }
+
+    #[test]
+    fn dragging_picked_layers_leaves_no_trail() {
+        use crate::app::tools::Tool;
+        use crate::app::tools::transform::{
+            cancel_floating_layer, create_floating_layer, flush_transform_preview,
+        };
+        use crate::selection::transform::TransformInfo;
+        let mut app = test_app_pub(Canvas::new(256, 256, Color32::WHITE, 64));
+        let c = app.canvas_mut();
+        c.set_layer_tile_data(1, 1, 1, solid(Color32::RED));
+        c.insert_new_layer(2, "Top".into(), LayerKind::Paint, None);
+        c.set_layer_tile_data(2, 1, 1, half(Color32::BLUE));
+        c.active_layer_idx = 2;
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        app.layer_state.selected = vec![app.canvas.layers[1].id, app.canvas.layers[2].id];
+        let layers = |app: &PainterApp| {
+            [1, 2].map(|i| {
+                let mut keys = app.canvas.layer_tile_keys(i);
+                keys.sort_unstable();
+                keys.into_iter()
+                    .filter_map(|(tx, ty)| app.canvas.get_layer_tile_data(i, tx, ty))
+                    .filter(|t| t.iter().any(|p| p.a() > 0))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let set = |app: &mut PainterApp, offset: Vec2, rotation: f32, dragging: bool| {
+            if let Tool::Transform(ref mut info) = app.active_tool {
+                info.offset = offset;
+                info.rotation = rotation;
+                info.start_pos = dragging.then_some(Vec2::ZERO);
+            }
+            app.layer_state.transform_preview_pending = true;
+            flush_transform_preview(app);
+        };
+        // Straight to the end...
+        // Before it's used, the box goes around both layers' paint.
+        let box_before = crate::app::tools::transform::idle_box(&app).unwrap();
+        assert_eq!(box_before.min, eframe::egui::pos2(64.0, 64.0));
+        assert_eq!(
+            box_before.max,
+            eframe::egui::pos2(128.0, 128.0),
+            "the red layer's whole tile"
+        );
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        create_floating_layer(&mut app);
+        set(&mut app, Vec2::new(37.5, -20.25), 0.4, false);
+        let direct = layers(&app);
+        cancel_floating_layer(&mut app);
+        // ...or there through a drag: the same.
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        create_floating_layer(&mut app);
+        for k in 1..=6 {
+            let t = k as f32 / 6.0;
+            set(
+                &mut app,
+                Vec2::new(-60.0 + 97.5 * t, 70.0 - 90.25 * t),
+                1.2 - 0.8 * t,
+                true,
+            );
+        }
+        set(&mut app, Vec2::new(37.5, -20.25), 0.4, false);
+        assert!(layers(&app) == direct, "a drag leaves pixels behind");
+    }
+
+    #[test]
+    fn picked_layers_transform_at_full_depth_in_a_deeper_document() {
+        use crate::app::tools::Tool;
+        use crate::canvas::storage::Depth;
+        use crate::selection::transform::TransformInfo;
+        let mut app = test_app_pub(Canvas::new(128, 128, Color32::WHITE, 64));
+        let c = app.canvas_mut();
+        c.set_layer_tile_data(1, 0, 0, solid(Color32::RED));
+        c.insert_new_layer(2, "Top".into(), LayerKind::Paint, None);
+        c.set_layer_tile_data(2, 0, 0, half(Color32::BLUE));
+        c.active_layer_idx = 2;
+        app.convert_depth(Depth::U16);
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        app.layer_state.selected = vec![app.canvas.layers[1].id, app.canvas.layers[2].id];
+        let deep =
+            |app: &PainterApp, (tx, ty)| [1, 2].map(|i| app.canvas.get_layer_tile_deep(i, tx, ty));
+        let before = deep(&app, (0, 0));
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        crate::app::tools::transform::create_floating_layer(&mut app);
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            info.offset = Vec2::new(64.0, 64.0);
+        }
+        app.layer_state.transform_preview_pending = true;
+        crate::app::tools::transform::flush_transform_preview(&mut app);
+        crate::app::tools::transform::commit_floating_layer(&mut app);
+        assert!(
+            deep(&app, (1, 1)).iter().all(Option::is_some),
+            "arrived deep"
+        );
+        app.apply_history(false);
+        assert!(deep(&app, (0, 0)) == before, "undone at full depth");
+    }
+
+    #[test]
+    fn picked_layers_transform_together_in_one_step() {
+        use crate::app::tools::Tool;
+        use crate::selection::transform::TransformInfo;
+        let mut app = test_app_pub(Canvas::new(128, 128, Color32::WHITE, 64));
+        let c = app.canvas_mut();
+        c.set_layer_tile_data(1, 0, 0, solid(Color32::RED));
+        c.insert_new_layer(2, "Top".into(), LayerKind::Paint, None);
+        c.set_layer_tile_data(2, 0, 0, half(Color32::BLUE));
+        // Shows through its blend mode while it moves, not as a plain layer.
+        c.layers[2].blend = LayerBlend::Multiply;
+        c.active_layer_idx = 2;
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        app.layer_state.selected = vec![app.canvas.layers[1].id, app.canvas.layers[2].id];
+        // (Undo leaves the tiles the pixels landed on cleared, not gone.)
+        let pixels = |app: &PainterApp| [1, 2].map(|i| app.canvas.get_layer_tile_data(i, 0, 0));
+        let before = pixels(&app);
+        let picture = app.canvas.flatten().pixels;
+        app.active_tool = Tool::Transform(TransformInfo::default());
+        crate::app::tools::transform::create_floating_layer(&mut app);
+        // Each layer redrawn in place: no floating layer, nothing changed yet.
+        assert!(app.layer_state.floating_layer_idx.is_none());
+        assert_eq!(app.canvas.layers.len(), 3);
+        assert!(pixels(&app) == before);
+        assert_eq!(app.canvas.flatten().pixels, picture);
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            info.offset = Vec2::new(64.0, 64.0);
+        }
+        // (As a drag of the box does.)
+        app.layer_state.transform_preview_pending = true;
+        crate::app::tools::transform::flush_transform_preview(&mut app);
+        let preview = app.canvas.flatten().pixels;
+        crate::app::tools::transform::commit_floating_layer(&mut app);
+        for layer in [1, 2] {
+            assert!(
+                app.canvas
+                    .get_layer_tile_data(layer, 0, 0)
+                    .is_none_or(|t| t.iter().all(|p| p.a() == 0)),
+                "layer {layer} left"
+            );
+            assert!(
+                app.canvas
+                    .get_layer_tile_data(layer, 1, 1)
+                    .is_some_and(|t| t.iter().any(|p| p.a() > 0)),
+                "layer {layer} arrived"
+            );
+        }
+        assert_eq!(
+            app.canvas.flatten().pixels,
+            preview,
+            "the preview was exact"
+        );
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one undo step");
+        app.apply_history(false);
+        assert!(pixels(&app) == before, "undo puts both back");
+        // Cancelled: both as they were, nothing to undo.
+        let steps = app.layer_state.history.stacks().0.len();
+        crate::app::tools::transform::create_floating_layer(&mut app);
+        crate::app::tools::transform::cancel_floating_layer(&mut app);
+        assert!(pixels(&app) == before, "cancel puts both back");
+        assert_eq!(app.canvas.layers.len(), 3);
+        assert_eq!(app.layer_state.history.stacks().0.len(), steps);
+    }
+
+    #[test]
+    fn merge_down_onto_a_normal_layer_bakes_its_opacity() {
+        let mut app = test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        let c = app.canvas_mut();
+        c.set_layer_tile_data(1, 0, 0, half(Color32::RED));
+        c.layers[1].opacity = 0.5;
+        c.insert_new_layer(2, "Top".into(), LayerKind::Paint, None);
+        c.set_layer_tile_data(
+            2,
+            1,
+            0,
+            solid(Color32::from_rgba_unmultiplied(0, 0, 255, 128)),
+        );
+        c.set_layer_tile_data(2, 0, 0, solid(Color32::from_rgb(0, 200, 0)));
+        c.layers[2].opacity = 0.7;
+        c.active_layer_idx = 2;
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        check(&mut app, PainterApp::merge_down, 2);
+        assert_eq!(app.canvas.layers[1].opacity, 1.0);
+        assert_eq!(app.canvas.layers[1].blend, LayerBlend::Normal);
+    }
+
+    #[test]
+    fn merge_visible_keeps_the_picture_and_hidden_layers() {
+        let mut app = app();
+        // Everything that shows goes into the background; the hidden layer
+        // stays.
+        check(&mut app, PainterApp::merge_visible, 2);
+        assert_eq!(app.canvas.layers[0].id, LayerId(0));
+        assert_eq!(app.canvas.layers[1].name, "Hidden");
+    }
+
+    #[test]
+    fn flatten_keeps_the_picture_and_undoes_in_one_step() {
+        let mut app = app();
+        check(&mut app, PainterApp::flatten_image, 1);
+        assert_eq!(app.canvas.layers[0].name, "Background");
+    }
+
+    #[test]
+    fn flatten_over_a_hidden_background_stays_transparent() {
+        let mut app = app();
+        app.canvas_mut().layers[0].visible = false;
+        check(&mut app, PainterApp::flatten_image, 1);
+    }
+
+    #[test]
+    fn merge_down_says_why_it_cannot() {
+        let mut app = app();
+        app.canvas_mut().active_layer_idx = 3; // lowest in its folder
+        app.merge_down();
+        assert!(app.export_state.message.is_some());
+        assert!(app.layer_state.history.stacks().0.is_empty());
+    }
+
+    #[test]
+    fn draft_layers_are_left_out_of_export_merging_and_sampling() {
+        let mut app = test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        let c = app.canvas_mut();
+        c.set_layer_tile_data(1, 0, 0, half(Color32::RED));
+        c.insert_new_layer(2, "Sketch".into(), LayerKind::Paint, None);
+        c.set_layer_tile_data(2, 0, 0, solid(Color32::BLUE));
+        c.layers[2].draft = true;
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        // Still on screen.
+        assert_eq!(app.canvas.flatten().pixels[40 * 128], Color32::BLUE);
+        // Not exported.
+        let mut without = test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        without
+            .canvas_mut()
+            .set_layer_tile_data(1, 0, 0, half(Color32::RED));
+        let expected = without.canvas.flatten().pixels;
+        assert_eq!(app.canvas.flatten_final().pixels, expected);
+        let psd = crate::project::psd::PsdDocument::from_canvas(&app.canvas);
+        assert_eq!(psd.composite, expected);
+        // Not picked by the eyedropper.
+        app.pick_color(Vec2::new(5.0, 40.0));
+        let picked = app
+            .brush_state
+            .brush
+            .brush_options
+            .color
+            .to_srgba_unmultiplied();
+        assert_eq!(picked[..3], [255, 255, 255]);
+        // Not in "all layers".
+        assert_eq!(
+            app.canvas.render_reference(None, 0, 40, 1, 1)[0],
+            Color32::TRANSPARENT
+        );
+        // Merge Visible leaves it as it is.
+        app.merge_visible();
+        assert_eq!(app.canvas.layers.len(), 2);
+        assert!(app.canvas.layers[1].draft);
+        assert_eq!(app.canvas.layers[0].id, LayerId(0));
+        assert_eq!(
+            app.canvas.get_layer_tile_data(0, 0, 0).unwrap()[40 * 64],
+            Color32::WHITE
+        );
+        // So does Flatten.
+        app.apply_history(false);
+        app.flatten_image();
+        assert_eq!(app.canvas.layers.len(), 2);
+        assert!(app.canvas.layers[1].draft);
+    }
+
+    #[test]
+    fn a_fill_can_find_its_area_in_the_reference_layer() {
+        use crate::app::tools::fill::FillSource;
+        let mut app = test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        // Line art on layer 1: a square outline from 10 to 40.
+        let mut lines = vec![Color32::TRANSPARENT; 64 * 64];
+        for i in 10..=40 {
+            for (x, y) in [(i, 10), (i, 40), (10, i), (40, i)] {
+                lines[y * 64 + x] = Color32::BLACK;
+            }
+        }
+        app.canvas_mut().set_layer_tile_data(1, 0, 0, lines.clone());
+        app.canvas_mut()
+            .insert_new_layer(2, "Colours".into(), LayerKind::Paint, None);
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        app.canvas_mut().active_layer_idx = 2;
+        app.workspace.fill.source = FillSource::Reference;
+        app.workspace.fill.settings.antialias = false;
+        app.workspace.fill.settings.expand = 0;
+        app.brush_state.brush.brush_options.color = Color32::GREEN;
+        // No reference layer yet: nothing happens, and a notice says so.
+        app.fill_press(Vec2::new(20.0, 20.0));
+        assert!(app.layer_state.history.stacks().0.is_empty());
+        assert!(app.export_state.message.is_some());
+        app.canvas_mut().layers[1].reference = true;
+        // Hidden, the reference still counts.
+        app.canvas_mut().layers[1].visible = false;
+        app.fill_press(Vec2::new(20.0, 20.0));
+        let colours = app.canvas.get_layer_tile_data(2, 0, 0).unwrap();
+        assert_eq!(colours[20 * 64 + 20], Color32::GREEN, "inside the lines");
+        assert_eq!(colours[5 * 64 + 5], Color32::TRANSPARENT, "outside");
+        assert_eq!(colours[50 * 64 + 50], Color32::TRANSPARENT, "outside");
+        assert_eq!(app.canvas.get_layer_tile_data(1, 0, 0).unwrap(), lines);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+    }
+
+    #[test]
+    fn a_brush_can_stay_inside_the_reference_lines() {
+        let mut app = test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        // Line art on layer 1: a square outline from 10 to 40.
+        let mut lines = vec![Color32::TRANSPARENT; 64 * 64];
+        for i in 10..=40 {
+            for (x, y) in [(i, 10), (i, 40), (10, i), (40, i)] {
+                lines[y * 64 + x] = Color32::BLACK;
+            }
+        }
+        app.canvas_mut().set_layer_tile_data(1, 0, 0, lines);
+        app.canvas_mut().layers[1].reference = true;
+        app.canvas_mut()
+            .insert_new_layer(2, "Colours".into(), LayerKind::Paint, None);
+        app.layer_state
+            .layer_ui_colors
+            .resize(3, Color32::from_gray(40));
+        app.canvas_mut().active_layer_idx = 2;
+        app.workspace.fill.settings.expand = 0;
+        let b = &mut app.brush_state.brush;
+        b.stay_inside = true;
+        b.brush_options.color = Color32::GREEN;
+        b.brush_options.diameter = 12.0;
+        b.brush_options.hardness = 100.0;
+        b.brush_options.pressure_size = false;
+        // From inside the square right across its side.
+        app.start_stroke_with_pressure(Vec2::new(30.0, 25.0), 1.0);
+        app.add_stroke_point(Vec2::new(55.0, 25.0), 1.0);
+        app.finish_stroke();
+        app.settle_strokes();
+        let colours = app.canvas.get_layer_tile_data(2, 0, 0).unwrap();
+        assert_eq!(colours[25 * 64 + 35].a(), 255, "inside the lines");
+        assert_eq!(colours[25 * 64 + 50].a(), 0, "past the line");
+    }
+
+    #[test]
+    fn layer_flags_survive_saving_and_opening() {
+        let mut app = app();
+        app.canvas_mut().layers[1].position_locked = true;
+        app.canvas_mut().layers[3].draft = true;
+        app.canvas_mut().layers[2].reference = true;
+        // A merge in the history: saved, so the reopened file can undo it.
+        app.canvas_mut().active_layer_idx = 4;
+        let tree_before = tree(&app);
+        let pixels_before = app.canvas.flatten().pixels;
+        app.merge_down();
+        let tree_after = tree(&app);
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let loaded = crate::project::decode_project(&bytes).unwrap();
+        let flags = |c: &Canvas| {
+            c.layers
+                .iter()
+                .map(|l| (l.id, l.position_locked, l.draft, l.reference))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(flags(&loaded.canvas), flags(&app.canvas));
+        assert!(loaded.canvas.layers[1].position_locked);
+        assert_eq!(loaded.history.stacks().0.len(), 1);
+        let mut reopened = test_app_pub(Canvas::new(8, 8, Color32::WHITE, 64));
+        reopened.replace_document(loaded.canvas, loaded.history);
+        assert!(tree(&reopened) == tree_after);
+        reopened.apply_history(false);
+        assert!(
+            tree(&reopened) == tree_before,
+            "undo goes back through the merge"
+        );
+        assert_eq!(reopened.canvas.flatten().pixels, pixels_before);
+        reopened.apply_history(true);
+        assert!(tree(&reopened) == tree_after, "and redo merges again");
     }
 }

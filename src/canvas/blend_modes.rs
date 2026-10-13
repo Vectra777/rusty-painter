@@ -37,10 +37,18 @@ pub enum LayerBlend {
     Exclusion,
     Subtract,
     Divide,
+    /// Parallel: twice the harmonic mean of the two colours, like
+    /// two resistors in parallel (darkens, but less than Multiply).
+    Parallel,
     Hue,
     Saturation,
     Color,
     Luminosity,
+    /// Folders only: the folder isn't composited on its own first; its
+    /// layers blend straight into what's below it (Photoshop's and Krita's
+    /// pass-through). Not in [`Self::GROUPS`]: the folder's blend menu
+    /// offers it apart. Composites as Normal wherever it can't pass through.
+    PassThrough,
 }
 
 impl LayerBlend {
@@ -76,6 +84,7 @@ impl LayerBlend {
             Self::Exclusion,
             Self::Subtract,
             Self::Divide,
+            Self::Parallel,
         ],
         &[Self::Hue, Self::Saturation, Self::Color, Self::Luminosity],
     ];
@@ -105,10 +114,12 @@ impl LayerBlend {
             Self::Exclusion => "Exclusion",
             Self::Subtract => "Subtract",
             Self::Divide => "Divide",
+            Self::Parallel => "Parallel",
             Self::Hue => "Hue",
             Self::Saturation => "Saturation",
             Self::Color => "Color",
             Self::Luminosity => "Luminosity",
+            Self::PassThrough => "Pass Through",
         }
     }
 
@@ -138,31 +149,31 @@ impl LayerBlend {
             Self::Exclusion => "exclusion",
             Self::Subtract => "subtract",
             Self::Divide => "divide",
+            Self::Parallel => "parallel",
             Self::Hue => "hue",
             Self::Saturation => "saturation",
             Self::Color => "color",
             Self::Luminosity => "luminosity",
+            Self::PassThrough => "pass_through",
         }
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::GROUPS
-            .iter()
-            .flat_map(|g| g.iter())
-            .copied()
+        (Self::GROUPS.iter().flat_map(|g| g.iter()).copied())
+            .chain([Self::PassThrough])
             .find(|m| m.key() == key)
     }
 }
 
 /// The colour space layers and strokes blend in.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendSpace {
     /// Physically correct light mixing: colours are decoded from sRGB,
     /// blended, and encoded again.
     #[default]
     Linear,
-    /// Blend the stored sRGB values directly, like Photoshop and Krita's
-    /// default 8-bit documents.
+    /// Blend the stored sRGB values directly, like Photoshop's 8-bit
+    /// documents.
     Gamma,
 }
 
@@ -223,6 +234,18 @@ fn vivid_light(b: f32, s: f32) -> f32 {
     }
 }
 
+/// Parallel: `2 / (1/b + 1/s)`, nothing where either channel is (next to)
+/// nothing, as its harmonic mean tends to. (Taking 1 for such a channel's
+/// reciprocal instead would turn a channel both colours lack full: yellow
+/// over yellow would come out white.)
+#[inline]
+fn parallel(b: f32, s: f32) -> f32 {
+    if b <= f32::EPSILON || s <= f32::EPSILON {
+        return 0.0;
+    }
+    (2.0 / (1.0 / b + 1.0 / s)).clamp(0.0, 1.0)
+}
+
 #[inline]
 fn separable(mode: LayerBlend, b: f32, s: f32) -> f32 {
     match mode {
@@ -263,6 +286,7 @@ fn separable(mode: LayerBlend, b: f32, s: f32) -> f32 {
                 (b / s).min(1.0)
             }
         }
+        LayerBlend::Parallel => parallel(b, s),
         _ => s,
     }
 }
@@ -342,13 +366,18 @@ pub fn blend_color(mode: LayerBlend, b: [f32; 3], s: [f32; 3]) -> [f32; 3] {
     }
 }
 
+pub(crate) const MIN_ALPHA: f32 = 1e-6;
+
 /// Composite premultiplied `src` onto premultiplied `dst` with `mode`.
 /// `dissolve_noise` (0..1, stable per pixel) decides Dissolve's pixels: a
 /// pixel shows the source fully opaque where the noise is below its alpha.
 #[inline]
 pub fn composite(mode: LayerBlend, src: Rgba, dst: Rgba, dissolve_noise: f32) -> Rgba {
     let a_s = src.a();
-    if a_s <= 0.0 {
+    // Below this the source can't show in 8 bits, and un-premultiplying
+    // it would divide by almost nothing (0 × inf = NaN, drawn black).
+    // NaN takes the branch too.
+    if a_s.is_nan() || a_s <= MIN_ALPHA {
         return dst;
     }
     if mode == LayerBlend::Normal {
@@ -364,7 +393,7 @@ pub fn composite(mode: LayerBlend, src: Rgba, dst: Rgba, dissolve_noise: f32) ->
         return opaque;
     }
     let a_b = dst.a();
-    if a_b <= 0.0 {
+    if a_b.is_nan() || a_b <= MIN_ALPHA {
         return src;
     }
     let unpremul = |c: Rgba, a: f32| {
@@ -406,13 +435,29 @@ mod tests {
     }
 
     #[test]
+    fn parallel_leaves_a_channel_neither_colour_has_empty() {
+        // Yellow over yellow is yellow (it once came out white), and a
+        // channel only one colour has is nothing.
+        let yellow = [1.0, 0.6, 0.0];
+        assert!(close(
+            blend_color(LayerBlend::Parallel, yellow, yellow),
+            yellow
+        ));
+        let blue = [0.0, 0.0, 1.0];
+        assert!(close(
+            blend_color(LayerBlend::Parallel, yellow, blue),
+            [0.0; 3]
+        ));
+    }
+
+    #[test]
     fn every_mode_is_listed_once_and_round_trips_its_key() {
         let all: Vec<LayerBlend> = LayerBlend::GROUPS
             .iter()
             .flat_map(|g| g.iter())
             .copied()
             .collect();
-        assert_eq!(all.len(), 27);
+        assert_eq!(all.len(), 28);
         for m in &all {
             assert_eq!(all.iter().filter(|x| *x == m).count(), 1);
             assert_eq!(LayerBlend::from_key(m.key()), Some(*m));
@@ -447,6 +492,52 @@ mod tests {
                 "{mode:?}: {:?}",
                 blend_color(mode, b, s)
             );
+        }
+    }
+
+    #[test]
+    fn reference_values_of_the_other_modes() {
+        // W3C / Photoshop formulas worked by hand for the same inputs.
+        let b = [0.2, 0.5, 0.8];
+        let s = [0.6, 0.5, 0.1];
+        let cases: [(LayerBlend, [f32; 3]); 10] = [
+            (LayerBlend::ColorDodge, [0.5, 1.0, 0.8 / 0.9]),
+            (LayerBlend::ColorBurn, [0.0, 0.0, 0.0]),
+            (LayerBlend::HardLight, [0.36, 0.5, 0.16]),
+            // Upper half: b + (2s − 1)(D(b) − b), D(0.2) = 0.448.
+            (LayerBlend::SoftLight, [0.2496, 0.5, 0.672]),
+            (LayerBlend::VividLight, [0.25, 0.5, 0.0]),
+            (LayerBlend::LinearLight, [0.4, 0.5, 0.0]),
+            (LayerBlend::Divide, [0.2 / 0.6, 1.0, 1.0]),
+            // 2 / (1/b + 1/s).
+            (LayerBlend::Parallel, [0.3, 0.5, 2.0 / 11.25]),
+            // Whole colours: lum(b) = 0.443 < lum(s) = 0.486.
+            (LayerBlend::DarkerColor, b),
+            (LayerBlend::LighterColor, s),
+        ];
+        for (mode, expected) in cases {
+            assert!(
+                close(blend_color(mode, b, s), expected),
+                "{mode:?}: {:?}",
+                blend_color(mode, b, s)
+            );
+        }
+    }
+
+    #[test]
+    fn a_nearly_invisible_source_never_makes_nan() {
+        let dst = opaque(1.0, 1.0, 1.0);
+        for &mode in LayerBlend::GROUPS.iter().flat_map(|g| g.iter()) {
+            for a in [1e-39_f32, 3e-39, 1e-20, 1e-7, f32::NAN] {
+                let src = Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, a);
+                let out = composite(mode, src, dst, 0.5);
+                let c = [out.r(), out.g(), out.b(), out.a()];
+                assert!(c.iter().all(|v| v.is_finite()), "{mode:?} at {a}: {c:?}");
+                assert!(
+                    c.iter().all(|v| (v - 1.0).abs() < 1e-4),
+                    "{mode:?} at {a}: {c:?}"
+                );
+            }
         }
     }
 

@@ -1,8 +1,7 @@
-use crate::{
-    PainterApp,
-    app::state::validate_canvas_size,
-    utils::exporter::{ExportFormat, save_color_image},
-};
+//! The Export dialog: format, file name and progress.
+
+use crate::ui::widgets::FitScreen;
+use crate::{PainterApp, app::document::validate_canvas_size, project::export::ExportFormat};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -13,46 +12,73 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
     if !app.export_state.show_modal {
         return;
     }
+    // The quick mask layer isn't part of the picture.
+    app.quick_mask_leave();
 
     let mut open = app.export_state.show_modal;
     egui::Window::new("Export Canvas")
+        .fit_screen(ctx)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
             let settings = &mut app.export_state.settings;
+            let mut choose = false;
 
             ui.horizontal(|ui| {
                 ui.label("Format");
-                egui::ComboBox::from_label("Format")
+                egui::ComboBox::from_id_salt("export_format")
                     .selected_text(settings.format.label())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut settings.format, ExportFormat::Png, "PNG");
-                        ui.selectable_value(&mut settings.format, ExportFormat::Jpeg, "JPEG");
-                        ui.selectable_value(&mut settings.format, ExportFormat::Tiff, "TIFF");
+                        for format in ExportFormat::ALL {
+                            ui.selectable_value(&mut settings.format, format, format.label());
+                        }
                     });
             });
 
             ui.separator();
             ui.heading("Destination");
-            ui.horizontal(|ui| {
-                ui.label("File");
-                let display = settings
-                    .chosen_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| settings.default_file_name());
-                ui.monospace(display);
-                if ui.button("Choose...").clicked()
-                    && let Some(path) = pick_file(&settings.default_file_name())
-                {
-                    settings.chosen_path = Some(path);
-                }
-            });
+            // Android: into shared storage, by type (see `publish_file`).
+            if cfg!(mobile) {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut settings.base_name);
+                });
+                let place = if settings.format.is_layered() {
+                    "Download/Rusty Painter"
+                } else {
+                    "Pictures/Rusty Painter"
+                };
+                ui.weak(format!("Saved in {place}"));
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label("File");
+                    let display = settings
+                        .chosen_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| settings.default_file_name());
+                    ui.monospace(display);
+                    if ui.button("Choose...").clicked() {
+                        choose = true;
+                    }
+                });
+            }
+
+            if choose {
+                choose_file(app);
+            }
 
             if let Some(msg) = &app.export_state.message {
                 ui.label(msg);
+            }
+            #[cfg(mobile)]
+            if let Some((uri, mime)) = &app.export_state.share
+                && ui.button("Share…").clicked()
+                && let Err(err) = crate::platform::share_uri(uri, mime, "Share image")
+            {
+                app.export_state.message = Some(err);
             }
 
             if app.export_state.in_progress {
@@ -70,8 +96,8 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     .add_enabled(!disabled, egui::Button::new("Export"))
                     .clicked()
                 {
-                    let target = settings.output_path();
-                    let format = settings.format;
+                    let target = app.export_state.settings.output_path();
+                    let format = app.export_state.settings.format;
 
                     let (w, h) = (app.canvas.width(), app.canvas.height());
                     if let Err(msg) = validate_canvas_size(w, h) {
@@ -79,42 +105,13 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
                         return;
                     }
 
-                    // Flatten on the UI thread, then save on a worker thread.
-                    // The shared canvas is not cloned across threads; size limits keep this bounded.
-                    app.stroke_worker.wait_idle();
-                    let img = app.canvas.flatten();
-
+                    app.export_state.share = None;
                     app.export_state.in_progress = true;
                     app.export_state.progress = 0.05;
                     app.export_state.message = Some("Exporting...".to_string());
-                    let (tx, rx) = mpsc::channel();
-                    app.export_state.progress_rx = Some(rx);
-                    app.export_state.task = Some(thread::spawn(move || {
-                        let _ = tx.send(ExportProgress {
-                            progress: 0.2,
-                            message: Some("Saving file...".to_string()),
-                        });
-                        let result =
-                            save_color_image(img, target.clone(), format).map(|_| target.clone());
-                        match result {
-                            Ok(path) => {
-                                let msg = format!("Saved to {}", path.display());
-                                let _ = tx.send(ExportProgress {
-                                    progress: 1.0,
-                                    message: Some(msg.clone()),
-                                });
-                                Ok(msg)
-                            }
-                            Err(err) => {
-                                let msg = format!("Export failed: {err}");
-                                let _ = tx.send(ExportProgress {
-                                    progress: 1.0,
-                                    message: Some(msg.clone()),
-                                });
-                                Err(msg)
-                            }
-                        }
-                    }));
+                    // Once the strokes are painted: copy the document, then
+                    // flatten and save it on another thread.
+                    app.when_strokes_painted(move |app| start_export(app, target, format));
                 }
                 if ui
                     .add_enabled(!disabled, egui::Button::new("Cancel"))
@@ -128,17 +125,67 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
     app.export_state.show_modal = open;
 }
 
-#[cfg(not(target_os = "android"))]
-fn pick_file(default_name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_file_name(default_name)
-        .save_file()
+/// Copy the document as it is now and export the copy on another thread.
+fn start_export(app: &mut PainterApp, target: PathBuf, format: ExportFormat) {
+    // Shader layers export as their current frame.
+    app.bake_shader_layers();
+    let canvas = app.canvas.detached_copy();
+    let color = crate::project::export::ExportColor {
+        profile: app.canvas.profile.clone(),
+        cmyk: app.workspace.color.cmyk_profile(),
+        intent: app.workspace.color.intent,
+    };
+    let (tx, rx) = mpsc::channel();
+    app.export_state.progress_rx = Some(rx);
+    app.export_state.task = Some(thread::spawn(move || {
+        let _ = tx.send(ExportProgress {
+            progress: 0.2,
+            message: Some("Saving file...".to_string()),
+            share: None,
+        });
+        let result = match format {
+            ExportFormat::Psd => crate::project::export::save_psd(
+                &crate::project::psd::PsdDocument::from_canvas(&canvas),
+                target.clone(),
+            ),
+            ExportFormat::Svg => crate::project::svg::document_svg(&canvas)
+                .and_then(|svg| crate::project::export::save_svg(&svg, target.clone())),
+            _ => crate::project::export::export_canvas(&canvas, target.clone(), format, &color),
+        }
+        .and_then(|_| published(&target, format));
+        match result {
+            Ok((msg, share)) => {
+                let _ = tx.send(ExportProgress {
+                    progress: 1.0,
+                    message: Some(msg.clone()),
+                    share,
+                });
+                Ok(msg)
+            }
+            Err(err) => {
+                let msg = format!("Export failed: {err}");
+                let _ = tx.send(ExportProgress {
+                    progress: 1.0,
+                    message: Some(msg.clone()),
+                    share: None,
+                });
+                Err(msg)
+            }
+        }
+    }));
 }
 
-#[cfg(target_os = "android")]
-fn pick_file(_default_name: &str) -> Option<PathBuf> {
-    None
+#[cfg(not(mobile))]
+fn choose_file(app: &mut PainterApp) {
+    let dialog = crate::app::settings::file_dialog()
+        .set_file_name(app.export_state.settings.default_file_name());
+    app.file_dialog_job(dialog, crate::app::jobs::Pick::Save, |app, paths| {
+        app.export_state.settings.chosen_path = Some(paths[0].clone());
+    });
 }
+
+#[cfg(mobile)]
+fn choose_file(_app: &mut PainterApp) {}
 
 /// Export settings tracked by the app.
 #[derive(Clone)]
@@ -168,6 +215,10 @@ impl ExportSettings {
     }
 
     pub fn output_path(&self) -> PathBuf {
+        // Written to the cache, then moved to shared storage.
+        if cfg!(mobile) {
+            return android_cache().join(self.default_file_name());
+        }
         if let Some(path) = &self.chosen_path {
             ensure_extension(path.clone(), self.format.extension())
         } else {
@@ -189,4 +240,35 @@ fn ensure_extension(mut path: PathBuf, ext: &str) -> PathBuf {
 pub struct ExportProgress {
     pub progress: f32,
     pub message: Option<String>,
+    /// Android: the exported file's (URI, MIME type), to share.
+    pub share: Option<(String, String)>,
+}
+
+/// The written export's message, and what to share it by.
+#[cfg(not(mobile))]
+fn published(
+    path: &Path,
+    _format: ExportFormat,
+) -> Result<(String, Option<(String, String)>), String> {
+    Ok((format!("Saved to {}", path.display()), None))
+}
+
+/// Android: moved from the cache into shared storage.
+#[cfg(mobile)]
+fn published(
+    path: &Path,
+    format: ExportFormat,
+) -> Result<(String, Option<(String, String)>), String> {
+    let done = crate::platform::publish_file(path, format.mime_type())?;
+    Ok((done.message, done.share_uri.zip(done.share_mime)))
+}
+
+#[cfg(mobile)]
+fn android_cache() -> PathBuf {
+    crate::platform::cache_dir()
+}
+
+#[cfg(not(mobile))]
+fn android_cache() -> PathBuf {
+    unreachable!("only on Android")
 }

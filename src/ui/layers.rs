@@ -1,6 +1,10 @@
+//! The Layers panel: the layer tree with folders and masks, drag to
+//! reorder, visibility, opacity, blend mode and locks.
+
 use crate::PainterApp;
 use crate::canvas::blend_modes::LayerBlend;
 use crate::canvas::storage::{LayerId, LayerKind};
+use crate::ui::bar_slider::BarSlider;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
 use crate::ui::widgets::{draw_checkerboard, icon_button, icon_toggle, percent_of_unit};
@@ -76,6 +80,16 @@ pub fn refresh_thumbnails(app: &mut PainterApp, ctx: &egui::Context) {
             Color32::TRANSPARENT
         };
         let mut image = egui::ColorImage::new([tw, th], base);
+        // A fill layer has no paint: its colours, sampled.
+        if let Some(fill) = canvas.layers[idx].style.fill {
+            for (&(tx, ty), samples) in &by_tile {
+                for &(dst, src) in samples {
+                    let x = (tx * tile_size + src % tile_size) as i32;
+                    let y = (ty * tile_size + src / tile_size) as i32;
+                    image.pixels[dst] = fill.pixel(x, y);
+                }
+            }
+        }
         for (&(tx, ty), samples) in &by_tile {
             let Some(cell) = canvas.lock_layer_tile_if_exists(idx, tx, ty) else {
                 continue;
@@ -84,7 +98,7 @@ pub fn refresh_thumbnails(app: &mut PainterApp, ctx: &egui::Context) {
             if guard.is_empty && !is_mask {
                 continue;
             }
-            if let Some(data) = &guard.data {
+            if let Some(data) = guard.data() {
                 for &(dst, src) in samples {
                     image.pixels[dst] = if is_mask {
                         let px = data[src];
@@ -124,9 +138,56 @@ struct RowInfo {
     rect: egui::Rect,
 }
 
+/// Which rows the layers panel shows while searching.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum RowFilter {
+    #[default]
+    All,
+    Paint,
+    Text,
+    Vector,
+    Adjustment,
+    Folder,
+    /// Tagged with `TAG_COLORS[k]`.
+    Tag(usize),
+}
+
+impl RowFilter {
+    fn label(self) -> String {
+        match self {
+            Self::All => "All".into(),
+            Self::Paint => "Paint".into(),
+            Self::Text => "Text".into(),
+            Self::Vector => "Vector".into(),
+            Self::Adjustment => "Adjustment / fill".into(),
+            Self::Folder => "Folders".into(),
+            Self::Tag(k) => format!("Tag: {}", TAG_COLORS[k].1),
+        }
+    }
+
+    fn matches(self, l: &crate::canvas::storage::Layer, tag: Color32) -> bool {
+        match self {
+            Self::All => true,
+            Self::Paint => {
+                l.kind == LayerKind::Paint
+                    && l.text.is_none()
+                    && l.vector.is_none()
+                    && l.adjustment.is_none()
+                    && l.style.fill.is_none()
+            }
+            Self::Text => l.text.is_some(),
+            Self::Vector => l.vector.is_some(),
+            Self::Adjustment => l.adjustment.is_some() || l.style.fill.is_some(),
+            Self::Folder => l.kind == LayerKind::Group,
+            Self::Tag(k) => tag == TAG_COLORS[k].0,
+        }
+    }
+}
+
 /// Layers and folders top-to-bottom as the panel shows them: each level
-/// top of stack first, children under their open folder.
-fn display_order(canvas: &crate::canvas::Canvas) -> Vec<(usize, usize)> {
+/// top of stack first, children under their open folder (under every
+/// folder when `all`).
+fn display_order(canvas: &crate::canvas::Canvas, all: bool) -> Vec<(usize, usize)> {
     let ids: std::collections::HashSet<LayerId> = canvas.layers.iter().map(|l| l.id).collect();
     // A parent that no longer exists counts as top level, so nothing is lost.
     let parent_of = |i: usize| canvas.layers[i].parent.filter(|p| ids.contains(p));
@@ -136,6 +197,7 @@ fn display_order(canvas: &crate::canvas::Canvas) -> Vec<(usize, usize)> {
         parent: Option<LayerId>,
         depth: usize,
         parent_of: &dyn Fn(usize) -> Option<LayerId>,
+        all: bool,
         out: &mut Vec<(usize, usize)>,
     ) {
         if depth > canvas.layers.len() {
@@ -147,37 +209,113 @@ fn display_order(canvas: &crate::canvas::Canvas) -> Vec<(usize, usize)> {
                 continue;
             }
             out.push((i, depth));
-            if layer.kind == LayerKind::Group && layer.expanded {
-                visit(canvas, Some(layer.id), depth + 1, parent_of, out);
+            // An animated layer is one row: its drawings are on the timeline.
+            let track = layer.anim == Some(crate::canvas::storage::Anim::Track);
+            if layer.kind == LayerKind::Group && (layer.expanded || all) && !track {
+                visit(canvas, Some(layer.id), depth + 1, parent_of, all, out);
             }
         }
     }
-    visit(canvas, None, 0, &parent_of, &mut out);
+    visit(canvas, None, 0, &parent_of, all, &mut out);
     out
+}
+
+/// Alt+right-click's menu of the layers under the pointer: a click selects
+/// one; a click elsewhere or Escape closes it.
+pub fn layer_pick_menu(app: &mut PainterApp, ctx: &egui::Context) {
+    let Some((pos, ids)) = app.layer_state.pick_menu.clone() else {
+        return;
+    };
+    let mut chosen = None;
+    let area = egui::Area::new(egui::Id::new("layer_pick_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ctx, |ui| {
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                ui.label(RichText::new("Layers here").small().color(TEXT_DIM));
+                for &id in &ids {
+                    let Some(i) = app.canvas.layer_index_of(id) else {
+                        continue;
+                    };
+                    if ui.button(app.canvas.layers[i].name.as_str()).clicked() {
+                        chosen = Some(id);
+                    }
+                }
+            });
+        });
+    let (clicked, escape) = ctx.input(|i| {
+        (
+            i.pointer.button_clicked(egui::PointerButton::Primary),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if let Some(id) = chosen {
+        app.pick_row(id);
+    } else if escape || (clicked && !area.response.contains_pointer()) {
+        app.layer_state.pick_menu = None;
+    }
 }
 
 /// Sidebar that manages the canvas layer stack.
 pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp) {
+    // The layers stay as they are until the mask is turned back into the
+    // selection.
+    if app.workspace.select.quick_mask.is_some() {
+        ui.label(RichText::new("Quick mask").strong());
+        ui.label(
+            RichText::new("Paint to select, erase to deselect. The red shows what isn't selected.")
+                .color(TEXT_DIM),
+        );
+        if ui.button("Leave Quick Mask").clicked() {
+            app.quick_mask_leave();
+        }
+        return;
+    }
+    // What the panel changes in the layers' settings is one undo step.
+    app.settings_watch();
     let m = metrics(ctx);
-    let row_height = m.layer_row_height;
+    // Tall enough for the name over the opacity bar, whatever the font
+    // (a touch screen's bigger one cut the bar off).
+    let body = ui.text_style_height(&egui::TextStyle::Body);
+    let bar = ui.spacing().interact_size.y.max(body + 4.0);
+    let row_height = m.layer_row_height.max(body + 2.0 + bar + 12.0);
     let mut add_layer = false;
     let mut add_folder = false;
     let mut add_mask = false;
     let mut to_delete = None;
+    let mut duplicate: Option<usize> = None;
+    let mut edit_text: Option<usize> = None;
+    let mut edit_shader: Option<LayerId> = None;
+    let mut add_shader = false;
+    let mut rasterise_text: Option<usize> = None;
+    let mut rasterise_vector: Option<usize> = None;
+    let mut line_width: Option<usize> = None;
     let mut active_idx = app.canvas.active_layer_idx;
     let mut needs_refresh = false;
     let mut rows: Vec<RowInfo> = Vec::new();
     let mut pending_move: Option<(usize, usize, Option<LayerId>)> = None;
     let mut toggle_expanded: Option<usize> = None;
     let mut toggle_mask: Option<usize> = None;
+    let mut select_paint: Option<(usize, crate::selection::SelectionMode)> = None;
     let renaming_id = ui.id().with("renaming_layer");
     let mut renaming: Option<usize> = ui.data(|d| d.get_temp(renaming_id));
 
     // The row that owns the selection (a selected mask highlights its layer).
-    let active_owner = match app.canvas.layers.get(active_idx).map(|l| l.kind) {
-        Some(LayerKind::Mask { owner }) => app.canvas.layer_index_of(owner).unwrap_or(active_idx),
-        _ => active_idx,
-    };
+    let active_owner = app.active_row();
+    // Rows picked together (Ctrl/Shift-click): edits to one go to all.
+    let picked = app.selected_indices();
+    let several = picked.len() > 1;
+    let mut pick_click: Option<(usize, egui::Modifiers)> = None;
+    let mut group_picked = false;
+    let mut merge_picked = false;
+    let mut merge_down: Option<usize> = None;
+    let mut delete_picked = false;
+    let mut duplicate_picked = false;
+    let mut lock_picked: Option<bool> = None;
+    let mut copy_layers = false;
+    let mut paste_layers = false;
+    let mut ungroup: Option<usize> = None;
+    let mut pick_tag: Option<Color32> = None;
 
     // Header: counts and add/delete buttons.
     ui.horizontal(|ui| {
@@ -204,7 +342,9 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     "Delete (with its mask / folder contents)",
                 )
             });
-            if delete.inner.clicked() {
+            if delete.inner.clicked() && several {
+                delete_picked = true;
+            } else if delete.inner.clicked() {
                 to_delete = Some(active_idx);
             }
             let can_mask = active_owner != 0
@@ -224,6 +364,16 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
             });
             if mask.inner.clicked() {
                 add_mask = true;
+            }
+            if ui
+                .add_sized(
+                    [m.header_button, m.header_button],
+                    egui::Button::new(RichText::new("fx").strong()).frame(false),
+                )
+                .on_hover_text("New shader layer: live animated effects written in GLSL")
+                .clicked()
+            {
+                add_shader = true;
             }
             if icon_button(ui, Icon::Folder, m.header_button, false, "New folder").clicked() {
                 add_folder = true;
@@ -245,7 +395,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     if let Some(layer) = app.canvas.layers.get(active_owner) {
         let mut blend = layer.blend;
         let mut alpha_locked = layer.alpha_locked;
+        let mut clipped = layer.clipped;
         let can_alpha_lock = layer.kind == LayerKind::Paint;
+        let can_clip = active_owner != 0;
+        let folder = layer.kind == LayerKind::Group;
         let changed = ui
             .horizontal(|ui| {
                 if can_alpha_lock {
@@ -253,21 +406,95 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         "Lock transparency (/): paint and fills only recolour what's already there",
                     );
                 }
+                if can_clip {
+                    ui.toggle_value(&mut clipped, "Clip").on_hover_text(
+                        "Clip to the layer below (Ctrl+Alt+G): show only where it has paint",
+                    );
+                }
                 ui.label(RichText::new("Blend").color(TEXT_DIM));
-                blend_mode_picker(ui, &mut blend)
+                let mixed = picked.iter().any(|&i| app.canvas.layers[i].blend != blend);
+                blend_mode_picker(ui, &mut blend, mixed, folder)
             })
             .inner;
         if changed {
-            app.canvas_mut().layers[active_owner].blend = blend;
+            for &i in &picked {
+                // Only folders pass through.
+                if blend != LayerBlend::PassThrough || app.canvas.layers[i].kind == LayerKind::Group
+                {
+                    app.canvas_mut().layers[i].blend = blend;
+                }
+            }
+            needs_refresh = true;
+        }
+        if clipped != app.canvas.layers[active_owner].clipped {
+            for &i in picked.iter().filter(|&&i| i != 0) {
+                app.canvas_mut().layers[i].clipped = clipped;
+            }
             needs_refresh = true;
         }
         if alpha_locked != app.canvas.layers[active_owner].alpha_locked {
-            app.canvas_mut().layers[active_owner].alpha_locked = alpha_locked;
+            for &i in &picked {
+                if app.canvas.layers[i].kind == LayerKind::Paint {
+                    app.canvas_mut().layers[i].alpha_locked = alpha_locked;
+                }
+            }
         }
+        layer_flags(app, ui, active_owner, &picked);
     }
     ui.add_space(2.0);
 
-    let order = display_order(&app.canvas);
+    // Search: the matching rows, flat, from every folder.
+    let filter_id = egui::Id::new("layers_filter");
+    let (mut query, mut filter): (String, RowFilter) =
+        ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let combo_width = 96.0;
+        ui.add(
+            egui::TextEdit::singleline(&mut query)
+                .hint_text("Search layers")
+                .desired_width((ui.available_width() - combo_width - 16.0).max(40.0)),
+        );
+        egui::ComboBox::from_id_salt("layers_filter_kind")
+            .width(combo_width)
+            .selected_text(filter.label())
+            .show_ui(ui, |ui| {
+                let kinds = [
+                    RowFilter::All,
+                    RowFilter::Paint,
+                    RowFilter::Text,
+                    RowFilter::Vector,
+                    RowFilter::Adjustment,
+                    RowFilter::Folder,
+                ];
+                let tags = (0..TAG_COLORS.len())
+                    .filter(|&k| TAG_COLORS[k].0 != UNTAGGED)
+                    .map(RowFilter::Tag);
+                for f in kinds.into_iter().chain(tags) {
+                    ui.selectable_value(&mut filter, f, f.label());
+                }
+            });
+    });
+    let filtering = !query.trim().is_empty() || filter != RowFilter::All;
+    let order: Vec<(usize, usize)> = if filtering {
+        let needle = query.trim().to_lowercase();
+        let colors = &app.layer_state.layer_ui_colors;
+        display_order(&app.canvas, true)
+            .into_iter()
+            .filter(|&(i, _)| {
+                let l = &app.canvas.layers[i];
+                let tag = colors.get(i).copied().unwrap_or(UNTAGGED);
+                l.name.to_lowercase().contains(&needle) && filter.matches(l, tag)
+            })
+            .map(|(i, _)| (i, 0))
+            .collect()
+    } else {
+        display_order(&app.canvas, false)
+    };
+    ui.data_mut(|d| d.insert_temp(filter_id, (query, filter)));
+    if filtering && order.is_empty() {
+        ui.label(RichText::new("No layer matches").color(TEXT_DIM));
+    }
     egui::ScrollArea::vertical()
         .id_salt("layers_scroll")
         .auto_shrink([false; 2])
@@ -276,6 +503,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
             for &(i, depth) in &order {
                 let mut vis_changed = false;
                 let mut opacity_released = false;
+                let mut opacity_moved = false;
+                let mut opacity_drag = (false, false);
                 // Widgets edit copies; the canvas is only borrowed exclusively
                 // (which ends an in-progress stroke) when something changed.
                 let current = &app.canvas.layers[i];
@@ -286,6 +515,15 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     current.opacity,
                 );
                 let alpha_locked = current.alpha_locked;
+                let (position_locked, draft, reference) =
+                    (current.position_locked, current.draft, current.reference);
+                let clipped = current.clipped;
+                let adjustment = current.adjustment.is_some();
+                let fill = current.style.fill.is_some();
+                let bordered = current.style.border.is_some();
+                let is_text = current.text.is_some();
+                let is_vector = current.vector.is_some();
+                let is_shader = current.shader.is_some();
                 let (id, kind, parent, expanded, blend) = (
                     current.id,
                     current.kind,
@@ -296,6 +534,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 let is_group = kind == LayerKind::Group;
                 let mask_idx = app.canvas.mask_index_of(id);
                 let is_active = i == active_owner;
+                let is_picked = several && picked.contains(&i);
 
                 let (row, row_response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), row_height),
@@ -303,17 +542,22 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 );
                 rows.push(RowInfo { idx: i, id, parent, depth, is_group, rect: row });
 
-                let bg = if is_active {
+                let bg = if is_active || is_picked {
                     BG_RAISED
                 } else if row_response.hovered() {
                     Color32::from_gray(40)
                 } else {
                     BG_PANEL
                 };
-                ui.painter().rect_filled(row, 0.0, bg);
-                if is_active {
-                    let bar = egui::Rect::from_min_size(row.min, egui::vec2(3.0, row.height()));
-                    ui.painter().rect_filled(bar, 0.0, ACCENT);
+                ui.painter()
+                    .rect_filled(row.shrink2(egui::vec2(2.0, 1.0)), RADIUS_CARD, bg);
+                if is_active || is_picked {
+                    let bar = egui::Rect::from_min_size(
+                        row.min + egui::vec2(4.0, 8.0),
+                        egui::vec2(3.0, (row.height() - 16.0).max(4.0)),
+                    );
+                    let color = if is_active { accent() } else { accent().gamma_multiply(0.5) };
+                    ui.painter().rect_filled(bar, 1.5, color);
                 }
 
                 let indent = depth as f32 * INDENT;
@@ -331,7 +575,23 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 let (visible, locked, name, opacity) = &mut edited;
 
                 vis_changed |= icon_toggle(&mut content, visible, Icon::Eye, Icon::EyeOff, "Toggle visibility");
-                if is_group {
+                let is_track = app.canvas.layers[i].anim == Some(crate::canvas::storage::Anim::Track);
+                if is_group && is_track {
+                    // An animated layer: its drawings are on the timeline.
+                    let (film_rect, film) = content
+                        .allocate_exact_size(egui::vec2(m.row_toggle + THUMB_W, THUMB_H), egui::Sense::click());
+                    content.painter().text(
+                        film_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "🎞",
+                        egui::FontId::proportional(14.0),
+                        TEXT_DIM,
+                    );
+                    if film.on_hover_text("An animated layer: its drawings are on the timeline").clicked() {
+                        active_idx = i;
+                        app.workspace.animation.show_timeline = true;
+                    }
+                } else if is_group {
                     // Disclosure arrow + folder icon in place of lock/thumbnail.
                     let (arrow_rect, arrow) = content
                         .allocate_exact_size(egui::vec2(m.row_toggle, m.row_toggle), egui::Sense::click());
@@ -347,7 +607,14 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     let layer_targeted = active_idx == i;
                     let thumb = thumbnail(&mut content, app, i, layer_targeted && mask_idx.is_some());
                     if thumb.clicked() {
-                        active_idx = i;
+                        // A click picks like the rest of the row; Ctrl with
+                        // Shift and/or Alt selects the layer's pixels.
+                        match paint_select_mode(&content) {
+                            Some(mode) if mode != crate::selection::SelectionMode::Replace => {
+                                select_paint = Some((i, mode))
+                            }
+                            _ => pick_click = Some((i, content.input(|inp| inp.modifiers))),
+                        }
                     }
                     if let Some(mi) = mask_idx {
                         let enabled = app.canvas.layers[mi].visible;
@@ -361,7 +628,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         if mask_thumb.double_clicked() {
                             toggle_mask = Some(mi);
                         } else if mask_thumb.clicked() {
-                            active_idx = mi;
+                            match paint_select_mode(&content) {
+                                Some(mode) => select_paint = Some((mi, mode)),
+                                None => active_idx = mi,
+                            }
                         }
                     }
                     // Color tag strip left of the thumbnails.
@@ -397,48 +667,230 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         if is_group {
                             text = text.strong();
                         }
+                        // A line of text tall, not a button's height (on a
+                        // touch screen that pushed the bar out of the row).
+                        let interact = ui.spacing().interact_size.y;
+                        ui.spacing_mut().interact_size.y = 0.0;
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().interact_size.y = interact;
+                            if clipped {
+                                ui.label(RichText::new("↓").color(accent()))
+                                    .on_hover_text("Clipped to the layer below");
+                            }
+                            if is_text {
+                                ui.label(RichText::new("T").strong().color(accent()))
+                                    .on_hover_text("Text layer: double-click to edit the text");
+                            }
+                            if is_shader {
+                                ui.label(RichText::new("fx").strong().color(accent()))
+                                    .on_hover_text("Shader layer: double-click to edit its shader");
+                            }
                             ui.add(egui::Label::new(text).truncate());
                             if blend != LayerBlend::Normal {
-                                ui.label(RichText::new(blend.label()).small().color(ACCENT));
+                                ui.label(RichText::new(blend.label()).small().color(accent()));
+                            }
+                            if adjustment {
+                                ui.label(egui::RichText::new("◐").color(accent()))
+                                    .on_hover_text("Adjustment layer: double-click to change it");
+                            }
+                            if fill {
+                                ui.label(RichText::new("fill").small().color(accent()))
+                                    .on_hover_text("Fill layer: double-click to change it");
+                            }
+                            if bordered {
+                                ui.label(RichText::new("border").small().color(accent()))
+                                    .on_hover_text("Has a border (Layer → Border…)");
+                            }
+                            if is_vector {
+                                ui.label(RichText::new("vec").small().color(accent()))
+                                    .on_hover_text(
+                                        "Vector layer: lines stay editable (Layer → Vector); \
+                                         the eraser takes lines out",
+                                    );
                             }
                             if alpha_locked {
-                                ui.label(RichText::new("α").small().color(ACCENT))
+                                ui.label(RichText::new("α").small().color(accent()))
                                     .on_hover_text("Transparency locked");
                             }
+                            if position_locked {
+                                ui.label(RichText::new("pos").small().color(accent()))
+                                    .on_hover_text("Position locked: can't be moved or transformed");
+                            }
+                            if draft {
+                                ui.label(RichText::new("draft").small().color(accent()))
+                                    .on_hover_text("Draft: left out of export, merging and \"all layers\"");
+                            }
+                            if reference {
+                                ui.label(RichText::new("ref").small().color(accent()))
+                                    .on_hover_text("Reference layer for fills and the magic wand");
+                            }
                         });
+                        ui.spacing_mut().interact_size.y = interact;
                     }
                     ui.horizontal(|ui| {
                         if !m.touch {
                             ui.spacing_mut().interact_size.y = 16.0;
                         }
                         ui.spacing_mut().slider_width = (width - 44.0).max(40.0);
-                        let response = ui.add(percent_of_unit(egui::Slider::new(opacity, 0.0..=1.0)));
+                        let before = *opacity;
+                        let mut response = ui.add(crate::ui::widgets::reset(&mut *opacity, |v| percent_of_unit(BarSlider::new(v, 0.0..=1.0))));
+                        if is_picked {
+                            response = response.on_hover_text(
+                                "Changes every picked layer, keeping their proportions (Alt: the same value for all)",
+                            );
+                        }
+                        opacity_drag = (response.drag_started(), response.dragged());
+                        // A right-click opens the row's menu; it doesn't set the opacity.
+                        let secondary = ui.input(|i| {
+                            i.pointer.button_down(egui::PointerButton::Secondary)
+                                || i.pointer.button_released(egui::PointerButton::Secondary)
+                        });
+                        if secondary {
+                            *opacity = before;
+                        }
                         opacity_released =
                             response.drag_stopped() || (response.changed() && !response.dragged());
+                        // Shown live while the slider is dragged.
+                        opacity_moved = response.changed();
                     });
                 });
 
                 if row_response.clicked() {
-                    active_idx = i;
+                    pick_click = Some((i, ui.input(|inp| inp.modifiers)));
                 }
+                // Double-click renames (folders open and close with their
+                // arrow).
                 if row_response.double_clicked() {
-                    if is_group {
-                        toggle_expanded = Some(i);
+                    active_idx = i;
+                    if adjustment {
+                        app.workspace.filter.editing = Some(id);
+                    } else if fill {
+                        app.workspace.filter.fill_editing = Some(id);
+                    } else if is_shader {
+                        edit_shader = Some(id);
+                    } else if is_text {
+                        edit_text = Some(i);
                     } else {
-                        active_idx = i;
                         renaming = Some(i);
                     }
                 }
                 // The background stays at the bottom.
-                if row_response.drag_started() && i != 0 {
+                // (Not while searching: the rows shown aren't the stack.)
+                if row_response.drag_started() && i != 0 && !filtering {
                     app.layer_state.layer_dragging = Some(i);
                 }
 
+                // A right-click anywhere on the row opens its menu, its
+                // thumbnail, toggles and slider included (they take clicks
+                // of their own).
+                let mut row_response = row_response;
+                if !row_response.secondary_clicked()
+                    && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
+                    && ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| row.contains(p))
+                {
+                    row_response.clicked = true;
+                    row_response.hovered = true;
+                }
+                // Right-clicking a row outside the picked ones picks it alone.
+                if row_response.secondary_clicked() && !is_active && !is_picked {
+                    pick_click = Some((i, egui::Modifiers::NONE));
+                }
                 row_response.context_menu(|ui| {
+                    if i != 0 {
+                        let label = if is_picked {
+                            format!("Group {} layers into folder", picked.len())
+                        } else {
+                            "Group into folder".to_string()
+                        };
+                        if ui.button(label).clicked() {
+                            group_picked = true;
+                            ui.close_menu();
+                        }
+                    }
+                    if is_picked && ui.button(format!("Merge {} layers", picked.len())).clicked() {
+                        merge_picked = true;
+                        ui.close_menu();
+                    }
+                    if !is_picked && !is_group && i != 0 && ui.button("Merge Down").clicked() {
+                        merge_down = Some(i);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if !is_group && ui.button("Select pixels").on_hover_text(
+                        "Select what's painted on the layer (Ctrl+Shift-click its thumbnail adds, Ctrl+Alt-click takes away)",
+                    ).clicked() {
+                        select_paint = Some((i, crate::selection::SelectionMode::Replace));
+                        ui.close_menu();
+                    }
                     if ui.button("Rename").clicked() {
                         active_idx = i;
                         renaming = Some(i);
+                        ui.close_menu();
+                    }
+                    if adjustment && ui.button("Edit adjustment…").clicked() {
+                        app.workspace.filter.editing = Some(id);
+                        ui.close_menu();
+                    }
+                    if fill && ui.button("Edit fill…").clicked() {
+                        app.workspace.filter.fill_editing = Some(id);
+                        ui.close_menu();
+                    }
+                    if kind == LayerKind::Paint
+                        && !adjustment
+                        && !fill
+                        && ui.button("Border…").clicked()
+                    {
+                        app.workspace.filter.border_editing = Some(id);
+                        ui.close_menu();
+                    }
+                    if is_shader && ui.button("Edit shader…").clicked() {
+                        edit_shader = Some(id);
+                        ui.close_menu();
+                    }
+                    if is_text && ui.button("Edit text…").clicked() {
+                        edit_text = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_text && ui.button("Rasterise text").clicked() {
+                        rasterise_text = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_vector && ui.button("Line width…").clicked() {
+                        line_width = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_vector && ui.button("Rasterise vector layer").clicked() {
+                        rasterise_vector = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_picked {
+                        let n = picked.len();
+                        if ui.button(format!("Duplicate {n} layers")).clicked() {
+                            duplicate_picked = true;
+                            ui.close_menu();
+                        }
+                        let all_locked = picked.iter().all(|&j| app.canvas.layers[j].locked);
+                        let label = if all_locked { "Unlock" } else { "Lock" };
+                        if ui.button(format!("{label} {n} layers")).clicked() {
+                            lock_picked = Some(!all_locked);
+                            ui.close_menu();
+                        }
+                    } else if !is_group && i != 0 && ui.button("Duplicate").clicked() {
+                        duplicate = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_group && !is_track && ui.button("Ungroup").clicked() {
+                        ungroup = Some(i);
+                        ui.close_menu();
+                    }
+                    let copy_label = if is_picked { "Copy layers" } else { "Copy layer" };
+                    if ui.button(copy_label).clicked() {
+                        copy_layers = true;
+                        ui.close_menu();
+                    }
+                    let can_paste = app.workspace.clipboard.layers.is_some();
+                    if ui.add_enabled(can_paste, egui::Button::new("Paste layers")).clicked() {
+                        paste_layers = true;
                         ui.close_menu();
                     }
                     if !is_group && i != 0 {
@@ -468,30 +920,88 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     {
                         ui.close_menu();
                     }
-                    ui.separator();
-                    let can_delete = app.canvas.layers.len() > 1 && i != 0;
-                    let label = if is_group { "Delete folder and contents" } else { "Delete" };
-                    if ui.add_enabled(can_delete, egui::Button::new(label)).clicked() {
-                        to_delete = Some(i);
+                    let tag = app.layer_state.layer_ui_colors.get(i).copied().unwrap_or(UNTAGGED);
+                    if tag != UNTAGGED && ui.button("Pick layers with this tag").clicked() {
+                        pick_tag = Some(tag);
                         ui.close_menu();
+                    }
+                    ui.separator();
+                    if is_picked {
+                        if ui.button(format!("Delete {} layers", picked.len())).clicked() {
+                            delete_picked = true;
+                            ui.close_menu();
+                        }
+                    } else {
+                        let can_delete = app.canvas.layers.len() > 1 && i != 0;
+                        let label = if is_group { "Delete folder and contents" } else { "Delete" };
+                        if ui.add_enabled(can_delete, egui::Button::new(label)).clicked() {
+                            to_delete = Some(i);
+                            ui.close_menu();
+                        }
                     }
                 });
 
+                // The picked layers' opacities as a drag on one of them
+                // started: they keep their proportions to it.
+                let start_id = ui.id().with(("opacity_start", id));
+                let opacities = |app: &PainterApp| -> Vec<(LayerId, f32)> {
+                    picked.iter().map(|&j| (app.canvas.layers[j].id, app.canvas.layers[j].opacity)).collect()
+                };
+                if is_picked && opacity_drag.0 {
+                    let start = opacities(app);
+                    ui.data_mut(|d| d.insert_temp(start_id, start));
+                }
                 if let Some(layer) = app.canvas.layers.get(i) {
                     let (visible, locked, name, opacity) = edited;
-                    if (visible, locked, opacity) != (layer.visible, layer.locked, layer.opacity)
-                        || name != layer.name
-                    {
+                    let before = (layer.visible, layer.locked, layer.opacity);
+                    if (visible, locked, opacity) != before || name != layer.name {
+                        let start: Vec<(LayerId, f32)> = match ui.data(|d| d.get_temp(start_id)) {
+                            Some(start) => start,
+                            None if is_picked => opacities(app),
+                            None => Vec::new(),
+                        };
                         let layer = &mut app.canvas_mut().layers[i];
                         layer.visible = visible;
                         layer.locked = locked;
                         layer.name = name;
                         layer.opacity = opacity;
+                        let alt = ui.input(|inp| inp.modifiers.alt);
+                        let from = start.iter().find(|s| s.0 == id).map_or(before.2, |s| s.1);
+                        for (other, was) in start.into_iter().filter(|s| s.0 != id) {
+                            let Some(j) = app.canvas.layer_index_of(other) else {
+                                continue;
+                            };
+                            let l = &mut app.canvas_mut().layers[j];
+                            if visible != before.0 {
+                                l.visible = visible;
+                            }
+                            if locked != before.1 {
+                                l.locked = locked;
+                            }
+                            if opacity != before.2 {
+                                l.opacity = if alt || from <= f32::EPSILON {
+                                    opacity
+                                } else {
+                                    (was * opacity / from).clamp(0.0, 1.0)
+                                };
+                            }
+                        }
                     }
                 }
-                if vis_changed || opacity_released {
-                    needs_refresh = true;
-                    app.mark_layer_tiles_with_data_dirty(i);
+                if !opacity_drag.1 {
+                    ui.data_mut(|d| d.remove::<Vec<(LayerId, f32)>>(start_id));
+                }
+                if vis_changed || opacity_released || opacity_moved {
+                    // (Everything, thumbnails too, once it's let go.)
+                    needs_refresh |= vis_changed || opacity_released;
+                    ctx.request_repaint();
+                    if is_picked {
+                        for &j in &picked {
+                            app.mark_layer_tiles_with_data_dirty(j);
+                        }
+                    } else {
+                        app.mark_layer_tiles_with_data_dirty(i);
+                    }
                 }
             }
 
@@ -502,12 +1012,21 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     (i.pointer.interact_pos(), !i.pointer.primary_down())
                 });
                 let canvas = &app.canvas;
+                // Picked rows go along with the dragged one (not into themselves).
+                let along: Vec<usize> = if several && picked.contains(&from) {
+                    picked.iter().copied().filter(|&j| j != from && j != 0).collect()
+                } else {
+                    Vec::new()
+                };
                 let target = pointer.and_then(|p| {
                     drop_target(
                         &rows,
                         from,
                         p.y,
-                        |id, ancestor| canvas.is_within(id, ancestor),
+                        |id, ancestor| {
+                            canvas.is_within(id, ancestor)
+                                || along.iter().any(|&j| canvas.is_within(id, canvas.layers[j].id))
+                        },
                         |folder| last_child_index(canvas, folder),
                     )
                 });
@@ -519,13 +1038,16 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         pending_move = Some((from, t.to, t.parent));
                     }
                 } else if let Some(pointer) = pointer {
-                    paint_drag_feedback(ui, app, &rows, from, target, pointer, row_height);
+                    paint_drag_feedback(ui, app, &rows, from, &along, target, pointer);
                     autoscroll(ui, pointer);
                     ctx.request_repaint();
                 }
             }
         });
 
+    if let Some((i, mode)) = select_paint {
+        app.select_layer_paint(i, mode);
+    }
     // Structural changes after the rows, so this frame's edits were written
     // to the right layers before indices shift.
     if let Some(i) = toggle_expanded {
@@ -538,7 +1060,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         needs_refresh = true;
     }
     if let Some((from, to, parent)) = pending_move {
-        app.move_layer(from, to, parent);
+        app.move_selected(from, to, parent);
         active_idx = app.canvas.active_layer_idx;
         renaming = None;
         needs_refresh = true;
@@ -549,6 +1071,50 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         None => d.remove::<usize>(renaming_id),
     });
 
+    // A click picks its row alone, adds or takes it out (Ctrl), or picks
+    // every row from the selected one to it (Shift).
+    if let Some((i, mods)) = pick_click {
+        let canvas = &app.canvas;
+        let id_of = |j: usize| canvas.layers[j].id;
+        let mut ids: Vec<LayerId> = picked.iter().map(|&j| id_of(j)).collect();
+        let id = id_of(i);
+        let at = |j: usize| order.iter().position(|&(k, _)| k == j);
+        if mods.command {
+            if let Some(pos) = ids.iter().position(|&p| p == id) {
+                if ids.len() > 1 {
+                    ids.remove(pos);
+                    if i == active_owner
+                        && let Some(last) = ids.last().and_then(|&l| canvas.layer_index_of(l))
+                    {
+                        active_idx = last;
+                    }
+                }
+            } else {
+                ids.push(id);
+                active_idx = i;
+            }
+        } else if mods.shift
+            && let (Some(a), Some(b)) = (at(active_owner), at(i))
+        {
+            ids = order[a.min(b)..=a.max(b)]
+                .iter()
+                .map(|&(k, _)| id_of(k))
+                .collect();
+            active_idx = i;
+        } else {
+            ids = vec![id];
+            active_idx = i;
+        }
+        app.layer_state.selected = ids;
+    }
+
+    // An animated layer picked: its drawing showing (painting goes there).
+    if let Some(layer) = app.canvas.layers.get(active_idx)
+        && layer.anim == Some(crate::canvas::storage::Anim::Track)
+        && let Some(i) = app.canvas.frame_at(layer.id, app.canvas.time)
+    {
+        active_idx = i;
+    }
     if active_idx != app.canvas.active_layer_idx {
         app.canvas_mut().active_layer_idx = active_idx;
     }
@@ -559,8 +1125,70 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     if add_folder {
         app.add_folder();
     }
+    if group_picked {
+        app.group_selected();
+        needs_refresh = true;
+    }
+    if merge_picked {
+        app.merge_selected();
+    }
+    if let Some(idx) = merge_down {
+        app.canvas_mut().active_layer_idx = idx;
+        app.merge_down();
+    }
+    if delete_picked {
+        app.delete_picked();
+        needs_refresh = true;
+    }
+    if duplicate_picked {
+        app.duplicate_picked();
+    }
+    if let Some(locked) = lock_picked {
+        for &j in &picked {
+            app.canvas_mut().layers[j].locked = locked;
+        }
+    }
+    if copy_layers {
+        app.copy_layers();
+    }
+    if paste_layers {
+        app.paste_layers();
+        needs_refresh = true;
+    }
+    if let Some(idx) = ungroup {
+        app.ungroup(idx);
+        needs_refresh = true;
+    }
+    if let Some(tag) = pick_tag {
+        app.pick_tagged(tag);
+    }
     if add_mask {
         app.add_mask_to_active();
+    }
+    if let Some(idx) = duplicate {
+        app.canvas_mut().active_layer_idx = idx;
+        app.duplicate_layer();
+    }
+    if let Some(idx) = edit_text {
+        app.text_edit_layer(idx);
+    }
+    if let Some(id) = edit_shader {
+        app.open_shader_editor(id);
+    }
+    if add_shader {
+        let (name, source) = crate::canvas::shader::TEMPLATES[0];
+        app.add_shader_layer(name, source);
+    }
+    if let Some(idx) = rasterise_text {
+        app.rasterise_text_layer(idx);
+        needs_refresh = true;
+    }
+    if let Some(idx) = rasterise_vector {
+        app.rasterise_vector_layer(idx);
+        needs_refresh = true;
+    }
+    if let Some(idx) = line_width {
+        app.line_width_open(idx);
     }
     if let Some(idx) = to_delete {
         app.remove_layer(idx);
@@ -569,6 +1197,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         needs_refresh = true;
     }
 
+    app.settings_record(ctx.input(|i| i.pointer.any_down()));
     if needs_refresh {
         app.mark_all_tiles_dirty();
         app.layer_state.thumbnails_dirty = true;
@@ -576,15 +1205,58 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     }
 }
 
-/// Drop-down of every blend mode, in Photoshop's groups. Returns whether
-/// the choice changed.
-fn blend_mode_picker(ui: &mut egui::Ui, blend: &mut LayerBlend) -> bool {
+/// Lock position, draft and reference toggles for entry `idx` (a layer or
+/// folder; the background can't be a draft). A change goes to every entry
+/// of `picked`.
+fn layer_flags(app: &mut PainterApp, ui: &mut egui::Ui, idx: usize, picked: &[usize]) {
+    let layer = &app.canvas.layers[idx];
+    let (mut position_locked, mut draft, mut reference) =
+        (layer.position_locked, layer.draft, layer.reference);
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut position_locked, "Lock position")
+            .on_hover_text("The layer can't be moved or transformed");
+        if idx != 0 {
+            ui.toggle_value(&mut draft, "Draft").on_hover_text(
+                "Shown, but left out of export, merging, copy merged and \"all layers\" sampling",
+            );
+        }
+        ui.toggle_value(&mut reference, "Reference").on_hover_text(
+            "Fills and the magic wand set to \"Reference\" find their areas in this layer",
+        );
+    });
+    let layer = &app.canvas.layers[idx];
+    let before = (layer.position_locked, layer.draft, layer.reference);
+    if (position_locked, draft, reference) == before {
+        return;
+    }
+    for &i in picked {
+        let layer = &mut app.canvas_mut().layers[i];
+        if position_locked != before.0 {
+            layer.position_locked = position_locked;
+        }
+        if draft != before.1 && i != 0 {
+            layer.draft = draft;
+        }
+        if reference != before.2 {
+            layer.reference = reference;
+        }
+    }
+}
+
+/// Drop-down of every blend mode, in Photoshop's groups (with Pass Through
+/// first for a `folder`). Returns whether the choice changed.
+fn blend_mode_picker(ui: &mut egui::Ui, blend: &mut LayerBlend, mixed: bool, folder: bool) -> bool {
     let before = *blend;
     egui::ComboBox::from_id_salt("layer_blend_mode")
-        .selected_text(blend.label())
+        .selected_text(if mixed { "Mixed" } else { blend.label() })
         .width(ui.available_width())
         .height(600.0)
         .show_ui(ui, |ui| {
+            if folder {
+                ui.selectable_value(blend, LayerBlend::PassThrough, "Pass Through")
+                    .on_hover_text("The folder's layers blend straight into what's below it");
+                ui.separator();
+            }
             for (i, group) in LayerBlend::GROUPS.iter().enumerate() {
                 if i > 0 {
                     ui.separator();
@@ -602,6 +1274,20 @@ const INDENT: f32 = 16.0;
 
 /// A layer (or mask) thumbnail button; `targeted` outlines it as the
 /// painting target.
+/// Ctrl+click on a thumbnail selects the layer's paint: Shift adds it to the
+/// selection, Alt takes it away, both keep the overlap. (On a layer's
+/// thumbnail, Ctrl alone picks the layer, as on the rest of its row.)
+fn paint_select_mode(ui: &egui::Ui) -> Option<crate::selection::SelectionMode> {
+    use crate::selection::SelectionMode;
+    let m = ui.input(|i| i.modifiers);
+    m.command.then_some(match (m.shift, m.alt) {
+        (true, true) => SelectionMode::Intersect,
+        (true, false) => SelectionMode::Add,
+        (false, true) => SelectionMode::Subtract,
+        (false, false) => SelectionMode::Replace,
+    })
+}
+
 fn thumbnail(ui: &mut egui::Ui, app: &PainterApp, idx: usize, targeted: bool) -> egui::Response {
     let (thumb_box, response) =
         ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::click());
@@ -617,17 +1303,17 @@ fn thumbnail(ui: &mut egui::Ui, app: &PainterApp, idx: usize, targeted: bool) ->
             Color32::WHITE,
         );
         let stroke = if targeted {
-            Stroke::new(2.0_f32, ACCENT)
+            Stroke::new(2.0_f32, accent())
         } else {
             Stroke::new(1.0_f32, BORDER)
         };
         ui.painter().rect_stroke(
             img_rect.expand(if targeted { 1.0 } else { 0.0 }),
-            0.0,
+            RADIUS_SMALL,
             stroke,
         );
     } else {
-        ui.painter().rect_filled(thumb_box, 0.0, BG_INSET);
+        ui.painter().rect_filled(thumb_box, RADIUS_SMALL, BG_INSET);
     }
     response
 }
@@ -689,18 +1375,24 @@ fn color_tag_picker(ui: &mut egui::Ui, current: &mut Color32) -> bool {
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
             if color == UNTAGGED {
-                ui.painter()
-                    .rect_stroke(rect.shrink(1.0), 0.0, Stroke::new(1.0_f32, TEXT_DIM));
+                ui.painter().rect_stroke(
+                    rect.shrink(1.0),
+                    RADIUS_SMALL,
+                    Stroke::new(1.0_f32, TEXT_DIM),
+                );
                 ui.painter().line_segment(
                     [rect.left_bottom(), rect.right_top()],
                     Stroke::new(1.0_f32, TEXT_DIM),
                 );
             } else {
-                ui.painter().rect_filled(rect, 0.0, color);
+                ui.painter().rect_filled(rect, RADIUS_SMALL, color);
             }
             if *current == color || response.hovered() {
-                ui.painter()
-                    .rect_stroke(rect.expand(1.5), 0.0, Stroke::new(1.5_f32, TEXT_STRONG));
+                ui.painter().rect_stroke(
+                    rect.expand(1.5),
+                    RADIUS_SMALL + 1.5,
+                    Stroke::new(1.5_f32, TEXT_STRONG),
+                );
             }
             if response.on_hover_text(name).clicked() {
                 *current = color;
@@ -822,16 +1514,22 @@ fn paint_drag_feedback(
     app: &PainterApp,
     rows: &[RowInfo],
     from: usize,
+    along: &[usize],
     target: Option<DropTarget>,
     pointer: egui::Pos2,
-    row_height: f32,
 ) {
     let Some(dragged) = rows.iter().find(|r| r.idx == from) else {
         return;
     };
     let from_rect = dragged.rect;
+    let row_height = from_rect.height();
     let painter = ui.painter();
-    painter.rect_filled(from_rect, 0.0, BG_CANVAS.gamma_multiply(0.7));
+    for row in rows
+        .iter()
+        .filter(|r| r.idx == from || along.contains(&r.idx))
+    {
+        painter.rect_filled(row.rect, RADIUS_CARD, BG_CANVAS.gamma_multiply(0.7));
+    }
 
     let name_of = |idx: usize| {
         app.canvas
@@ -848,19 +1546,19 @@ fn paint_drag_feedback(
                 DropKind::Into { row: pos } => {
                     painter.rect_stroke(
                         rows[pos].rect.shrink(1.0),
-                        0.0,
-                        Stroke::new(2.0_f32, ACCENT),
+                        RADIUS_CARD,
+                        Stroke::new(2.0_f32, accent()),
                     );
                     format!("into {}", name_of(row.idx))
                 }
                 DropKind::Gap { y, depth } => {
                     let left = from_rect.left() + 8.0 + depth as f32 * INDENT;
                     let x = egui::Rangef::new(left, from_rect.right());
-                    painter.hline(x, y, Stroke::new(3.0_f32, ACCENT));
+                    painter.hline(x, y, Stroke::new(3.0_f32, accent()));
                     for end in [x.min, x.max] {
                         let marker =
                             egui::Rect::from_center_size(egui::pos2(end, y), egui::vec2(7.0, 9.0));
-                        painter.rect_filled(marker, 0.0, ACCENT);
+                        painter.rect_filled(marker, 2.0, accent());
                     }
                     format!("above {}", name_of(row.idx))
                 }
@@ -877,12 +1575,16 @@ fn paint_drag_feedback(
         egui::pos2(from_rect.left() + 12.0, pointer.y - row_height * 0.5),
         egui::vec2(from_rect.width() - 12.0, row_height),
     );
-    painter.rect_filled(ghost, 0.0, BG_RAISED.gamma_multiply(0.95));
-    painter.rect_stroke(ghost, 0.0, Stroke::new(1.0_f32, ACCENT));
+    painter.rect_filled(ghost, RADIUS_CARD, BG_RAISED.gamma_multiply(0.95));
+    painter.rect_stroke(ghost, RADIUS_CARD, Stroke::new(1.0_f32, accent()));
     painter.text(
         ghost.left_center() + egui::vec2(12.0, -8.0),
         egui::Align2::LEFT_CENTER,
-        name_of(from),
+        if along.is_empty() {
+            name_of(from).to_string()
+        } else {
+            format!("{} layers", along.len() + 1)
+        },
         egui::TextStyle::Body.resolve(ui.style()),
         TEXT_STRONG,
     );
@@ -891,7 +1593,7 @@ fn paint_drag_feedback(
         egui::Align2::LEFT_CENTER,
         caption,
         egui::TextStyle::Small.resolve(ui.style()),
-        if moves { ACCENT } else { TEXT_DIM },
+        if moves { accent() } else { TEXT_DIM },
     );
 }
 

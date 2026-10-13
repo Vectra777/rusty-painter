@@ -79,6 +79,49 @@
 
 use std::os::raw::c_void;
 
+/// Where a pen sample falls in the pen's contact with the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PenPhase {
+    /// The pen touched the screen.
+    Down,
+    /// The pen moved while touching.
+    Move,
+    /// The pen lifted.
+    Up,
+    /// The system cancelled the contact (a system gesture): it was not
+    /// intended input.
+    Cancel,
+}
+
+/// One Apple Pencil sample (rusty-painter patch). Winit delivers the Pencil
+/// as touches with its force and altitude but no azimuth, and only the
+/// newest of the samples UIKit coalesces into each event (the Pencil reports
+/// at 240 Hz); every sample is also queued here, in order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenSample {
+    /// Position in physical pixels, relative to the window.
+    pub x: f32,
+    pub y: f32,
+    /// Normalized pressure (0..=1).
+    pub pressure: f32,
+    /// Angle from perpendicular in radians (0 = upright, π/2 = flat), and
+    /// the direction the pen points in radians (0 = up the screen, positive
+    /// clockwise): Android's conventions, from UIKit's altitude and azimuth.
+    pub tilt: f32,
+    pub orientation: f32,
+    /// The barrel's roll in radians (Apple Pencil Pro, iOS 17.5+).
+    pub roll: Option<f32>,
+    /// The id of the touch winit reports for the same contact
+    /// ([`crate::event::Touch::id`]), so it can be told from a finger.
+    pub touch_id: u64,
+    pub phase: PenPhase,
+}
+
+/// Take the Pencil samples queued since the last call, oldest first.
+pub fn take_pen_samples() -> Vec<PenSample> {
+    crate::platform_impl::take_pen_samples()
+}
+
 use crate::event_loop::EventLoop;
 use crate::monitor::{MonitorHandle, VideoModeHandle};
 use crate::window::{Window, WindowAttributes};

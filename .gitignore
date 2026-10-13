@@ -1,8 +1,14 @@
 /target
 /brushes
+/gradients.json
+/swatches.json
+/autosave.rpainter
+/autosave.rpainter.tmp
 perf.data
 perf.data.old
 flamegraph.svg
 keystore.properties
 *.keystore
 *.jks
+/docs/book
+/graphify-out
