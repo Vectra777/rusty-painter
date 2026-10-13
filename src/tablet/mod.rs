@@ -100,6 +100,9 @@ struct ToolState {
     /// the frame's `Down`).
     posed_this_frame: bool,
     in_range: bool,
+    /// Samples (indices in the output) made since the last frame: its
+    /// timestamp, which comes at its end, is theirs.
+    unstamped: Vec<usize>,
 }
 
 #[cfg(not(mobile))]
@@ -112,8 +115,9 @@ impl ToolState {
         is_eraser: bool,
         out: &mut Vec<TabletSample>,
     ) {
-        let mut emit = |state: &Self, phase| {
+        let mut emit = |state: &mut Self, phase| {
             if let Some(pos) = state.pos {
+                state.unstamped.push(out.len());
                 out.push(TabletSample {
                     pos,
                     pressure: state.pressure,
@@ -162,13 +166,21 @@ impl ToolState {
             }
             // The frame's pose came before its `Down`: that pose is where
             // the contact starts.
-            ToolEvent::Frame(_) => {
+            ToolEvent::Frame(stamp) => {
                 if self.pending_down && self.posed_this_frame {
                     self.pending_down = false;
                     self.down = true;
                     emit(self, TabletPhase::Down);
                 }
                 self.posed_this_frame = false;
+                // The frame's time is its samples'.
+                let time =
+                    stamp.map(|t| (t - octotablet::events::FrameTimestamp::epoch()).as_secs_f64());
+                for i in self.unstamped.drain(..) {
+                    if let Some(s) = out.get_mut(i) {
+                        s.time = time;
+                    }
+                }
             }
             _ => {}
         }
@@ -219,6 +231,7 @@ impl WinitPen {
                         tilt: s.tilt,
                         wheel: s.wheel,
                         is_eraser: s.is_eraser,
+                        time: Some(s.time),
                     };
                     out.push(winit_sample(pose, scale, phase));
                 }
@@ -237,6 +250,8 @@ struct WinitPose {
     tilt: Option<[f32; 2]>,
     wheel: Option<f32>,
     is_eraser: bool,
+    /// When, in seconds (the windowing system's clock).
+    time: Option<f64>,
 }
 
 /// A winit pen sample in egui points (`scale`: physical pixels per point).
@@ -252,7 +267,7 @@ fn winit_sample(s: WinitPose, scale: f32, phase: TabletPhase) -> TabletSample {
         wheel: s.wheel,
         is_eraser: s.is_eraser,
         phase,
-        time: None,
+        time: s.time,
     }
 }
 
@@ -480,7 +495,7 @@ impl TabletInput {
                     PenPhase::Up => TabletPhase::Up,
                     PenPhase::Cancel => TabletPhase::Cancel,
                 },
-                time: None,
+                time: Some(s.time),
             })
             .collect();
         if let Some(last) = samples.last() {
@@ -563,6 +578,24 @@ mod tests {
     }
 
     #[test]
+    fn a_frames_timestamp_is_its_samples() {
+        let mut state = ToolState::default();
+        let mut out = Vec::new();
+        let stamp = octotablet::events::FrameTimestamp::epoch();
+        for event in [
+            ToolEvent::Down,
+            pose(10.0, 10.0, 0.5),
+            ToolEvent::Frame(Some(stamp)),
+            pose(12.0, 10.0, 0.5),
+            ToolEvent::Frame(None),
+        ] {
+            state.apply(&event, 2.0, false, &mut out);
+        }
+        let times: Vec<_> = out.iter().map(|s| s.time).collect();
+        assert_eq!(times, vec![Some(0.0), None], "each frame stamps its own");
+    }
+
+    #[test]
     fn a_pose_before_its_down_in_the_same_frame_starts_the_contact() {
         let samples = run(&[
             pose(10.0, 10.0, 0.0),
@@ -637,6 +670,7 @@ mod winit_tests {
             tilt: Some([std::f32::consts::FRAC_PI_6, 0.0]),
             wheel: Some(0.25),
             is_eraser: true,
+            time: None,
         };
         let t = winit_sample(s, 2.0, TabletPhase::Move);
         assert_eq!(t.pos, [100.0, 50.0]);

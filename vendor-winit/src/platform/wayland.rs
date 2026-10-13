@@ -54,6 +54,9 @@ pub struct PenSample {
     /// The tool is an eraser (a pen's eraser end).
     pub is_eraser: bool,
     pub phase: PenPhase,
+    /// When the pen was there, in seconds (the server's clock, millisecond
+    /// steps): samples handled in one frame keep their own times.
+    pub time: f64,
 }
 
 /// Take the pen samples queued since the last call, oldest first.
