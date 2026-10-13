@@ -456,8 +456,11 @@ pub(crate) fn gradient_options(
         app.brush_state.brush.brush_options.color,
         app.brush_state.secondary_color,
     );
-    let (picked, edit) = gradient_picker(ui, &mut app.workspace.gradient, brush_colors);
+    let (picked, edit, import) = gradient_picker(ui, &mut app.workspace.gradient, brush_colors);
     changed |= picked;
+    if import {
+        app.pick_open(crate::app::files::OpenFor::Gradients);
+    }
     if let Some(copy) = edit {
         app.gradient_edit(copy);
     }
@@ -528,7 +531,7 @@ fn gradient_picker(
     ui: &mut egui::Ui,
     state: &mut crate::app::tools::gradient::GradientToolState,
     (primary, secondary): (egui::Color32, egui::Color32),
-) -> (bool, Option<bool>) {
+) -> (bool, Option<bool>, bool) {
     use crate::app::tools::gradient::GradientColors;
     use crate::ui::widgets::paint_gradient_strip;
     let id = ui.make_persistent_id("gradient_colors");
@@ -558,7 +561,7 @@ fn gradient_picker(
         .on_hover_text("Change the colours in the Gradient Editor (a preset is copied first)")
         .clicked()
         .then_some(false);
-    let mut changed = false;
+    let (mut changed, mut import) = (false, false);
     let row_height = if metrics(ui.ctx()).touch { 36.0 } else { 24.0 };
     egui::popup_below_widget(
         ui,
@@ -619,9 +622,13 @@ fn gradient_picker(
             {
                 edit = Some(true);
             }
+            import = ui
+                .button("Import .grd…")
+                .on_hover_text("Photoshop gradients, added to your gradients")
+                .clicked();
         },
     );
-    (changed, edit)
+    (changed, edit, import)
 }
 
 fn shape_options(

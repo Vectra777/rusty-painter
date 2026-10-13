@@ -11,6 +11,7 @@
 
 mod abr;
 mod gimp;
+pub(crate) mod grd;
 pub(crate) mod krita;
 mod mypaint;
 #[cfg(feature = "sut-import")]

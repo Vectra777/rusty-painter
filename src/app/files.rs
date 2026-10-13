@@ -16,6 +16,8 @@ pub(crate) enum OpenFor {
     Library(PathBuf),
     /// Brush files (several at once).
     Brushes,
+    /// Photoshop gradient files (several at once).
+    Gradients,
     /// An image whose colours become a palette.
     Palette,
     /// An ICC profile, for what [`ProfileUse`] says.
@@ -72,6 +74,7 @@ impl OpenFor {
                 ("Images", vec!["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
             }
             OpenFor::Profile(_) => ("ICC profiles", vec!["icc", "icm"]),
+            OpenFor::Gradients => ("Photoshop gradients", vec!["grd"]),
         }
     }
 
@@ -98,7 +101,7 @@ impl PainterApp {
         let mut all: Vec<&str> = extensions.clone();
         all.extend(upper.iter().map(String::as_str));
         let dialog = crate::app::settings::file_dialog().add_filter(label, &all);
-        let pick = if matches!(purpose, OpenFor::Brushes) {
+        let pick = if matches!(purpose, OpenFor::Brushes | OpenFor::Gradients) {
             crate::app::jobs::Pick::Files
         } else {
             crate::app::jobs::Pick::File
@@ -115,7 +118,7 @@ impl PainterApp {
 
     #[cfg(mobile)]
     pub(crate) fn pick_open(&mut self, purpose: OpenFor) {
-        let multiple = matches!(purpose, OpenFor::Brushes);
+        let multiple = matches!(purpose, OpenFor::Brushes | OpenFor::Gradients);
         match crate::platform::picker_open(purpose.mimes(), multiple) {
             Ok(()) => self.workspace.file_pick = Some(PendingPick::Open(purpose)),
             Err(err) => self.report(err),
@@ -219,6 +222,7 @@ impl PainterApp {
                 });
             }
             OpenFor::Brushes => self.import_brushes_in_background(name, source),
+            OpenFor::Gradients => self.import_gradients_in_background(name, source),
             OpenFor::Palette => {
                 let stem = std::path::Path::new(&name)
                     .file_stem()

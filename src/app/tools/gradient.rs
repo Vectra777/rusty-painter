@@ -350,6 +350,38 @@ impl PainterApp {
         state.editor = Some(GradientEditor { index });
     }
 
+    /// Add the gradients in Photoshop gradient file `name` to the user's,
+    /// read on another thread.
+    pub(crate) fn import_gradients_in_background(
+        &mut self,
+        name: String,
+        source: crate::app::import::FileSource,
+    ) {
+        self.spawn_job(None, move || {
+            let result = source
+                .read()
+                .and_then(|bytes| crate::brush_engine::import::grd::read(&bytes));
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok((gradients, noise)) => {
+                    let count = gradients.len();
+                    let library = &mut app.workspace.gradient.library;
+                    for g in gradients {
+                        library.add(g);
+                    }
+                    library.save_if_changed();
+                    let skipped = if noise > 0 {
+                        format!(" ({noise} noise gradients left out: they have no stops)")
+                    } else {
+                        String::new()
+                    };
+                    app.export_state.message =
+                        Some(format!("{count} gradients from {name} added to yours{skipped}"));
+                }
+                Err(err) => app.report(format!("{name}: {err}")),
+            })
+        });
+    }
+
     /// Settings changed: repaint the gradient being placed, or give the
     /// selected gradient fill the tool's gradient, shape, repeat and
     /// reverse (an undo step once let go of).

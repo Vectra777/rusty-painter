@@ -23,3 +23,4 @@ Every filter previews live on the layer or the selection; sliders preview smooth
 - Between each pair of stops, a diamond: the midpoint, where the two are mixed half and half. Drag it, or set it below.
 - A colour stop of your own gradients can follow the brush's primary or secondary colour.
 - The gradient map and fill layers can start from any of your gradients or the presets (Gradients ▾) and save theirs to your gradients.
+- **Photoshop gradients** (`.grd`): the gradient picker's Import .grd…, or drop the files on the window. Their stops, opacity stops and midpoints come across, and stops in the foreground or background colour follow your primary and secondary colours. Noise gradients (random colours, no stops) are left out, and Photoshop's Smoothness is read as none.
