@@ -41,6 +41,9 @@ miniz_oxide = "0.8"
 png = "0.18"
 # The Text tool: glyph outlines (egui already uses it).
 ab_glyph = "0.2"
+# Font names (family and style) and the faces of `.ttc` collections, for the
+# Text tool's font list: the version ab_glyph already uses.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 quick-xml = "0.41"
 # Shader layers: GLSL (Shadertoy style) compiled with naga, handed to wgpu
 # as naga modules.

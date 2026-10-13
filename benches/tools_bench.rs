@@ -519,7 +519,14 @@ fn bench_text(c: &mut Criterion) {
     let paragraph = "The quick brown fox jumps\nover the lazy dog, twice\nand then once more.";
     let mut group = c.benchmark_group("text");
     group.bench_function("render_3_lines_64px", |b| {
-        b.iter(|| black_box(text::render(&font, paragraph, &style, Vec2::splat(100.0))))
+        b.iter(|| {
+            black_box(text::render(
+                std::slice::from_ref(&font),
+                paragraph,
+                &style,
+                Vec2::splat(100.0),
+            ))
+        })
     });
     group.finish();
 }

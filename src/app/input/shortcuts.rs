@@ -122,8 +122,8 @@ impl PainterApp {
 /// Handle app-wide shortcuts. Returns whether a repaint is needed.
 pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> bool {
     // Let text fields keep their keys (typing a layer name must not
-    // switch tools).
-    if ctx.wants_keyboard_input() {
+    // switch tools), and text being typed on the canvas.
+    if ctx.wants_keyboard_input() || app.workspace.text.session.is_some() {
         return false;
     }
     // A filter dialog takes Enter and Esc; nothing else may change the

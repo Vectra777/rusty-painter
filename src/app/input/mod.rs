@@ -469,7 +469,10 @@ fn handle_primary_press(
         Tool::Smudge | Tool::Blur => app.blend_press(raw, pressure),
         Tool::Shape(kind) => app.shape_press(kind, raw),
         Tool::Gradient => app.gradient_press(raw),
-        Tool::Text => app.text_press(raw),
+        Tool::Text => {
+            let m = response.ctx.input(|i| i.modifiers);
+            app.text_press(raw, m.shift, m.command);
+        }
         Tool::VectorEdit => {
             let m = response.ctx.input(|i| i.modifiers);
             app.line_edit_press(raw, m.shift, m.alt);

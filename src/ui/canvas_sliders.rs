@@ -109,6 +109,9 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
         Tool::Pen => context_bar(ctx, area, |ui| {
             crate::ui::tool_options::pen_controls(app, ui);
         }),
+        Tool::Text => context_bar(ctx, area, |ui| {
+            crate::ui::text_dialog::text_controls(app, ui);
+        }),
         _ => {}
     }
 }

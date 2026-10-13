@@ -3338,6 +3338,7 @@ dependencies = [
  "serde_json",
  "spade",
  "tiff",
+ "ttf-parser",
  "wgpu",
  "wide",
  "winit",

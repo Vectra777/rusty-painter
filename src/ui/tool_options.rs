@@ -60,7 +60,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Text => {
             tool_title(ui, "Text");
             crate::ui::text_dialog::text_controls(app, ui);
-            "Click to type; drag the text to move it; Ctrl+Enter keeps it"
+            "Click to type, drag for a text box  ·  click in the text: caret, twice: word, three times: line  ·  move: its corner handle or Ctrl+drag  ·  Ctrl+Enter or a click away keeps it, Esc drops it"
         }
     };
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
