@@ -59,6 +59,7 @@ pub fn fill_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     style.fill = Some(fill);
     app.workspace.filter.adjusting = ctx.input(|i| i.pointer.any_down());
     app.set_layer_style(idx, style);
+    app.settings_record(ctx.input(|i| i.pointer.any_down()));
     if done || !open {
         app.workspace.filter.fill_editing = None;
     }
@@ -237,6 +238,7 @@ pub fn border_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         });
     app.workspace.filter.adjusting = ctx.input(|i| i.pointer.any_down());
     app.set_layer_style(idx, style);
+    app.settings_record(ctx.input(|i| i.pointer.any_down()));
     if done || !open {
         app.workspace.filter.border_editing = None;
     }

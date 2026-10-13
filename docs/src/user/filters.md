@@ -11,7 +11,11 @@ Every filter previews live on the layer or the selection; sliders preview smooth
 
 ## Gradients
 
-`Shift+G`: linear, radial, reflected, angle and diamond gradients, previewed live, dithered, clipped to the selection. Drag the ends again before applying; Shift snaps the angle to 15°.
+`Shift+G`: linear, radial, reflected, angle and diamond gradients, previewed live, dithered, clipped to the selection, with any of the 28 blend modes. Drag the ends again before applying; Shift snaps the angle to 15°.
+
+- **Paint** paints the gradient onto the layer.
+- **Fill layer** makes a gradient fill layer instead, which stays editable.
+- With a gradient fill layer selected, the tool edits it: its ends show on the canvas; drag one to move it, or drag away from them to place the gradient anew. The tool's gradient, shape, repeat and reverse change it too. Each change is one undo step.
 
 **The gradient editor** (the gradient tool's Edit…, the gradient map, gradient fill layers) works as Photoshop's:
 

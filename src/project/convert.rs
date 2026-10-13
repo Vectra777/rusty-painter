@@ -589,6 +589,8 @@ pub(super) struct StoredLayerSettings {
     position_locked: bool,
     draft: bool,
     reference: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    style: Option<crate::canvas::layer_style::LayerStyle>,
 }
 
 impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
@@ -667,6 +669,7 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                             position_locked: s.position_locked,
                             draft: s.draft,
                             reference: s.reference,
+                            style: s.style.clone(),
                         };
                         (id.0, stored)
                     })
@@ -814,6 +817,7 @@ impl StoredLayerHistoryOp {
                             position_locked: s.position_locked,
                             draft: s.draft,
                             reference: s.reference,
+                            style: s.style,
                         };
                         (LayerId(id), settings)
                     })

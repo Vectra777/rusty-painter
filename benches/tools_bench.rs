@@ -339,7 +339,14 @@ fn bench_gradient(c: &mut Criterion) {
                         *o = ramp.pixel(t, Some(n));
                     }
                 };
-                pool.install(|| canvas.paint_over_region(1, &region, row));
+                pool.install(|| {
+                    canvas.paint_over_region(
+                        1,
+                        &region,
+                        rusty_painter::canvas::blend_modes::LayerBlend::Normal,
+                        row,
+                    )
+                });
             });
         });
     }

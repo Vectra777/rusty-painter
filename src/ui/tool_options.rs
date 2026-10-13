@@ -424,6 +424,24 @@ pub(crate) fn gradient_options(
     if compact {
         tool_title(ui, "Gradient");
     }
+    let editing_fill = app.active_gradient_fill().is_some();
+    let s = &mut app.workspace.gradient.settings;
+    if editing_fill {
+        ui.label(egui::RichText::new("Editing the fill layer").color(crate::ui::style::TEXT_DIM))
+            .on_hover_text(
+                "Drag its ends, or away from them to place it anew; these settings change it",
+            );
+    } else {
+        segmented(
+            ui,
+            &mut s.fill_layer,
+            &[(false, "Paint"), (true, "Fill layer")],
+            compact,
+        );
+        if compact {
+            vdivider(ui);
+        }
+    }
     let s = &mut app.workspace.gradient.settings;
     let mut changed = segmented(
         ui,
@@ -473,9 +491,14 @@ pub(crate) fn gradient_options(
         .checkbox(&mut s.dither, "Dither")
         .on_hover_text("Breaks up the bands of a smooth gradient")
         .changed();
+    if compact {
+        vdivider(ui);
+    }
+    changed |= crate::ui::widgets::blend_combo(ui, "gradient_blend", &mut s.blend);
     if changed {
         app.gradient_settings_changed();
     }
+    app.settings_record(ui.input(|i| i.pointer.any_down()));
     if compact {
         vdivider(ui);
     }

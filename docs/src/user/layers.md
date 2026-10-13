@@ -24,7 +24,7 @@ Filter → New Adjustment Layer: brightness/contrast, hue/saturation, levels, cu
 
 ## Fill layers
 
-Layer → New Fill Layer: a colour or a gradient. A new gradient fill starts from the Gradient tool's gradient and shape; its dialog has the [gradient editor](filters.md#gradients), the shape (linear, radial, reflected, angle or diamond), repeat, reverse and angle. Its mask or clipping says where it shows. Gradient fills mix in the document's colour space, are dithered in 8-bit documents and exact in 16-bit and float ones, and follow the canvas when it's resized, rotated or flipped.
+Layer → New Fill Layer: a colour or a gradient. A new gradient fill starts from the Gradient tool's gradient and shape; its dialog has the [gradient editor](filters.md#gradients), the shape (linear, radial, reflected, angle or diamond), repeat, reverse and angle. Its mask or clipping says where it shows. Gradient fills mix in the document's colour space, are dithered in 8-bit documents and exact in 16-bit and float ones, and follow the canvas when it's resized, rotated or flipped. Select one with the Gradient tool to drag its ends on the canvas. Changes to a fill or a border undo like any other.
 
 ## Borders
 

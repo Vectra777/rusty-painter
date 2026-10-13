@@ -689,6 +689,8 @@ pub fn gradient_editor_window(app: &mut PainterApp, ctx: &egui::Context) {
             app.gradient_settings_changed();
         }
     }
+    // A selected gradient fill it changed: one undo step once let go.
+    app.settings_record(ctx.input(|i| i.pointer.any_down()));
 }
 
 #[cfg(test)]

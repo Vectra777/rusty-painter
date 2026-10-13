@@ -1230,6 +1230,9 @@ impl PainterApp {
         if self.canvas.layers.get(idx).is_none_or(|l| l.style == style) {
             return;
         }
+        // An undo step once the change is let go of
+        // ([`Self::settings_record`]).
+        self.settings_watch();
         self.canvas_mut().layers[idx].style = style;
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;

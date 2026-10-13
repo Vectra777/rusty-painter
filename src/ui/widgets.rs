@@ -76,6 +76,30 @@ pub(crate) fn paint_swatch(painter: &egui::Painter, rect: Rect, color: Color32) 
     painter.rect_stroke(rect, radius, Stroke::new(1.0_f32, BORDER));
 }
 
+/// A blend mode picker, its modes in their groups. Returns whether it
+/// changed.
+pub(crate) fn blend_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    mode: &mut crate::canvas::blend_modes::LayerBlend,
+) -> bool {
+    use crate::canvas::blend_modes::LayerBlend;
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(mode.label())
+        .show_ui(ui, |ui| {
+            for (i, group) in LayerBlend::GROUPS.iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                for &m in *group {
+                    changed |= ui.selectable_value(mode, m, m.label()).changed();
+                }
+            }
+        });
+    changed
+}
+
 /// A gradient's colours left to right across `rect`, over a checkerboard
 /// where they're see-through.
 pub(crate) fn paint_gradient_strip(
