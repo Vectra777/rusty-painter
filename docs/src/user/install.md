@@ -29,7 +29,7 @@ Unzip and run `rusty-painter.exe`. `ffmpeg.exe` is next to it for video export. 
 
 ## Android
 
-Install the APK (allow installs from your browser or file manager when Android asks). Android support is experimental. The app starts in the project library: projects live in the app's storage, in folders. Exports go to `Pictures/Rusty Painter` (images) or `Download/Rusty Painter` (PSD, SVG), and time-lapses to Pictures as GIF (there's no ffmpeg on Android).
+Install the APK (allow installs from your browser or file manager when Android asks). The app starts in the project library: projects live in the app's storage, in folders. Exports go to `Pictures/Rusty Painter` (images) or `Download/Rusty Painter` (PSD, SVG), and time-lapses to Pictures as GIF (there's no ffmpeg on Android).
 
 ## iPad
 

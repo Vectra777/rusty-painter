@@ -18,7 +18,7 @@ Build with the MSVC Rust toolchain (Visual Studio's C++ build tools and the Wind
 `scripts/make-icons.sh` makes every platform's icon (window, `.exe`, Android's adaptive icon, iPad) from one picture.
 
 ## Android (APK)
-This is an experimental setup and may need platform fixes. Building for Android needs more than the target and `cargo-apk`: this repo vendors and patches `winit` and ships its own NDK linker wrappers, both required for the build to work:
+Building for Android needs more than the target and `cargo-apk`: this repo vendors and patches `winit` and ships its own NDK linker wrappers, both required for the build to work:
 
 - `vendor-winit/`: a patched copy of `winit`, pulled in via `[patch.crates-io]` in `Cargo.toml`, needed for Android windowing/lifecycle support beyond what upstream `winit` provides out of the box.
 - `scripts/linkers/` + `scripts/build-android.sh`: wrapper scripts that route each Android target's linker invocation through the NDK toolchain; `.cargo/config.toml` points cargo at them. Run `scripts/build-android.sh` rather than a bare `cargo apk build` to make sure these are picked up.

@@ -2,7 +2,7 @@
 
 A painting app built with Rust, egui and wgpu, for Linux, Windows, Android and iPad. The canvas is split into tiles, brushes paint on their own thread, and the UI stays out of the way.
 
-![](/imgs/2025-12-1118-06-17-ezgif.com-video-to-gif-converter.gif)
+![](docs/src/demo.gif)
 
 **📖 Documentation: <https://vectra777.github.io/rusty-painter/>** (user guide, developer guide and API reference; the source is in [`docs/`](docs/)).
 

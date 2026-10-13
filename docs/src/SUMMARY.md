@@ -26,4 +26,5 @@
 - [Making changes](dev/developer-guide.md)
 - [Performance](dev/performance.md)
 - [Debugging on Windows](dev/windows-debugging.md)
+- [Roadmap](dev/roadmap.md)
 - [API reference](dev/api.md)
