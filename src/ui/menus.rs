@@ -978,6 +978,7 @@ mod top_bar_tests {
             Tool::Liquify,
             Tool::Puppet,
             Tool::Gradient,
+            Tool::Pen,
             Tool::Text,
             Tool::Eyedropper,
             Tool::Animate,

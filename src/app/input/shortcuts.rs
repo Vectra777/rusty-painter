@@ -213,6 +213,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let flip = on(Action::FlipView);
     let content_fill = on(Action::ContentFill);
     let gradient = on(Action::Gradient);
+    let pen = on(Action::Pen);
     let shapes = on(Action::Shapes);
     let ruler = on(Action::Ruler);
     let delete = on(Action::DeletePixels);
@@ -335,6 +336,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             app.shape_cancel();
         } else if app.workspace.gradient.session.is_some() {
             app.gradient_cancel();
+        } else if app.workspace.pen.drawing.is_some() {
+            // Esc ends the line being drawn (it stays), as Photoshop's.
+            app.pen_finish();
         } else if app.selection_manager.is_dragging || app.workspace.select.magnetic.is_some() {
             app.select_cancel();
         } else {
@@ -388,6 +392,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         repaint = true;
     } else if delete && app.workspace.shapes.session.is_some() {
         app.shape_undo_point();
+        repaint = true;
+    } else if delete && app.workspace.pen.drawing.is_some() {
+        app.pen_undo_point();
         repaint = true;
     } else if delete
         && ((app.layer_state.floating_layer_idx.is_none() && app.layer_state.in_place.is_none())
@@ -482,6 +489,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         }
         if gradient {
             app.active_tool = Tool::Gradient;
+        }
+        if pen {
+            app.active_tool = Tool::Pen;
         }
         if shapes {
             // Pressing U again goes to the next shape.

@@ -189,6 +189,8 @@ impl PainterApp {
         ws.fill.path.clear();
         ws.guides.end_drag();
         ws.view_aids.guides.end_drag();
+        ws.pen.path = Default::default();
+        ws.pen.end_session();
         // Its layer and history belong to the old document.
         ws.select.quick_mask = None;
         self.viewport.touch.pen_on_canvas = false;

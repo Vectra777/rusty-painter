@@ -183,6 +183,17 @@ fn handle_pen_drag(
         Tool::Text => app.text_drag(raw),
         Tool::VectorEdit => app.line_edit_drag(raw),
         Tool::Animate => app.animate_drag(raw, ctx.input(|i| i.modifiers.shift)),
+        Tool::Pen => app.pen_drag(raw, pen_keys(ctx)),
+    }
+}
+
+/// The keys held, for the Pen.
+fn pen_keys(ctx: &egui::Context) -> crate::app::tools::pen::PenKeys {
+    let m = ctx.input(|i| i.modifiers);
+    crate::app::tools::pen::PenKeys {
+        command: m.command,
+        alt: m.alt,
+        shift: m.shift,
     }
 }
 
@@ -258,8 +269,13 @@ fn handle_events(
             } => {
                 handle_mouse_button(app, ctx, response, pos, button, pressed, placement);
             }
-            egui::Event::Key { key, pressed, .. } => {
-                handle_keyboard(app, key, pressed);
+            egui::Event::Key {
+                key,
+                pressed,
+                modifiers,
+                ..
+            } => {
+                handle_keyboard(app, key, pressed, modifiers.command);
             }
             egui::Event::PointerMoved(pos) => {
                 handle_pointer_move(app, ctx, response, pos, placement);
@@ -381,6 +397,7 @@ fn handle_primary_press(
         Tool::Brush
             | Tool::Shape(_)
             | Tool::Gradient
+            | Tool::Pen
             | Tool::Text
             | Tool::VectorEdit
             | Tool::Animate
@@ -458,6 +475,7 @@ fn handle_primary_press(
             app.line_edit_press(raw, m.shift, m.alt);
         }
         Tool::Animate => app.animate_press(raw, response.ctx.input(|i| i.modifiers.alt)),
+        Tool::Pen => app.pen_press(raw, pen_keys(&response.ctx)),
     }
 }
 
@@ -483,10 +501,21 @@ fn handle_primary_release(app: &mut PainterApp) {
         Tool::Text => app.text_release(),
         Tool::VectorEdit => app.line_edit_release(),
         Tool::Animate => app.animate_release(),
+        Tool::Pen => app.pen_release(),
     }
 }
 
-fn handle_keyboard(app: &mut PainterApp, key: egui::Key, pressed: bool) {
+fn handle_keyboard(app: &mut PainterApp, key: egui::Key, pressed: bool, command: bool) {
+    // The Pen: Ctrl+Enter makes the path the selection; Enter ends the
+    // line being drawn.
+    if pressed && key == egui::Key::Enter && matches!(app.active_tool, Tool::Pen) {
+        if command {
+            app.pen_to_selection(crate::selection::SelectionMode::Replace);
+        } else {
+            app.pen_finish();
+        }
+        return;
+    }
     if pressed && key == egui::Key::Enter {
         transform::commit_floating_layer(app);
         app.liquify_commit();
@@ -581,6 +610,18 @@ fn handle_pointer_move(
                 app.animate_drag(raw, ctx.input(|i| i.modifiers.shift));
                 ctx.request_repaint();
             }
+        } else if matches!(app.active_tool, Tool::Pen) {
+            let raw = app.tool_snap(
+                app.screen_to_canvas_raw(pos, placement.origin, placement.center),
+                false,
+                false,
+            );
+            if app.viewport.is_primary_down {
+                app.pen_drag(raw, pen_keys(ctx));
+            } else {
+                app.pen_hover(raw);
+            }
+            ctx.request_repaint();
         } else if matches!(app.active_tool, Tool::Text) {
             if app.viewport.is_primary_down {
                 let raw = app.tool_snap(
@@ -648,7 +689,12 @@ fn handle_tool_move(
             transform::transform_drag(app, pos, keep_aspect);
             ctx.request_repaint();
         }
-        Tool::Shape(_) | Tool::Gradient | Tool::Text | Tool::VectorEdit | Tool::Animate => {}
+        Tool::Shape(_)
+        | Tool::Gradient
+        | Tool::Text
+        | Tool::VectorEdit
+        | Tool::Animate
+        | Tool::Pen => {}
     }
 }
 

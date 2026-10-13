@@ -22,6 +22,7 @@ pub enum Action {
     Wand,
     Shapes,
     Gradient,
+    Pen,
     Ruler,
     Transform,
     Animate,
@@ -255,6 +256,7 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Tools",
         &[b!(SHIFT, G)],
     ),
+    info(Action::Pen, "pen", "Pen (paths)", "Tools", &[b!(SHIFT, P)]),
     info(
         Action::Ruler,
         "ruler",

@@ -48,6 +48,7 @@ pub(crate) enum Icon {
     ShapeEllipse,
     ShapePolygon,
     ShapeCurve,
+    Pen,
     Ruler,
     Gradient,
     Text,
@@ -76,7 +77,7 @@ pub(crate) enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub(crate) const ALL: [Icon; 57] = [
+    pub(crate) const ALL: [Icon; 58] = [
         Icon::Brush,
         Icon::Eraser,
         Icon::SelectRect,
@@ -117,6 +118,7 @@ impl Icon {
         Icon::ShapeEllipse,
         Icon::ShapePolygon,
         Icon::ShapeCurve,
+        Icon::Pen,
         Icon::Ruler,
         Icon::Gradient,
         Icon::Text,
@@ -183,6 +185,7 @@ impl Icon {
             Icon::ShapeRect => phosphor!("rectangle"),
             Icon::ShapeEllipse => phosphor!("circle"),
             Icon::ShapeCurve => phosphor!("bezier-curve"),
+            Icon::Pen => phosphor!("pen-nib"),
             Icon::Ruler => phosphor!("ruler"),
             Icon::Gradient => phosphor!("gradient"),
             Icon::Text => phosphor!("text-t"),

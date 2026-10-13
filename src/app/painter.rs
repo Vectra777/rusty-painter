@@ -472,6 +472,10 @@ impl PainterApp {
         if !matches!(self.active_tool, crate::app::tools::Tool::Text) {
             self.text_commit();
         }
+        // Leaving the Pen ends the line being drawn (it stays).
+        if !matches!(self.active_tool, crate::app::tools::Tool::Pen) {
+            self.pen_finish();
+        }
         // Leaving the Shape tool applies the shape; a double-click
         // finishes a polygon.
         if !matches!(self.active_tool, crate::app::tools::Tool::Shape(_)) {
@@ -549,6 +553,7 @@ impl PainterApp {
         crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| {
             map.to_screen(self.to_canvas_space(p))
         });
+        crate::app::tools::pen::draw_pen(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::animate::draw_animate(self, ui.painter(), &|p| map.to_screen(p));
         if matches!(self.active_tool, crate::app::tools::Tool::Animate)
             && let Some(canvas) = self.viewport.cursor_canvas
@@ -761,6 +766,10 @@ impl PainterApp {
         // outright left nothing to redo).
         if self.layer_state.liquify.is_some() {
             self.liquify_commit();
+        }
+        // With the Pen, undo and redo step through path edits first.
+        if self.pen_step(redo) {
+            return;
         }
         // Inside a puppet warp, undo and redo step through its pins; undo
         // past its first pin cancels it.

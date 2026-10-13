@@ -320,7 +320,10 @@ impl PainterApp {
     }
 
     /// Change the selection with `f`, as one undo step.
-    fn change_selection(&mut self, f: impl FnOnce(&mut crate::selection::SelectionManager)) {
+    pub(crate) fn change_selection(
+        &mut self,
+        f: impl FnOnce(&mut crate::selection::SelectionManager),
+    ) {
         self.select_cancel();
         let prev = self.selection_manager.current_shape.clone();
         f(&mut self.selection_manager);

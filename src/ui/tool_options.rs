@@ -44,6 +44,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Smudge | Tool::Blur => blend_options(app, ui),
         Tool::Shape(kind) => shape_options(app, ui, kind),
         Tool::Gradient => gradient_options(app, ui, true),
+        Tool::Pen => pen_options(app, ui),
         Tool::VectorEdit => {
             tool_title(ui, "Edit Lines");
             if ui.button("Back to brush").clicked() {
@@ -629,6 +630,91 @@ fn gradient_picker(
         },
     );
     (changed, edit, import)
+}
+
+fn pen_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
+    use crate::app::tools::pen::PenMode;
+    tool_title(ui, "Pen");
+    pen_controls(app, ui);
+    match app.workspace.pen.mode {
+        PenMode::Draw => {
+            "Click: corner  ·  drag: curve (Alt breaks it)  ·  first point: close  ·  Enter/Esc: end the line  ·  on the path: add or delete a point  ·  Ctrl: edit  ·  Alt: convert"
+        }
+        PenMode::Edit => "Drag a point, a handle or a curve  ·  Alt+drag a handle: on its own",
+        PenMode::Convert => "Click a point: corner ↔ smooth  ·  drag a handle: on its own",
+    }
+}
+
+/// The Pen's mode and what to do with the path: the options bar's, and
+/// the touch screen's context bar.
+pub(crate) fn pen_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
+    use crate::app::tools::pen::PenMode;
+    use crate::selection::SelectionMode;
+    segmented(
+        ui,
+        &mut app.workspace.pen.mode,
+        &[
+            (PenMode::Draw, "Draw"),
+            (PenMode::Edit, "Edit"),
+            (PenMode::Convert, "Convert"),
+        ],
+        true,
+    );
+    if app.workspace.pen.drawing.is_some() {
+        // For a touch screen, which has no Enter or Backspace.
+        if ui
+            .button("End line")
+            .on_hover_text("Enter or Esc")
+            .clicked()
+        {
+            app.pen_finish();
+        }
+        if ui
+            .button("Remove point")
+            .on_hover_text("Backspace")
+            .clicked()
+        {
+            app.pen_undo_point();
+        }
+    }
+    vdivider(ui);
+    let has_path = !app.workspace.pen.path.is_empty();
+    ui.add_enabled_ui(has_path, |ui| {
+        ui.menu_button("Selection ▾", |ui| {
+            for (mode, label) in [
+                (SelectionMode::Replace, "Make Selection (Ctrl+Enter)"),
+                (SelectionMode::Add, "Add to Selection"),
+                (SelectionMode::Subtract, "Subtract from Selection"),
+                (SelectionMode::Intersect, "Intersect with Selection"),
+            ] {
+                if ui.button(label).clicked() {
+                    app.pen_to_selection(mode);
+                    ui.close_menu();
+                }
+            }
+        });
+        if ui
+            .button("Fill")
+            .on_hover_text("Fill the path's shapes with the brush colour")
+            .clicked()
+        {
+            app.pen_fill();
+        }
+        if ui
+            .button("Stroke")
+            .on_hover_text("Draw the path with the brush (on a vector layer: as lines)")
+            .clicked()
+        {
+            app.pen_stroke();
+        }
+        if ui
+            .button("Clear")
+            .on_hover_text("Remove the path")
+            .clicked()
+        {
+            app.pen_clear();
+        }
+    });
 }
 
 fn shape_options(

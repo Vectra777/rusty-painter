@@ -56,6 +56,7 @@ pub(crate) struct LoadedProject {
     pub history: History,
     pub guides: Option<crate::app::tools::guides::StoredGuides>,
     pub saved_selections: Vec<crate::app::tools::select::SavedSelection>,
+    pub work_path: crate::canvas::path::Path,
 }
 
 /// Everything a project file holds, copied off the app: it's encoded and
@@ -66,6 +67,7 @@ pub(crate) struct ProjectSnapshot {
     history: History,
     guides: crate::app::tools::guides::StoredGuides,
     saved_selections: Vec<crate::app::tools::select::SavedSelection>,
+    work_path: crate::canvas::path::Path,
 }
 
 impl ProjectSnapshot {
@@ -78,6 +80,7 @@ impl ProjectSnapshot {
             history: app.layer_state.history.clone(),
             guides: crate::app::tools::guides::StoredGuides::from_app(app),
             saved_selections: app.workspace.select.saved.clone(),
+            work_path: app.workspace.pen.path.clone(),
         }
     }
 
@@ -287,6 +290,7 @@ impl PainterApp {
                     guides.apply(self);
                 }
                 self.workspace.select.saved = loaded.saved_selections;
+                self.workspace.pen.path = loaded.work_path;
             }
         }
         self.set_brush_tool(self.brush_state.eraser_active());
@@ -462,6 +466,9 @@ struct ProjectFile {
     /// Select → Save Selection; absent in older files.
     #[serde(default)]
     saved_selections: Vec<StoredSavedSelection>,
+    /// The Pen's path; absent in older files.
+    #[serde(default, skip_serializing_if = "crate::canvas::path::Path::is_empty")]
+    work_path: crate::canvas::path::Path,
 }
 
 impl ProjectFile {
@@ -493,6 +500,7 @@ impl ProjectFile {
             histories: vec![StoredHistory::from_history(&snapshot.history, blobs)?],
             guides: Some(snapshot.guides.clone()),
             saved_selections: StoredSavedSelection::from_saved(&snapshot.saved_selections, blobs)?,
+            work_path: snapshot.work_path.clone(),
         })
     }
 
@@ -554,6 +562,7 @@ impl ProjectFile {
             history,
             guides: self.guides,
             saved_selections,
+            work_path: self.work_path,
         })
     }
 }
