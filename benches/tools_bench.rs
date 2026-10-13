@@ -297,8 +297,10 @@ fn bench_gradient(c: &mut Criterion) {
     group.bench_function("ramp_build", |b| {
         b.iter(|| {
             black_box(Ramp::new(
-                Color32::from_rgb(240, 120, 30),
-                Color32::from_rgb(40, 30, 120),
+                &rusty_painter::canvas::gradient::GradientStops::two(
+                    Color32::from_rgb(240, 120, 30),
+                    Color32::from_rgb(40, 30, 120),
+                ),
                 BlendSpace::Linear,
                 1.0,
             ))
@@ -310,8 +312,10 @@ fn bench_gradient(c: &mut Criterion) {
         GradientShape::Angle,
     ] {
         let ramp = Ramp::new(
-            Color32::from_rgb(240, 120, 30),
-            Color32::from_rgb(40, 30, 120),
+            &rusty_painter::canvas::gradient::GradientStops::two(
+                Color32::from_rgb(240, 120, 30),
+                Color32::from_rgb(40, 30, 120),
+            ),
             BlendSpace::Linear,
             1.0,
         );

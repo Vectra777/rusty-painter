@@ -112,7 +112,7 @@ fn linear_to_srgb(v: f32) -> f32 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Filter {
     /// Both -1..=1.
     BrightnessContrast {
@@ -366,118 +366,57 @@ impl ToneCurve {
 /// A ready-made gradient map: its name and stops.
 pub type MapPreset = (&'static str, &'static [(f32, [u8; 3])]);
 
-/// Most stops a gradient map holds.
-pub const MAP_STOPS: usize = 8;
+/// A gradient map's colours, dark to light: the gradients the gradient tool
+/// and fill layers use (opacity stops aside, which a map leaves out).
+pub type GradientMap = crate::canvas::gradient::GradientStops;
 
-/// A gradient map's colours, dark to light.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct GradientMap {
-    pub len: u8,
-    /// Position 0..=1 and sRGB colour, sorted by position.
-    pub stops: [(f32, [u8; 3]); MAP_STOPS],
-}
+/// Ready-made maps: name and stops.
+pub const MAP_PRESETS: [MapPreset; 6] = [
+    (
+        "Black to white",
+        &[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])],
+    ),
+    (
+        "Sepia",
+        &[
+            (0.0, [30, 18, 10]),
+            (0.55, [150, 105, 65]),
+            (1.0, [250, 235, 205]),
+        ],
+    ),
+    (
+        "Sunset",
+        &[
+            (0.0, [35, 10, 60]),
+            (0.4, [190, 40, 80]),
+            (0.75, [250, 150, 60]),
+            (1.0, [255, 240, 190]),
+        ],
+    ),
+    (
+        "Cool shadows",
+        &[
+            (0.0, [15, 25, 70]),
+            (0.5, [120, 140, 170]),
+            (1.0, [255, 245, 225]),
+        ],
+    ),
+    ("Duotone", &[(0.0, [40, 20, 90]), (1.0, [255, 200, 90])]),
+    (
+        "Night",
+        &[
+            (0.0, [0, 0, 10]),
+            (0.6, [30, 70, 130]),
+            (1.0, [190, 230, 255]),
+        ],
+    ),
+];
 
-impl Default for GradientMap {
-    fn default() -> Self {
-        Self::from_stops(&[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])])
-    }
-}
-
-impl GradientMap {
-    /// Ready-made maps: name and stops.
-    pub const PRESETS: [MapPreset; 6] = [
-        (
-            "Black to white",
-            &[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])],
-        ),
-        (
-            "Sepia",
-            &[
-                (0.0, [30, 18, 10]),
-                (0.55, [150, 105, 65]),
-                (1.0, [250, 235, 205]),
-            ],
-        ),
-        (
-            "Sunset",
-            &[
-                (0.0, [35, 10, 60]),
-                (0.4, [190, 40, 80]),
-                (0.75, [250, 150, 60]),
-                (1.0, [255, 240, 190]),
-            ],
-        ),
-        (
-            "Cool shadows",
-            &[
-                (0.0, [15, 25, 70]),
-                (0.5, [120, 140, 170]),
-                (1.0, [255, 245, 225]),
-            ],
-        ),
-        ("Duotone", &[(0.0, [40, 20, 90]), (1.0, [255, 200, 90])]),
-        (
-            "Night",
-            &[
-                (0.0, [0, 0, 10]),
-                (0.6, [30, 70, 130]),
-                (1.0, [190, 230, 255]),
-            ],
-        ),
-    ];
-
-    pub fn from_stops(stops: &[(f32, [u8; 3])]) -> Self {
-        let mut map = Self {
-            len: 0,
-            stops: [(0.0, [0; 3]); MAP_STOPS],
-        };
-        for (slot, &(pos, c)) in map.stops.iter_mut().zip(stops) {
-            *slot = (pos.clamp(0.0, 1.0), c);
-            map.len += 1;
-        }
-        map.sort();
-        map
-    }
-
-    pub fn stops(&self) -> &[(f32, [u8; 3])] {
-        &self.stops[..(self.len as usize).min(MAP_STOPS)]
-    }
-
-    pub fn sort(&mut self) {
-        let n = (self.len as usize).min(MAP_STOPS);
-        self.stops[..n].sort_by(|a, b| a.0.total_cmp(&b.0));
-    }
-
-    /// Light becomes dark and dark light.
-    pub fn reversed(&self) -> Self {
-        let stops: Vec<_> = self.stops().iter().map(|&(p, c)| (1.0 - p, c)).collect();
-        Self::from_stops(&stops)
-    }
-
-    /// The colour at `t` (0..=1), sRGB 0..=1.
-    pub fn color_at(&self, t: f32) -> [f32; 3] {
-        let stops = self.stops();
-        let f = |c: [u8; 3]| c.map(|v| v as f32 / 255.0);
-        let Some(first) = stops.first() else {
-            return [t; 3];
-        };
-        if t <= first.0 {
-            return f(first.1);
-        }
-        for pair in stops.windows(2) {
-            let ((p0, c0), (p1, c1)) = (pair[0], pair[1]);
-            if t <= p1 {
-                let k = if p1 - p0 > 1e-6 {
-                    (t - p0) / (p1 - p0)
-                } else {
-                    1.0
-                };
-                let (a, b) = (f(c0), f(c1));
-                return [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * k);
-            }
-        }
-        f(stops[stops.len() - 1].1)
-    }
+/// A gradient map's colour for luma `t` (0..=1): sRGB 0..=1, mixed in
+/// gamma, as Photoshop's maps are.
+fn map_color(map: &GradientMap, t: f32) -> [f32; 3] {
+    let [r, g, b, _] = map.eval(t, crate::canvas::blend_modes::BlendSpace::Gamma);
+    [r / 255.0, g / 255.0, b / 255.0]
 }
 
 /// What each 0..=255 value of red, green and blue becomes.
@@ -636,39 +575,48 @@ impl Filter {
         }
     }
 
+    /// A gradient map with no stops yet, black to white: the editor gives
+    /// it its two stops ([`GradientMap::default`]) when it opens.
+    const GRADIENT_MAP: Filter = Filter::GradientMap(GradientMap {
+        colors: Vec::new(),
+        opacity: Vec::new(),
+    });
+
     /// Filters that can be adjustment layers: each pixel changes on its own
     /// (no neighbours, no position), and its transparency stays.
-    pub const ADJUSTMENTS: [Filter; 15] = [
-        Filter::BrightnessContrast {
-            brightness: 0.0,
-            contrast: 0.0,
-        },
-        Filter::HueSaturation {
-            hue: 0.0,
-            saturation: 0.0,
-            lightness: 0.0,
-        },
-        Filter::Levels {
-            black: 0.0,
-            white: 1.0,
-            gamma: 1.0,
-        },
-        Filter::Invert,
-        Filter::Desaturate,
-        Filter::Posterize { levels: 6 },
-        Filter::Threshold { level: 0.5 },
-        Filter::CURVES,
-        Filter::COLOUR_BALANCE,
-        Filter::GRADIENT_MAP,
-        Filter::Exposure { stops: 0.0 },
-        Filter::Temperature {
-            temperature: 0.0,
-            tint: 0.0,
-        },
-        Filter::Vibrance { amount: 0.0 },
-        Filter::Sepia { amount: 1.0 },
-        Filter::Solarize { level: 0.5 },
-    ];
+    pub fn adjustments() -> [Filter; 15] {
+        [
+            Filter::BrightnessContrast {
+                brightness: 0.0,
+                contrast: 0.0,
+            },
+            Filter::HueSaturation {
+                hue: 0.0,
+                saturation: 0.0,
+                lightness: 0.0,
+            },
+            Filter::Levels {
+                black: 0.0,
+                white: 1.0,
+                gamma: 1.0,
+            },
+            Filter::Invert,
+            Filter::Desaturate,
+            Filter::Posterize { levels: 6 },
+            Filter::Threshold { level: 0.5 },
+            Filter::CURVES,
+            Filter::COLOUR_BALANCE,
+            Filter::GRADIENT_MAP,
+            Filter::Exposure { stops: 0.0 },
+            Filter::Temperature {
+                temperature: 0.0,
+                tint: 0.0,
+            },
+            Filter::Vibrance { amount: 0.0 },
+            Filter::Sepia { amount: 1.0 },
+            Filter::Solarize { level: 0.5 },
+        ]
+    }
 
     /// This filter set up for a `w`×`h` canvas: the ones that work from its
     /// middle learn where that is.
@@ -702,14 +650,6 @@ impl Filter {
         highlights: [0.0; 3],
         preserve_luminosity: true,
     };
-    const GRADIENT_MAP: Filter = Filter::GradientMap(GradientMap {
-        len: 2,
-        stops: {
-            let mut stops = [(0.0, [0u8; 3]); MAP_STOPS];
-            stops[1] = (1.0, [255; 3]);
-            stops
-        },
-    });
 
     /// This filter on one composited pixel (adjustment layers), through
     /// `lut` when it has one (see [`Filter::channel_lut`]).
@@ -777,7 +717,7 @@ impl Filter {
     /// preview): its distances shrink with it.
     pub fn shrunk(&self, block: usize) -> Filter {
         let k = block.max(1) as f32;
-        match *self {
+        match self.clone() {
             Filter::GaussianBlur { radius } => Filter::GaussianBlur { radius: radius / k },
             Filter::MotionBlur { angle, distance } => Filter::MotionBlur {
                 angle,
@@ -1109,7 +1049,7 @@ impl Filter {
                 highlights,
                 preserve_luminosity,
             } => colour_balance(rgb, shadows, midtones, highlights, preserve_luminosity),
-            Filter::GradientMap(map) => map.color_at(luma(rgb).clamp(0.0, 1.0)),
+            Filter::GradientMap(ref map) => map_color(map, luma(rgb).clamp(0.0, 1.0)),
             _ => return None,
         })
     }

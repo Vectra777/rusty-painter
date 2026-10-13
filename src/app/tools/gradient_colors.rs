@@ -3,7 +3,7 @@
 //! Editor, which are kept in `gradients.json` next to the brushes folder.
 
 use crate::canvas::blend::Unmultiply;
-use crate::canvas::gradient::Stop;
+use crate::canvas::gradient::{ColorStop, GradientStops, OpacityStop};
 use eframe::egui::Color32;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -139,50 +139,107 @@ pub enum StopColor {
     Fixed([u8; 3]),
 }
 
-/// A stop of a user gradient.
+fn one() -> f32 {
+    1.0
+}
+
+fn half() -> f32 {
+    0.5
+}
+
+/// A colour stop of a user gradient.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EditStop {
     /// 0 (start) to 1 (end).
     pub pos: f32,
     pub color: StopColor,
-    /// 0 (clear) to 1.
+    /// Before opacity stops, a stop's own opacity: moved into
+    /// [`CustomGradient::opacity`] when read ([`CustomGradient::migrate`]),
+    /// and not written.
+    #[serde(default = "one", skip_serializing)]
     pub opacity: f32,
+    /// Where between this stop and the next their colours are mixed half
+    /// and half (0.5: halfway).
+    #[serde(default = "half")]
+    pub mid: f32,
+}
+
+impl EditStop {
+    pub fn new(pos: f32, color: StopColor) -> Self {
+        Self {
+            pos,
+            color,
+            opacity: 1.0,
+            mid: 0.5,
+        }
+    }
 }
 
 /// A gradient made in the Gradient Editor.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CustomGradient {
     pub name: String,
-    /// In any order while being edited; sorted when used.
+    /// Colour stops, in any order while being edited; sorted when used.
     pub stops: Vec<EditStop>,
+    /// Opacity stops (none: opaque), likewise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opacity: Vec<OpacityStop>,
 }
 
 impl CustomGradient {
+    /// One saved before opacity stops: its stops' own opacities become
+    /// opacity stops.
+    pub fn migrate(&mut self) {
+        if self.opacity.is_empty() && self.stops.iter().any(|s| s.opacity < 1.0) {
+            self.opacity = self
+                .stops
+                .iter()
+                .map(|s| OpacityStop {
+                    pos: s.pos,
+                    opacity: s.opacity.clamp(0.0, 1.0),
+                    mid: 0.5,
+                })
+                .collect();
+            self.opacity.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+        }
+        for s in &mut self.stops {
+            s.opacity = 1.0;
+        }
+    }
+
     /// The stops with real colours, sorted by position.
-    pub fn resolve(&self, primary: Color32, secondary: Color32) -> Vec<Stop> {
-        let mut stops: Vec<Stop> = self
-            .stops
-            .iter()
-            .map(|s| {
-                let [r, g, b] = match s.color {
-                    StopColor::Primary => rgb(primary),
-                    StopColor::Secondary => rgb(secondary),
-                    StopColor::Fixed(c) => c,
-                };
-                let a = (s.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-                Stop {
+    pub fn resolve(&self, primary: Color32, secondary: Color32) -> GradientStops {
+        let mut stops = GradientStops {
+            colors: self
+                .stops
+                .iter()
+                .map(|s| ColorStop {
                     pos: s.pos.clamp(0.0, 1.0),
-                    color: Color32::from_rgba_unmultiplied(r, g, b, a),
-                }
-            })
-            .collect();
-        stops.sort_by(|a, b| a.pos.total_cmp(&b.pos));
-        if stops.is_empty() {
-            stops.push(Stop {
+                    color: match s.color {
+                        StopColor::Primary => rgb(primary),
+                        StopColor::Secondary => rgb(secondary),
+                        StopColor::Fixed(c) => c,
+                    },
+                    mid: s.mid,
+                })
+                .collect(),
+            opacity: self
+                .opacity
+                .iter()
+                .map(|s| OpacityStop {
+                    pos: s.pos.clamp(0.0, 1.0),
+                    ..*s
+                })
+                .collect(),
+        };
+        if stops.colors.is_empty() {
+            stops.colors.push(ColorStop {
                 pos: 0.0,
-                color: primary,
+                color: rgb(primary),
+                mid: 0.5,
             });
         }
+        stops.sort();
         stops
     }
 }
@@ -196,47 +253,67 @@ impl CustomGradient {
         order.iter().position(|&i| i == selected).unwrap_or(0)
     }
 
-    /// A new fixed stop at `pos` with the colour the gradient has there;
-    /// returns its index.
+    /// Put the opacity stops in order; returns where stop `selected` went.
+    pub fn sort_opacity(&mut self, selected: usize) -> usize {
+        let mut order: Vec<usize> = (0..self.opacity.len()).collect();
+        order.sort_by(|&a, &b| self.opacity[a].pos.total_cmp(&self.opacity[b].pos));
+        self.opacity = order.iter().map(|&i| self.opacity[i]).collect();
+        order.iter().position(|&i| i == selected).unwrap_or(0)
+    }
+
+    /// A new fixed colour stop at `pos` with the colour the gradient has
+    /// there (mixed as on screen); returns its index.
     pub fn add_stop(&mut self, pos: f32, primary: Color32, secondary: Color32) -> usize {
         let pos = pos.clamp(0.0, 1.0);
-        let stops = self.resolve(primary, secondary);
-        let after = stops.iter().position(|s| s.pos > pos);
-        let color = match after {
-            None => stops[stops.len() - 1].color,
-            Some(0) => stops[0].color,
-            Some(i) => {
-                let (a, b) = (stops[i - 1], stops[i]);
-                let t = if b.pos > a.pos {
-                    (pos - a.pos) / (b.pos - a.pos)
-                } else {
-                    0.0
-                };
-                let (ca, cb) = (a.color.unmultiplied(), b.color.unmultiplied());
-                let mix: [u8; 4] = std::array::from_fn(|k| {
-                    (ca[k] as f32 + (cb[k] as f32 - ca[k] as f32) * t).round() as u8
-                });
-                Color32::from_rgba_unmultiplied(mix[0], mix[1], mix[2], mix[3])
-            }
-        };
-        let [r, g, b, a] = color.unmultiplied();
-        self.stops.push(EditStop {
-            pos,
-            color: StopColor::Fixed([r, g, b]),
-            opacity: a as f32 / 255.0,
-        });
+        let [r, g, b, _] = self
+            .resolve(primary, secondary)
+            .eval(pos, crate::canvas::blend_modes::BlendSpace::Gamma);
+        let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+        self.stops
+            .push(EditStop::new(pos, StopColor::Fixed([q(r), q(g), q(b)])));
         self.stops.len() - 1
     }
 
-    /// Mirror the stops end to end.
-    pub fn reverse(&mut self) {
-        for s in &mut self.stops {
-            s.pos = 1.0 - s.pos;
-        }
-        self.sort_stops(0);
+    /// A new opacity stop at `pos` with the opacity the gradient has there;
+    /// returns its index.
+    pub fn add_opacity_stop(&mut self, pos: f32) -> usize {
+        let pos = pos.clamp(0.0, 1.0);
+        let opacity = self
+            .resolve(Color32::BLACK, Color32::BLACK)
+            .eval(pos, crate::canvas::blend_modes::BlendSpace::Gamma)[3];
+        self.opacity.push(OpacityStop {
+            pos,
+            opacity,
+            mid: 0.5,
+        });
+        self.opacity.len() - 1
     }
 
-    /// Space the stops evenly from 0 to 1, keeping their order.
+    /// Mirror the stops end to end, midpoints and all.
+    pub fn reverse(&mut self) {
+        self.sort_stops(0);
+        self.sort_opacity(0);
+        let reversed = GradientStops {
+            colors: self
+                .stops
+                .iter()
+                .map(|s| ColorStop {
+                    pos: s.pos,
+                    color: [0; 3],
+                    mid: s.mid,
+                })
+                .collect(),
+            opacity: self.opacity.clone(),
+        }
+        .reversed();
+        self.stops.reverse();
+        for (s, r) in self.stops.iter_mut().zip(&reversed.colors) {
+            (s.pos, s.mid) = (r.pos, r.mid);
+        }
+        self.opacity = reversed.opacity;
+    }
+
+    /// Space the colour stops evenly from 0 to 1, keeping their order.
     pub fn spread(&mut self) {
         self.sort_stops(0);
         let last = self.stops.len().saturating_sub(1).max(1) as f32;
@@ -275,6 +352,10 @@ impl GradientLibrary {
                 }
             })
             .unwrap_or_default();
+        let mut custom: Vec<CustomGradient> = custom;
+        for g in &mut custom {
+            g.migrate();
+        }
         Self {
             custom,
             path: Some(path),
@@ -304,7 +385,12 @@ impl GradientLibrary {
 
     /// The colours along the gradient, using the brush's `primary` and
     /// `secondary` colours where it does.
-    pub fn stops(&self, colors: GradientColors, primary: Color32, secondary: Color32) -> Vec<Stop> {
+    pub fn stops(
+        &self,
+        colors: GradientColors,
+        primary: Color32,
+        secondary: Color32,
+    ) -> GradientStops {
         self.editable(colors).resolve(primary, secondary)
     }
 
@@ -315,6 +401,7 @@ impl GradientLibrary {
             pos,
             color,
             opacity,
+            mid: 0.5,
         };
         let name = self.name(colors).to_string();
         let stops = match colors {
@@ -338,10 +425,17 @@ impl GradientLibrary {
                 return self.custom.get(i).cloned().unwrap_or(CustomGradient {
                     name,
                     stops: Vec::new(),
+                    opacity: Vec::new(),
                 });
             }
         };
-        CustomGradient { name, stops }
+        let mut g = CustomGradient {
+            name,
+            stops,
+            opacity: Vec::new(),
+        };
+        g.migrate();
+        g
     }
 
     /// Add `gradient` to the user's; returns how to choose it.
@@ -396,25 +490,31 @@ mod tests {
 
     #[test]
     fn a_custom_gradient_resolves_brush_colours_and_opacity() {
-        let g = CustomGradient {
-            name: "Test".into(),
-            stops: vec![
-                EditStop {
-                    pos: 1.0,
-                    color: StopColor::Secondary,
-                    opacity: 0.0,
-                },
-                EditStop {
-                    pos: 0.0,
-                    color: StopColor::Primary,
-                    opacity: 1.0,
-                },
-            ],
-        };
+        // As saved before opacity stops: each stop with its own opacity.
+        let old = r#"{"name":"Test","stops":[
+            {"pos":1.0,"color":"Secondary","opacity":0.0},
+            {"pos":0.0,"color":"Primary","opacity":1.0}]}"#;
+        let mut g: CustomGradient = serde_json::from_str(old).unwrap();
+        g.migrate();
         let stops = g.resolve(Color32::RED, Color32::BLUE);
-        assert_eq!(stops[0].color, Color32::RED, "sorted by position");
-        assert_eq!(stops[1].color.a(), 0);
-        assert_eq!(stops[1].color.unmultiplied()[3], 0);
+        assert_eq!(stops.colors[0].color, [255, 0, 0], "sorted by position");
+        assert_eq!(stops.colors[1].color, [0, 0, 255]);
+        let a = |t| stops.eval(t, crate::canvas::blend_modes::BlendSpace::Gamma)[3];
+        assert_eq!((a(0.0), a(1.0)), (1.0, 0.0), "opacity became opacity stops");
+        assert!(
+            !serde_json::to_string(&g)
+                .unwrap()
+                .contains("\"opacity\":0.0}")
+        );
+    }
+
+    #[test]
+    fn opacity_stops_are_added_where_the_gradient_already_is() {
+        let lib = GradientLibrary::default();
+        let mut g = lib.editable(GradientColors::ForegroundToTransparent);
+        let i = g.add_opacity_stop(0.25);
+        assert!((g.opacity[i].opacity - 0.75).abs() < 1e-3);
+        assert_eq!(g.sort_opacity(i), 1);
     }
 
     #[test]

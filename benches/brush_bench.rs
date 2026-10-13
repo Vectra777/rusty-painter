@@ -427,7 +427,7 @@ fn bench_composite_layer_features(c: &mut Criterion) {
             let (mut canvas, _) = two_layers();
             let a = canvas.insert_new_layer(3, "adj".into(), LayerKind::Paint, None);
             let ai = canvas.layer_index_of(a).unwrap();
-            canvas.layers[ai].adjustment = Some(hue);
+            canvas.layers[ai].adjustment = Some(hue.clone());
             canvas
         }),
         ("levels_adjustment_layer", {
@@ -445,7 +445,7 @@ fn bench_composite_layer_features(c: &mut Criterion) {
             let (mut canvas, _) = two_layers();
             let a = canvas.insert_new_layer(3, "adj".into(), LayerKind::Paint, None);
             let ai = canvas.layer_index_of(a).unwrap();
-            canvas.layers[ai].adjustment = Some(hue);
+            canvas.layers[ai].adjustment = Some(hue.clone());
             let m = canvas.insert_new_layer(4, "mask".into(), LayerKind::Mask { owner: a }, None);
             let mi = canvas.layer_index_of(m).unwrap();
             paint(&canvas, mi, (255, 255, 255));

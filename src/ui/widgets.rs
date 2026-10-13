@@ -81,18 +81,23 @@ pub(crate) fn paint_swatch(painter: &egui::Painter, rect: Rect, color: Color32) 
 pub(crate) fn paint_gradient_strip(
     painter: &egui::Painter,
     rect: Rect,
-    stops: &[crate::canvas::gradient::Stop],
+    stops: &crate::canvas::gradient::GradientStops,
 ) {
-    let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
-        return;
-    };
-    if stops.iter().any(|s| s.color.a() < 255) {
+    if stops.has_transparency() {
         draw_checkerboard(painter, rect, (rect.height() / 3.0).clamp(3.0, 8.0));
     }
-    // The end colours carry on to the edges.
-    let points: Vec<(f32, Color32)> = std::iter::once((0.0, first.color))
-        .chain(stops.iter().map(|s| (s.pos.clamp(0.0, 1.0), s.color)))
-        .chain(std::iter::once((1.0, last.color)))
+    // Sampled every few points, so midpoints and opacity stops show.
+    let steps = (rect.width() / 3.0).ceil().clamp(2.0, 256.0) as usize;
+    let points: Vec<(f32, Color32)> = (0..=steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32;
+            let [r, g, b, a] = stops.eval(t, crate::canvas::blend_modes::BlendSpace::Gamma);
+            let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+            (
+                t,
+                Color32::from_rgba_unmultiplied(q(r), q(g), q(b), q(a * 255.0)),
+            )
+        })
         .collect();
     let mut mesh = egui::Mesh::default();
     for (pos, color) in points {
@@ -678,8 +683,13 @@ mod growth_tests {
         for group in Filter::MENU {
             for f in group.iter() {
                 let widths = window_widths(40, |ui| {
-                    let mut f = *f;
-                    crate::ui::filter_dialog::settings(ui, &mut f);
+                    let mut f = f.clone();
+                    let mut library = Default::default();
+                    let mut gradients = crate::ui::filter_dialog::Gradients {
+                        library: &mut library,
+                        colors: (egui::Color32::BLACK, egui::Color32::WHITE),
+                    };
+                    crate::ui::filter_dialog::settings(ui, &mut f, &mut gradients);
                 });
                 let last = widths[widths.len() - 1];
                 assert!(

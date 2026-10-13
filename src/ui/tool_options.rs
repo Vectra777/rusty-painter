@@ -373,7 +373,7 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
         }
         (false, _, FilterMode::Filter) => {
             use crate::canvas::filters::Filter;
-            let current = b.brush_filter;
+            let current = b.brush_filter.clone();
             egui::ComboBox::from_id_salt("brush_filter")
                 .selected_text(current.name())
                 .show_ui(ui, |ui| {
@@ -381,7 +381,7 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                         if i > 0 {
                             ui.separator();
                         }
-                        for &f in group.iter() {
+                        for f in group.iter().cloned() {
                             let same =
                                 std::mem::discriminant(&f) == std::mem::discriminant(&current);
                             if ui.selectable_label(same, f.name()).clicked() && !same {
@@ -394,7 +394,14 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                 ui.add_space(6.0);
                 ui.menu_button("Settings…", |ui| {
                     ui.set_min_width(300.0);
-                    crate::ui::filter_dialog::settings(ui, &mut b.brush_filter);
+                    let mut gradients = crate::ui::filter_dialog::Gradients {
+                        library: &mut app.workspace.gradient.library,
+                        colors: (
+                            app.brush_state.brush.brush_options.color,
+                            app.brush_state.secondary_color,
+                        ),
+                    };
+                    crate::ui::filter_dialog::settings(ui, &mut b.brush_filter, &mut gradients);
                 });
             }
             "Paint the filter on through the brush  ·  going over a spot again doesn't filter it twice"
@@ -413,7 +420,7 @@ pub(crate) fn gradient_options(
     ui: &mut egui::Ui,
     compact: bool,
 ) -> &'static str {
-    use crate::canvas::gradient::{GradientRepeat, GradientShape};
+    use crate::canvas::gradient::GradientRepeat;
     if compact {
         tool_title(ui, "Gradient");
     }
@@ -421,12 +428,7 @@ pub(crate) fn gradient_options(
     let mut changed = segmented(
         ui,
         &mut s.shape,
-        &[
-            (GradientShape::Linear, "Linear"),
-            (GradientShape::Radial, "Radial"),
-            (GradientShape::Reflected, "Reflected"),
-            (GradientShape::Angle, "Angle"),
-        ],
+        &crate::ui::layer_style_dialog::SHAPES,
         compact,
     );
     if compact {

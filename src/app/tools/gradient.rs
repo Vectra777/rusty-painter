@@ -76,10 +76,6 @@ pub struct GradientToolState {
 pub struct GradientEditor {
     /// Index into [`GradientLibrary::custom`].
     pub index: usize,
-    /// The stop being edited.
-    pub selected: usize,
-    /// The stop being dragged along the strip.
-    pub dragging: Option<usize>,
 }
 
 /// In screen points.
@@ -213,10 +209,7 @@ impl PainterApp {
                 state.library.custom.len() - 1
             }
         };
-        state.editor = Some(GradientEditor {
-            index,
-            ..Default::default()
-        });
+        state.editor = Some(GradientEditor { index });
     }
 
     /// Settings changed: repaint the gradient being placed.
@@ -243,10 +236,13 @@ impl PainterApp {
             self.brush_state.brush.brush_options.color,
             self.brush_state.secondary_color,
         );
-        for stop in &mut stops {
-            stop.color = PainterApp::convert_color_for_model(stop.color, model);
+        for stop in &mut stops.colors {
+            let [r, g, b] = stop.color;
+            let [r, g, b, _] =
+                PainterApp::convert_color_for_model(Color32::from_rgb(r, g, b), model).to_array();
+            stop.color = [r, g, b];
         }
-        let ramp = Ramp::from_stops(&stops, self.canvas.blend_space, settings.opacity);
+        let ramp = Ramp::new(&stops, self.canvas.blend_space, settings.opacity);
         let pool = std::sync::Arc::clone(&self.workspace.pool);
         let canvas = std::sync::Arc::clone(&self.canvas);
         let Some(session) = self.workspace.gradient.session.as_mut() else {
@@ -369,10 +365,28 @@ pub(crate) fn draw_gradient(
         return;
     };
     let (a, b) = (to_screen(session.start), to_screen(session.end));
-    if app.workspace.gradient.settings.shape == GradientShape::Radial {
-        let r = (b - a).length();
-        painter.circle_stroke(a, r, Stroke::new(3.0_f32, Color32::from_black_alpha(140)));
-        painter.circle_stroke(a, r, Stroke::new(1.0_f32, Color32::from_white_alpha(200)));
+    match app.workspace.gradient.settings.shape {
+        GradientShape::Radial => {
+            let r = (b - a).length();
+            painter.circle_stroke(a, r, Stroke::new(3.0_f32, Color32::from_black_alpha(140)));
+            painter.circle_stroke(a, r, Stroke::new(1.0_f32, Color32::from_white_alpha(200)));
+        }
+        GradientShape::Diamond => {
+            // The square the end colour reaches, turned towards the end.
+            let d = b - a;
+            let n = egui::vec2(-d.y, d.x);
+            let corners = vec![b, a + n, a - d, a - n];
+            for (width, color) in [
+                (3.0_f32, Color32::from_black_alpha(140)),
+                (1.0_f32, Color32::from_white_alpha(200)),
+            ] {
+                painter.add(egui::Shape::closed_line(
+                    corners.clone(),
+                    Stroke::new(width, color),
+                ));
+            }
+        }
+        _ => {}
     }
     painter.line_segment([a, b], Stroke::new(3.0_f32, Color32::BLACK));
     painter.line_segment([a, b], Stroke::new(1.0_f32, Color32::WHITE));
@@ -387,7 +401,12 @@ pub(crate) fn draw_gradient(
         app.brush_state.brush.brush_options.color,
         app.brush_state.secondary_color,
     );
-    let (from, to) = (stops[0].color, stops[stops.len() - 1].color);
+    let end = |t| {
+        let [r, g, b, a] = stops.eval(t, crate::canvas::blend_modes::BlendSpace::Gamma);
+        let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+        Color32::from_rgba_unmultiplied(q(r), q(g), q(b), q(a * 255.0))
+    };
+    let (from, to) = (end(0.0), end(1.0));
     let (first, second) = if settings.reverse {
         (to, from)
     } else {

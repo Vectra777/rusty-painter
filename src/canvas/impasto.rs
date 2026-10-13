@@ -233,7 +233,7 @@ pub fn modulate(pixels: &mut [Color32], map: &HeightMap, tx: i32, ty: i32) {
 /// shown: [`crate::canvas::storage::Layer::shown_style`]) says: its
 /// lightness map, or its heights lit.
 pub fn relief(
-    style: crate::canvas::layer_style::LayerStyle,
+    style: &crate::canvas::layer_style::LayerStyle,
     map: &HeightMap,
     pixels: &mut [Color32],
     tx: i32,

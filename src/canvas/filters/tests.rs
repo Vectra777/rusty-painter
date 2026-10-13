@@ -16,7 +16,7 @@ fn neutral_settings_change_nothing() {
             let neutral = match f {
                 Filter::BrightnessContrast { .. }
                 | Filter::HueSaturation { .. }
-                | Filter::Levels { .. } => *f,
+                | Filter::Levels { .. } => f.clone(),
                 Filter::GaussianBlur { .. } => Filter::GaussianBlur { radius: 0.0 },
                 Filter::Noise { mono, size, .. } => Filter::Noise {
                     amount: 0.0,
@@ -28,7 +28,7 @@ fn neutral_settings_change_nothing() {
                 | Filter::ColourBalance { .. }
                 | Filter::Exposure { .. }
                 | Filter::Temperature { .. }
-                | Filter::Vibrance { .. } => *f,
+                | Filter::Vibrance { .. } => f.clone(),
                 Filter::Sepia { .. } => Filter::Sepia { amount: 0.0 },
                 Filter::Solarize { .. } => Filter::Solarize { level: 1.0 },
                 Filter::Median { .. } | Filter::OilPaint { .. } => continue,
@@ -71,8 +71,8 @@ fn neutral_settings_change_nothing() {
     }
 }
 
-fn rgb_of(f: Filter, c: Color32) -> [u8; 3] {
-    let out = f.apply(&[c], 1, 1, (0, 0))[0].unmultiplied();
+fn rgb_of(f: impl std::borrow::Borrow<Filter>, c: Color32) -> [u8; 3] {
+    let out = f.borrow().apply(&[c], 1, 1, (0, 0))[0].unmultiplied();
     [out[0], out[1], out[2]]
 }
 
@@ -86,7 +86,7 @@ fn curves_lift_what_their_curve_lifts() {
         green: ToneCurve::default(),
         blue: ToneCurve::default(),
     };
-    let [r, g, b] = rgb_of(master, grey);
+    let [r, g, b] = rgb_of(&master, grey);
     assert!(r > 180 && r == g && g == b, "{r} {g} {b}");
     // A red curve changes red only.
     let red = Filter::Curves {
@@ -95,7 +95,7 @@ fn curves_lift_what_their_curve_lifts() {
         green: ToneCurve::default(),
         blue: ToneCurve::default(),
     };
-    let [r, g, b] = rgb_of(red, grey);
+    let [r, g, b] = rgb_of(&red, grey);
     assert!(r > 180 && g == 128 && b == 128, "{r} {g} {b}");
     // Its table and the maths agree (the table rounds between curves).
     let lut = red.channel_lut().expect("per channel");
@@ -145,17 +145,17 @@ fn colour_balance_shifts_the_range_it_is_told_to() {
         highlights: [0.0; 3],
         preserve_luminosity: false,
     };
-    assert!(rgb_of(blue_shadows, Color32::from_rgb(20, 20, 20))[2] > 100);
-    assert_eq!(rgb_of(blue_shadows, Color32::WHITE), [255, 255, 255]);
+    assert!(rgb_of(&blue_shadows, Color32::from_rgb(20, 20, 20))[2] > 100);
+    assert_eq!(rgb_of(&blue_shadows, Color32::WHITE), [255, 255, 255]);
 }
 
 #[test]
 fn a_gradient_map_colours_by_brightness_and_keeps_transparency() {
-    let map = GradientMap::from_stops(&[(0.0, [200, 0, 0]), (1.0, [0, 0, 200])]);
-    let f = Filter::GradientMap(map);
-    assert_eq!(rgb_of(f, Color32::BLACK), [200, 0, 0]);
-    assert_eq!(rgb_of(f, Color32::WHITE), [0, 0, 200]);
-    let [r, g, b] = rgb_of(f, Color32::from_rgb(128, 128, 128));
+    let map = GradientMap::from_colors(&[(0.0, [200, 0, 0]), (1.0, [0, 0, 200])]);
+    let f = Filter::GradientMap(map.clone());
+    assert_eq!(rgb_of(&f, Color32::BLACK), [200, 0, 0]);
+    assert_eq!(rgb_of(&f, Color32::WHITE), [0, 0, 200]);
+    let [r, g, b] = rgb_of(&f, Color32::from_rgb(128, 128, 128));
     assert!(
         r.abs_diff(100) <= 2 && g == 0 && b.abs_diff(100) <= 2,
         "{r} {g} {b}"
@@ -238,7 +238,7 @@ fn the_new_colour_adjustments_do_what_they_say() {
         Filter::Vibrance { amount: 0.0 },
         Filter::Sepia { amount: 1.0 },
     ] {
-        assert!(Filter::ADJUSTMENTS.iter().any(|a| a.name() == f.name()));
+        assert!(Filter::adjustments().iter().any(|a| a.name() == f.name()));
     }
 }
 
@@ -249,7 +249,7 @@ fn every_filter_keeps_a_transparent_pixel_transparent_or_says_why() {
     let clear = vec![Color32::TRANSPARENT; 9];
     for group in Filter::MENU {
         for f in group.iter() {
-            let f = f.fitted(3, 3);
+            let f = f.clone().fitted(3, 3);
             let out = f.apply(&clear, 3, 3, (0, 0));
             let spreads = matches!(f, Filter::Clouds { .. } | Filter::Glow { .. });
             if !spreads {
@@ -275,12 +275,14 @@ fn new_filters_round_trip_as_project_json() {
             highlights: [-0.5, 0.0, 0.5],
             preserve_luminosity: false,
         },
-        Filter::GradientMap(GradientMap::from_stops(GradientMap::PRESETS[2].1)),
+        Filter::GradientMap(GradientMap::from_colors(
+            crate::canvas::filters::MAP_PRESETS[2].1,
+        )),
     ] {
-        let json = serde_json::to_string(&Some(f)).unwrap();
+        let json = serde_json::to_string(&Some(f.clone())).unwrap();
         let back: Option<Filter> = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, Some(f));
-        assert!(Filter::ADJUSTMENTS.iter().any(|a| a.name() == f.name()));
+        assert_eq!(back.as_ref(), Some(&f));
+        assert!(Filter::adjustments().iter().any(|a| a.name() == f.name()));
     }
 }
 

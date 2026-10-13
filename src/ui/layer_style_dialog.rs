@@ -2,7 +2,7 @@
 //! outline, changed live.
 
 use crate::PainterApp;
-use crate::canvas::gradient::GradientShape;
+use crate::canvas::gradient::{GradientRepeat, GradientShape, GradientStops};
 use crate::canvas::layer_style::{Border, LayerFill, MAX_BORDER};
 use crate::canvas::storage::LayerId;
 use crate::ui::bar_slider::BarSlider;
@@ -23,13 +23,12 @@ pub fn fill_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         app.workspace.filter.fill_editing = None;
         return;
     };
-    let mut style = app.canvas.layers[idx].style;
+    let mut style = app.canvas.layers[idx].style.clone();
     let Some(mut fill) = style.fill else {
         app.workspace.filter.fill_editing = None;
         return;
     };
     let size = [app.canvas.width() as f32, app.canvas.height() as f32];
-    let brush = app.brush_state.brush.brush_options.color;
     let title = format!("Fill: {}", app.canvas.layers[idx].name);
     let (mut open, mut done) = (true, false);
     egui::Window::new(title)
@@ -40,7 +39,12 @@ pub fn fill_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         .resizable(false)
         .default_width(340.0)
         .show(ctx, |ui| {
-            fill_settings(ui, &mut fill, size, brush);
+            fill_settings(
+                ui,
+                &mut fill,
+                size,
+                &mut crate::ui::filter_dialog::Gradients::of(app),
+            );
             ui.label(
                 RichText::new(
                     "Covers the canvas: add a mask to paint where it shows, or clip it \
@@ -60,8 +64,13 @@ pub fn fill_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     }
 }
 
-fn fill_settings(ui: &mut egui::Ui, fill: &mut LayerFill, size: [f32; 2], brush: egui::Color32) {
-    let [r, g, b, _] = brush.to_srgba_unmultiplied();
+fn fill_settings(
+    ui: &mut egui::Ui,
+    fill: &mut LayerFill,
+    size: [f32; 2],
+    gradients: &mut crate::ui::filter_dialog::Gradients<'_>,
+) {
+    let [r, g, b, _] = gradients.colors.0.to_srgba_unmultiplied();
     let mut kind = matches!(fill, LayerFill::Gradient { .. });
     if segmented(
         ui,
@@ -69,19 +78,17 @@ fn fill_settings(ui: &mut egui::Ui, fill: &mut LayerFill, size: [f32; 2], brush:
         &[(false, "Colour"), (true, "Gradient")],
         false,
     ) {
-        *fill = match *fill {
-            LayerFill::Colour(c) => {
-                let colours =
-                    crate::canvas::filters::GradientMap::from_stops(&[(0.0, c), (1.0, [255; 3])]);
-                LayerFill::Gradient {
-                    colours,
-                    shape: GradientShape::Linear,
-                    start: [0.0, size[1] / 2.0],
-                    end: [size[0], size[1] / 2.0],
-                }
-            }
+        *fill = match fill {
+            LayerFill::Colour(c) => LayerFill::Gradient {
+                colours: GradientStops::from_colors(&[(0.0, *c), (1.0, [255; 3])]),
+                shape: GradientShape::Linear,
+                start: [0.0, size[1] / 2.0],
+                end: [size[0], size[1] / 2.0],
+                repeat: GradientRepeat::None,
+                reverse: false,
+            },
             LayerFill::Gradient { colours, .. } => {
-                LayerFill::Colour(colours.stops().first().map_or([r, g, b], |&(_, c)| c))
+                LayerFill::Colour(colours.colors.first().map_or([r, g, b], |s| s.color))
             }
         };
     }
@@ -101,21 +108,33 @@ fn fill_settings(ui: &mut egui::Ui, fill: &mut LayerFill, size: [f32; 2], brush:
             shape,
             start,
             end,
+            repeat,
+            reverse,
         } => {
-            crate::ui::filter_dialog::gradient_map_settings(ui, colours);
+            crate::ui::gradient_editor::edit_document_gradient(
+                ui,
+                "fill layer gradient",
+                colours,
+                gradients.library,
+                gradients.colors,
+                true,
+            );
             ui.add_space(4.0);
             let mut new_shape = *shape;
-            segmented(
-                ui,
-                &mut new_shape,
-                &[
-                    (GradientShape::Linear, "Linear"),
-                    (GradientShape::Radial, "Radial"),
-                    (GradientShape::Reflected, "Reflected"),
-                    (GradientShape::Angle, "Angle"),
-                ],
-                false,
-            );
+            segmented(ui, &mut new_shape, &SHAPES, false);
+            ui.horizontal(|ui| {
+                segmented(
+                    ui,
+                    repeat,
+                    &[
+                        (GradientRepeat::None, "Once"),
+                        (GradientRepeat::Repeat, "Repeat"),
+                        (GradientRepeat::Mirror, "Mirror"),
+                    ],
+                    false,
+                );
+                ui.checkbox(reverse, "Reverse");
+            });
             let d = egui::vec2(end[0] - start[0], end[1] - start[1]);
             let mut angle = d.y.atan2(d.x).to_degrees().round();
             let turned = slider_row(
@@ -128,9 +147,23 @@ fn fill_settings(ui: &mut egui::Ui, fill: &mut LayerFill, size: [f32; 2], brush:
                 *shape = new_shape;
                 (*start, *end) = across(*shape, angle.to_radians(), size);
             }
+            ui.label(
+                RichText::new("Or drag its ends on the canvas with the Gradient tool (Shift+G).")
+                    .small()
+                    .color(TEXT_DIM),
+            );
         }
     }
 }
+
+/// The gradient shapes, for a selector.
+pub(crate) const SHAPES: [(GradientShape, &str); 5] = [
+    (GradientShape::Linear, "Linear"),
+    (GradientShape::Radial, "Radial"),
+    (GradientShape::Reflected, "Reflected"),
+    (GradientShape::Angle, "Angle"),
+    (GradientShape::Diamond, "Diamond"),
+];
 
 /// A gradient's ends for `shape` turned by `angle` across a canvas of
 /// `size`: linear from edge to edge, the others from the centre.
@@ -145,6 +178,9 @@ fn across(shape: GradientShape, angle: f32, size: [f32; 2]) -> ([f32; 2], [f32; 
         GradientShape::Reflected => (c, c + dir * half),
         GradientShape::Radial => (c, c + dir * (w.hypot(h) / 2.0)),
         GradientShape::Angle => (c, c + dir * half.max(1.0)),
+        // Its corner reaches the canvas's: the diamond's half-diagonal
+        // along both axes is the larger half-side, turned.
+        GradientShape::Diamond => (c, c + dir * (w.max(h) / 2.0) * std::f32::consts::SQRT_2),
     };
     ([from.x, from.y], [to.x, to.y])
 }
@@ -155,7 +191,7 @@ pub fn border_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         app.workspace.filter.border_editing = None;
         return;
     };
-    let mut style = app.canvas.layers[idx].style;
+    let mut style = app.canvas.layers[idx].style.clone();
     let title = format!("Border: {}", app.canvas.layers[idx].name);
     let (mut open, mut done) = (true, false);
     egui::Window::new(title)

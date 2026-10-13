@@ -81,12 +81,12 @@ pub fn refresh_thumbnails(app: &mut PainterApp, ctx: &egui::Context) {
         };
         let mut image = egui::ColorImage::new([tw, th], base);
         // A fill layer has no paint: its colours, sampled.
-        if let Some(fill) = canvas.layers[idx].style.fill {
+        if let Some(fill) = &canvas.layers[idx].style.fill {
             for (&(tx, ty), samples) in &by_tile {
                 for &(dst, src) in samples {
                     let x = (tx * tile_size + src % tile_size) as i32;
                     let y = (ty * tile_size + src / tile_size) as i32;
-                    image.pixels[dst] = fill.pixel(x, y);
+                    image.pixels[dst] = fill.pixel(x, y, canvas.blend_space);
                 }
             }
         }

@@ -301,7 +301,7 @@ impl PainterApp {
             };
             let mut lit = data.clone();
             if let Some(h) = self.canvas.layers[idx].height.as_deref() {
-                crate::canvas::impasto::relief(style, h, &mut lit, tx, ty, ts);
+                crate::canvas::impasto::relief(&style, h, &mut lit, tx, ty, ts);
             }
             if lit == data {
                 continue;

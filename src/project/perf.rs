@@ -432,7 +432,7 @@ fn every_filter() {
     app.workspace.jobs.defer = true;
     for f in Filter::MENU.iter().flat_map(|g| g.iter()) {
         let started = std::time::Instant::now();
-        app.filter_open(*f);
+        app.filter_open(f.clone());
         app.filter_commit();
         let ui = started.elapsed();
         app.run_jobs();
@@ -488,11 +488,12 @@ fn layer_kinds_and_styles() {
     use crate::canvas::layer_style::{Border, LayerFill, LayerStyle};
     let mut app = big_app();
     time("composite: two paint layers", || app.canvas.flatten());
-    for f in Filter::ADJUSTMENTS {
+    for f in Filter::adjustments() {
         app.canvas_mut().active_layer_idx = 1;
+        let name = f.name();
         app.add_adjustment_layer(f);
         let idx = app.canvas.active_layer_idx;
-        time(&format!("composite: + {} layer", f.name()), || {
+        time(&format!("composite: + {name} layer"), || {
             app.canvas.flatten()
         });
         app.remove_layer(idx);
@@ -506,6 +507,8 @@ fn layer_kinds_and_styles() {
                 shape: crate::canvas::gradient::GradientShape::Linear,
                 start: [0.0, 0.0],
                 end: [N as f32, N as f32],
+                repeat: Default::default(),
+                reverse: false,
             },
         ),
     ] {

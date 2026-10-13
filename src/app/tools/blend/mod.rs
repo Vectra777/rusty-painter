@@ -170,7 +170,7 @@ impl DeformMode {
 }
 
 /// What one blend stroke does, fixed when it starts.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum BlendKind {
     Smudge,
     Blur,
@@ -223,7 +223,7 @@ pub struct Carry {
 
 /// A blend stroke in progress, as the app knows it (the stroke worker
 /// paints it).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ActiveBlend {
     /// The Brush tool's (a mixing brush), not the Smudge or Blur tool's.
     from_brush: bool,
@@ -1068,7 +1068,7 @@ impl PainterApp {
                     b.adjust_saturation.clamp(-1.0, 1.0),
                     b.adjust_value.clamp(-1.0, 1.0),
                 ]),
-                (_, _, FilterMode::Filter) => BlendKind::Filter(b.brush_filter),
+                (_, _, FilterMode::Filter) => BlendKind::Filter(b.brush_filter.clone()),
             },
         };
         // Like a brush stroke: a second press ends the running one first
@@ -1098,7 +1098,7 @@ impl PainterApp {
             Arc::clone(&self.canvas),
             Arc::clone(&self.workspace.pool),
             brush,
-            kind,
+            kind.clone(),
             mix,
             pos,
             pressure,
@@ -1672,7 +1672,7 @@ impl BlendSession {
         // where the displacement says, at full weight (the mask sets how
         // far it moves).
         let mut weights_are_mask = true;
-        let target: Vec<[f32; 4]> = match self.stroke.kind {
+        let target: Vec<[f32; 4]> = match self.stroke.kind.clone() {
             BlendKind::Deform(mode, amount) => {
                 weights_are_mask = false;
                 let stroke = &self.stroke;
@@ -1770,8 +1770,14 @@ impl BlendSession {
                     let key = (x.div_euclid(ts), y.div_euclid(ts));
                     let at = ((y - key.1 * ts) * ts + (x - key.0 * ts)) as usize;
                     if !stroke.filtered.contains_key(&key) {
-                        let tile =
-                            filter_tile(&self.canvas, idx, &stroke.before, key, filter, wrap);
+                        let tile = filter_tile(
+                            &self.canvas,
+                            idx,
+                            &stroke.before,
+                            key,
+                            filter.clone(),
+                            wrap,
+                        );
                         stroke.filtered.insert(key, tile);
                     }
                     let filtered = codec.to_f(stroke.filtered[&key][at]);

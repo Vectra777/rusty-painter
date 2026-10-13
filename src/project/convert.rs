@@ -448,8 +448,8 @@ impl From<&LayerMeta> for StoredLayerMeta {
             parent: meta.parent.map(|p| p.0),
             blend: Some(meta.blend.key().to_string()),
             clipped: meta.clipped,
-            adjustment: meta.adjustment,
-            style: meta.style,
+            adjustment: meta.adjustment.clone(),
+            style: meta.style.clone(),
             text: StoredText::from_layer(meta.text.as_deref()),
             vector: meta.vector.as_deref().cloned(),
             heights: meta.height.as_ref().map(|m| {
