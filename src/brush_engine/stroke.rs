@@ -3,7 +3,7 @@
 //! onto the layer.
 
 use crate::brush_engine::brush::{Brush, BrushType, RibbonSeg, Target};
-use crate::brush_engine::brush_options::{PixelBrushShape, TipOrder};
+use crate::brush_engine::brush_options::{BrushOptions, PixelBrushShape, TipOrder};
 use crate::brush_engine::dynamics::{
     DabVar, FAST_SPEED, PenBarrel, PenTilt, compose, direction, tip_orientation,
 };
@@ -579,13 +579,38 @@ struct Pending {
     /// Distance from the stroke's start, canvas pixels.
     along: f32,
     dir: Option<f32>,
+    /// Its variation, when it was worked out as it was placed (its size
+    /// sets the space to the next dab).
+    var: Option<DabVar>,
 }
 
-/// A dab ready to paint with dynamics: its pressure level and variation.
+/// What spaces dabs by their own size: the brush's unpressured `(diameter,
+/// opacity, flow)` and the pressure from the last sample to this one.
+struct Sizing {
+    original: (f32, f32, f32),
+    from: f32,
+    to: f32,
+    /// Each dab's variation is worked out as it's placed.
+    per_dab: bool,
+}
+
+impl Sizing {
+    /// The space after a dab at `pressure` varied by `var`: the brush's
+    /// spacing of its actual size.
+    fn spacing_at(&self, brush: &Brush, pressure: f32, var: &DabVar) -> f32 {
+        let o = &brush.brush_options;
+        let diameter = self.original.0 * pressure_size_factor(o, pressure) * var.scale;
+        o.spacing_px(diameter.max(0.5), o.spacing_factor(pressure) * var.spacing)
+    }
+}
+
+/// A dab ready to paint with dynamics: its pressure and variation.
 #[derive(Clone, Copy, Debug)]
 struct Plan {
     pos: Vec2,
-    level: u32,
+    /// Its pressure (runs of dabs the same to the eye are painted
+    /// together: see [`Runs`]).
+    pressure: f32,
     var: DabVar,
     along: f32,
 }
@@ -647,6 +672,9 @@ pub struct StrokeState {
     last_chord: Option<Vec2>,
     /// The sample before `last_pos`, for the circle through the last three.
     before_last: Option<Vec2>,
+    /// The last dab's size by pressure (a pen held still adds a dab once
+    /// pressing harder grows it).
+    last_dab_size: f32,
     rng: SmallRng,
     /// The last dabs (at least an end taper's length of the pen), drawn
     /// redrawably until the stroke goes on past them or ends.
@@ -728,6 +756,7 @@ impl StrokeState {
             heading: Vec2::ZERO,
             last_chord: None,
             before_last: None,
+            last_dab_size: 0.0,
             rng: SmallRng::seed_from_u64(seed),
             tail: Vec::new(),
             newer_from: 0,
@@ -790,13 +819,30 @@ impl StrokeState {
     ) {
         let o = &brush.brush_options;
         let original = (o.diameter, o.opacity, o.flow);
-        let p = pressure.clamp(0.0, 1.0);
-        let from = self.last_pressure.unwrap_or(p);
+        let raw_p = pressure.clamp(0.0, 1.0);
+        let from = self.last_pressure.unwrap_or(raw_p);
         self.prev_sample_time = self.sample_time;
         self.sample_time = time;
         if self.start_time.is_none() {
             self.start_time = time;
         }
+        // The stabiliser holds the brush back from the pen: its pressure
+        // moves the same share of the way, so it changes where the brush
+        // is, not ahead of it.
+        let (pos, p) = if brush.pixel_perfect {
+            (raw_pos, raw_p)
+        } else {
+            let dt = match (self.prev_sample_time, self.sample_time) {
+                (Some(t0), Some(t1)) => Some((t1 - t0) as f32),
+                _ => None,
+            };
+            let mut settings = brush.stabilizer_settings();
+            settings.view_scale = self.view_scale;
+            let (pos, share) = self
+                .stabilizer
+                .step_shared(&settings, self.last_pos, raw_pos, dt);
+            (pos, from + (raw_p - from) * share)
+        };
         let dynamic = brush.has_dynamics();
         if dynamic {
             self.update_speed(raw_pos, time);
@@ -822,9 +868,22 @@ impl StrokeState {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Spacing and jitter follow this sample's pressure.
             apply_pressure(brush, original, p);
-            let spacing =
-                brush.brush_options.spacing_factor(p) * self.spacing_input(brush, raw_pos, p);
-            self.add_point_at_pressure(brush, raw_pos, spacing);
+            let spacing = brush.brush_options.spacing_factor(p) * self.spacing_input(brush, pos, p);
+            if brush.pixel_perfect {
+                self.add_point_pixel_perfect(pos);
+            } else {
+                // Dabs varying one by one are worked out as they're placed,
+                // and spaced by their own size.
+                let sizing = Sizing {
+                    original,
+                    from,
+                    to: p,
+                    per_dab: brush.varies_per_dab()
+                        && !brush.is_ribbon()
+                        && brush.brush_type != BrushType::Bristle,
+                };
+                self.add_point_at_pressure(brush, pos, spacing, &sizing);
+            }
             if brush.dual.is_some() {
                 self.paint_mask(brush, original.0, context);
             }
@@ -918,6 +977,7 @@ impl StrokeState {
                     t: 1.0,
                     along: self.travel,
                     dir: self.dir,
+                    var: None,
                 });
             }
             self.paint_pending(brush, original, p, p, context);
@@ -1237,7 +1297,10 @@ impl StrokeState {
                     .iter()
                     .map(|d| {
                         let pressure = from + (p - from) * d.t;
-                        let var = self.dab_var(brush, d, pressure);
+                        let var = match d.var {
+                            Some(var) => var,
+                            None => self.dab_var(brush, d, pressure),
+                        };
                         // An input drives the scatter: now it's known.
                         let pos = if defer {
                             self.scatter_by(brush, d.pos, brush.jitter / 100.0 + var.scatter)
@@ -1246,7 +1309,7 @@ impl StrokeState {
                         };
                         Plan {
                             pos,
-                            level: pressure_level(pressure, brush, original.0),
+                            pressure,
                             var,
                             along: d.along,
                         }
@@ -1275,35 +1338,26 @@ impl StrokeState {
             }
             // Pressure blends along the segment, so a slow pen (or a big
             // pressure change between samples) doesn't paint visible steps.
-            // Dabs are painted in runs of equal (rounded) pressure.
+            // Dabs that look the same are painted together (see [`Runs`]).
             let mut run = std::mem::take(&mut self.run);
-            let mut level = None;
+            let mut key = None;
+            let mut run_pressure = 0.0;
             for d in &pending {
-                let q = pressure_level(from + (p - from) * d.t, brush, original.0);
-                if level != Some(q) {
-                    if let Some(prev) = level
-                        && !run.is_empty()
-                    {
-                        apply_pressure(
-                            brush,
-                            original,
-                            prev as f32 / pressure_levels(brush, original.0),
-                        );
+                let q = from + (p - from) * d.t;
+                let k = run_key(brush, original, q);
+                if key != Some(k) {
+                    if key.is_some() && !run.is_empty() {
+                        apply_pressure(brush, original, run_pressure);
                         context.dabs(brush, &run);
                         run.clear();
                     }
-                    level = Some(q);
+                    key = Some(k);
+                    run_pressure = q;
                 }
                 run.push(d.pos);
             }
-            if let Some(last) = level
-                && !run.is_empty()
-            {
-                apply_pressure(
-                    brush,
-                    original,
-                    last as f32 / pressure_levels(brush, original.0),
-                );
+            if key.is_some() && !run.is_empty() {
+                apply_pressure(brush, original, run_pressure);
                 context.dabs(brush, &run);
             }
             run.clear();
@@ -1533,6 +1587,7 @@ impl StrokeState {
             t: 1.0,
             along: self.travel,
             dir: self.dir,
+            var: None,
         };
         // A reading, not a dab: the dab count stays.
         let dabs = self.dabs;
@@ -1573,8 +1628,10 @@ impl StrokeState {
             tilt_direction: tilt.map_or(0.0, |t| turn(t.direction)),
             direction: dab.dir.or(self.dir).map_or(0.0, turn),
             distance: dab.along,
-            time: match (self.start_time, self.sample_time) {
-                (Some(t0), Some(t)) => (t - t0) as f32,
+            // At the dab's own moment, between the samples either side.
+            time: match (self.start_time, self.prev_sample_time, self.sample_time) {
+                (Some(t0), Some(a), Some(b)) => (a + (b - a) * dab.t as f64 - t0) as f32,
+                (Some(t0), None, Some(t)) => (t - t0) as f32,
                 _ => 0.0,
             },
             random_dab: self.rng.random(),
@@ -1742,24 +1799,10 @@ impl StrokeState {
         }
     }
 
-    /// Queue the dabs for one sample into `self.pending`, `spacing` times
-    /// the brush's spacing apart.
-    fn add_point_at_pressure(&mut self, brush: &Brush, raw_pos: Vec2, spacing: f32) {
-        if brush.pixel_perfect {
-            self.add_point_pixel_perfect(raw_pos);
-            return;
-        }
-
-        let dt = match (self.prev_sample_time, self.sample_time) {
-            (Some(t0), Some(t1)) => Some((t1 - t0) as f32),
-            _ => None,
-        };
-        let mut settings = brush.stabilizer_settings();
-        settings.view_scale = self.view_scale;
-        let pos = self
-            .stabilizer
-            .step_timed(&settings, self.last_pos, raw_pos, dt);
-
+    /// Queue the dabs for one (stabilised) sample at `pos` into
+    /// `self.pending`, `spacing` times the brush's spacing apart; with
+    /// `sizing`, each dab's own size spaces the next (as Krita spaces them).
+    fn add_point_at_pressure(&mut self, brush: &Brush, pos: Vec2, spacing: f32, sizing: &Sizing) {
         let spacing_dist = if brush.brush_type == crate::brush_engine::brush::BrushType::Bristle {
             // Each hair draws a continuous line.
             brush.bristles.step()
@@ -1781,6 +1824,24 @@ impl StrokeState {
             let delta = pos - prev;
             let chord = delta.length();
             if chord == 0.0 {
+                // Held still, pressing harder: a dab where it is, once the
+                // brush has grown a pixel (and a tenth) since the last.
+                let size =
+                    sizing.original.0 * pressure_size_factor(&brush.brush_options, sizing.to);
+                if size > self.last_dab_size + (self.last_dab_size * 0.1).max(1.0) {
+                    let mut dab = Pending {
+                        pos,
+                        t: 1.0,
+                        along: self.travel,
+                        dir: self.dir,
+                        var: None,
+                    };
+                    if sizing.per_dab {
+                        dab.var = Some(self.dab_var(brush, &dab, sizing.to));
+                    }
+                    self.pending.push(dab);
+                    self.last_dab_size = size;
+                }
                 return;
             }
             let unit_step = delta / chord;
@@ -1840,21 +1901,34 @@ impl StrokeState {
                     // Blit.
                     let done = walked + piece_len - dist_left;
                     let dir = angle(heading_at(done, towards)).or(self.dir);
+                    let mut next = spacing_dist;
                     for _ in 0..count {
                         let p = if defer {
                             cur_pos
                         } else {
                             self.scatter(brush, cur_pos)
                         };
-                        self.pending.push(Pending {
+                        let mut dab = Pending {
                             pos: p,
                             t: done / length,
                             along: self.travel + done,
                             dir,
-                        });
+                            var: None,
+                        };
+                        let pressure = sizing.from + (sizing.to - sizing.from) * dab.t;
+                        self.last_dab_size = sizing.original.0
+                            * pressure_size_factor(&brush.brush_options, pressure);
+                        if sizing.per_dab {
+                            // Its variation now, so its own size (pressure,
+                            // inputs and all) spaces the next dab.
+                            let var = self.dab_var(brush, &dab, pressure);
+                            next = (sizing.spacing_at(brush, pressure, &var) * reach).max(0.5);
+                            dab.var = Some(var);
+                        }
+                        self.pending.push(dab);
                     }
 
-                    self.dist_until_next_blit = spacing_dist;
+                    self.dist_until_next_blit = next;
                 }
                 // Take the partial step to the piece's end.
                 self.dist_until_next_blit -= dist_left;
@@ -1872,9 +1946,12 @@ impl StrokeState {
                     t: 1.0,
                     along: 0.0,
                     dir: None,
+                    var: None,
                 });
             }
             self.dist_until_next_blit = spacing_dist;
+            self.last_dab_size =
+                sizing.original.0 * pressure_size_factor(&brush.brush_options, sizing.to);
         }
 
         self.last_pos = Some(pos);
@@ -1933,6 +2010,7 @@ impl StrokeState {
                         x: x as f32 + 0.5,
                         y: y as f32 + 0.5,
                     },
+                    var: None,
                     t,
                     along: self.travel + t * length,
                     dir,
@@ -1961,6 +2039,7 @@ impl StrokeState {
                 t: 1.0,
                 along: 0.0,
                 dir: None,
+                var: None,
             });
         }
         self.last_pos = Some(pos);
@@ -2066,16 +2145,13 @@ fn paint_plans(
 ) {
     let mut start = 0;
     while start < plans.len() {
-        let level = plans[start].level;
+        let pressure = plans[start].pressure;
+        let key = run_key(brush, original, pressure);
         let end = plans[start..]
             .iter()
-            .position(|p| p.level != level)
+            .position(|p| run_key(brush, original, p.pressure) != key)
             .map_or(plans.len(), |n| start + n);
-        apply_pressure(
-            brush,
-            original,
-            level as f32 / pressure_levels(brush, original.0),
-        );
+        apply_pressure(brush, original, pressure);
         let run = &plans[start..end];
         let centers: Vec<Vec2> = run.iter().map(|p| p.pos).collect();
         let vars: Vec<DabVar> = run.iter().map(|p| p.var).collect();
@@ -2099,52 +2175,64 @@ fn airbrush_interval(brush: &Brush) -> f64 {
     1.0 / f64::from(brush.airbrush_rate.max(0.1))
 }
 
-/// Pressure steps dabs are grouped by, for `brush` at `diameter` across:
-/// at most half a pixel of width each (a 233 px brush in 64 steps changed
-/// width 3.6 px at a time, which its edges showed as notches), and when
-/// pressure sets opacity or flow, a step per level an 8-bit pixel shows
-/// (in 64, a slow fade showed bands).
-fn pressure_levels(brush: &Brush, diameter: f32) -> f32 {
-    let o = &brush.brush_options;
-    let fine = if o.pressure_opacity || o.pressure_flow {
-        256.0
-    } else {
-        64.0
-    };
-    (diameter * 2.0).clamp(fine, 4096.0)
+/// What pressure `p` makes of the brush's unpressured `(diameter,
+/// opacity, flow)`: its diameter, opacity, flow and wash opacity.
+fn pressured(o: &BrushOptions, (diameter, opacity, flow): (f32, f32, f32), p: f32) -> [f32; 4] {
+    let curves = &o.pressure_curves;
+    let mut out = [diameter, opacity, flow, 1.0];
+    if o.pressure_size {
+        out[0] = diameter * pressure_size_factor(o, p);
+    }
+    let wash = o.painting_mode == crate::brush_engine::brush_options::PaintingMode::Wash;
+    if o.pressure_opacity {
+        // Wash: pressure sets each dab's opacity, which the stroke moves
+        // toward (its own opacity caps the whole stroke).
+        if wash {
+            out[3] = curves.opacity(p);
+        } else {
+            out[1] *= curves.opacity(p);
+        }
+    }
+    if o.pressure_flow {
+        out[2] *= curves.flow(p);
+    }
+    out
 }
 
-fn pressure_level(p: f32, brush: &Brush, diameter: f32) -> u32 {
-    (p.clamp(0.0, 1.0) * pressure_levels(brush, diameter)).round() as u32
+/// How much of the brush's size pressure `p` leaves (1 without pressure
+/// size).
+fn pressure_size_factor(o: &BrushOptions, p: f32) -> f32 {
+    if o.pressure_size {
+        o.pressure_min_size + (1.0 - o.pressure_min_size) * o.pressure_curves.size(p)
+    } else {
+        1.0
+    }
+}
+
+/// Dabs with the same key look the same and are painted as one run: their
+/// size within a quarter pixel, their opacity and flow within 1/512.
+/// Pressure isn't rounded: a steep curve can't make steps.
+fn run_key(brush: &Brush, original: (f32, f32, f32), p: f32) -> [i32; 4] {
+    let [d, o, f, w] = pressured(&brush.brush_options, original, p);
+    [
+        (d * 4.0).round() as i32,
+        (o * 512.0).round() as i32,
+        (f * 512.0).round() as i32,
+        (w * 512.0).round() as i32,
+    ]
 }
 
 /// Set what pressure `p` drives on the brush, from its unpressured
 /// `(diameter, opacity, flow)`. In wash mode pressure-opacity is each dab's
 /// opacity (`Brush::wash_opacity`) instead of the stroke's opacity cap,
 /// which must stay fixed for a whole stroke.
-fn apply_pressure(brush: &mut Brush, (diameter, opacity, flow): (f32, f32, f32), p: f32) {
+fn apply_pressure(brush: &mut Brush, original: (f32, f32, f32), p: f32) {
+    let [d, opacity, flow, wash] = pressured(&brush.brush_options, original, p);
     let o = &mut brush.brush_options;
-    (o.diameter, o.opacity, o.flow) = (diameter, opacity, flow);
-    let curves = &o.pressure_curves;
-    if o.pressure_size {
-        let factor = o.pressure_min_size + (1.0 - o.pressure_min_size) * curves.size(p);
-        o.diameter = (diameter * factor).max(1.0);
-    }
-    let wash = o.painting_mode == crate::brush_engine::brush_options::PaintingMode::Wash;
-    let pressure_opacity = o.pressure_opacity.then(|| curves.opacity(p));
-    if !wash && let Some(p) = pressure_opacity {
-        o.opacity *= p;
-    }
-    if o.pressure_flow {
-        o.flow *= curves.flow(p);
-    }
-    // Wash: pressure sets each dab's opacity, which the stroke moves toward
-    // (its own opacity caps the whole stroke).
-    brush.wash_opacity = if wash {
-        pressure_opacity.unwrap_or(1.0)
-    } else {
-        1.0
-    };
+    // Below a pixel the dab is drawn a pixel wide, fainter (see
+    // `Brush::dab`), rather than as a dot that doesn't shrink.
+    (o.diameter, o.opacity, o.flow) = (d, opacity, flow);
+    brush.wash_opacity = wash;
 }
 
 impl Default for StrokeState {

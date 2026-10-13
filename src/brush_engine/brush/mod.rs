@@ -851,10 +851,18 @@ impl Brush {
             .enumerate()
             .filter_map(|(i, &center)| {
                 let var = vars.get(i % vars.len().max(1)).copied().unwrap_or_default();
-                let r = (base_r * var.scale).max(0.25);
-                if var.strength <= 0.0 || base_r * var.scale < 0.1 {
+                let radius = base_r * var.scale;
+                if var.strength <= 0.0 || radius < 0.005 {
                     return None;
                 }
+                // Under half a pixel: drawn half a pixel wide and fainter,
+                // so a stroke thinning away fades rather than going on as
+                // a line of dots, nor stopping short.
+                let (r, fade) = if radius < 0.5 {
+                    (0.5, radius / 0.5)
+                } else {
+                    (radius, 1.0)
+                };
                 let mirror = orients.and_then(|o| o.get(i)).copied();
                 let orient = match mirror {
                     Some(m) => compose(var.orient, m),
@@ -867,7 +875,7 @@ impl Brush {
                 dab.orient = orient;
                 dab.rigid = is_rigid(orient);
                 dab.reach = reach;
-                dab.strength = var.strength;
+                dab.strength = var.strength * fade;
                 dab.tip = var.tip.min(last_tip);
                 dab.hatch = var.hatch;
                 dab.hardness = var.hardness;

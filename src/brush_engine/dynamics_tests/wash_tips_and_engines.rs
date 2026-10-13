@@ -206,12 +206,13 @@ fn fade_counts_the_strokes_dabs() {
     }];
     let (canvas, _) = paint(&mut b, &line(64.0, 0.5), 1, true);
     let thick = |x: usize| (0..H).filter(|&y| alpha(&canvas, x, y) > 128).count();
-    // Dabs 5 px apart from x = 20: twenty of them reach x = 120.
+    // Each dab spaced by its own size (a quarter of it): small ones close
+    // together, so from x = 20 the twenty reach about x = 67.
     assert!(
-        thick(40) < thick(70) && thick(70) < thick(150),
+        thick(30) < thick(45) && thick(45) < thick(150),
         "{} {} {}",
-        thick(40),
-        thick(70),
+        thick(30),
+        thick(45),
         thick(150)
     );
     assert_eq!(thick(150), thick(200));

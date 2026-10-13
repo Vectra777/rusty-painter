@@ -352,3 +352,142 @@ fn pressure_opacity_fades_without_bands() {
     eprintln!("opacity: biggest step between columns {step}/255");
     assert!(step <= 2, "opacity steps {step}/255 at once");
 }
+
+#[test]
+fn smoothing_eases_pressure_with_the_position() {
+    // Strong smoothing; the pen presses hard all at once half way. The
+    // brush is held back from the pen, and its pressure with it: the width
+    // grows over the stretch the smoothing eases over, not in one step.
+    let samples: Vec<Sample> = (0..=120)
+        .map(|i| {
+            let p = if i < 60 { 0.3 } else { 1.0 };
+            (
+                Vec2::new(100.0 + i as f32 * 10.0, 200.0),
+                p,
+                i as f64 / 120.0,
+                None,
+            )
+        })
+        .collect();
+    let mut b = Brush::new(120.0, 100.0, Color32::BLACK, 5.0);
+    b.stabilizer_algorithm = StabilizerAlgorithm::Simple;
+    b.stabilizer = 0.9;
+    let (canvas, _) = run(&mut b, &samples, (1400, 400));
+    let top = |x: usize| {
+        (0..400)
+            .find(|&y| {
+                canvas
+                    .get_layer_tile_data(1, (x / 64) as i32, (y / 64) as i32)
+                    .is_some_and(|t| t[(y % 64) * 64 + x % 64].a() > 127)
+            })
+            .unwrap_or(400) as i32
+    };
+    let edge: Vec<i32> = (300..1200).map(top).collect();
+    let step = edge.windows(10).map(|w| (w[9] - w[0]).abs()).max().unwrap();
+    eprintln!("smoothed: the edge moves at most {step} px over 10 columns");
+    assert!(step <= 10, "the width jumps {step} px over 10 columns");
+}
+
+#[test]
+fn a_light_stroke_sized_by_an_input_stays_unbroken() {
+    // Size by pressure through Inputs, pressed lightly: the dabs are small,
+    // and spaced by their size, not the brush's (which left gaps).
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    let samples: Vec<Sample> = (0..=100)
+        .map(|i| {
+            (
+                Vec2::new(100.0 + i as f32 * 8.0, 100.0),
+                0.08,
+                i as f64 / 240.0,
+                None,
+            )
+        })
+        .collect();
+    let mut b = Brush::new(60.0, 100.0, Color32::BLACK, 25.0);
+    b.brush_options.pressure_size = false;
+    b.inputs = vec![InputMapping {
+        sensor: Sensor::Pressure,
+        setting: DabSetting::Size,
+        amount: 1.0,
+        ..Default::default()
+    }];
+    let (canvas, _) = run(&mut b, &samples, (1000, 200));
+    let alpha = |x: usize| {
+        canvas
+            .get_layer_tile_data(1, (x / 64) as i32, 1)
+            .map_or(0, |t| t[(100 % 64) * 64 + x % 64].a())
+    };
+    let gaps = (150..850).filter(|&x| alpha(x) < 40).count();
+    eprintln!("light input-sized stroke: {gaps} columns with a gap");
+    assert_eq!(gaps, 0, "{gaps} columns between dabs left empty");
+}
+
+#[test]
+fn a_steep_pressure_curve_makes_no_steps_either() {
+    // Nearly all of the size in a tenth of the pressure: rounding pressure
+    // (as it was) gave steps of several pixels; dabs are grouped by how big
+    // they are now.
+    use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
+    let samples: Vec<Sample> = (0..=300)
+        .map(|i| {
+            let t = i as f32 / 300.0;
+            (
+                Vec2::new(200.0 + t * 1400.0, 300.0),
+                0.5 + 0.1 * t,
+                t as f64,
+                None,
+            )
+        })
+        .collect();
+    let mut b = Brush::new(233.0, 100.0, Color32::BLACK, 16.0);
+    let point = |x, y| CurvePoint { x, y };
+    b.brush_options.pressure_curves.size = Some(SoftnessCurve {
+        points: vec![
+            point(0.0, 0.0),
+            point(0.5, 0.3),
+            point(0.6, 1.0),
+            point(1.0, 1.0),
+        ],
+    });
+    let (canvas, _) = run(&mut b, &samples, (1800, 600));
+    let top = |x: usize| {
+        (0..600)
+            .find(|&y| {
+                canvas
+                    .get_layer_tile_data(1, (x / 64) as i32, (y / 64) as i32)
+                    .is_some_and(|t| t[(y % 64) * 64 + x % 64].a() > 127)
+            })
+            .unwrap_or(600) as f32
+    };
+    let edge: Vec<f32> = (400..1500).map(top).collect();
+    let wobble = (37..edge.len() - 37)
+        .map(|i| (edge[i] - edge[i - 37..=i + 37].iter().sum::<f32>() / 75.0).abs())
+        .fold(0.0, f32::max);
+    eprintln!("steep curve: the edge strays {wobble:.2} px from its trend");
+    assert!(wobble < 1.5, "the edge wobbles {wobble:.2} px");
+}
+
+#[test]
+fn pressing_harder_in_place_grows_the_mark() {
+    let samples: Vec<Sample> = (0..=30)
+        .map(|i| {
+            (
+                Vec2::new(150.0, 150.0),
+                0.1 + 0.03 * i as f32,
+                i as f64 / 60.0,
+                None,
+            )
+        })
+        .collect();
+    let mut b = Brush::new(200.0, 100.0, Color32::BLACK, 10.0);
+    let (canvas, _) = run(&mut b, &samples, (300, 300));
+    let inked = (0..300)
+        .filter(|&x| {
+            canvas
+                .get_layer_tile_data(1, x / 64, 150 / 64)
+                .is_some_and(|t| t[(150 % 64) * 64 + (x % 64) as usize].a() > 127)
+        })
+        .count();
+    eprintln!("pressed in place: {inked} px across");
+    assert!(inked > 150, "the mark stayed {inked} px across");
+}
