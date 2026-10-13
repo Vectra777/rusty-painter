@@ -917,6 +917,9 @@ impl Canvas {
         if let Some(heights) = layer.height.as_deref() {
             crate::canvas::impasto::relief(&layer.shown_style(), heights, &mut out, tx, ty, ts);
         }
+        if let Some(overlay) = &layer.style.overlay {
+            overlay.apply(&mut out, tx, ty, ts, self.blend_space);
+        }
         Some(out)
     }
 

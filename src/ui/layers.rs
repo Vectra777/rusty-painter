@@ -843,6 +843,14 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         app.workspace.filter.border_editing = Some(id);
                         ui.close_menu();
                     }
+                    if kind == LayerKind::Paint
+                        && !adjustment
+                        && !fill
+                        && ui.button("Gradient Overlay…").clicked()
+                    {
+                        app.workspace.filter.overlay_editing = Some(id);
+                        ui.close_menu();
+                    }
                     if is_shader && ui.button("Edit shader…").clicked() {
                         edit_shader = Some(id);
                         ui.close_menu();

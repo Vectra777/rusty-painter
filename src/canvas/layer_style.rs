@@ -28,6 +28,75 @@ pub struct LayerStyle {
     /// darkening the paint (see [`crate::canvas::impasto::modulate`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lightness_map: bool,
+    /// A gradient over the layer's paint, only where there is paint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<GradientOverlay>,
+}
+
+/// Photoshop's Gradient Overlay: a gradient laid over a layer's paint,
+/// clipped to it, mixed in with its own blend mode and opacity.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GradientOverlay {
+    /// Always [`LayerFill::Gradient`]: the gradient and where it runs.
+    pub gradient: LayerFill,
+    pub blend: crate::canvas::blend_modes::LayerBlend,
+    /// 0..=1.
+    pub opacity: f32,
+}
+
+impl GradientOverlay {
+    /// `stops` across a `w`×`h` canvas, left to right.
+    pub fn new(stops: GradientMap, w: f32, h: f32) -> Self {
+        Self {
+            gradient: LayerFill::Gradient {
+                colours: stops,
+                shape: GradientShape::Linear,
+                start: [0.0, h / 2.0],
+                end: [w, h / 2.0],
+                repeat: GradientRepeat::None,
+                reverse: false,
+            },
+            blend: crate::canvas::blend_modes::LayerBlend::Normal,
+            opacity: 1.0,
+        }
+    }
+
+    /// Lay the overlay's tile `(tx, ty)` over `paint` (premultiplied, the
+    /// tile's pixels), keeping the paint's own transparency.
+    pub fn apply(
+        &self,
+        paint: &mut [Color32],
+        tx: i32,
+        ty: i32,
+        tile_size: usize,
+        space: BlendSpace,
+    ) {
+        let over = self.gradient.tile(tx, ty, tile_size, space);
+        let opacity = self.opacity.clamp(0.0, 1.0);
+        for (p, g) in paint.iter_mut().zip(over) {
+            let a = p.a();
+            if a == 0 {
+                continue;
+            }
+            use crate::canvas::blend::Unmultiply;
+            let [br, bg, bb, _] = p.unmultiplied();
+            let [sr, sg, sb, sa] = g.unmultiplied();
+            let unit = |v: u8| v as f32 / 255.0;
+            let base = [unit(br), unit(bg), unit(bb)];
+            let mixed = crate::canvas::blend_modes::blend_color(
+                self.blend,
+                base,
+                [unit(sr), unit(sg), unit(sb)],
+            );
+            let k = unit(sa) * opacity;
+            let q = |i: usize| {
+                ((base[i] + (mixed[i] - base[i]) * k) * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            *p = Color32::from_rgba_unmultiplied(q(0), q(1), q(2), a);
+        }
+    }
 }
 
 impl LayerStyle {
@@ -36,6 +105,26 @@ impl LayerStyle {
             && self.border.is_none()
             && self.impasto.is_none()
             && !self.lightness_map
+            && self.overlay.is_none()
+    }
+
+    /// The gradient the Gradient tool edits on the canvas: a gradient
+    /// fill's, else the gradient overlay's.
+    pub fn gradient_mut(&mut self) -> Option<&mut LayerFill> {
+        match (&mut self.fill, &mut self.overlay) {
+            (Some(fill @ LayerFill::Gradient { .. }), _) => Some(fill),
+            (None, Some(overlay)) => Some(&mut overlay.gradient),
+            _ => None,
+        }
+    }
+
+    /// [`Self::gradient_mut`], to read.
+    pub fn gradient(&self) -> Option<&LayerFill> {
+        match (&self.fill, &self.overlay) {
+            (Some(fill @ LayerFill::Gradient { .. }), _) => Some(fill),
+            (None, Some(overlay)) => Some(&overlay.gradient),
+            _ => None,
+        }
     }
 
     /// How far (pixels) past its paint the layer shows: the border's width.
@@ -397,6 +486,31 @@ mod tests {
     }
 
     #[test]
+    fn an_overlay_colours_the_paint_only_and_keeps_its_transparency() {
+        // Black to white across 16 px, multiplied over half-clear red.
+        let mut overlay = GradientOverlay::new(GradientMap::default(), 16.0, 16.0);
+        overlay.blend = crate::canvas::blend_modes::LayerBlend::Multiply;
+        let red = Color32::from_rgba_unmultiplied(255, 0, 0, 128);
+        let mut paint = vec![red; 16 * 16];
+        paint[1] = Color32::TRANSPARENT;
+        overlay.apply(&mut paint, 0, 0, 16, BlendSpace::Gamma);
+        use crate::canvas::blend::Unmultiply;
+        assert_eq!(paint[1], Color32::TRANSPARENT, "no paint, no overlay");
+        let [r, _, _, a] = paint[0].unmultiplied();
+        assert!(
+            r < 20 && a.abs_diff(128) <= 1,
+            "black multiplied, half clear still"
+        );
+        let [r, g, _, _] = paint[15].unmultiplied();
+        assert!(r > 230 && g < 5, "white multiplied: the red stays");
+        // Half opacity: half way back to the paint.
+        overlay.opacity = 0.5;
+        let mut paint = vec![Color32::from_rgb(255, 0, 0); 16 * 16];
+        overlay.apply(&mut paint, 0, 0, 16, BlendSpace::Gamma);
+        assert!(paint[0].r().abs_diff(128) <= 4, "{:?}", paint[0]);
+    }
+
+    #[test]
     fn a_fill_saved_before_repeat_and_reverse_still_reads() {
         let old = r#"{"Gradient":{"colours":{"len":2,"stops":[[0.0,[0,0,0]],[1.0,[255,255,255]],[0.0,[0,0,0]],[0.0,[0,0,0]],[0.0,[0,0,0]],[0.0,[0,0,0]],[0.0,[0,0,0]],[0.0,[0,0,0]]]},"shape":"Radial","start":[1.0,2.0],"end":[3.0,4.0]}}"#;
         let fill: LayerFill = serde_json::from_str(old).unwrap();
@@ -411,6 +525,7 @@ mod tests {
             border: Some(Border::default()),
             impasto: None,
             lightness_map: false,
+            overlay: None,
         };
         let json = serde_json::to_string(&style).unwrap();
         assert_eq!(serde_json::from_str::<LayerStyle>(&json).unwrap(), style);

@@ -626,6 +626,7 @@ impl PainterApp {
         ui::filter_dialog::adjustment_dialog(self, ctx);
         ui::layer_style_dialog::fill_dialog(self, ctx);
         ui::layer_style_dialog::border_dialog(self, ctx);
+        ui::layer_style_dialog::overlay_dialog(self, ctx);
         ui::layer_style_dialog::line_width_dialog(self, ctx);
         crate::app::autosave::recovery_dialog(self, ctx);
         ui::library::library_dialogs(self, ctx);

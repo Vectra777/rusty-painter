@@ -44,6 +44,7 @@ pub fn fill_dialog(app: &mut PainterApp, ctx: &egui::Context) {
                 &mut fill,
                 size,
                 &mut crate::ui::filter_dialog::Gradients::of(app),
+                true,
             );
             ui.label(
                 RichText::new(
@@ -65,20 +66,25 @@ pub fn fill_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     }
 }
 
+/// A fill's settings; `colour_too` offers a plain colour as well as a
+/// gradient (a fill layer's, not an overlay's).
 fn fill_settings(
     ui: &mut egui::Ui,
     fill: &mut LayerFill,
     size: [f32; 2],
     gradients: &mut crate::ui::filter_dialog::Gradients<'_>,
+    colour_too: bool,
 ) {
     let [r, g, b, _] = gradients.colors.0.to_srgba_unmultiplied();
     let mut kind = matches!(fill, LayerFill::Gradient { .. });
-    if segmented(
-        ui,
-        &mut kind,
-        &[(false, "Colour"), (true, "Gradient")],
-        false,
-    ) {
+    if colour_too
+        && segmented(
+            ui,
+            &mut kind,
+            &[(false, "Colour"), (true, "Gradient")],
+            false,
+        )
+    {
         *fill = match fill {
             LayerFill::Colour(c) => LayerFill::Gradient {
                 colours: GradientStops::from_colors(&[(0.0, *c), (1.0, [255; 3])]),
@@ -241,6 +247,68 @@ pub fn border_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     app.settings_record(ctx.input(|i| i.pointer.any_down()));
     if done || !open {
         app.workspace.filter.border_editing = None;
+    }
+}
+
+/// A layer's gradient overlay: on or off, the gradient, its shape and
+/// angle, blend mode and opacity. Its ends can be dragged on the canvas
+/// with the Gradient tool while this is open.
+pub fn overlay_dialog(app: &mut PainterApp, ctx: &egui::Context) {
+    let Some(idx) = layer_of(app, app.workspace.filter.overlay_editing) else {
+        app.workspace.filter.overlay_editing = None;
+        return;
+    };
+    let mut style = app.canvas.layers[idx].style.clone();
+    let size = [app.canvas.width() as f32, app.canvas.height() as f32];
+    let title = format!("Gradient Overlay: {}", app.canvas.layers[idx].name);
+    let (mut open, mut done) = (true, false);
+    let mut gradients = crate::ui::filter_dialog::Gradients::of(app);
+    egui::Window::new(title)
+        .fit_screen(ctx)
+        .id(egui::Id::new("overlay_dialog"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(340.0)
+        .show(ctx, |ui| {
+            let mut on = style.overlay.is_some();
+            if ui.checkbox(&mut on, "Gradient over the paint").changed() {
+                style.overlay = on.then(|| {
+                    crate::canvas::layer_style::GradientOverlay::new(
+                        GradientStops::default(),
+                        size[0],
+                        size[1],
+                    )
+                });
+            }
+            if let Some(overlay) = &mut style.overlay {
+                ui.horizontal(|ui| {
+                    ui.label("Blend");
+                    crate::ui::widgets::blend_combo(ui, "overlay_blend", &mut overlay.blend);
+                });
+                slider_row(
+                    ui,
+                    "Opacity",
+                    percent_of_unit(BarSlider::new(&mut overlay.opacity, 0.0..=1.0)),
+                );
+                fill_settings(ui, &mut overlay.gradient, size, &mut gradients, false);
+            }
+            ui.label(
+                RichText::new(
+                    "Only where the layer has paint, and follows it as you paint. Merging or \
+                     exporting keeps it as pixels.",
+                )
+                .small()
+                .color(TEXT_DIM),
+            );
+            ui.separator();
+            done = ui.button("Done").clicked();
+        });
+    app.workspace.filter.adjusting = ctx.input(|i| i.pointer.any_down());
+    app.set_layer_style(idx, style);
+    app.settings_record(ctx.input(|i| i.pointer.any_down()));
+    if done || !open {
+        app.workspace.filter.overlay_editing = None;
     }
 }
 

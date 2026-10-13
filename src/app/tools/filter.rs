@@ -162,6 +162,9 @@ pub struct FilterState {
     pub fill_editing: Option<LayerId>,
     /// The layer whose border settings are open.
     pub border_editing: Option<LayerId>,
+    /// The layer whose gradient overlay settings are open (the Gradient
+    /// tool drags its ends meanwhile).
+    pub overlay_editing: Option<LayerId>,
     /// One of its settings is being dragged.
     pub adjusting: bool,
 }

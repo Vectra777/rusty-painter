@@ -531,6 +531,7 @@ fn layer_kinds_and_styles() {
                 }),
                 impasto: None,
                 lightness_map: false,
+                overlay: None,
             },
         );
         time(

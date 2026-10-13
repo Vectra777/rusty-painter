@@ -109,16 +109,17 @@ const HANDLE_HIT: f32 = 12.0;
 const TINY: f32 = 2.0;
 
 impl PainterApp {
-    /// The selected layer's gradient fill ends, if it's a gradient fill.
+    /// The ends of the selected layer's gradient fill or gradient
+    /// overlay, if it has one.
     pub(crate) fn active_gradient_fill(&self) -> Option<(Vec2, Vec2)> {
-        match &self
-            .canvas
-            .layers
-            .get(self.canvas.active_layer_idx)?
-            .style
-            .fill
-        {
-            Some(crate::canvas::layer_style::LayerFill::Gradient { start, end, .. }) => {
+        let layer = self.canvas.layers.get(self.canvas.active_layer_idx)?;
+        // An overlay only while its settings are open: otherwise the tool
+        // paints on the layer as usual.
+        if layer.style.fill.is_none() && self.workspace.filter.overlay_editing != Some(layer.id) {
+            return None;
+        }
+        match layer.style.gradient()? {
+            crate::canvas::layer_style::LayerFill::Gradient { start, end, .. } => {
                 Some((Vec2::from(*start), Vec2::from(*end)))
             }
             _ => None,
@@ -267,7 +268,7 @@ impl PainterApp {
         let mut style = self.canvas.layers[idx].style.clone();
         if let Some(crate::canvas::layer_style::LayerFill::Gradient {
             start: s, end: e, ..
-        }) = style.fill.as_mut()
+        }) = style.gradient_mut()
         {
             (*s, *e) = ([start.x, start.y], [end.x, end.y]);
             self.set_layer_style(idx, style);
@@ -374,8 +375,9 @@ impl PainterApp {
                     } else {
                         String::new()
                     };
-                    app.export_state.message =
-                        Some(format!("{count} gradients from {name} added to yours{skipped}"));
+                    app.export_state.message = Some(format!(
+                        "{count} gradients from {name} added to yours{skipped}"
+                    ));
                 }
                 Err(err) => app.report(format!("{name}: {err}")),
             })
@@ -409,7 +411,7 @@ impl PainterApp {
             repeat,
             reverse,
             ..
-        }) = style.fill.as_mut()
+        }) = style.gradient_mut()
         {
             (*colours, *shape, *repeat, *reverse) =
                 (stops, settings.shape, settings.repeat, settings.reverse);
@@ -574,7 +576,7 @@ pub(crate) fn draw_gradient(
         .canvas
         .layers
         .get(app.canvas.active_layer_idx)
-        .and_then(|l| l.style.fill.as_ref());
+        .and_then(|l| l.style.gradient());
     let (start, end, shape, stops, reverse) = if let Some(session) = &state.session {
         (
             session.start,
@@ -791,6 +793,32 @@ mod tests {
                 .iter()
                 .all(|l| !matches!(l.style.fill, Some(LayerFill::Gradient { .. })))
         );
+    }
+
+    #[test]
+    fn an_overlays_ends_are_dragged_only_while_its_settings_are_open() {
+        let mut app = app();
+        app.active_tool = crate::app::tools::Tool::Gradient;
+        let mut style = app.canvas.layers[1].style.clone();
+        style.overlay = Some(crate::canvas::layer_style::GradientOverlay::new(
+            Default::default(),
+            128.0,
+            64.0,
+        ));
+        app.set_layer_style(1, style);
+        app.settings_record(false);
+        assert!(
+            app.active_gradient_fill().is_none(),
+            "the tool paints as usual"
+        );
+        app.workspace.filter.overlay_editing = app.canvas.layer_id_at(1);
+        let (_, end) = app.active_gradient_fill().expect("its ends while open");
+        app.gradient_press(end);
+        app.gradient_drag(Vec2::new(40.0, 40.0), false);
+        app.gradient_release();
+        assert_eq!(app.active_gradient_fill().unwrap().1, Vec2::new(40.0, 40.0));
+        app.apply_history(false);
+        assert_eq!(app.active_gradient_fill().unwrap().1, end, "undone");
     }
 
     #[test]
