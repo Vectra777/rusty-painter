@@ -239,3 +239,42 @@ fn a_thin_nib_dragged_edge_on_leaves_no_gaps() {
     let gaps: Vec<usize> = (14..114).filter(|&y| alpha(y) < 128).collect();
     assert!(gaps.is_empty(), "unpainted rows {gaps:?}");
 }
+
+#[test]
+fn a_fast_curve_stays_round_between_far_apart_samples() {
+    // A fast circle as a pen reports it at 240 Hz: samples 100 px apart.
+    // Straight pieces between them would cut inside it by 6 px.
+    let (c, r) = (Vec2::new(300.0, 300.0), 200.0);
+    let step = 100.0 / r;
+    let samples: Vec<Sample> = (0..=10)
+        .map(|i| {
+            let a = i as f32 * step;
+            (
+                c + Vec2::new(a.cos(), a.sin()) * r,
+                1.0,
+                i as f64 / 240.0,
+                None,
+            )
+        })
+        .collect();
+    let mut b = Brush::new(4.0, 100.0, Color32::BLACK, 5.0);
+    b.brush_options.pressure_size = false;
+    let (canvas, _) = run(&mut b, &samples, (600, 600));
+    // How far painted pixels stray from the circle, past the first two
+    // pieces (no direction is known before the first, and the second leaves
+    // the way it went).
+    let mut worst = 0f32;
+    for y in 0..600 {
+        for x in 0..600 {
+            let painted = canvas
+                .get_layer_tile_data(1, (x / 64) as i32, (y / 64) as i32)
+                .is_some_and(|t| t[(y % 64) * 64 + x % 64].a() > 127);
+            let d = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - c;
+            if painted && d.y.atan2(d.x) > step * 2.0 {
+                worst = worst.max((d.length() - r).abs());
+            }
+        }
+    }
+    eprintln!("fast curve: painted pixels up to {worst:.2} px off the circle");
+    assert!(worst < 3.0, "{worst:.2} px off the circle");
+}

@@ -346,17 +346,35 @@ impl TabletInput {
     }
 }
 
+/// Pressure below which an Android pen move is the pen lifting off.
+#[cfg(target_os = "android")]
+const LIFT_PRESSURE: f32 = 0.002;
+
+/// How far each Android pen move goes towards its own pressure: about a
+/// 9 ms time constant at 240 Hz. A Xiaomi Focus Pen updates pressure on
+/// about every other sample and holds it between, so it comes in steps of
+/// up to a third of the range, which a big brush shows as bulges.
+// Per sample, not per millisecond: a pen sampling much slower than 240 Hz
+// would lag more; key it to the event time if one turns up.
+#[cfg(target_os = "android")]
+const PRESSURE_SMOOTHING: f32 = 0.35;
+
 /// Drains the stylus samples the patched winit queues (every batched sample,
 /// with its pressure).
 #[cfg(target_os = "android")]
 pub struct TabletInput {
     down: bool,
+    /// The stroke's pressure so far, smoothed.
+    pressure: f32,
 }
 
 #[cfg(target_os = "android")]
 impl TabletInput {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Option<Self> {
-        Some(Self { down: false })
+        Some(Self {
+            down: false,
+            pressure: 0.0,
+        })
     }
 
     pub fn poll(&mut self, ctx: &eframe::egui::Context) -> Vec<TabletSample> {
@@ -364,9 +382,20 @@ impl TabletInput {
         let scale = ctx.pixels_per_point();
         let samples: Vec<TabletSample> = winit::platform::android::take_pen_samples()
             .into_iter()
+            // A pen lifting fast reports one last move at next to no
+            // pressure (1 of 8192 on a Xiaomi Focus Pen) tens of pixels on:
+            // the pen leaving, which would paint a hairline tail.
+            .filter(|s| !(matches!(s.phase, PenPhase::Move) && s.pressure < LIFT_PRESSURE))
             .map(|s| TabletSample {
                 pos: [s.x / scale, s.y / scale],
-                pressure: s.pressure,
+                pressure: {
+                    if matches!(s.phase, PenPhase::Down) {
+                        self.pressure = s.pressure;
+                    } else {
+                        self.pressure += PRESSURE_SMOOTHING * (s.pressure - self.pressure);
+                    }
+                    self.pressure
+                },
                 // Android: angle from perpendicular, and the direction the
                 // pen points (0 up, clockwise).
                 tilt: Some({

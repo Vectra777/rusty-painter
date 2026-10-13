@@ -642,9 +642,11 @@ pub struct StrokeState {
     /// moving in whole pixels gives short segments pointing only 0°, 45°,
     /// 90°…, so each segment's own direction would make a nib wobble.
     heading: Vec2,
-    /// The way the last segment between samples went (a unit vector), for
-    /// the curve through the next.
+    /// The way the last segment between samples arrived (a unit vector),
+    /// for the curve through the next to leave by.
     last_chord: Option<Vec2>,
+    /// The sample before `last_pos`, for the circle through the last three.
+    before_last: Option<Vec2>,
     rng: SmallRng,
     /// The last dabs (at least an end taper's length of the pen), drawn
     /// redrawably until the stroke goes on past them or ends.
@@ -725,6 +727,7 @@ impl StrokeState {
             prev_lean: None,
             heading: Vec2::ZERO,
             last_chord: None,
+            before_last: None,
             rng: SmallRng::seed_from_u64(seed),
             tail: Vec::new(),
             newer_from: 0,
@@ -1789,8 +1792,10 @@ impl StrokeState {
             }
             // The way from the last sample: a curve when samples are far
             // apart (a fast stroke), as pieces.
-            let path = curve_between(prev, pos, self.last_chord);
-            self.last_chord = Some(unit_step);
+            let arrive = self.before_last.and_then(|p0| arrival(p0, prev, pos));
+            let path = curve_between(prev, pos, self.last_chord, arrive);
+            self.last_chord = Some(arrive.unwrap_or(unit_step));
+            self.before_last = Some(prev);
             let length: f32 = (path.windows(2))
                 .map(|w| (w[1] - w[0]).length())
                 .sum::<f32>()
@@ -1997,19 +2002,39 @@ fn reach_along(brush: &Brush, dir: f32) -> f32 {
     (1.0 / ((c / w.max(0.02)).powi(2) + (s / h.max(0.02)).powi(2)).sqrt()).clamp(0.05, 1.0)
 }
 
+/// The way a stroke through `p0`, `p1` and `p2` arrives at `p2` (a unit
+/// vector): along the circle through the three, which turns the chord
+/// `p1`→`p2` by the angle at `p0` (a chord and the tangent at its end make
+/// the inscribed angle). None when they're too close or turn sharply.
+fn arrival(p0: Vec2, p1: Vec2, p2: Vec2) -> Option<Vec2> {
+    let (u, w, chord) = (p1 - p0, p2 - p0, p2 - p1);
+    let length = chord.length();
+    if u.length_sq() < 1e-6 || length < 1e-3 {
+        return None;
+    }
+    let turn = (u.x * w.y - u.y * w.x).atan2(u.dot(w));
+    if turn.abs() > std::f32::consts::FRAC_PI_4 {
+        return None;
+    }
+    let (s, c) = turn.sin_cos();
+    let d = chord / length;
+    Some(Vec2::new(d.x * c - d.y * s, d.x * s + d.y * c))
+}
+
 /// The way from sample `a` to `b` as points, `a` first and `b` last:
 /// straight, or when they're far apart (a fast stroke, a tablet reporting
 /// slowly) and the stroke came in along `incoming` without a sharp turn, a
-/// curve leaving `a` that way and arriving along `a`→`b` (a Hermite
-/// curve). Each curve starts the way the last one ended, so sparse samples
-/// join smoothly without waiting for the next sample.
-fn curve_between(a: Vec2, b: Vec2, incoming: Option<Vec2>) -> Vec<Vec2> {
+/// curve leaving `a` that way and arriving along `outgoing` (the circle
+/// through the last three samples), else along `a`→`b` (a Hermite curve).
+/// Each curve starts the way the last one ended, so sparse samples join
+/// smoothly and round without waiting for the next sample.
+fn curve_between(a: Vec2, b: Vec2, incoming: Option<Vec2>, outgoing: Option<Vec2>) -> Vec<Vec2> {
     let chord = b - a;
     let length = chord.length();
     let Some(incoming) = incoming.filter(|d| length > 8.0 && d.dot(chord / length) > 0.5) else {
         return vec![a, b];
     };
-    let (m0, m1) = (incoming * length, chord);
+    let (m0, m1) = (incoming * length, outgoing.map_or(chord, |d| d * length));
     let pieces = (length / 2.0).ceil().clamp(2.0, 64.0) as usize;
     (0..=pieces)
         .map(|i| {
@@ -2124,16 +2149,19 @@ mod spacing_tests {
     #[test]
     fn far_samples_join_in_a_curve_that_leaves_the_way_the_stroke_came() {
         let (a, b) = (Vec2::ZERO, Vec2::new(40.0, 40.0));
-        let curve = curve_between(a, b, Some(Vec2::new(1.0, 0.0)));
+        let curve = curve_between(a, b, Some(Vec2::new(1.0, 0.0)), None);
         assert_eq!((curve[0], *curve.last().unwrap()), (a, b));
         // Coming in along x, it bends that way of the straight line.
         let mid = curve[curve.len() / 2];
         assert!(mid.x - mid.y > 4.0, "{mid:?}");
         // A sharp turn, or close samples: straight.
-        assert_eq!(curve_between(a, b, Some(Vec2::new(-1.0, 0.0))), vec![a, b]);
+        assert_eq!(
+            curve_between(a, b, Some(Vec2::new(-1.0, 0.0)), None),
+            vec![a, b]
+        );
         let near = Vec2::new(4.0, 4.0);
         assert_eq!(
-            curve_between(a, near, Some(Vec2::new(1.0, 0.0))),
+            curve_between(a, near, Some(Vec2::new(1.0, 0.0)), None),
             vec![a, near]
         );
     }
