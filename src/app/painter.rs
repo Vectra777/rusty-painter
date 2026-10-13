@@ -52,7 +52,9 @@ impl eframe::App for PainterApp {
     /// Android: the soft keyboard's typing (NativeActivity gets none).
     #[cfg(target_os = "android")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        let typed = crate::android::keyboard_input(ctx.wants_keyboard_input());
+        // Text being typed on the canvas wants the keyboard too.
+        let wanted = ctx.wants_keyboard_input() || self.workspace.text.session.is_some();
+        let typed = crate::android::keyboard_input(wanted);
         raw_input.events.extend(typed);
     }
 
@@ -132,6 +134,10 @@ impl eframe::App for PainterApp {
             return;
         }
 
+        // Text being typed takes the keys first.
+        if self.text_keys(ctx) {
+            needs_repaint = true;
+        }
         if crate::app::input::shortcuts::handle_shortcuts(self, ctx) {
             needs_repaint = true;
         }
@@ -472,6 +478,10 @@ impl PainterApp {
         if !matches!(self.active_tool, crate::app::tools::Tool::Text) {
             self.text_commit();
         }
+        // Leaving the Pen ends the line being drawn (it stays).
+        if !matches!(self.active_tool, crate::app::tools::Tool::Pen) {
+            self.pen_finish();
+        }
         // Leaving the Shape tool applies the shape; a double-click
         // finishes a polygon.
         if !matches!(self.active_tool, crate::app::tools::Tool::Shape(_)) {
@@ -549,6 +559,8 @@ impl PainterApp {
         crate::app::tools::gradient::draw_gradient(self, ui.painter(), &|p| {
             map.to_screen(self.to_canvas_space(p))
         });
+        crate::app::tools::pen::draw_pen(self, ui.painter(), &|p| map.to_screen(p));
+        crate::app::tools::text::draw_text(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::animate::draw_animate(self, ui.painter(), &|p| map.to_screen(p));
         if matches!(self.active_tool, crate::app::tools::Tool::Animate)
             && let Some(canvas) = self.viewport.cursor_canvas
@@ -626,12 +638,13 @@ impl PainterApp {
         ui::filter_dialog::adjustment_dialog(self, ctx);
         ui::layer_style_dialog::fill_dialog(self, ctx);
         ui::layer_style_dialog::border_dialog(self, ctx);
+        ui::layer_style_dialog::overlay_dialog(self, ctx);
         ui::layer_style_dialog::line_width_dialog(self, ctx);
         crate::app::autosave::recovery_dialog(self, ctx);
         ui::library::library_dialogs(self, ctx);
         ui::image_menu::size_dialog(self, ctx);
         ui::select_dialog::select_dialog(self, ctx);
-        ui::text_dialog::text_dialog(self, ctx);
+
         ui::view_aids_menu::guides_window(self, ctx);
         ui::reference_window::reference_window(self, ctx);
         ui::navigator::navigator_window(self, ctx);
@@ -760,6 +773,10 @@ impl PainterApp {
         // outright left nothing to redo).
         if self.layer_state.liquify.is_some() {
             self.liquify_commit();
+        }
+        // With the Pen, undo and redo step through path edits first.
+        if self.pen_step(redo) {
+            return;
         }
         // Inside a puppet warp, undo and redo step through its pins; undo
         // past its first pin cancels it.

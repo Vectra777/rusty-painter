@@ -491,7 +491,7 @@ fn new_features(c: &mut Criterion) {
         &mut g,
         "filter_hue_saturation_4k",
         |_| {},
-        |a| b::apply_filter(a, hue),
+        |a| b::apply_filter(a, hue.clone()),
     );
     bench(
         &mut g,
@@ -576,7 +576,7 @@ fn new_features(c: &mut Criterion) {
     bench(
         &mut g,
         "composite_4k_with_adjustment_layer",
-        |a| b::add_adjustment_layer(a, hue),
+        |a| b::add_adjustment_layer(a, hue.clone()),
         |a| {
             black_box(b::composite_all(a));
         },

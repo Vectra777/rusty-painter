@@ -169,7 +169,7 @@ pub struct LayerMeta {
 }
 
 /// A layer's settings as undo puts them back (not its name or pixels).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LayerSettings {
     pub visible: bool,
     pub opacity: f32,
@@ -180,6 +180,9 @@ pub struct LayerSettings {
     pub position_locked: bool,
     pub draft: bool,
     pub reference: bool,
+    /// Its fill or border; `None` (a step saved before styles were undone)
+    /// leaves it as it is.
+    pub style: Option<crate::canvas::layer_style::LayerStyle>,
 }
 
 impl LayerSettings {
@@ -194,12 +197,17 @@ impl LayerSettings {
             position_locked: l.position_locked,
             draft: l.draft,
             reference: l.reference,
+            style: Some(l.style.clone()),
         }
     }
 
     /// Exchange these with the layer's.
     fn swap(&mut self, l: &mut crate::canvas::storage::Layer) {
-        let now = Self::of(l);
+        let mut now = Self::of(l);
+        match self.style.take() {
+            Some(style) => l.style = style,
+            None => now.style = None,
+        }
         l.visible = self.visible;
         l.opacity = self.opacity;
         l.locked = self.locked;

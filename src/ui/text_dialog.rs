@@ -1,16 +1,26 @@
-//! The Text tool's dialog (the text being typed) and its settings, shared
-//! with the options bar.
+//! The Text tool's settings, for the options bar and the touch screen's
+//! context bar: the font (searchable, by family and style), size,
+//! alignment, spacing, the text's colour, and keeping or dropping the
+//! text being typed. The text itself is typed on the canvas.
 
 use crate::PainterApp;
 use crate::canvas::text::TextAlign;
-use crate::ui::widgets::FitScreen;
 use crate::ui::widgets::segmented;
 use eframe::egui;
 
 /// Font, size, alignment and spacing. Returns whether anything changed.
 pub(crate) fn text_controls(app: &mut PainterApp, ui: &mut egui::Ui) -> bool {
+    if let Some(s) = app.workspace.text.session.as_mut() {
+        ui.color_edit_button_srgba(&mut s.color)
+            .on_hover_text("The text's colour (picking a brush colour sets it too)");
+    }
     let state = &mut app.workspace.text;
     state.ensure_fonts();
+    if !state.scanned {
+        // The list fills in once the system's fonts are found.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
     let mut changed = false;
     let current = state
         .fonts
@@ -19,11 +29,55 @@ pub(crate) fn text_controls(app: &mut PainterApp, ui: &mut egui::Ui) -> bool {
         .to_string();
     egui::ComboBox::from_id_salt("text_font")
         .selected_text(current)
-        .width(170.0)
-        .height(400.0)
+        .width(190.0)
+        .height(420.0)
         .show_ui(ui, |ui| {
+            let search = ui.add(
+                egui::TextEdit::singleline(&mut state.search)
+                    .hint_text("Search fonts")
+                    .desired_width(180.0),
+            );
+            if !search.has_focus() && state.search.is_empty() {
+                search.request_focus();
+            }
+            if !state.scanned {
+                ui.label(
+                    egui::RichText::new("Loading fonts…")
+                        .small()
+                        .color(crate::ui::style::TEXT_DIM),
+                );
+            }
+            ui.separator();
+            let words: Vec<String> = state
+                .search
+                .to_lowercase()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            let mut family = "";
             for (i, f) in state.fonts.iter().enumerate() {
-                changed |= ui.selectable_value(&mut state.font, i, &f.name).changed();
+                let name = f.name.to_lowercase();
+                if !words.iter().all(|w| name.contains(w.as_str())) {
+                    continue;
+                }
+                // Each family's styles together, under its name.
+                if f.family != family && f.name != f.family {
+                    ui.label(
+                        egui::RichText::new(&f.family)
+                            .small()
+                            .color(crate::ui::style::TEXT_DIM),
+                    );
+                }
+                family = &f.family;
+                let label = if f.name != f.family {
+                    format!(
+                        "    {}",
+                        f.name.strip_prefix(&f.family).unwrap_or(&f.name).trim()
+                    )
+                } else {
+                    f.name.clone()
+                };
+                changed |= ui.selectable_value(&mut state.font, i, label).changed();
             }
         });
     let style = &mut state.style;
@@ -65,66 +119,18 @@ pub(crate) fn text_controls(app: &mut PainterApp, ui: &mut egui::Ui) -> bool {
         )
         .on_hover_text("Space between letters")
         .changed();
+    if app.workspace.text.session.is_some() {
+        crate::ui::widgets::vdivider(ui);
+        if ui
+            .button("Keep")
+            .on_hover_text("Keep the text (Ctrl+Enter, or click away from it)")
+            .clicked()
+        {
+            app.text_commit();
+        }
+        if ui.button("Cancel").on_hover_text("Esc").clicked() {
+            app.text_cancel();
+        }
+    }
     changed
-}
-
-pub fn text_dialog(app: &mut PainterApp, ctx: &egui::Context) {
-    let Some(session) = app.workspace.text.session.as_mut() else {
-        return;
-    };
-    let focus = std::mem::take(&mut session.focus);
-    let mut text = std::mem::take(&mut session.text);
-    let (mut ok, mut cancel) = (false, false);
-    let mut open = true;
-    egui::Window::new("Text")
-        .fit_screen(ctx)
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .default_width(360.0)
-        .show(ctx, |ui| {
-            let edit = ui.add(
-                egui::TextEdit::multiline(&mut text)
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Type here; drag the text on the canvas to move it"),
-            );
-            if focus {
-                edit.request_focus();
-            }
-            ui.horizontal_wrapped(|ui| {
-                if let Some(s) = app.workspace.text.session.as_mut() {
-                    ui.color_edit_button_srgba(&mut s.color)
-                        .on_hover_text("Text colour");
-                }
-                text_controls(app, ui);
-            });
-            ui.label(
-                egui::RichText::new(
-                    "In the brush colour. Kept as a text layer: click it with the Text tool to edit it again.",
-                )
-                    .small()
-                    .color(crate::ui::style::TEXT_DIM),
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                ok = ui.button("OK").clicked();
-                cancel = ui.button("Cancel").clicked();
-            });
-        });
-    if let Some(s) = app.workspace.text.session.as_mut() {
-        s.text = text;
-    }
-    // Esc cancels; Ctrl+Enter keeps (Enter types a new line).
-    let (esc, keep) = ctx.input(|i| {
-        (
-            i.key_pressed(egui::Key::Escape),
-            i.key_pressed(egui::Key::Enter) && i.modifiers.command,
-        )
-    });
-    if ok || keep {
-        app.text_commit();
-    } else if cancel || esc || !open {
-        app.text_cancel();
-    }
 }

@@ -162,6 +162,9 @@ pub struct FilterState {
     pub fill_editing: Option<LayerId>,
     /// The layer whose border settings are open.
     pub border_editing: Option<LayerId>,
+    /// The layer whose gradient overlay settings are open (the Gradient
+    /// tool drags its ends meanwhile).
+    pub overlay_editing: Option<LayerId>,
     /// One of its settings is being dragged.
     pub adjusting: bool,
 }
@@ -268,6 +271,7 @@ impl PainterApp {
             .collect();
         let pool = Arc::clone(&self.workspace.pool);
         let original = Arc::new(pool.install(|| self.canvas.capture_region(layer, bounds)));
+        let has_settings = filter.has_settings();
         self.workspace.filter.session = Some(FilterSession {
             filter,
             layer: layer_id,
@@ -281,7 +285,7 @@ impl PainterApp {
             preview: None,
             extra,
         });
-        if !filter.has_settings() {
+        if !has_settings {
             self.filter_commit();
         }
     }
@@ -442,7 +446,7 @@ impl PainterApp {
         session.running = true;
         session.dirty = false;
         let id = session.layer;
-        let (filter, original) = (session.filter, Arc::clone(&session.original));
+        let (filter, original) = (session.filter.clone(), Arc::clone(&session.original));
         let coverage = session.coverage.clone();
         let pool = Arc::clone(&self.workspace.pool);
         let canvas = Arc::clone(&self.canvas);
@@ -509,7 +513,7 @@ impl PainterApp {
                 for i in extra {
                     let original = canvas.capture_region(i, bounds);
                     let coverage = session.coverage.as_deref();
-                    apply_to(&canvas, i, session.filter, &original, coverage);
+                    apply_to(&canvas, i, session.filter.clone(), &original, coverage);
                     tiles.extend(canvas.region_snapshots(i, &original));
                 }
                 tiles

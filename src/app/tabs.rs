@@ -30,6 +30,7 @@ pub struct Document {
     rig: crate::app::rig::RigEditState,
     motion: crate::app::motion::MotionEditState,
     guides: crate::app::tools::guides::GuideState,
+    pen_path: crate::canvas::path::Path,
     wet_clock: Option<std::time::Instant>,
     wet_step: Option<(u64, usize)>,
     wet_drying: Option<crate::app::stroke_ops::WetDrying>,
@@ -56,6 +57,7 @@ impl Document {
             rig: Default::default(),
             motion: Default::default(),
             guides: Default::default(),
+            pen_path: Default::default(),
             wet_clock: None,
             wet_step: None,
             wet_drying: None,
@@ -138,6 +140,8 @@ impl PainterApp {
         std::mem::swap(&mut ws.rig, &mut doc.rig);
         std::mem::swap(&mut ws.motion, &mut doc.motion);
         std::mem::swap(&mut ws.guides, &mut doc.guides);
+        std::mem::swap(&mut ws.pen.path, &mut doc.pen_path);
+        ws.pen.end_session();
         std::mem::swap(&mut ws.wet_clock, &mut doc.wet_clock);
         std::mem::swap(&mut ws.wet_step, &mut doc.wet_step);
         std::mem::swap(&mut ws.wet_drying, &mut doc.wet_drying);

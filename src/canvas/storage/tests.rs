@@ -1063,7 +1063,7 @@ fn curves_colour_balance_and_gradient_map_work_as_adjustment_layers() {
         });
         let px = pixel(&canvas);
         assert!(px.r() <= 1 && px.g().abs_diff(128) <= 1, "{space:?} {px:?}");
-        canvas.layers[ai].adjustment = Some(Filter::GradientMap(GradientMap::from_stops(&[
+        canvas.layers[ai].adjustment = Some(Filter::GradientMap(GradientMap::from_colors(&[
             (0.0, [0, 0, 0]),
             (0.5, [0, 200, 0]),
             (1.0, [255, 255, 255]),

@@ -155,6 +155,41 @@ impl Stabilizer {
         }
     }
 
+    /// [`Self::step_timed`], and the share of the way from `prev` to `raw`
+    /// it went (0..=1): what other values the pen gives with its position
+    /// (pressure) move by, so they stay with the stabilised point rather
+    /// than running ahead of it, as Krita's "stabilize sensors" does.
+    pub fn step_shared(
+        &mut self,
+        settings: &StabilizerSettings,
+        prev: Option<Vec2>,
+        raw: Vec2,
+        dt: Option<f32>,
+    ) -> (Vec2, f32) {
+        let pos = self.step_timed(settings, prev, raw, dt);
+        let Some(prev) = prev else {
+            return (pos, 1.0);
+        };
+        let share = match settings.algorithm {
+            StabilizerAlgorithm::None | StabilizerAlgorithm::PostCorrection => 1.0,
+            // Its own share, also with the pen held still.
+            StabilizerAlgorithm::Simple if settings.strength > 0.0 => {
+                let steps = dt.map_or(1.0, |dt| dt.max(0.0) / STEP);
+                1.0 - (settings.strength * 0.95).powf(steps)
+            }
+            _ => {
+                let way = raw - prev;
+                let len2 = way.length_sq();
+                if len2 < 1e-6 {
+                    1.0
+                } else {
+                    ((pos - prev).dot(way) / len2).clamp(0.0, 1.0)
+                }
+            }
+        };
+        (pos, share)
+    }
+
     /// A 1€ filter (Casiez et al.): a low-pass filter whose cutoff rises with
     /// the pen's speed, so slow, careful movement loses its jitter and fast
     /// movement keeps up without lag.

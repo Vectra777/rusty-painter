@@ -2,6 +2,11 @@
 //! second is. The gradient shows on the layer as it's dragged and stays
 //! adjustable (drag its ends) until it's applied: Enter, a press away from
 //! it, or another tool. Esc cancels.
+//!
+//! On a gradient fill layer the tool edits the fill instead: its ends show,
+//! a drag moves one or, away from them, places the gradient anew, each an
+//! undo step. With **Fill layer** chosen, a drag makes a new gradient fill
+//! layer, which stays editable that way.
 
 use crate::app::PainterApp;
 pub use crate::app::tools::gradient_colors::{GradientColors, GradientLibrary};
@@ -20,6 +25,11 @@ pub struct GradientSettings {
     pub reverse: bool,
     pub opacity: f32,
     pub dither: bool,
+    /// How the gradient mixes with the paint under it.
+    pub blend: crate::canvas::blend_modes::LayerBlend,
+    /// A drag makes a gradient fill layer (editable later) rather than
+    /// painting the gradient.
+    pub fill_layer: bool,
 }
 
 impl Default for GradientSettings {
@@ -31,6 +41,8 @@ impl Default for GradientSettings {
             reverse: false,
             opacity: 1.0,
             dither: true,
+            blend: crate::canvas::blend_modes::LayerBlend::Normal,
+            fill_layer: false,
         }
     }
 }
@@ -57,10 +69,24 @@ pub struct GradientSession {
     dirty: bool,
 }
 
+/// A gradient fill layer's ends being dragged, or a new one's being
+/// placed.
+pub struct FillEdit {
+    /// The fill layer, or `None` for one made on release.
+    layer: Option<crate::canvas::storage::LayerId>,
+    pub start: Vec2,
+    pub end: Vec2,
+    drag: Drag,
+    /// Moved since the press (a click changes nothing).
+    moved: bool,
+}
+
 #[derive(Default)]
 pub struct GradientToolState {
     pub settings: GradientSettings,
     pub session: Option<GradientSession>,
+    /// A fill layer's gradient being dragged.
+    pub fill_edit: Option<FillEdit>,
     /// Presets and the user's own gradients.
     pub library: GradientLibrary,
     /// The Gradient Editor, while open.
@@ -76,10 +102,6 @@ pub struct GradientToolState {
 pub struct GradientEditor {
     /// Index into [`GradientLibrary::custom`].
     pub index: usize,
-    /// The stop being edited.
-    pub selected: usize,
-    /// The stop being dragged along the strip.
-    pub dragging: Option<usize>,
 }
 
 /// In screen points.
@@ -87,9 +109,70 @@ const HANDLE_HIT: f32 = 12.0;
 const TINY: f32 = 2.0;
 
 impl PainterApp {
+    /// The ends of the selected layer's gradient fill or gradient
+    /// overlay, if it has one.
+    pub(crate) fn active_gradient_fill(&self) -> Option<(Vec2, Vec2)> {
+        let layer = self.canvas.layers.get(self.canvas.active_layer_idx)?;
+        // An overlay only while its settings are open: otherwise the tool
+        // paints on the layer as usual.
+        if layer.style.fill.is_none() && self.workspace.filter.overlay_editing != Some(layer.id) {
+            return None;
+        }
+        match layer.style.gradient()? {
+            crate::canvas::layer_style::LayerFill::Gradient { start, end, .. } => {
+                Some((Vec2::from(*start), Vec2::from(*end)))
+            }
+            _ => None,
+        }
+    }
+
     /// A press with the Gradient tool at canvas point `pos`.
     pub(crate) fn gradient_press(&mut self, pos: Vec2) {
         let hit = HANDLE_HIT / self.viewport.zoom.max(0.01);
+        // A gradient fill: drag one of its ends, or place it anew.
+        if self.workspace.gradient.session.is_none()
+            && let Some((start, end)) = self.active_gradient_fill()
+        {
+            let layer = self.canvas.layer_id_at(self.canvas.active_layer_idx);
+            let edit = if (pos - end).length() <= hit {
+                FillEdit {
+                    layer,
+                    start,
+                    end,
+                    drag: Drag::End,
+                    moved: false,
+                }
+            } else if (pos - start).length() <= hit {
+                FillEdit {
+                    layer,
+                    start,
+                    end,
+                    drag: Drag::Start,
+                    moved: false,
+                }
+            } else {
+                FillEdit {
+                    layer,
+                    start: pos,
+                    end: pos,
+                    drag: Drag::End,
+                    moved: false,
+                }
+            };
+            self.workspace.gradient.fill_edit = Some(edit);
+            return;
+        }
+        if self.workspace.gradient.settings.fill_layer && self.workspace.gradient.session.is_none()
+        {
+            self.workspace.gradient.fill_edit = Some(FillEdit {
+                layer: None,
+                start: pos,
+                end: pos,
+                drag: Drag::End,
+                moved: false,
+            });
+            return;
+        }
         if let Some(session) = self.workspace.gradient.session.as_mut() {
             if (pos - session.end).length() <= hit {
                 session.drag = Some(Drag::End);
@@ -141,12 +224,6 @@ impl PainterApp {
 
     /// Drag with the Gradient tool; `snap` (Shift) keeps it to 15° steps.
     pub(crate) fn gradient_drag(&mut self, pos: Vec2, snap: bool) {
-        let Some(session) = self.workspace.gradient.session.as_mut() else {
-            return;
-        };
-        let Some(drag) = session.drag else {
-            return;
-        };
         let snapped = |from: Vec2, to: Vec2| {
             if !snap {
                 return to;
@@ -156,6 +233,25 @@ impl PainterApp {
             let a = (d.y.atan2(d.x) / step).round() * step;
             from + Vec2::new(a.cos(), a.sin()) * d.length()
         };
+        if let Some(edit) = self.workspace.gradient.fill_edit.as_mut() {
+            match edit.drag {
+                Drag::End => edit.end = snapped(edit.start, pos),
+                Drag::Start => edit.start = snapped(edit.end, pos),
+            }
+            let zoom = self.viewport.zoom.max(0.01);
+            edit.moved |= (edit.end - edit.start).length() * zoom >= TINY;
+            if let (Some(id), true) = (edit.layer, edit.moved) {
+                let (start, end) = (edit.start, edit.end);
+                self.gradient_fill_set(id, start, end);
+            }
+            return;
+        }
+        let Some(session) = self.workspace.gradient.session.as_mut() else {
+            return;
+        };
+        let Some(drag) = session.drag else {
+            return;
+        };
         match drag {
             Drag::End => session.end = snapped(session.start, pos),
             Drag::Start => session.start = snapped(session.end, pos),
@@ -163,7 +259,46 @@ impl PainterApp {
         session.dirty = true;
     }
 
+    /// Fill layer `id`'s gradient ends set to `start` and `end` (undone
+    /// with the rest of the drag, once let go).
+    fn gradient_fill_set(&mut self, id: crate::canvas::storage::LayerId, start: Vec2, end: Vec2) {
+        let Some(idx) = self.canvas.layer_index_of(id) else {
+            return;
+        };
+        let mut style = self.canvas.layers[idx].style.clone();
+        if let Some(crate::canvas::layer_style::LayerFill::Gradient {
+            start: s, end: e, ..
+        }) = style.gradient_mut()
+        {
+            (*s, *e) = ([start.x, start.y], [end.x, end.y]);
+            self.set_layer_style(idx, style);
+        }
+    }
+
     pub(crate) fn gradient_release(&mut self) {
+        if let Some(edit) = self.workspace.gradient.fill_edit.take() {
+            if edit.moved && edit.layer.is_none() {
+                // A new fill layer with the tool's gradient and settings.
+                let settings = self.workspace.gradient.settings;
+                let colours = self.workspace.gradient.library.stops(
+                    settings.colors,
+                    self.brush_state.brush.brush_options.color,
+                    self.brush_state.secondary_color,
+                );
+                self.add_fill_layer(crate::canvas::layer_style::LayerFill::Gradient {
+                    colours,
+                    shape: settings.shape,
+                    start: [edit.start.x, edit.start.y],
+                    end: [edit.end.x, edit.end.y],
+                    repeat: settings.repeat,
+                    reverse: settings.reverse,
+                });
+                // Edited on the canvas: no dialog over it.
+                self.workspace.filter.fill_editing = None;
+            }
+            self.settings_record(false);
+            return;
+        }
         let zoom = self.viewport.zoom.max(0.01);
         let Some(session) = self.workspace.gradient.session.as_mut() else {
             return;
@@ -213,16 +348,74 @@ impl PainterApp {
                 state.library.custom.len() - 1
             }
         };
-        state.editor = Some(GradientEditor {
-            index,
-            ..Default::default()
+        state.editor = Some(GradientEditor { index });
+    }
+
+    /// Add the gradients in Photoshop gradient file `name` to the user's,
+    /// read on another thread.
+    pub(crate) fn import_gradients_in_background(
+        &mut self,
+        name: String,
+        source: crate::app::import::FileSource,
+    ) {
+        self.spawn_job(None, move || {
+            let result = source
+                .read()
+                .and_then(|bytes| crate::brush_engine::import::grd::read(&bytes));
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok((gradients, noise)) => {
+                    let count = gradients.len();
+                    let library = &mut app.workspace.gradient.library;
+                    for g in gradients {
+                        library.add(g);
+                    }
+                    library.save_if_changed();
+                    let skipped = if noise > 0 {
+                        format!(" ({noise} noise gradients left out: they have no stops)")
+                    } else {
+                        String::new()
+                    };
+                    app.export_state.message = Some(format!(
+                        "{count} gradients from {name} added to yours{skipped}"
+                    ));
+                }
+                Err(err) => app.report(format!("{name}: {err}")),
+            })
         });
     }
 
-    /// Settings changed: repaint the gradient being placed.
+    /// Settings changed: repaint the gradient being placed, or give the
+    /// selected gradient fill the tool's gradient, shape, repeat and
+    /// reverse (an undo step once let go of).
     pub(crate) fn gradient_settings_changed(&mut self) {
         if let Some(session) = self.workspace.gradient.session.as_mut() {
             session.dirty = true;
+            return;
+        }
+        if self.active_tool != crate::app::tools::Tool::Gradient
+            || self.active_gradient_fill().is_none()
+        {
+            return;
+        }
+        let settings = self.workspace.gradient.settings;
+        let stops = self.workspace.gradient.library.stops(
+            settings.colors,
+            self.brush_state.brush.brush_options.color,
+            self.brush_state.secondary_color,
+        );
+        let idx = self.canvas.active_layer_idx;
+        let mut style = self.canvas.layers[idx].style.clone();
+        if let Some(crate::canvas::layer_style::LayerFill::Gradient {
+            colours,
+            shape,
+            repeat,
+            reverse,
+            ..
+        }) = style.gradient_mut()
+        {
+            (*colours, *shape, *repeat, *reverse) =
+                (stops, settings.shape, settings.repeat, settings.reverse);
+            self.set_layer_style(idx, style);
         }
     }
 
@@ -243,10 +436,13 @@ impl PainterApp {
             self.brush_state.brush.brush_options.color,
             self.brush_state.secondary_color,
         );
-        for stop in &mut stops {
-            stop.color = PainterApp::convert_color_for_model(stop.color, model);
+        for stop in &mut stops.colors {
+            let [r, g, b] = stop.color;
+            let [r, g, b, _] =
+                PainterApp::convert_color_for_model(Color32::from_rgb(r, g, b), model).to_array();
+            stop.color = [r, g, b];
         }
-        let ramp = Ramp::from_stops(&stops, self.canvas.blend_space, settings.opacity);
+        let ramp = Ramp::new(&stops, self.canvas.blend_space, settings.opacity);
         let pool = std::sync::Arc::clone(&self.workspace.pool);
         let canvas = std::sync::Arc::clone(&self.canvas);
         let Some(session) = self.workspace.gradient.session.as_mut() else {
@@ -301,9 +497,9 @@ impl PainterApp {
                     }
                 });
             };
-            pool.install(|| canvas.paint_over_region_deep(layer, original, row));
+            pool.install(|| canvas.paint_over_region_deep(layer, original, settings.blend, row));
         } else {
-            pool.install(|| canvas.paint_over_region(layer, original, row));
+            pool.install(|| canvas.paint_over_region(layer, original, settings.blend, row));
         }
         session.dirty = false;
         drop(canvas);
@@ -365,14 +561,83 @@ pub(crate) fn draw_gradient(
     painter: &egui::Painter,
     to_screen: &dyn Fn(Vec2) -> egui::Pos2,
 ) {
-    let Some(session) = &app.workspace.gradient.session else {
+    let state = &app.workspace.gradient;
+    let settings = state.settings;
+    let tool_stops = || {
+        state.library.stops(
+            settings.colors,
+            app.brush_state.brush.brush_options.color,
+            app.brush_state.secondary_color,
+        )
+    };
+    // The gradient being placed, a new fill being dragged out, or the
+    // selected gradient fill (while the tool is chosen).
+    let fill = app
+        .canvas
+        .layers
+        .get(app.canvas.active_layer_idx)
+        .and_then(|l| l.style.gradient());
+    let (start, end, shape, stops, reverse) = if let Some(session) = &state.session {
+        (
+            session.start,
+            session.end,
+            settings.shape,
+            tool_stops(),
+            settings.reverse,
+        )
+    } else if let Some(edit) = state.fill_edit.as_ref().filter(|e| e.layer.is_none()) {
+        (
+            edit.start,
+            edit.end,
+            settings.shape,
+            tool_stops(),
+            settings.reverse,
+        )
+    } else if let (
+        crate::app::tools::Tool::Gradient,
+        Some(crate::canvas::layer_style::LayerFill::Gradient {
+            colours,
+            shape,
+            start,
+            end,
+            reverse,
+            ..
+        }),
+    ) = (app.active_tool, fill)
+    {
+        (
+            Vec2::from(*start),
+            Vec2::from(*end),
+            *shape,
+            colours.clone(),
+            *reverse,
+        )
+    } else {
         return;
     };
-    let (a, b) = (to_screen(session.start), to_screen(session.end));
-    if app.workspace.gradient.settings.shape == GradientShape::Radial {
-        let r = (b - a).length();
-        painter.circle_stroke(a, r, Stroke::new(3.0_f32, Color32::from_black_alpha(140)));
-        painter.circle_stroke(a, r, Stroke::new(1.0_f32, Color32::from_white_alpha(200)));
+    let (a, b) = (to_screen(start), to_screen(end));
+    match shape {
+        GradientShape::Radial => {
+            let r = (b - a).length();
+            painter.circle_stroke(a, r, Stroke::new(3.0_f32, Color32::from_black_alpha(140)));
+            painter.circle_stroke(a, r, Stroke::new(1.0_f32, Color32::from_white_alpha(200)));
+        }
+        GradientShape::Diamond => {
+            // The square the end colour reaches, turned towards the end.
+            let d = b - a;
+            let n = egui::vec2(-d.y, d.x);
+            let corners = vec![b, a + n, a - d, a - n];
+            for (width, color) in [
+                (3.0_f32, Color32::from_black_alpha(140)),
+                (1.0_f32, Color32::from_white_alpha(200)),
+            ] {
+                painter.add(egui::Shape::closed_line(
+                    corners.clone(),
+                    Stroke::new(width, color),
+                ));
+            }
+        }
+        _ => {}
     }
     painter.line_segment([a, b], Stroke::new(3.0_f32, Color32::BLACK));
     painter.line_segment([a, b], Stroke::new(1.0_f32, Color32::WHITE));
@@ -381,18 +646,13 @@ pub(crate) fn draw_gradient(
         painter.rect_filled(r.expand(1.5), 0.0, Color32::BLACK);
         crate::ui::widgets::paint_swatch(painter, r, color);
     };
-    let settings = app.workspace.gradient.settings;
-    let stops = app.workspace.gradient.library.stops(
-        settings.colors,
-        app.brush_state.brush.brush_options.color,
-        app.brush_state.secondary_color,
-    );
-    let (from, to) = (stops[0].color, stops[stops.len() - 1].color);
-    let (first, second) = if settings.reverse {
-        (to, from)
-    } else {
-        (from, to)
+    let end = |t| {
+        let [r, g, b, a] = stops.eval(t, crate::canvas::blend_modes::BlendSpace::Gamma);
+        let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+        Color32::from_rgba_unmultiplied(q(r), q(g), q(b), q(a * 255.0))
     };
+    let (from, to) = (end(0.0), end(1.0));
+    let (first, second) = if reverse { (to, from) } else { (from, to) };
     swatch(a, first);
     swatch(b, second);
 }
@@ -456,6 +716,131 @@ mod tests {
         assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert_eq!(pixel(&app, 80, 10).a(), 0, "undone");
+    }
+
+    #[test]
+    fn a_gradient_mixes_with_the_paint_under_it_by_its_blend_mode() {
+        let mut app = app();
+        // Grey paint first: a gradient from grey to grey.
+        let grey = Color32::from_gray(128);
+        (
+            app.brush_state.brush.brush_options.color,
+            app.brush_state.secondary_color,
+        ) = (grey, grey);
+        app.gradient_press(Vec2::new(0.0, 32.0));
+        app.gradient_drag(Vec2::new(128.0, 32.0), false);
+        app.gradient_commit();
+        // Black to white over it, multiplied: white leaves the grey.
+        app.brush_state.brush.brush_options.color = Color32::BLACK;
+        app.brush_state.secondary_color = Color32::WHITE;
+        app.workspace.gradient.settings.blend = crate::canvas::blend_modes::LayerBlend::Multiply;
+        app.gradient_press(Vec2::new(0.0, 32.0));
+        app.gradient_drag(Vec2::new(128.0, 32.0), false);
+        app.gradient_commit();
+        let (left, right) = (pixel(&app, 1, 10), pixel(&app, 126, 10));
+        assert!(left.r() < 10, "black multiplied: {left:?}");
+        assert!(
+            right.r().abs_diff(128) <= 4,
+            "white multiplied keeps the grey: {right:?}"
+        );
+    }
+
+    #[test]
+    fn a_fill_layer_gradient_is_made_and_edited_on_the_canvas() {
+        use crate::canvas::layer_style::LayerFill;
+        let mut app = app();
+        app.active_tool = crate::app::tools::Tool::Gradient;
+        let layers = app.canvas.layers.len();
+        app.workspace.gradient.settings.fill_layer = true;
+        app.gradient_press(Vec2::new(10.0, 32.0));
+        app.gradient_drag(Vec2::new(110.0, 32.0), false);
+        assert_eq!(app.canvas.layers.len(), layers, "made when let go");
+        app.gradient_release();
+        assert_eq!(app.canvas.layers.len(), layers + 1);
+        let ends = |app: &crate::PainterApp| app.active_gradient_fill().expect("a gradient fill");
+        assert_eq!(ends(&app), (Vec2::new(10.0, 32.0), Vec2::new(110.0, 32.0)));
+        assert!(
+            app.workspace.filter.fill_editing.is_none(),
+            "no dialog over it"
+        );
+        // Its end dragged: the fill follows, one undo step.
+        let steps = app.layer_state.history.stacks().0.len();
+        app.gradient_press(Vec2::new(110.0, 32.0));
+        app.gradient_drag(Vec2::new(60.0, 50.0), false);
+        app.gradient_drag(Vec2::new(70.0, 50.0), false);
+        app.gradient_release();
+        assert_eq!(ends(&app).1, Vec2::new(70.0, 50.0));
+        assert_eq!(app.layer_state.history.stacks().0.len(), steps + 1);
+        // Away from its ends: placed anew.
+        app.gradient_press(Vec2::new(64.0, 5.0));
+        app.gradient_drag(Vec2::new(64.0, 60.0), false);
+        app.gradient_release();
+        assert_eq!(ends(&app), (Vec2::new(64.0, 5.0), Vec2::new(64.0, 60.0)));
+        // A click on it changes nothing.
+        app.gradient_press(Vec2::new(20.0, 20.0));
+        app.gradient_release();
+        assert_eq!(ends(&app), (Vec2::new(64.0, 5.0), Vec2::new(64.0, 60.0)));
+        // Undo back through the edits, then the layer itself.
+        app.apply_history(false);
+        assert_eq!(ends(&app).1, Vec2::new(70.0, 50.0));
+        app.apply_history(false);
+        assert_eq!(ends(&app).1, Vec2::new(110.0, 32.0));
+        app.apply_history(false);
+        assert_eq!(app.canvas.layers.len(), layers);
+        assert!(
+            app.canvas
+                .layers
+                .iter()
+                .all(|l| !matches!(l.style.fill, Some(LayerFill::Gradient { .. })))
+        );
+    }
+
+    #[test]
+    fn an_overlays_ends_are_dragged_only_while_its_settings_are_open() {
+        let mut app = app();
+        app.active_tool = crate::app::tools::Tool::Gradient;
+        let mut style = app.canvas.layers[1].style.clone();
+        style.overlay = Some(crate::canvas::layer_style::GradientOverlay::new(
+            Default::default(),
+            128.0,
+            64.0,
+        ));
+        app.set_layer_style(1, style);
+        app.settings_record(false);
+        assert!(
+            app.active_gradient_fill().is_none(),
+            "the tool paints as usual"
+        );
+        app.workspace.filter.overlay_editing = app.canvas.layer_id_at(1);
+        let (_, end) = app.active_gradient_fill().expect("its ends while open");
+        app.gradient_press(end);
+        app.gradient_drag(Vec2::new(40.0, 40.0), false);
+        app.gradient_release();
+        assert_eq!(app.active_gradient_fill().unwrap().1, Vec2::new(40.0, 40.0));
+        app.apply_history(false);
+        assert_eq!(app.active_gradient_fill().unwrap().1, end, "undone");
+    }
+
+    #[test]
+    fn the_tool_settings_change_a_selected_gradient_fill() {
+        let mut app = app();
+        app.active_tool = crate::app::tools::Tool::Gradient;
+        app.add_gradient_fill_layer();
+        app.workspace.gradient.settings.shape = GradientShape::Diamond;
+        app.gradient_settings_changed();
+        app.settings_record(false);
+        let idx = app.canvas.active_layer_idx;
+        let shape = |app: &crate::PainterApp| {
+            app.canvas.layers[idx]
+                .style
+                .fill
+                .as_ref()
+                .and_then(|f| f.gradient())
+                .map(|g| g.shape)
+        };
+        assert_eq!(shape(&app), Some(GradientShape::Diamond));
+        app.apply_history(false);
+        assert_eq!(shape(&app), Some(GradientShape::Linear), "undone");
     }
 
     #[test]

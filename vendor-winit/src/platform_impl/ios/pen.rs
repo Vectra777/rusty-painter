@@ -77,6 +77,7 @@ fn sample(touch: &UITouch, scale: f64, touch_id: u64, phase: PenPhase) -> PenSam
         roll,
         touch_id,
         phase,
+        time: touch.timestamp(),
     }
 }
 

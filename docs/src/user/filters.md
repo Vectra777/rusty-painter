@@ -11,4 +11,16 @@ Every filter previews live on the layer or the selection; sliders preview smooth
 
 ## Gradients
 
-`Shift+G`: linear, radial, reflected and angle gradients, previewed live, dithered, clipped to the selection.
+`Shift+G`: linear, radial, reflected, angle and diamond gradients, previewed live, dithered, clipped to the selection, with any of the 28 blend modes. Drag the ends again before applying; Shift snaps the angle to 15°.
+
+- **Paint** paints the gradient onto the layer.
+- **Fill layer** makes a gradient fill layer instead, which stays editable.
+- With a gradient fill layer selected, the tool edits it: its ends show on the canvas; drag one to move it, or drag away from them to place the gradient anew. The tool's gradient, shape, repeat and reverse change it too. Each change is one undo step.
+
+**The gradient editor** (the gradient tool's Edit…, the gradient map, gradient fill layers) works as Photoshop's:
+
+- Colour stops under the strip, opacity stops over it: click a lane to add one where the gradient already is, drag a marker to move it, or off the strip to remove it.
+- Between each pair of stops, a diamond: the midpoint, where the two are mixed half and half. Drag it, or set it below.
+- A colour stop of your own gradients can follow the brush's primary or secondary colour.
+- The gradient map and fill layers can start from any of your gradients or the presets (Gradients ▾) and save theirs to your gradients.
+- **Photoshop gradients** (`.grd`): the gradient picker's Import .grd…, or drop the files on the window. Their stops, opacity stops and midpoints come across, and stops in the foreground or background colour follow your primary and secondary colours. Noise gradients (random colours, no stops) are left out, and Photoshop's Smoothness is read as none.

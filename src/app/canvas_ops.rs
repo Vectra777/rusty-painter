@@ -189,6 +189,8 @@ impl PainterApp {
         ws.fill.path.clear();
         ws.guides.end_drag();
         ws.view_aids.guides.end_drag();
+        ws.pen.path = Default::default();
+        ws.pen.end_session();
         // Its layer and history belong to the old document.
         ws.select.quick_mask = None;
         self.viewport.touch.pen_on_canvas = false;
@@ -1201,23 +1203,23 @@ impl PainterApp {
         self.add_fill_layer(crate::canvas::layer_style::LayerFill::Colour([r, g, b]));
     }
 
-    /// A gradient fill from the brush colour to the secondary colour,
-    /// left to right across the canvas.
+    /// A gradient fill with the gradient tool's gradient and shape, left
+    /// to right across the canvas.
     pub(crate) fn add_gradient_fill_layer(&mut self) {
-        let rgb = |c: Color32| {
-            let [r, g, b, _] = c.unmultiplied();
-            [r, g, b]
-        };
-        let colours = crate::canvas::filters::GradientMap::from_stops(&[
-            (0.0, rgb(self.brush_state.brush.brush_options.color)),
-            (1.0, rgb(self.brush_state.secondary_color)),
-        ]);
+        let settings = self.workspace.gradient.settings;
+        let colours = self.workspace.gradient.library.stops(
+            settings.colors,
+            self.brush_state.brush.brush_options.color,
+            self.brush_state.secondary_color,
+        );
         let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
         self.add_fill_layer(crate::canvas::layer_style::LayerFill::Gradient {
             colours,
-            shape: crate::canvas::gradient::GradientShape::Linear,
+            shape: settings.shape,
             start: [0.0, h / 2.0],
             end: [w, h / 2.0],
+            repeat: settings.repeat,
+            reverse: settings.reverse,
         });
     }
 
@@ -1230,6 +1232,9 @@ impl PainterApp {
         if self.canvas.layers.get(idx).is_none_or(|l| l.style == style) {
             return;
         }
+        // An undo step once the change is let go of
+        // ([`Self::settings_record`]).
+        self.settings_watch();
         self.canvas_mut().layers[idx].style = style;
         self.mark_all_tiles_dirty();
         self.layer_state.thumbnails_dirty = true;

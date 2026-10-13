@@ -21,25 +21,84 @@ use std::path::PathBuf;
 /// A tile's position and pixels.
 type LayerTile = ((i32, i32), Vec<Color32>);
 
-/// A font on offer: shipped with the app, or a file opened when chosen.
+/// A font on offer: shipped with the app, or a face of a font file, opened
+/// when chosen.
 pub struct FontEntry {
+    /// Family and style, as the font names itself ("Noto Sans Bold").
     pub name: String,
+    pub family: String,
+    /// The file's name without its extension: what text layers saved
+    /// before font names were read call it.
+    stem: String,
     file: Option<PathBuf>,
+    /// The face within a collection (`.ttc`).
+    index: u32,
     loaded: Option<FontArc>,
 }
+
+impl FontEntry {
+    fn open(&mut self) -> Option<FontArc> {
+        if self.loaded.is_none()
+            && let Some(path) = &self.file
+        {
+            self.loaded = std::fs::read(path).ok().and_then(|bytes| {
+                ab_glyph::FontVec::try_from_vec_and_index(bytes, self.index)
+                    .ok()
+                    .map(FontArc::new)
+            });
+        }
+        self.loaded.clone()
+    }
+}
+
+/// Families that cover many scripts, tried for characters the chosen font
+/// lacks (after the shipped fonts).
+const FALLBACK_FAMILIES: &[&str] = &[
+    "Noto Sans",
+    "DejaVu Sans",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Droid Sans Fallback",
+    "Noto Sans Symbols",
+    "Noto Sans Symbols 2",
+    "Segoe UI",
+    "Segoe UI Symbol",
+    "Microsoft YaHei",
+    "Arial Unicode MS",
+    "Roboto",
+];
 
 #[derive(Default)]
 pub struct TextToolState {
     pub style: TextStyle,
     /// Index into `fonts`.
     pub font: usize,
-    /// Filled the first time the tool is used.
+    /// The shipped fonts, then the system's once they're listed.
     pub fonts: Vec<FontEntry>,
+    /// The system's fonts being listed on another thread.
+    scan: Option<std::sync::mpsc::Receiver<Vec<FontEntry>>>,
+    /// The system's fonts are listed.
+    pub scanned: bool,
+    /// What the font list is narrowed to.
+    pub search: String,
+    /// Fonts for characters the chosen one lacks, once needed.
+    fallback: Option<Vec<FontArc>>,
     pub session: Option<TextSession>,
     /// Text layers a brush stroke started on, in stroke order: made plain
     /// pixels when the stroke began, their text goes into the stroke's undo
     /// step when it's filed.
     pub(crate) stroke_rasterised: Vec<(LayerId, Box<TextLayer>)>,
+}
+
+/// What the pointer is doing to the text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TextDrag {
+    /// Moving it, held at this offset from its top-left.
+    Move(Vec2),
+    /// Selecting from the anchor to the pointer.
+    Select,
+    /// Widening its box.
+    Width,
 }
 
 /// Text being typed.
@@ -57,14 +116,36 @@ pub struct TextSession {
     layer: LayerId,
     /// The layer selected before, selected again when done.
     active_before: usize,
-    /// Pointer offset from `pos` while dragging the text.
-    grab: Option<Vec2>,
+    drag: Option<TextDrag>,
+    /// The caret, as a character index; with `anchor`, the selection.
+    pub caret: usize,
+    pub anchor: usize,
+    /// Text an input method is composing (shown, not yet typed).
+    pub preedit: String,
+    /// The last click, for double and triple clicks: when, where, how many.
+    last_click: Option<(std::time::Instant, Vec2, u8)>,
+    /// When the caret last moved (it shows steadily for a moment).
+    pub moved_at: std::time::Instant,
+    /// Text and caret before each edit, for undo while typing.
+    undo: Vec<(String, usize)>,
+    redo: Vec<(String, usize)>,
+    /// The last edit was typing (more typing joins its undo step).
+    typing: bool,
     /// What the preview shows, to repaint when anything changes.
     shown: Option<(String, Vec2, TextStyle, usize, Color32)>,
-    /// The dialog's text box should take the keyboard (just opened).
-    pub focus: bool,
+    /// What the canvas draws over the text, worked out each frame.
+    pub view: Option<TextView>,
     /// Editing an existing text layer: how it was.
     editing: Option<EditedLayer>,
+}
+
+/// The text's box, caret and selection, from its top-left, for drawing.
+#[derive(Clone, Debug, Default)]
+pub struct TextView {
+    pub size: Vec2,
+    pub caret: Vec2,
+    pub caret_height: f32,
+    pub selection: Vec<egui::Rect>,
 }
 
 /// A text layer as it was when its editing began.
@@ -73,36 +154,107 @@ struct EditedLayer {
     tiles: Vec<LayerTile>,
 }
 
-impl TextToolState {
-    /// The shipped fonts, then the system's (listed once).
-    pub fn ensure_fonts(&mut self) {
-        if !self.fonts.is_empty() {
-            return;
-        }
-        self.fonts = text::builtin_fonts()
-            .into_iter()
-            .map(|(name, font)| FontEntry {
-                name,
-                file: None,
-                loaded: Some(font),
+/// The faces in font file `path`, named from their own tables.
+fn faces_of(path: &std::path::Path) -> Vec<FontEntry> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let stem = path
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let count = ttf_parser::fonts_in_collection(&bytes).unwrap_or(1).min(64);
+    (0..count)
+        .filter_map(|index| {
+            let face = ttf_parser::Face::parse(&bytes, index).ok()?;
+            let name = |ids: &[u16]| {
+                ids.iter().find_map(|&id| {
+                    face.names()
+                        .into_iter()
+                        .filter(|n| n.name_id == id && n.is_unicode())
+                        .find_map(|n| n.to_string())
+                })
+            };
+            use ttf_parser::name_id;
+            let family = name(&[name_id::TYPOGRAPHIC_FAMILY, name_id::FAMILY])
+                .unwrap_or_else(|| stem.clone());
+            let style =
+                name(&[name_id::TYPOGRAPHIC_SUBFAMILY, name_id::SUBFAMILY]).unwrap_or_default();
+            let full = if style.is_empty() || style.eq_ignore_ascii_case("regular") {
+                family.clone()
+            } else {
+                format!("{family} {style}")
+            };
+            Some(FontEntry {
+                name: full,
+                family,
+                stem: stem.clone(),
+                file: Some(path.to_path_buf()),
+                index,
+                loaded: None,
             })
-            .chain(
-                text::system_font_files()
+        })
+        .collect()
+}
+
+impl TextToolState {
+    /// The shipped fonts at once; the system's listed on another thread
+    /// (the list fills in when they're found).
+    pub fn ensure_fonts(&mut self) {
+        if self.fonts.is_empty() {
+            self.fonts = text::builtin_fonts()
+                .into_iter()
+                .map(|(name, font)| FontEntry {
+                    family: name.clone(),
+                    stem: name.clone(),
+                    name,
+                    file: None,
+                    index: 0,
+                    loaded: Some(font),
+                })
+                .collect();
+        }
+        if !self.scanned && self.scan.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut found: Vec<FontEntry> = text::system_font_files()
                     .into_iter()
-                    .map(|(name, path)| FontEntry {
-                        name,
-                        file: Some(path),
-                        loaded: None,
-                    }),
-            )
-            .collect();
+                    .flat_map(|(_, path)| faces_of(&path))
+                    .collect();
+                found.sort_by_key(|f| f.name.to_lowercase());
+                found.dedup_by(|a, b| a.name == b.name);
+                let _ = tx.send(found);
+            });
+            self.scan = Some(rx);
+        }
+        if let Some(rx) = &self.scan {
+            match rx.try_recv() {
+                Ok(found) => self.add_scanned(found),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.add_scanned(Vec::new()),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    fn add_scanned(&mut self, found: Vec<FontEntry>) {
+        self.fonts.extend(found);
+        self.scan = None;
+        self.scanned = true;
+        self.fallback = None;
+    }
+
+    /// Wait for the system's fonts (a text layer's font may be among them).
+    fn wait_for_fonts(&mut self) {
+        self.ensure_fonts();
+        if let Some(rx) = self.scan.take() {
+            self.add_scanned(rx.recv().unwrap_or_default());
+        }
     }
 
     /// The chosen font, opened if need be (a file that won't open falls
     /// back to the first font).
     pub fn current_font(&mut self) -> Option<FontArc> {
         self.ensure_fonts();
-        match self.open_font(self.font) {
+        match self.fonts.get_mut(self.font).and_then(FontEntry::open) {
             Some(font) => Some(font),
             None => {
                 self.font = 0;
@@ -111,17 +263,43 @@ impl TextToolState {
         }
     }
 
-    /// Font `index`, opened if need be.
-    fn open_font(&mut self, index: usize) -> Option<FontArc> {
-        let entry = self.fonts.get_mut(index)?;
-        if entry.loaded.is_none()
-            && let Some(path) = &entry.file
-        {
-            entry.loaded = std::fs::read(path)
-                .ok()
-                .and_then(|bytes| FontArc::try_from_vec(bytes).ok());
+    /// The chosen font and, if `text` has characters it lacks, the fonts
+    /// tried for them.
+    pub fn fonts_for(&mut self, text: &str) -> Option<Vec<FontArc>> {
+        let main = self.current_font()?;
+        Some(self.with_fallback(main, text))
+    }
+
+    fn with_fallback(&mut self, main: FontArc, text: &str) -> Vec<FontArc> {
+        use ab_glyph::Font;
+        let lacks = text
+            .chars()
+            .any(|c| !c.is_whitespace() && main.glyph_id(c).0 == 0);
+        if !lacks {
+            return vec![main];
         }
-        entry.loaded.clone()
+        if self.fallback.is_none() {
+            let mut fonts: Vec<FontArc> = self
+                .fonts
+                .iter()
+                .filter_map(|f| f.loaded.clone())
+                .take(2)
+                .collect();
+            for family in FALLBACK_FAMILIES {
+                if let Some(entry) = self
+                    .fonts
+                    .iter_mut()
+                    .find(|f| f.family.eq_ignore_ascii_case(family) && f.name == f.family)
+                    && let Some(font) = entry.open()
+                {
+                    fonts.push(font);
+                }
+            }
+            self.fallback = Some(fonts);
+        }
+        std::iter::once(main)
+            .chain(self.fallback.iter().flatten().cloned())
+            .collect()
     }
 
     /// The name of the chosen font.
@@ -131,43 +309,183 @@ impl TextToolState {
             .map_or_else(String::new, |f| f.name.clone())
     }
 
-    /// Where the font called `name` is in the list.
+    /// Where the font called `name` is in the list (by its name, or its
+    /// file's, as layers saved before named it).
     fn font_index(&mut self, name: &str) -> Option<usize> {
         self.ensure_fonts();
-        self.fonts.iter().position(|f| f.name == name)
+        let find = |fonts: &[FontEntry]| {
+            fonts
+                .iter()
+                .position(|f| f.name == name)
+                .or_else(|| fonts.iter().position(|f| f.stem == name))
+        };
+        if let Some(i) = find(&self.fonts) {
+            return Some(i);
+        }
+        self.wait_for_fonts();
+        find(&self.fonts)
     }
 
-    /// The font a text layer uses (the first font if it isn't here).
-    fn font_for(&mut self, name: &str) -> Option<FontArc> {
-        let index = self.font_index(name).unwrap_or(0);
-        self.open_font(index)
-            .or_else(|| self.fonts.first().and_then(|f| f.loaded.clone()))
+    /// The fonts a text layer uses (the first font if its own isn't here).
+    fn fonts_of(&mut self, layer: &TextLayer) -> Option<Vec<FontArc>> {
+        let index = self.font_index(&layer.font).unwrap_or(0);
+        let main = self
+            .fonts
+            .get_mut(index)
+            .and_then(FontEntry::open)
+            .or_else(|| self.fonts.first().and_then(|f| f.loaded.clone()))?;
+        Some(self.with_fallback(main, &layer.text))
     }
 }
 
+/// Character `index`'s byte offset in `s` (its end past the last).
+fn byte_at(s: &str, index: usize) -> usize {
+    s.char_indices().nth(index).map_or(s.len(), |(b, _)| b)
+}
+
+/// The word around caret `index` (letters, digits and `_`; otherwise
+/// the one character there).
+fn word_at(text: &str, index: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let at = index.min(chars.len().saturating_sub(1));
+    if chars.is_empty() || !is_word(chars[at]) {
+        return (index, (index + 1).min(chars.len()));
+    }
+    let mut a = at;
+    while a > 0 && is_word(chars[a - 1]) {
+        a -= 1;
+    }
+    let mut b = at;
+    while b < chars.len() && is_word(chars[b]) {
+        b += 1;
+    }
+    (a, b)
+}
+
+/// The caret moved a word left (`-1`) or right (`1`) from `index`.
+fn word_step(text: &str, index: usize, dir: i32) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut i = index;
+    if dir < 0 {
+        while i > 0 && !is_word(chars[i - 1]) {
+            i -= 1;
+        }
+        while i > 0 && is_word(chars[i - 1]) {
+            i -= 1;
+        }
+    } else {
+        while i < chars.len() && !is_word(chars[i]) {
+            i += 1;
+        }
+        while i < chars.len() && is_word(chars[i]) {
+            i += 1;
+        }
+    }
+    i
+}
+
+/// In screen points: how near a click must be to the text's handles.
+const TEXT_HANDLE: f32 = 10.0;
+
 impl PainterApp {
-    pub(crate) fn text_press(&mut self, pos: Vec2) {
-        let font = self
-            .workspace
-            .text
-            .session
-            .is_some()
-            .then(|| self.workspace.text.current_font())
-            .flatten();
-        if let Some(font) = font
-            && let Some(session) = &self.workspace.text.session
+    /// The session's layout, from its top-left.
+    fn text_layout(&mut self) -> Option<text::Layout> {
+        let state = &mut self.workspace.text;
+        let session = state.session.as_ref()?;
+        let shown = format!("{}{}", session.text, session.preedit);
+        let fonts = state.fonts_for(&shown)?;
+        let session = state.session.as_ref()?;
+        let mut t = session.text.clone();
+        t.insert_str(byte_at(&t, session.caret), &session.preedit);
+        Some(text::layout(&fonts, &t, &state.style))
+    }
+
+    /// The text's box on the canvas (at least a caret's size).
+    pub(crate) fn text_box(&mut self) -> Option<egui::Rect> {
+        let layout = self.text_layout()?;
+        let session = self.workspace.text.session.as_ref()?;
+        let size = Vec2::new(
+            layout.size.x.max(1.0),
+            layout.size.y.max(layout.text_height),
+        );
+        Some(egui::Rect::from_min_size(
+            egui::pos2(session.pos.x, session.pos.y),
+            egui::vec2(size.x, size.y),
+        ))
+    }
+
+    /// A press with the Text tool. On the text being typed: the caret goes
+    /// there (Shift: the selection grows to it; again quickly: a word,
+    /// then a line), and a drag selects; on its move handle (or with Ctrl)
+    /// it's moved; on a box's right edge, the box widens. Elsewhere it's
+    /// kept, and a press with no text being typed starts some (on a text
+    /// layer, edits it).
+    pub(crate) fn text_press(&mut self, pos: Vec2, shift: bool, command: bool) {
+        let zoom = self.viewport.zoom.max(0.01);
+        let handle = TEXT_HANDLE / zoom;
+        if self.workspace.text.session.is_some()
+            && let Some(rect) = self.text_box()
         {
-            let size = text::measure(&font, &session.text, &self.workspace.text.style);
-            let r = egui::Rect::from_min_size(egui::pos2(session.pos.x, session.pos.y), size)
-                .expand(8.0 / self.viewport.zoom.max(0.01));
-            if r.contains(egui::pos2(pos.x, pos.y)) {
-                let offset = pos - session.pos;
+            let session = self.workspace.text.session.as_ref().expect("a session");
+            let origin = session.pos;
+            let mover = egui::pos2(rect.left(), rect.top()) - egui::vec2(handle, handle);
+            let near_mover = (egui::pos2(pos.x, pos.y) - mover).length() <= handle;
+            let on_text = rect.expand(handle * 0.5).contains(egui::pos2(pos.x, pos.y));
+            let boxed = self.workspace.text.style.width.is_some();
+            let on_edge = boxed
+                && (pos.x - rect.right()).abs() <= handle
+                && pos.y >= rect.top()
+                && pos.y <= rect.bottom();
+            if near_mover || (command && on_text) {
                 if let Some(s) = self.workspace.text.session.as_mut() {
-                    s.grab = Some(offset);
+                    s.drag = Some(TextDrag::Move(pos - origin));
                 }
                 return;
             }
+            if on_edge {
+                if let Some(s) = self.workspace.text.session.as_mut() {
+                    s.drag = Some(TextDrag::Width);
+                }
+                return;
+            }
+            if on_text {
+                let Some(layout) = self.text_layout() else {
+                    return;
+                };
+                let at = layout.hit(pos - origin);
+                let now = std::time::Instant::now();
+                let s = self.workspace.text.session.as_mut().expect("a session");
+                let count = match s.last_click {
+                    Some((t, p, n))
+                        if now.duration_since(t).as_millis() < 450
+                            && (p - pos).length() * zoom < 6.0 =>
+                    {
+                        n % 3 + 1
+                    }
+                    _ => 1,
+                };
+                s.last_click = Some((now, pos, count));
+                s.preedit.clear();
+                match count {
+                    2 => (s.anchor, s.caret) = word_at(&s.text, at),
+                    3 => (s.anchor, s.caret) = layout.line_bounds(at),
+                    _ => {
+                        s.caret = at;
+                        if !shift {
+                            s.anchor = at;
+                        }
+                    }
+                }
+                s.drag = (count == 1).then_some(TextDrag::Select);
+                s.typing = false;
+                s.moved_at = now;
+                return;
+            }
+            // Away from it: kept, and that's all.
             self.text_commit();
+            return;
         }
         match self.text_layer_at(pos) {
             Some(idx) => self.text_edit_layer(idx),
@@ -179,23 +497,60 @@ impl PainterApp {
     /// point `pos`.
     fn text_layer_at(&mut self, pos: Vec2) -> Option<usize> {
         let margin = 4.0 / self.viewport.zoom.max(0.01);
-        let candidates: Vec<(usize, TextLayer)> = self
-            .canvas
-            .layers
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, l)| l.visible && !l.locked)
-            .filter_map(|(i, l)| Some((i, (**l.text.as_ref()?).clone())))
-            .collect();
-        candidates.into_iter().find_map(|(i, t)| {
-            let font = self.workspace.text.font_for(&t.font)?;
-            let size = text::measure(&font, &t.text, &t.style);
-            egui::Rect::from_min_size(egui::pos2(t.pos.x, t.pos.y), size)
+        let hit = |canvas: &crate::canvas::Canvas, i: usize| -> Option<TextLayer> {
+            let l = &canvas.layers[i];
+            (l.visible && !l.locked)
+                .then(|| l.text.as_deref().cloned())
+                .flatten()
+        };
+        for i in (0..self.canvas.layers.len()).rev() {
+            let Some(t) = hit(&self.canvas, i) else {
+                continue;
+            };
+            let Some(fonts) = self.workspace.text.fonts_of(&t) else {
+                continue;
+            };
+            let size = text::measure(&fonts, &t.text, &t.style);
+            if egui::Rect::from_min_size(egui::pos2(t.pos.x, t.pos.y), egui::vec2(size.x, size.y))
                 .expand(margin)
                 .contains(egui::pos2(pos.x, pos.y))
-                .then_some(i)
-        })
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    fn new_session(
+        &mut self,
+        text: String,
+        pos: Vec2,
+        color: Color32,
+        layer: LayerId,
+        active_before: usize,
+        editing: Option<EditedLayer>,
+    ) {
+        let end = text.chars().count();
+        self.workspace.text.session = Some(TextSession {
+            text,
+            pos,
+            color,
+            brush_seen: self.brush_state.brush.brush_options.color,
+            layer,
+            active_before,
+            drag: None,
+            caret: end,
+            anchor: if editing.is_some() { 0 } else { end },
+            preedit: String::new(),
+            last_click: None,
+            moved_at: std::time::Instant::now(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            typing: false,
+            shown: None,
+            view: None,
+            editing,
+        });
     }
 
     fn text_start(&mut self, pos: Vec2) {
@@ -212,23 +567,18 @@ impl PainterApp {
             return;
         };
         self.insert_layer_state(idx);
+        // A new text starts as point text; a drag makes it a box.
+        self.workspace.text.style.width = None;
         let color = self.brush_state.brush.brush_options.color;
-        self.workspace.text.session = Some(TextSession {
-            text: String::new(),
-            pos,
-            color,
-            brush_seen: color,
-            layer: id,
-            active_before: active,
-            grab: None,
-            shown: None,
-            focus: true,
-            editing: None,
-        });
+        self.new_session(String::new(), pos, color, id, active, None);
+        if let Some(s) = self.workspace.text.session.as_mut() {
+            s.drag = Some(TextDrag::Width);
+        }
     }
 
     /// Open text layer `idx` for editing, with its text, font and settings
-    /// loaded (with the Text tool). Does nothing for other layers.
+    /// loaded (with the Text tool), all its text selected. Does nothing for
+    /// other layers.
     pub(crate) fn text_edit_layer(&mut self, idx: usize) {
         self.text_commit();
         crate::app::tools::transform::commit_floating_layer(self);
@@ -255,39 +605,290 @@ impl PainterApp {
         state.style = source.style;
         self.active_tool = crate::app::tools::Tool::Text;
         self.canvas_mut().active_layer_idx = idx;
-        self.workspace.text.session = Some(TextSession {
-            text: source.text.clone(),
-            pos: source.pos,
-            color: source.color,
-            brush_seen: self.brush_state.brush.brush_options.color,
-            layer: id,
-            active_before: idx,
-            grab: None,
-            shown: None,
-            focus: true,
-            editing: Some(EditedLayer {
+        let (text, pos, color) = (source.text.clone(), source.pos, source.color);
+        self.new_session(
+            text,
+            pos,
+            color,
+            id,
+            idx,
+            Some(EditedLayer {
                 text: source,
                 tiles,
             }),
-        });
+        );
     }
 
     pub(crate) fn text_drag(&mut self, pos: Vec2) {
-        if let Some(s) = self.workspace.text.session.as_mut()
-            && let Some(grab) = s.grab
-        {
-            s.pos = pos - grab;
+        let Some(drag) = self.workspace.text.session.as_ref().and_then(|s| s.drag) else {
+            return;
+        };
+        match drag {
+            TextDrag::Move(grab) => {
+                if let Some(s) = self.workspace.text.session.as_mut() {
+                    s.pos = pos - grab;
+                }
+            }
+            TextDrag::Select => {
+                let Some(layout) = self.text_layout() else {
+                    return;
+                };
+                if let Some(s) = self.workspace.text.session.as_mut() {
+                    s.caret = layout.hit(pos - s.pos);
+                    s.moved_at = std::time::Instant::now();
+                }
+            }
+            TextDrag::Width => {
+                let zoom = self.viewport.zoom.max(0.01);
+                let state = &mut self.workspace.text;
+                let Some(s) = state.session.as_ref() else {
+                    return;
+                };
+                let width = pos.x - s.pos.x;
+                // A new text's drag: a box once it's dragged a little.
+                if state.style.width.is_some() || width * zoom > 12.0 {
+                    state.style.width = Some(width.max(state.style.size));
+                }
+            }
         }
     }
 
     pub(crate) fn text_release(&mut self) {
         if let Some(s) = self.workspace.text.session.as_mut() {
-            s.grab = None;
+            s.drag = None;
         }
     }
 
-    /// Repaint the preview if the text, its place or its look changed.
+    /// Keep the text and caret before an edit, for undo while typing
+    /// (typing in a run is one step).
+    fn text_checkpoint(s: &mut TextSession, typing: bool) {
+        if !(typing && s.typing) {
+            s.undo.push((s.text.clone(), s.caret));
+            s.redo.clear();
+        }
+        s.typing = typing;
+    }
+
+    /// Put `insert` in place of the selection.
+    fn text_replace(s: &mut TextSession, insert: &str) {
+        let (a, b) = (s.caret.min(s.anchor), s.caret.max(s.anchor));
+        let (ba, bb) = (byte_at(&s.text, a), byte_at(&s.text, b));
+        s.text.replace_range(ba..bb, insert);
+        s.caret = a + insert.chars().count();
+        s.anchor = s.caret;
+        s.moved_at = std::time::Instant::now();
+    }
+
+    /// The selected text.
+    fn text_selected(s: &TextSession) -> String {
+        let (a, b) = (s.caret.min(s.anchor), s.caret.max(s.anchor));
+        s.text[byte_at(&s.text, a)..byte_at(&s.text, b)].to_string()
+    }
+
+    /// The keyboard while text is being typed, before any shortcut sees
+    /// it: typing, the caret's keys, the clipboard, an input method, undo,
+    /// and Ctrl+Enter (keep) or Esc (cancel). Every key is the text's
+    /// meanwhile; returns whether anything happened.
+    pub(crate) fn text_keys(&mut self, ctx: &egui::Context) -> bool {
+        if self.workspace.text.session.is_none() || ctx.wants_keyboard_input() {
+            return false;
+        }
+        let events = ctx.input_mut(|i| {
+            // Kept: pointer and the rest. Taken: everything typed.
+            let (keys, rest): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut i.events).into_iter().partition(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Text(_)
+                            | egui::Event::Key { .. }
+                            | egui::Event::Copy
+                            | egui::Event::Cut
+                            | egui::Event::Paste(_)
+                            | egui::Event::Ime(_)
+                    )
+                });
+            i.events = rest;
+            keys
+        });
+        if events.is_empty() {
+            return false;
+        }
+        let layout = self.text_layout();
+        let mut keep = false;
+        let mut cancel = false;
+        let mut copied = None;
+        let Some(s) = self.workspace.text.session.as_mut() else {
+            return false;
+        };
+        let count = s.text.chars().count();
+        for event in events {
+            match event {
+                egui::Event::Text(t) => {
+                    let t: String = t.chars().filter(|c| !c.is_control()).collect();
+                    if !t.is_empty() {
+                        Self::text_checkpoint(s, true);
+                        Self::text_replace(s, &t);
+                    }
+                }
+                egui::Event::Paste(t) => {
+                    Self::text_checkpoint(s, false);
+                    Self::text_replace(s, &t.replace("\r\n", "\n"));
+                }
+                egui::Event::Copy => copied = Some(Self::text_selected(s)),
+                egui::Event::Cut => {
+                    copied = Some(Self::text_selected(s));
+                    Self::text_checkpoint(s, false);
+                    Self::text_replace(s, "");
+                }
+                egui::Event::Ime(ime) => match ime {
+                    egui::ImeEvent::Preedit(p) => s.preedit = p,
+                    egui::ImeEvent::Commit(t) => {
+                        s.preedit.clear();
+                        Self::text_checkpoint(s, true);
+                        Self::text_replace(s, &t);
+                    }
+                    egui::ImeEvent::Enabled | egui::ImeEvent::Disabled => s.preedit.clear(),
+                },
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers: m,
+                    ..
+                } => {
+                    use egui::Key;
+                    let count = s
+                        .text
+                        .chars()
+                        .count()
+                        .max(count.min(s.text.chars().count()));
+                    let go = |s: &mut TextSession, to: usize| {
+                        s.caret = to.min(count);
+                        if !m.shift {
+                            s.anchor = s.caret;
+                        }
+                        s.typing = false;
+                        s.moved_at = std::time::Instant::now();
+                    };
+                    let selected = s.caret != s.anchor;
+                    match key {
+                        Key::Escape => cancel = true,
+                        Key::Enter if m.command => keep = true,
+                        Key::Enter => {
+                            Self::text_checkpoint(s, false);
+                            Self::text_replace(s, "\n");
+                        }
+                        Key::Tab => {
+                            Self::text_checkpoint(s, true);
+                            Self::text_replace(s, "\t");
+                        }
+                        Key::Backspace | Key::Delete => {
+                            if !selected {
+                                let to = match (key, m.command || m.alt) {
+                                    (Key::Backspace, true) => word_step(&s.text, s.caret, -1),
+                                    (Key::Backspace, false) => s.caret.saturating_sub(1),
+                                    (_, true) => word_step(&s.text, s.caret, 1),
+                                    _ => (s.caret + 1).min(count),
+                                };
+                                s.anchor = to;
+                            }
+                            if s.caret != s.anchor {
+                                Self::text_checkpoint(s, false);
+                                Self::text_replace(s, "");
+                            }
+                        }
+                        Key::ArrowLeft if selected && !m.shift => go(s, s.caret.min(s.anchor)),
+                        Key::ArrowRight if selected && !m.shift => go(s, s.caret.max(s.anchor)),
+                        Key::ArrowLeft => {
+                            let to = if m.command || m.alt {
+                                word_step(&s.text, s.caret, -1)
+                            } else {
+                                s.caret.saturating_sub(1)
+                            };
+                            go(s, to)
+                        }
+                        Key::ArrowRight => {
+                            let to = if m.command || m.alt {
+                                word_step(&s.text, s.caret, 1)
+                            } else {
+                                s.caret + 1
+                            };
+                            go(s, to)
+                        }
+                        Key::ArrowUp | Key::ArrowDown => {
+                            let dir = if key == Key::ArrowUp { -1 } else { 1 };
+                            let to = layout.as_ref().and_then(|l| l.vertical(s.caret, dir));
+                            let edge = if dir < 0 { 0 } else { count };
+                            go(s, to.unwrap_or(edge))
+                        }
+                        Key::Home | Key::End => {
+                            let line = layout.as_ref().map(|l| l.line_bounds(s.caret));
+                            let (a, b) = match (m.command, line) {
+                                (false, Some(line)) => line,
+                                _ => (0, count),
+                            };
+                            go(s, if key == Key::Home { a } else { b })
+                        }
+                        Key::A if m.command => {
+                            s.anchor = 0;
+                            s.caret = count;
+                        }
+                        Key::Z if m.command => {
+                            let (from, to) = if m.shift {
+                                (&mut s.redo, &mut s.undo)
+                            } else {
+                                (&mut s.undo, &mut s.redo)
+                            };
+                            if let Some((text, caret)) = from.pop() {
+                                to.push((std::mem::replace(&mut s.text, text), s.caret));
+                                s.caret = caret.min(s.text.chars().count());
+                                s.anchor = s.caret;
+                                s.typing = false;
+                            }
+                        }
+                        Key::Y if m.command => {
+                            if let Some((text, caret)) = s.redo.pop() {
+                                s.undo.push((std::mem::replace(&mut s.text, text), s.caret));
+                                s.caret = caret.min(s.text.chars().count());
+                                s.anchor = s.caret;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(text) = copied.filter(|t| !t.is_empty()) {
+            ctx.copy_text(text);
+        }
+        if keep {
+            self.text_commit();
+        } else if cancel {
+            self.text_cancel();
+        }
+        true
+    }
+
+    /// Repaint the preview if the text, its place or its look changed; and
+    /// work out the caret and selection to draw.
     pub(crate) fn text_update(&mut self) {
+        if self.workspace.text.session.is_some()
+            && let Some(layout) = self.text_layout()
+            && let Some(s) = self.workspace.text.session.as_mut()
+        {
+            let preedit = s.preedit.chars().count();
+            s.view = Some(TextView {
+                size: Vec2::new(layout.size.x, layout.size.y.max(layout.text_height)),
+                caret: layout.caret(s.caret + preedit),
+                caret_height: layout.text_height,
+                selection: if preedit > 0 {
+                    // What the input method is composing, underlined.
+                    layout.selection(s.caret, s.caret + preedit)
+                } else {
+                    layout.selection(s.anchor, s.caret)
+                },
+            });
+        }
         let brush_color = self.brush_state.brush.brush_options.color;
         let font_index = self.workspace.text.font;
         let style = self.workspace.text.style;
@@ -299,13 +900,9 @@ impl PainterApp {
             session.brush_seen = brush_color;
             session.color = brush_color;
         }
-        let now = (
-            session.text.clone(),
-            session.pos,
-            style,
-            font_index,
-            session.color,
-        );
+        let mut shown = session.text.clone();
+        shown.insert_str(byte_at(&shown, session.caret), &session.preedit);
+        let now = (shown, session.pos, style, font_index, session.color);
         if session.shown.as_ref() == Some(&now) {
             return;
         }
@@ -313,12 +910,12 @@ impl PainterApp {
             self.workspace.text.session = None;
             return;
         };
-        let Some(font) = self.workspace.text.current_font() else {
+        let Some(fonts) = self.workspace.text.fonts_for(&now.0) else {
             return;
         };
         self.release_canvas();
         self.clear_layer_tiles(idx);
-        if let Some(mask) = text::render(&font, &now.0, &style, now.1) {
+        if let Some(mask) = text::render(&fonts, &now.0, &style, now.1) {
             let mut scratch = UndoAction {
                 tiles: Vec::new(),
                 selection: None,
@@ -359,9 +956,18 @@ impl PainterApp {
         }
     }
 
+    /// A text layer's name from its text.
+    fn text_layer_name(text: &str) -> String {
+        let first: String = text.lines().next().unwrap_or("").chars().take(24).collect();
+        format!("Text: {}", first.trim())
+    }
+
     /// Keep the text: a new text layer, or the edited one, as one undo step
     /// (blank new text is dropped; an edited layer left blank is deleted).
     pub(crate) fn text_commit(&mut self) {
+        if let Some(s) = self.workspace.text.session.as_mut() {
+            s.preedit.clear();
+        }
         self.text_update();
         let Some(session) = self.workspace.text.session.take() else {
             return;
@@ -377,21 +983,14 @@ impl PainterApp {
         if session.text.trim().is_empty() {
             return;
         }
-        let name: String = session
-            .text
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(24)
-            .collect();
-        self.add_layer_with_tiles(format!("Text: {}", name.trim()), tiles, |layer| {
+        self.add_layer_with_tiles(Self::text_layer_name(&session.text), tiles, |layer| {
             layer.text = Some(Box::new(source));
         });
     }
 
     /// Keep an edited text layer's new text and pixels as one undo step,
-    /// which gives back both.
+    /// which gives back both. A layer still named after its text is named
+    /// after the new text.
     fn text_commit_edit(&mut self, mut session: TextSession) {
         let source = self.text_source(&session);
         let Some(before) = session.editing.take() else {
@@ -410,6 +1009,9 @@ impl PainterApp {
             return;
         }
         self.release_canvas();
+        if self.canvas.layers[idx].name == Self::text_layer_name(&before.text.text) {
+            self.canvas_mut().layers[idx].name = Self::text_layer_name(&source.text);
+        }
         let ts = self.canvas.tile_size();
         let mut keys = self.canvas.layer_tile_keys(idx);
         keys.extend(before.tiles.iter().map(|(k, _)| *k));
@@ -632,6 +1234,88 @@ impl PainterApp {
     }
 }
 
+/// Draw the text being typed: a frame round it, a handle to move it (and
+/// a box's to widen it), the selection and a blinking caret. Tells the
+/// system where the caret is, for an input method's window.
+pub(crate) fn draw_text(
+    app: &PainterApp,
+    painter: &egui::Painter,
+    to_screen: &dyn Fn(Vec2) -> egui::Pos2,
+) {
+    use crate::ui::style::accent;
+    let Some(session) = &app.workspace.text.session else {
+        return;
+    };
+    let Some(view) = &session.view else {
+        return;
+    };
+    let at = |p: Vec2| to_screen(session.pos + p);
+    let frame = [
+        at(Vec2::ZERO),
+        at(Vec2::new(view.size.x, 0.0)),
+        at(view.size),
+        at(Vec2::new(0.0, view.size.y)),
+        at(Vec2::ZERO),
+    ];
+    painter.add(egui::Shape::dashed_line(
+        &frame,
+        egui::Stroke::new(1.0_f32, accent()),
+        4.0,
+        3.0,
+    ));
+    // The move handle, up and left of the top-left corner.
+    let corner = frame[0] - egui::vec2(TEXT_HANDLE, TEXT_HANDLE);
+    let handle = egui::Rect::from_center_size(corner, egui::vec2(9.0, 9.0));
+    painter.rect_filled(handle, 1.0, accent());
+    painter.rect_stroke(handle, 1.0, egui::Stroke::new(1.0_f32, Color32::BLACK));
+    if app.workspace.text.style.width.is_some() {
+        // The box's width, at its right edge.
+        let mid = egui::pos2(
+            (frame[1].x + frame[2].x) / 2.0,
+            (frame[1].y + frame[2].y) / 2.0,
+        );
+        let edge = egui::Rect::from_center_size(mid, egui::vec2(6.0, 14.0));
+        painter.rect_filled(edge, 1.0, Color32::WHITE);
+        painter.rect_stroke(edge, 1.0, egui::Stroke::new(1.0_f32, accent()));
+    }
+    let composing = !session.preedit.is_empty();
+    for r in &view.selection {
+        let (a, b) = (at(r.min.to_vec2()), at(r.max.to_vec2()));
+        if composing {
+            painter.line_segment(
+                [egui::pos2(a.x, b.y), b],
+                egui::Stroke::new(2.0_f32, accent()),
+            );
+        } else {
+            painter.rect_filled(
+                egui::Rect::from_two_pos(a, b),
+                0.0,
+                accent().gamma_multiply(0.35),
+            );
+        }
+    }
+    // Blinking, steady for a moment after it moves.
+    let since = session.moved_at.elapsed().as_secs_f32();
+    let shown = since < 0.6 || ((since / 0.53) as u32).is_multiple_of(2);
+    let top = at(view.caret);
+    let bottom = at(view.caret + Vec2::new(0.0, view.caret_height));
+    if shown {
+        painter.line_segment(
+            [top, bottom],
+            egui::Stroke::new(3.0_f32, Color32::from_black_alpha(140)),
+        );
+        painter.line_segment([top, bottom], egui::Stroke::new(1.5_f32, Color32::WHITE));
+    }
+    let ctx = painter.ctx();
+    ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    ctx.output_mut(|o| {
+        o.ime = Some(egui::output::IMEOutput {
+            rect: egui::Rect::from_two_pos(frame[0], frame[2]),
+            cursor_rect: egui::Rect::from_two_pos(top, bottom + egui::vec2(1.0, 0.0)),
+        });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use crate::canvas::Canvas;
@@ -671,7 +1355,7 @@ mod tests {
     }
 
     fn type_text(app: &mut crate::PainterApp, pos: Vec2, text: &str) -> usize {
-        app.text_press(pos);
+        app.text_press(pos, false, false);
         app.workspace.text.session.as_mut().unwrap().text = text.into();
         app.text_update();
         app.text_commit();
@@ -686,7 +1370,7 @@ mod tests {
     fn typed_text_becomes_a_layer_in_one_undo_step() {
         let mut app = app();
         let layers = app.canvas.layers.len();
-        app.text_press(Vec2::new(20.0, 20.0));
+        app.text_press(Vec2::new(20.0, 20.0), false, false);
         app.workspace.text.session.as_mut().unwrap().text = "Hello".into();
         app.text_update();
         assert_eq!(
@@ -724,11 +1408,11 @@ mod tests {
     fn dragging_the_text_moves_it_and_cancel_leaves_nothing() {
         let mut app = app();
         let layers = app.canvas.layers.len();
-        app.text_press(Vec2::new(20.0, 20.0));
+        app.text_press(Vec2::new(20.0, 20.0), false, false);
         app.workspace.text.session.as_mut().unwrap().text = "Move".into();
         app.text_update();
-        // Press on the text: drag it rather than starting new text.
-        app.text_press(Vec2::new(30.0, 30.0));
+        // Ctrl+press on the text: drag it rather than starting new text.
+        app.text_press(Vec2::new(30.0, 30.0), false, true);
         app.text_drag(Vec2::new(130.0, 60.0));
         app.text_release();
         let s = app.workspace.text.session.as_ref().unwrap();
@@ -738,11 +1422,150 @@ mod tests {
         assert_eq!(undo_depth(&app), 0);
     }
 
+    /// `events` sent to the Text tool as one frame's keyboard input.
+    fn keys(app: &mut crate::PainterApp, events: Vec<egui::Event>) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            app.text_keys(ctx);
+            // Nothing typed is left for the shortcuts.
+            assert!(ctx.input(|i| i.events.iter().all(|e| !matches!(e, egui::Event::Text(_)))));
+        });
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    use eframe::egui;
+
+    #[test]
+    fn typing_on_the_canvas_edits_at_the_caret_and_undoes_in_runs() {
+        let mut app = app();
+        app.text_press(Vec2::new(20.0, 20.0), false, false);
+        app.text_release();
+        keys(&mut app, vec![egui::Event::Text("Helo".into())]);
+        let none = egui::Modifiers::NONE;
+        keys(&mut app, vec![key(egui::Key::ArrowLeft, none)]);
+        keys(&mut app, vec![egui::Event::Text("l".into())]);
+        let s = app.workspace.text.session.as_ref().unwrap();
+        assert_eq!((s.text.as_str(), s.caret), ("Hello", 4));
+        // Shift+Home selects to the start; typing replaces it.
+        keys(&mut app, vec![key(egui::Key::Home, egui::Modifiers::SHIFT)]);
+        keys(&mut app, vec![egui::Event::Text("J".into())]);
+        assert_eq!(app.workspace.text.session.as_ref().unwrap().text, "Jo");
+        // Undo while typing: back a step at a time.
+        keys(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.workspace.text.session.as_ref().unwrap().text, "Hello");
+        keys(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.workspace.text.session.as_ref().unwrap().text, "Helo");
+        // A letter key isn't a shortcut meanwhile: B types a b.
+        keys(
+            &mut app,
+            vec![key(egui::Key::End, none), egui::Event::Text("b".into())],
+        );
+        assert_eq!(app.workspace.text.session.as_ref().unwrap().text, "Helob");
+        assert_eq!(
+            app.active_tool,
+            crate::app::tools::Tool::Brush,
+            "no tool switch"
+        );
+        // Backspace, then Ctrl+Enter keeps it.
+        keys(
+            &mut app,
+            vec![
+                key(egui::Key::Backspace, none),
+                key(egui::Key::Enter, egui::Modifiers::COMMAND),
+            ],
+        );
+        assert!(app.workspace.text.session.is_none());
+        let idx = app.canvas.active_layer_idx;
+        assert_eq!(app.canvas.layers[idx].text.as_ref().unwrap().text, "Helo");
+    }
+
+    #[test]
+    fn clicks_place_the_caret_and_select_words_and_a_click_away_keeps_it() {
+        let mut app = app();
+        app.text_press(Vec2::new(20.0, 20.0), false, false);
+        app.text_release();
+        keys(&mut app, vec![egui::Event::Text("one two".into())]);
+        app.text_update();
+        let view = app
+            .workspace
+            .text
+            .session
+            .as_ref()
+            .unwrap()
+            .view
+            .clone()
+            .unwrap();
+        // A click at the far left of the text: the caret at its start.
+        app.text_press(Vec2::new(21.0, 30.0), false, false);
+        app.text_release();
+        assert_eq!(app.workspace.text.session.as_ref().unwrap().caret, 0);
+        // Twice on the second word: it's selected.
+        let on_two = Vec2::new(20.0 + view.size.x - 5.0, 30.0);
+        for _ in 0..2 {
+            app.text_press(on_two, false, false);
+            app.text_release();
+        }
+        let s = app.workspace.text.session.as_ref().unwrap();
+        assert_eq!((s.anchor.min(s.caret), s.anchor.max(s.caret)), (4, 7));
+        // Away from it: kept, and no new text started.
+        let layers = app.canvas.layers.len();
+        app.text_press(Vec2::new(250.0, 100.0), false, false);
+        assert!(app.workspace.text.session.is_none());
+        assert_eq!(
+            app.canvas.layers.len(),
+            layers,
+            "the preview became the layer"
+        );
+    }
+
+    #[test]
+    fn a_dragged_out_box_wraps_its_text() {
+        let mut app = app();
+        app.text_press(Vec2::new(10.0, 10.0), false, false);
+        app.text_drag(Vec2::new(110.0, 10.0));
+        app.text_release();
+        assert_eq!(app.workspace.text.style.width, Some(100.0));
+        keys(
+            &mut app,
+            vec![egui::Event::Text("wrap these words please".into())],
+        );
+        app.text_update();
+        let view = app
+            .workspace
+            .text
+            .session
+            .as_ref()
+            .unwrap()
+            .view
+            .clone()
+            .unwrap();
+        assert_eq!(view.size.x, 100.0);
+        assert!(view.size.y > 80.0, "several lines: {}", view.size.y);
+        // A click without a drag is point text.
+        app.text_commit();
+        app.text_press(Vec2::new(250.0, 100.0), false, false);
+        app.text_release();
+        assert_eq!(app.workspace.text.style.width, None);
+    }
+
     #[test]
     fn blank_text_is_not_kept() {
         let mut app = app();
         let layers = app.canvas.layers.len();
-        app.text_press(Vec2::new(20.0, 20.0));
+        app.text_press(Vec2::new(20.0, 20.0), false, false);
         app.text_commit();
         assert_eq!(app.canvas.layers.len(), layers);
         assert_eq!(undo_depth(&app), 0);
@@ -757,7 +1580,7 @@ mod tests {
         let depth = undo_depth(&app);
         // Click on the letters: the session opens on that layer.
         app.canvas_mut().active_layer_idx = 0;
-        app.text_press(Vec2::new(30.0, 40.0));
+        app.text_press(Vec2::new(30.0, 40.0), false, false);
         let s = app.workspace.text.session.as_ref().expect("editing");
         assert_eq!(s.text, "Hi");
         assert_eq!(app.canvas.active_layer_idx, idx);
@@ -886,7 +1709,7 @@ mod tests {
         assert_eq!(pixels(&app, idx), before, "the pixels stay");
         assert_eq!(undo_depth(&app), depth + 1);
         // No longer text: clicking it starts new text.
-        app.text_press(Vec2::new(30.0, 40.0));
+        app.text_press(Vec2::new(30.0, 40.0), false, false);
         assert!(
             app.workspace
                 .text

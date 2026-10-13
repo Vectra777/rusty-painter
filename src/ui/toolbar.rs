@@ -369,6 +369,16 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         }
     }
     let shape_anchor = Some(response.rect);
+    let pen_active = matches!(app.active_tool, Tool::Pen);
+    if tool_button(
+        ui,
+        app,
+        Icon::Pen,
+        pen_active,
+        "Pen (Shift+P): Bézier paths to select, fill or stroke",
+    ) {
+        app.active_tool = Tool::Pen;
+    }
     let liquify_active = matches!(app.active_tool, Tool::Liquify);
     if tool_button(ui, app, Icon::Liquify, liquify_active, "Liquify (W)") {
         app.active_tool = Tool::Liquify;

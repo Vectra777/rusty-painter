@@ -194,7 +194,7 @@ impl Dispatch<ZwpTabletToolV2, ToolData, WinitState> for TabletState {
                 let element = if pressed { ElementState::Pressed } else { ElementState::Released };
                 tool.buttons.push((button, element));
             },
-            Event::Frame { .. } => frame(state, proxy, &mut tool),
+            Event::Frame { time } => frame(state, proxy, &mut tool, time),
             Event::Removed => {
                 if let Some(cursor) = tool.cursor.take() {
                     cursor.destroy();
@@ -208,7 +208,8 @@ impl Dispatch<ZwpTabletToolV2, ToolData, WinitState> for TabletState {
 
 /// A tool's frame: its changes as pointer events, and its contact as
 /// samples.
-fn frame(state: &mut WinitState, proxy: &ZwpTabletToolV2, tool: &mut Tool) {
+/// `time`: the frame's, in milliseconds.
+fn frame(state: &mut WinitState, proxy: &ZwpTabletToolV2, tool: &mut Tool, time: u32) {
     let Some(window_id) = tool.window else {
         tool.clear_frame();
         return;
@@ -246,6 +247,7 @@ fn frame(state: &mut WinitState, proxy: &ZwpTabletToolV2, tool: &mut Tool) {
         wheel: tool.wheel,
         is_eraser: tool.is_eraser,
         phase,
+        time: time as f64 / 1000.0,
     };
     if tool.pressed && !tool.down {
         tool.down = true;

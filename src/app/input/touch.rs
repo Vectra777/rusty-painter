@@ -57,6 +57,9 @@ pub struct TouchState {
     pub(crate) pen_tilt: Option<crate::brush_engine::dynamics::PenTilt>,
     /// Its barrel rotation and wheel, in canvas terms.
     pub(crate) pen_barrel: crate::brush_engine::dynamics::PenBarrel,
+    /// When the latest pen sample was taken, where the platform says
+    /// (seconds, its own clock); `None` for the mouse and fingers.
+    pub(crate) pen_time: Option<f64>,
     /// The current pen contact started on the canvas.
     pub(crate) pen_on_canvas: bool,
     /// Where the history stood when the current stroke began, to take the

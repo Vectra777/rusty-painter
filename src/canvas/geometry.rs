@@ -47,6 +47,21 @@ impl ImageOp {
         }
     }
 
+    /// Where a point of the old `w`×`h` canvas (in pixel units, corners
+    /// at whole numbers) lands on the new one.
+    pub fn map_point(self, [x, y]: [f32; 2], w: usize, h: usize) -> [f32; 2] {
+        let (w, h) = (w as f32, h as f32);
+        match self {
+            ImageOp::Reframe { x: ox, y: oy, .. } => [x - ox as f32, y - oy as f32],
+            ImageOp::Resize { w: nw, h: nh, .. } => [x * nw as f32 / w, y * nh as f32 / h],
+            ImageOp::RotateCw => [h - y, x],
+            ImageOp::RotateCcw => [y, w - x],
+            ImageOp::Rotate180 => [w - x, h - y],
+            ImageOp::FlipHorizontal => [w - x, y],
+            ImageOp::FlipVertical => [x, h - y],
+        }
+    }
+
     /// One layer's `w`×`h` pixels after this; `fill` is what new area
     /// shows (the background colour, a mask's white, else transparent).
     pub fn apply(self, src: &[Color32], w: usize, h: usize, fill: Color32) -> Vec<Color32> {
@@ -296,14 +311,11 @@ impl Canvas {
                 }),
                 _ => None,
             };
-            if let (
-                ImageOp::Reframe { x, y, .. },
-                Some(crate::canvas::layer_style::LayerFill::Gradient { start, end, .. }),
-            ) = (op, shell.style.fill.as_mut())
+            if let Some(crate::canvas::layer_style::LayerFill::Gradient { start, end, .. }) =
+                shell.style.fill.as_mut()
             {
                 for p in [start, end] {
-                    p[0] -= x as f32;
-                    p[1] -= y as f32;
+                    *p = op.map_point(*p, w, h);
                 }
             }
             new_layers.push((shell, tiles));
@@ -412,6 +424,42 @@ mod tests {
 
     fn values(px: &[Color32]) -> Vec<u8> {
         px.iter().map(|c| c.r() / 10).collect()
+    }
+
+    #[test]
+    fn points_land_where_their_pixels_do() {
+        // A gradient fill's ends move as the pixels under them do.
+        let (w, h) = (3, 2);
+        for op in [
+            ImageOp::Reframe {
+                x: 1,
+                y: -1,
+                w: 3,
+                h: 3,
+            },
+            ImageOp::Resize {
+                w: 6,
+                h: 4,
+                smooth: false,
+            },
+            ImageOp::RotateCw,
+            ImageOp::RotateCcw,
+            ImageOp::Rotate180,
+            ImageOp::FlipHorizontal,
+            ImageOp::FlipVertical,
+        ] {
+            let (nw, nh) = op.new_size(w, h);
+            let out = op.move_pixels(&grid(), w, h, Color32::from_gray(250));
+            for i in 0..w * h {
+                let centre = [(i % w) as f32 + 0.5, (i / w) as f32 + 0.5];
+                let [x, y] = op.map_point(centre, w, h);
+                if x < 0.0 || y < 0.0 || x >= nw as f32 || y >= nh as f32 {
+                    continue; // cropped off
+                }
+                let landed = out[y.floor() as usize * nw + x.floor() as usize];
+                assert_eq!(landed.r() / 10, i as u8, "{op:?}: pixel {i}");
+            }
+        }
     }
 
     #[test]

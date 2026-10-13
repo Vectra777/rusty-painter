@@ -705,14 +705,38 @@ impl Canvas {
 
     /// Set the layer's pixels in `region` to its originals with
     /// `row(x0, y, out)`'s premultiplied colours (one row of the region's
-    /// part of a tile at a time) painted over them. Alpha-locked layers only
-    /// recolour. Tiles are processed in parallel.
+    /// part of a tile at a time) painted over them with `mode`, mixed in
+    /// the document's blend space. Alpha-locked layers only recolour. Tiles
+    /// are processed in parallel.
     pub fn paint_over_region(
         &self,
         layer_idx: usize,
         region: &Region,
+        mode: crate::canvas::blend_modes::LayerBlend,
         row: impl Fn(i32, i32, &mut [Color32]) + Sync,
     ) {
+        use crate::canvas::blend_modes::{BlendSpace, LayerBlend, composite, pixel_noise};
+        let space = self.blend_space;
+        let over = |s: Color32, d: Color32, x: i32, y: i32| -> Color32 {
+            if mode == LayerBlend::Normal {
+                return crate::canvas::blend::alpha_over(s, d);
+            }
+            let noise = pixel_noise(x as u32, y as u32);
+            match space {
+                BlendSpace::Linear => crate::canvas::blend::rgba_to_color32_fast(composite(
+                    mode,
+                    crate::canvas::blend::color32_to_linear(s),
+                    crate::canvas::blend::color32_to_linear(d),
+                    noise,
+                )),
+                BlendSpace::Gamma => crate::canvas::blend::gamma_rgba_to_color32(composite(
+                    mode,
+                    crate::canvas::blend::gamma_color32_to_rgba(s),
+                    crate::canvas::blend::gamma_color32_to_rgba(d),
+                    noise,
+                )),
+            }
+        };
         let Some(layer) = self.layers.get(layer_idx) else {
             return;
         };
@@ -740,7 +764,7 @@ impl Canvas {
                         if alpha_lock && dst.a() == 0 {
                             continue;
                         }
-                        let mut px = crate::canvas::blend::alpha_over(s, dst);
+                        let mut px = over(s, dst, tx * ts + lx, ty * ts + ly);
                         if alpha_lock {
                             px = crate::canvas::blend::with_alpha_of(px, dst.a());
                         }
@@ -761,6 +785,7 @@ impl Canvas {
         &self,
         layer_idx: usize,
         region: &Region,
+        mode: crate::canvas::blend_modes::LayerBlend,
         row: impl Fn(i32, i32, &mut [[f32; 4]]) + Sync,
     ) {
         let Some(layer) = self.layers.get(layer_idx) else {
@@ -771,7 +796,7 @@ impl Canvas {
         let [bx0, by0, bx1, by1] = region.bounds;
         if !self.depth.is_deep() {
             let encoder = crate::canvas::blend::LinearEncoder::new();
-            return self.paint_over_region(layer_idx, region, |x0, y, out| {
+            return self.paint_over_region(layer_idx, region, mode, |x0, y, out| {
                 let mut deep = vec![[0.0; 4]; out.len()];
                 row(x0, y, &mut deep);
                 for (o, [r, g, b, a]) in out.iter_mut().zip(deep) {
@@ -804,8 +829,24 @@ impl Canvas {
                         if alpha_lock && d[3] <= 0.0 {
                             continue;
                         }
-                        let keep = 1.0 - s[3];
-                        let mut px: [f32; 4] = std::array::from_fn(|c| s[c] + d[c] * keep);
+                        let mut px: [f32; 4] = if mode
+                            == crate::canvas::blend_modes::LayerBlend::Normal
+                        {
+                            let keep = 1.0 - s[3];
+                            std::array::from_fn(|c| s[c] + d[c] * keep)
+                        } else {
+                            let rgba = |p: [f32; 4]| {
+                                eframe::egui::Rgba::from_rgba_premultiplied(p[0], p[1], p[2], p[3])
+                            };
+                            let (x, y) = ((tx * ts + lx) as u32, (ty * ts + ly) as u32);
+                            crate::canvas::blend_modes::composite(
+                                mode,
+                                rgba(*s),
+                                rgba(d),
+                                crate::canvas::blend_modes::pixel_noise(x, y),
+                            )
+                            .to_array()
+                        };
                         if alpha_lock {
                             let scale = d[3] / px[3];
                             px = [px[0] * scale, px[1] * scale, px[2] * scale, d[3]];

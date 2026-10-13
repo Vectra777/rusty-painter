@@ -170,7 +170,7 @@ impl DeformMode {
 }
 
 /// What one blend stroke does, fixed when it starts.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum BlendKind {
     Smudge,
     Blur,
@@ -223,7 +223,7 @@ pub struct Carry {
 
 /// A blend stroke in progress, as the app knows it (the stroke worker
 /// paints it).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ActiveBlend {
     /// The Brush tool's (a mixing brush), not the Smudge or Blur tool's.
     from_brush: bool,
@@ -1068,7 +1068,7 @@ impl PainterApp {
                     b.adjust_saturation.clamp(-1.0, 1.0),
                     b.adjust_value.clamp(-1.0, 1.0),
                 ]),
-                (_, _, FilterMode::Filter) => BlendKind::Filter(b.brush_filter),
+                (_, _, FilterMode::Filter) => BlendKind::Filter(b.brush_filter.clone()),
             },
         };
         // Like a brush stroke: a second press ends the running one first
@@ -1098,7 +1098,7 @@ impl PainterApp {
             Arc::clone(&self.canvas),
             Arc::clone(&self.workspace.pool),
             brush,
-            kind,
+            kind.clone(),
             mix,
             pos,
             pressure,
@@ -1524,13 +1524,10 @@ impl BlendSession {
     }
 
     fn blend_diameter(&self, pressure: f32) -> f32 {
-        let o = &self.brush.brush_options;
-        let k = if o.pressure_size {
-            o.pressure_min_size + (1.0 - o.pressure_min_size) * o.pressure_curves.size(pressure)
-        } else {
-            1.0
-        };
-        (o.diameter * k).max(1.0)
+        let k = self
+            .brush
+            .pressure_scale(crate::brush_engine::dynamics::DabSetting::Size, pressure);
+        (self.brush.brush_options.diameter * k).max(1.0)
     }
 
     /// A dab at `center` and its mirror copies.
@@ -1563,16 +1560,19 @@ impl BlendSession {
         let o = &self.brush.brush_options;
         let r = diameter * 0.5;
         let mut strength = o.flow / 100.0 * o.opacity;
-        if o.pressure_opacity {
-            strength *= o.pressure_curves.opacity(pressure);
-        }
-        if o.pressure_flow {
-            strength *= o.pressure_curves.flow(pressure);
+        {
+            use crate::brush_engine::dynamics::DabSetting;
+            strength *= self.brush.pressure_scale(DabSetting::Opacity, pressure)
+                * self.brush.pressure_scale(DabSetting::Flow, pressure);
         }
         let hardness = (o.hardness / 100.0).clamp(0.0, 1.0);
         // The share of a brush width between dabs.
-        let gap = (o.spacing_px(diameter, o.spacing_factor(pressure)).max(1.0) / diameter.max(1.0))
-            .min(1.0);
+        let spacing = o.spacing_factor(pressure)
+            * self
+                .brush
+                .pressure_scale(crate::brush_engine::dynamics::DabSetting::Spacing, pressure)
+                .max(0.05);
+        let gap = (o.spacing_px(diameter, spacing).max(1.0) / diameter.max(1.0)).min(1.0);
         let blur_size = self.blur_size;
         let brush_paint = self.paint_of(placed);
         let idx = self.idx;
@@ -1672,7 +1672,7 @@ impl BlendSession {
         // where the displacement says, at full weight (the mask sets how
         // far it moves).
         let mut weights_are_mask = true;
-        let target: Vec<[f32; 4]> = match self.stroke.kind {
+        let target: Vec<[f32; 4]> = match self.stroke.kind.clone() {
             BlendKind::Deform(mode, amount) => {
                 weights_are_mask = false;
                 let stroke = &self.stroke;
@@ -1770,8 +1770,14 @@ impl BlendSession {
                     let key = (x.div_euclid(ts), y.div_euclid(ts));
                     let at = ((y - key.1 * ts) * ts + (x - key.0 * ts)) as usize;
                     if !stroke.filtered.contains_key(&key) {
-                        let tile =
-                            filter_tile(&self.canvas, idx, &stroke.before, key, filter, wrap);
+                        let tile = filter_tile(
+                            &self.canvas,
+                            idx,
+                            &stroke.before,
+                            key,
+                            filter.clone(),
+                            wrap,
+                        );
                         stroke.filtered.insert(key, tile);
                     }
                     let filtered = codec.to_f(stroke.filtered[&key][at]);

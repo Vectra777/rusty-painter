@@ -586,6 +586,96 @@ impl Brush {
 
     /// Whether dabs can differ from one another (dynamics, several tips),
     /// so each is planned on its own.
+    /// The Pen pressure settings (size, opacity, flow and spacing by
+    /// pressure, the min size and their curves) as the Pressure rows of the
+    /// brush's inputs, the one place pressure drives anything: each the
+    /// same response (size `min + (1 - min) × curve`), then switched off.
+    /// Brushes are read this way (saved ones, imported ones); idempotent.
+    pub fn fold_pressure(&mut self) {
+        use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+        let o = &mut self.brush_options;
+        let curves = &o.pressure_curves;
+        let row =
+            |setting, amount: f32, curve: &Option<crate::brush_engine::hardness::SoftnessCurve>| {
+                let mut m = InputMapping {
+                    sensor: Sensor::Pressure,
+                    setting,
+                    amount,
+                    ..Default::default()
+                };
+                if let Some(c) = curve {
+                    m.curve = c.clone();
+                }
+                m
+            };
+        let mut rows = Vec::new();
+        if o.pressure_size {
+            rows.push(row(
+                DabSetting::Size,
+                1.0 - o.pressure_min_size.clamp(0.0, 1.0),
+                &curves.size,
+            ));
+        }
+        if o.pressure_opacity {
+            rows.push(row(DabSetting::Opacity, 1.0, &curves.opacity));
+        }
+        if o.pressure_flow {
+            rows.push(row(DabSetting::Flow, 1.0, &curves.flow));
+        }
+        if o.pressure_spacing {
+            rows.push(row(DabSetting::Spacing, 1.0, &curves.spacing));
+        }
+        if rows.is_empty() {
+            return;
+        }
+        (
+            o.pressure_size,
+            o.pressure_opacity,
+            o.pressure_flow,
+            o.pressure_spacing,
+        ) = (false, false, false, false);
+        // First, as the section came first.
+        rows.append(&mut self.inputs);
+        self.inputs = rows;
+    }
+
+    /// How much pen pressure `p` leaves of `setting` (1: all of it), from
+    /// the Pressure rows of the inputs alone (other inputs aside): for tools
+    /// that size or fade their dabs by pressure without a stroke's inputs
+    /// (vector lines, smudge and blur). Pressure settings not yet folded
+    /// count too.
+    pub fn pressure_scale(
+        &self,
+        setting: crate::brush_engine::dynamics::DabSetting,
+        p: f32,
+    ) -> f32 {
+        use crate::brush_engine::dynamics::{DabSetting, Sensor};
+        let o = &self.brush_options;
+        let curves = &o.pressure_curves;
+        let mut k = match setting {
+            DabSetting::Size if o.pressure_size => {
+                o.pressure_min_size + (1.0 - o.pressure_min_size) * curves.size(p)
+            }
+            DabSetting::Opacity if o.pressure_opacity => curves.opacity(p),
+            DabSetting::Flow if o.pressure_flow => curves.flow(p),
+            _ => 1.0,
+        };
+        for m in self
+            .inputs
+            .iter()
+            .filter(|m| m.sensor == Sensor::Pressure && m.setting == setting)
+        {
+            let x = m.curve.eval(p.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            let a = m.amount.clamp(-1.0, 1.0);
+            k *= if a >= 0.0 {
+                1.0 - a * (1.0 - x)
+            } else {
+                1.0 + a * x
+            };
+        }
+        k.max(0.0)
+    }
+
     pub fn varies_per_dab(&self) -> bool {
         self.has_dynamics()
             || self.brush_options.tip_count() > 1
@@ -851,10 +941,18 @@ impl Brush {
             .enumerate()
             .filter_map(|(i, &center)| {
                 let var = vars.get(i % vars.len().max(1)).copied().unwrap_or_default();
-                let r = (base_r * var.scale).max(0.25);
-                if var.strength <= 0.0 || base_r * var.scale < 0.1 {
+                let radius = base_r * var.scale;
+                if var.strength <= 0.0 || radius < 0.005 {
                     return None;
                 }
+                // Under half a pixel: drawn half a pixel wide and fainter,
+                // so a stroke thinning away fades rather than going on as
+                // a line of dots, nor stopping short.
+                let (r, fade) = if radius < 0.5 {
+                    (0.5, radius / 0.5)
+                } else {
+                    (radius, 1.0)
+                };
                 let mirror = orients.and_then(|o| o.get(i)).copied();
                 let orient = match mirror {
                     Some(m) => compose(var.orient, m),
@@ -867,7 +965,7 @@ impl Brush {
                 dab.orient = orient;
                 dab.rigid = is_rigid(orient);
                 dab.reach = reach;
-                dab.strength = var.strength;
+                dab.strength = var.strength * fade;
                 dab.tip = var.tip.min(last_tip);
                 dab.hatch = var.hatch;
                 dab.hardness = var.hardness;

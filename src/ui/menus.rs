@@ -392,7 +392,7 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.add_vector_layer();
     }
     ui.menu_button("New Adjustment Layer", |ui| {
-        for filter in crate::canvas::filters::Filter::ADJUSTMENTS {
+        for filter in crate::canvas::filters::Filter::adjustments() {
             if menu_item(ui, filter.name(), None) {
                 app.add_adjustment_layer(filter);
             }
@@ -418,6 +418,12 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     {
         app.workspace.filter.border_editing = app.canvas.layer_id_at(app.canvas.active_layer_idx);
     }
+    if ui
+        .add_enabled_ui(can_border, |ui| menu_item(ui, "Gradient Overlay…", None))
+        .inner
+    {
+        app.workspace.filter.overlay_editing = app.canvas.layer_id_at(app.canvas.active_layer_idx);
+    }
     let active = app.canvas.active_layer_idx;
     ui.add_enabled_ui(app.is_vector_layer(active), |ui| {
         ui.menu_button("Vector", |ui| {
@@ -438,10 +444,10 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     .response
     .on_disabled_hover_text("For vector layers (Layer → New Vector Layer)");
     let shown = app.canvas.layers.get(active).map(|l| l.shown_style());
-    let lit = shown.and_then(|s| s.impasto);
+    let lit = shown.as_ref().and_then(|s| s.impasto);
     // A lightness map (Krita's colour smudge with a lightness tip): no
     // light to set, but it bakes the same.
-    let relief = shown.is_some_and(|s| s.lightness_map);
+    let relief = shown.as_ref().is_some_and(|s| s.lightness_map);
     ui.add_enabled_ui(lit.is_some() || relief, |ui| {
         ui.menu_button("Impasto", |ui| {
             if let Some(mut light) = lit {
@@ -639,7 +645,7 @@ fn filter_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
                 filter.name().to_string()
             };
             if menu_item(ui, &label, None) {
-                app.filter_open(*filter);
+                app.filter_open(filter.clone());
             }
         }
     };
@@ -972,6 +978,7 @@ mod top_bar_tests {
             Tool::Liquify,
             Tool::Puppet,
             Tool::Gradient,
+            Tool::Pen,
             Tool::Text,
             Tool::Eyedropper,
             Tool::Animate,

@@ -81,12 +81,12 @@ pub fn refresh_thumbnails(app: &mut PainterApp, ctx: &egui::Context) {
         };
         let mut image = egui::ColorImage::new([tw, th], base);
         // A fill layer has no paint: its colours, sampled.
-        if let Some(fill) = canvas.layers[idx].style.fill {
+        if let Some(fill) = &canvas.layers[idx].style.fill {
             for (&(tx, ty), samples) in &by_tile {
                 for &(dst, src) in samples {
                     let x = (tx * tile_size + src % tile_size) as i32;
                     let y = (ty * tile_size + src / tile_size) as i32;
-                    image.pixels[dst] = fill.pixel(x, y);
+                    image.pixels[dst] = fill.pixel(x, y, canvas.blend_space);
                 }
             }
         }
@@ -841,6 +841,14 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         && ui.button("Border…").clicked()
                     {
                         app.workspace.filter.border_editing = Some(id);
+                        ui.close_menu();
+                    }
+                    if kind == LayerKind::Paint
+                        && !adjustment
+                        && !fill
+                        && ui.button("Gradient Overlay…").clicked()
+                    {
+                        app.workspace.filter.overlay_editing = Some(id);
                         ui.close_menu();
                     }
                     if is_shader && ui.button("Edit shader…").clicked() {

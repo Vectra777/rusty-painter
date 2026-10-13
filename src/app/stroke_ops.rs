@@ -301,7 +301,7 @@ impl PainterApp {
             };
             let mut lit = data.clone();
             if let Some(h) = self.canvas.layers[idx].height.as_deref() {
-                crate::canvas::impasto::relief(style, h, &mut lit, tx, ty, ts);
+                crate::canvas::impasto::relief(&style, h, &mut lit, tx, ty, ts);
             }
             if lit == data {
                 continue;
@@ -445,6 +445,7 @@ impl PainterApp {
             pressure,
             self.viewport.touch.pen_tilt,
             self.viewport.touch.pen_barrel,
+            self.viewport.touch.pen_time,
         );
         self.viewport.touch.stroke_started = Some(std::time::Instant::now());
     }
@@ -472,6 +473,7 @@ impl PainterApp {
                 pressure,
                 self.viewport.touch.pen_tilt,
                 self.viewport.touch.pen_barrel,
+                self.viewport.touch.pen_time,
             );
         }
     }

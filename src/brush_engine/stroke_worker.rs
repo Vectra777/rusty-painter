@@ -216,6 +216,9 @@ impl Shared {
 pub struct StrokeWorker {
     /// Sample times count from here.
     epoch: std::time::Instant,
+    /// What to add to a pen's own sample time to count it from `epoch`
+    /// (an `f64`'s bits; NaN until a pen gives a time).
+    pen_clock: std::sync::atomic::AtomicU64,
     jobs: Option<Sender<Job>>,
     /// Strokes ended so far ([`Self::end`] calls).
     ends_sent: std::sync::atomic::AtomicU64,
@@ -312,6 +315,7 @@ impl StrokeWorker {
             .expect("failed to spawn the stroke worker thread");
         Self {
             epoch,
+            pen_clock: std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()),
             jobs: Some(jobs),
             ends_sent: Default::default(),
             shared,
@@ -330,7 +334,7 @@ impl StrokeWorker {
     }
 
     pub fn sample(&self, pos: Vec2, pressure: f32) {
-        self.sample_tilted(pos, pressure, None, PenBarrel::default());
+        self.sample_tilted(pos, pressure, None, PenBarrel::default(), None);
     }
 
     /// [`Self::sample`] with how the pen leans and turns.
@@ -340,8 +344,10 @@ impl StrokeWorker {
         pressure: f32,
         tilt: Option<crate::brush_engine::dynamics::PenTilt>,
         barrel: PenBarrel,
+        pen_time: Option<f64>,
     ) {
-        let time = self.epoch.elapsed().as_secs_f64();
+        let now = self.epoch.elapsed().as_secs_f64();
+        let time = pen_time.map_or(now, |t| self.pen_to_epoch(t, now));
         self.send(Job::Sample {
             pos,
             pressure,
@@ -349,6 +355,23 @@ impl StrokeWorker {
             tilt,
             barrel,
         });
+    }
+
+    /// A pen's own sample time `t` counted from the epoch: shifted so the
+    /// samples keep their spacing (several arrive at once, a frame's worth)
+    /// while staying near `now`. The shift is set again when it drifts (a
+    /// new stroke after a pause, a clock jump).
+    fn pen_to_epoch(&self, t: f64, now: f64) -> f64 {
+        use std::sync::atomic::Ordering;
+        let shift = f64::from_bits(self.pen_clock.load(Ordering::Relaxed));
+        let mapped = t + shift;
+        // A batch comes oldest first, so its later samples land a little
+        // ahead of now (up to a frame or two).
+        if shift.is_finite() && mapped <= now + 0.1 && now - mapped < 0.25 {
+            return mapped;
+        }
+        self.pen_clock.store((now - t).to_bits(), Ordering::Relaxed);
+        now
     }
 
     /// Run `task` once what's queued before it is done.
@@ -970,6 +993,24 @@ mod tests {
     use super::*;
     use eframe::egui::Color32;
     use rayon::ThreadPoolBuilder;
+
+    #[test]
+    fn a_frames_batched_pen_samples_keep_their_spacing() {
+        let worker = StrokeWorker::new();
+        // Three samples 4 ms apart, all handed over at once, oldest first.
+        let now = 1.0;
+        let a = worker.pen_to_epoch(500.000, now);
+        let b = worker.pen_to_epoch(500.004, now);
+        let c = worker.pen_to_epoch(500.008, now);
+        assert!((b - a - 0.004).abs() < 1e-9 && (c - a - 0.008).abs() < 1e-9);
+        // The next frame's, 16 ms on, keep counting the same way.
+        for (i, t) in [500.012, 500.016, 500.020, 500.024].into_iter().enumerate() {
+            let at = worker.pen_to_epoch(t, now + 0.016);
+            assert!((at - a - 0.012 - i as f64 * 0.004).abs() < 1e-9);
+        }
+        // After a pause the shift is set again.
+        assert_eq!(worker.pen_to_epoch(900.0, 5.0), 5.0);
+    }
 
     fn samples() -> Vec<(Vec2, f32)> {
         (0..40)

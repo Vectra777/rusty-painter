@@ -286,7 +286,7 @@ fn preset_from(
 
 /// An action descriptor's values.
 #[derive(Debug)]
-enum Value {
+pub(super) enum Value {
     Object(Object),
     List(Vec<Value>),
     Number(f64),
@@ -295,9 +295,9 @@ enum Value {
     Other,
 }
 
-type Object = Vec<(String, Value)>;
+pub(super) type Object = Vec<(String, Value)>;
 
-trait Get {
+pub(super) trait Get {
     fn get(&self, key: &str) -> Option<&Value>;
 }
 
@@ -308,21 +308,21 @@ impl Get for Object {
 }
 
 impl Value {
-    fn object(&self) -> Option<&Object> {
+    pub(super) fn object(&self) -> Option<&Object> {
         match self {
             Value::Object(o) => Some(o),
             _ => None,
         }
     }
 
-    fn list(&self) -> Option<&Vec<Value>> {
+    pub(super) fn list(&self) -> Option<&Vec<Value>> {
         match self {
             Value::List(l) => Some(l),
             _ => None,
         }
     }
 
-    fn number(&self) -> Option<f64> {
+    pub(super) fn number(&self) -> Option<f64> {
         match self {
             Value::Number(n) => Some(*n),
             _ => None,
@@ -336,7 +336,7 @@ impl Value {
         }
     }
 
-    fn text(&self) -> Option<&str> {
+    pub(super) fn text(&self) -> Option<&str> {
         match self {
             Value::Text(t) => Some(t),
             _ => None,
@@ -374,7 +374,7 @@ fn key(r: &mut Reader<'_>) -> Result<String, String> {
     Ok(String::from_utf8_lossy(r.take(len)?).into_owned())
 }
 
-fn descriptor(r: &mut Reader<'_>) -> Result<Object, String> {
+pub(super) fn descriptor(r: &mut Reader<'_>) -> Result<Object, String> {
     let _name = unicode(r)?;
     let _class = key(r)?;
     let count = r.u32_be()?;

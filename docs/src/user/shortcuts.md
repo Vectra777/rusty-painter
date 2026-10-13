@@ -41,6 +41,7 @@ The defaults, with QWERTY names:
 | `V`, `T` | Transform |
 | `W` / `Shift+W` | Liquify / puppet warp |
 | `Y` | Bones |
+| `Shift+P` | Pen (paths) |
 
 ## Edit
 

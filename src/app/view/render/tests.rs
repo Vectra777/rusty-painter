@@ -153,7 +153,7 @@ fn a_dragged_filter_previews_on_screen_and_ends_exactly_as_before() {
         };
         // The result as a filter always gave it: run once, then kept.
         let mut direct = setup();
-        direct.filter_open(filter);
+        direct.filter_open(filter.clone());
         direct.filter_commit();
         let expected = layer_pixels(&direct, 1);
 
@@ -175,7 +175,7 @@ fn a_dragged_filter_previews_on_screen_and_ends_exactly_as_before() {
             session.filter = if step < 1.0 {
                 Filter::GaussianBlur { radius: step }
             } else {
-                filter
+                filter.clone()
             };
             session.dirty = true;
             let (frames, _) = screen.settle_counting(&mut app);

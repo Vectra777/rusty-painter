@@ -263,7 +263,7 @@ fn the_filter_brush_changes_only_what_it_covers_and_undoes_exactly() {
 fn the_filter_brush_reads_the_layer_as_it_was_before_the_stroke() {
     use crate::canvas::filters::Filter;
     let blur = Filter::GaussianBlur { radius: 3.0 };
-    let mut a = filter_brush(checks, blur);
+    let mut a = filter_brush(checks, blur.clone());
     let before = all(&a);
     // Back and forth, dabs overlapping many times.
     stroke(&mut a, Vec2::new(30.0, 32.0), Vec2::new(90.0, 32.0));
@@ -284,7 +284,7 @@ fn the_filter_brush_reads_the_layer_as_it_was_before_the_stroke() {
 #[test]
 fn every_filter_paints_through_the_brush() {
     use crate::canvas::filters::Filter;
-    for &filter in Filter::MENU.iter().flat_map(|g| g.iter()) {
+    for filter in Filter::MENU.iter().flat_map(|g| g.iter()).cloned() {
         // A two-colour checkerboard is already its own median, at any
         // radius (the median's own tests cover it).
         if matches!(filter, Filter::Median { .. }) {
@@ -345,7 +345,7 @@ fn every_filter_paints_through_the_brush() {
             },
             f => f,
         };
-        let mut a = filter_brush(checks, filter);
+        let mut a = filter_brush(checks, filter.clone());
         let before = all(&a);
         stroke(&mut a, Vec2::new(30.0, 32.0), Vec2::new(90.0, 32.0));
         assert!(all(&a) != before, "{}", filter.name());

@@ -153,6 +153,7 @@ impl Pen {
             wheel: self.wheel.map(|_| self.last_wheel as f32),
             is_eraser: self.is_eraser,
             phase,
+            time: event.time as f64 / 1000.0,
         }
     }
 

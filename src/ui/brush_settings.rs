@@ -918,31 +918,64 @@ fn brush_settings_contents(
     });
 
     section(ui, "Pen pressure & tilt", true, |ui| {
-        let o = &mut brush.brush_options;
+        use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+        // One place for pressure: these are the Pressure rows of the
+        // brush's inputs (Brush → Inputs lists them too).
+        brush.fold_pressure();
+        let pressure_row = |inputs: &[InputMapping], setting| {
+            inputs
+                .iter()
+                .position(|m| m.sensor == Sensor::Pressure && m.setting == setting)
+        };
+        const SETTINGS: [(DabSetting, &str); 4] = [
+            (DabSetting::Size, "Size"),
+            (DabSetting::Opacity, "Opacity"),
+            (DabSetting::Flow, "Flow"),
+            (DabSetting::Spacing, "Spacing"),
+        ];
         // Wraps: four touch-sized buttons are wider than the panel.
         property_row(ui, "Controls", |ui| {
             ui.horizontal_wrapped(|ui| {
-                changed |= ui.toggle_value(&mut o.pressure_size, "Size").changed();
-                changed |= ui
-                    .toggle_value(&mut o.pressure_opacity, "Opacity")
-                    .changed();
-                changed |= ui.toggle_value(&mut o.pressure_flow, "Flow").changed();
-                changed |= ui
-                    .toggle_value(&mut o.pressure_spacing, "Spacing")
-                    .on_hover_text("Lighter pressure places the dabs closer together.")
-                    .changed();
+                for (setting, label) in SETTINGS {
+                    let mut on = pressure_row(&brush.inputs, setting).is_some();
+                    let mut toggle = ui.toggle_value(&mut on, label);
+                    if setting == DabSetting::Spacing {
+                        toggle = toggle
+                            .on_hover_text("Lighter pressure places the dabs closer together.");
+                    }
+                    if toggle.changed() {
+                        if on {
+                            brush.inputs.push(InputMapping {
+                                sensor: Sensor::Pressure,
+                                setting,
+                                amount: 1.0,
+                                ..Default::default()
+                            });
+                        } else {
+                            brush.inputs.retain(|m| {
+                                !(m.sensor == Sensor::Pressure && m.setting == setting)
+                            });
+                        }
+                        changed = true;
+                    }
+                }
             });
         });
-        if o.pressure_size {
-            mask_changed |= slider_row(
+        if let Some(i) = pressure_row(&brush.inputs, DabSetting::Size) {
+            // Min size is what the row's amount leaves at no pressure.
+            let mut min = (1.0 - brush.inputs[i].amount).clamp(0.0, 1.0);
+            let response = slider_row(
                 ui,
                 "Min size",
-                crate::ui::widgets::reset(&mut o.pressure_min_size, |v| {
+                crate::ui::widgets::reset(&mut min, |v| {
                     percent_of_unit(BarSlider::new(v, 0.0..=1.0))
                 }),
             )
-            .on_hover_text("Brush size at the lightest pressure, as a share of the full size.")
-            .changed();
+            .on_hover_text("Brush size at the lightest pressure, as a share of the full size.");
+            if response.changed() {
+                brush.inputs[i].amount = 1.0 - min;
+                mask_changed = true;
+            }
         }
         let tilt = &mut brush.dynamics.tilt;
         changed |= slider_row(
@@ -963,16 +996,13 @@ fn brush_settings_contents(
         )
         .on_hover_text("Above 0: stronger as the pen leans; below 0: lighter.")
         .changed();
-        let o = &mut brush.brush_options;
-        let curves = &mut o.pressure_curves;
-        for (on, name, curve) in [
-            (o.pressure_size, "Size", &mut curves.size),
-            (o.pressure_opacity, "Opacity", &mut curves.opacity),
-            (o.pressure_flow, "Flow", &mut curves.flow),
-            (o.pressure_spacing, "Spacing", &mut curves.spacing),
-        ] {
-            if on {
-                changed |= pressure_curve_row(ui, name, curve);
+        for (setting, name) in SETTINGS {
+            if let Some(i) = pressure_row(&brush.inputs, setting) {
+                let mut curve = Some(brush.inputs[i].curve.clone());
+                if pressure_curve_row(ui, name, &mut curve) {
+                    brush.inputs[i].curve = curve.unwrap_or_else(|| InputMapping::default().curve);
+                    changed = true;
+                }
             }
         }
     });
@@ -1406,7 +1436,9 @@ fn inputs_section(
         for (i, m) in inputs.iter_mut().enumerate() {
             ui.push_id(("input", i), |ui| {
                 ui.separator();
-                ui.horizontal(|ui| {
+                // Wraps: two menus side by side are wider than a narrow
+                // panel (and would widen what's below).
+                ui.horizontal_wrapped(|ui| {
                     egui::ComboBox::from_id_salt("sensor")
                         .selected_text(m.sensor.label())
                         .show_ui(ui, |ui| {

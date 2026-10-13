@@ -284,6 +284,9 @@ pub struct PenSample {
     /// The device is an eraser (its name says so).
     pub is_eraser: bool,
     pub phase: PenPhase,
+    /// When the pen was there, in seconds (the server's clock, millisecond
+    /// steps): samples handled in one frame keep their own times.
+    pub time: f64,
 }
 
 /// Take the pen samples queued since the last call, oldest first.

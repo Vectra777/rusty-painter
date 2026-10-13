@@ -18,6 +18,18 @@ Size, hardness, flow, spacing, jitter, scatter, and the airbrush (keeps painting
 
 Tapers in and out (no lag), stroke speed, tip angle / squash / follow the stroke, the pen's tilt or its barrel rotation, tips flipped at random, size, opacity, spray and colour randomness, and hard edges from any tip. Each setting has its own pressure curve (pressure can also set the spacing) on top of the pen's own curve, which can be [calibrated](tablets.md#calibration).
 
+## Pen pressure
+
+Brush → Pen pressure & tilt switches pressure onto size, opacity, flow and spacing, with a minimum size and a curve each. These are the Pressure rows of **Inputs** (below), shown here for quick access: there's one place pressure is set, so it can't apply twice. Brushes saved before work as they did.
+
+How pressure is used, as Krita uses it:
+
+- **Spacing follows each dab's size**, whatever sets it (pressure, inputs, tapers, randomness): light strokes don't break into beads.
+- **No steps**: pressure isn't rounded, so a big brush or a steep curve widens smoothly.
+- **Smoothing carries pressure** with the position: the stabiliser holds the brush back from the pen, and the pressure with it, so a change shows where the brush is.
+- Dabs thinner than a pixel fade out rather than leaving a line of dots, and pressing harder with the pen held still grows the mark.
+- Each pen sample keeps the time it was taken (Windows Ink, X11, Wayland, Android, iPad), for smoothing, speed and time inputs.
+
 ## Inputs
 
 Brush → Inputs: any input (pressure, speed, tilt, direction, distance, time, randomness per dab or per stroke, barrel rotation, an airbrush's wheel) can drive size, opacity, angle, squash, hue, saturation or value through its own curve. Inputs can also drive texture strength, hardness, scatter and the mix with the secondary colour.

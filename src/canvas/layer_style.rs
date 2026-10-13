@@ -2,15 +2,16 @@
 //! border around a layer's paint, as Clip Studio's border effect. Nothing is stored as pixels: the compositor asks
 //! [`LayerStyle`] for each tile as it would read a painted one.
 
+use crate::canvas::blend_modes::{BlendSpace, pixel_noise};
 use crate::canvas::filters::GradientMap;
-use crate::canvas::gradient::{Gradient, GradientRepeat, GradientShape};
+use crate::canvas::gradient::{Gradient, GradientRepeat, GradientShape, Ramp};
 use eframe::egui::{Color32, Vec2};
 
 /// Widest border, in pixels: its spill stays within the next tile.
 pub const MAX_BORDER: f32 = 48.0;
 
 /// What's generated for a layer rather than painted.
-#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayerStyle {
     /// A fill layer: this colour or gradient everywhere (its mask and
     /// clipping say where it shows).
@@ -27,6 +28,75 @@ pub struct LayerStyle {
     /// darkening the paint (see [`crate::canvas::impasto::modulate`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lightness_map: bool,
+    /// A gradient over the layer's paint, only where there is paint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<GradientOverlay>,
+}
+
+/// Photoshop's Gradient Overlay: a gradient laid over a layer's paint,
+/// clipped to it, mixed in with its own blend mode and opacity.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GradientOverlay {
+    /// Always [`LayerFill::Gradient`]: the gradient and where it runs.
+    pub gradient: LayerFill,
+    pub blend: crate::canvas::blend_modes::LayerBlend,
+    /// 0..=1.
+    pub opacity: f32,
+}
+
+impl GradientOverlay {
+    /// `stops` across a `w`×`h` canvas, left to right.
+    pub fn new(stops: GradientMap, w: f32, h: f32) -> Self {
+        Self {
+            gradient: LayerFill::Gradient {
+                colours: stops,
+                shape: GradientShape::Linear,
+                start: [0.0, h / 2.0],
+                end: [w, h / 2.0],
+                repeat: GradientRepeat::None,
+                reverse: false,
+            },
+            blend: crate::canvas::blend_modes::LayerBlend::Normal,
+            opacity: 1.0,
+        }
+    }
+
+    /// Lay the overlay's tile `(tx, ty)` over `paint` (premultiplied, the
+    /// tile's pixels), keeping the paint's own transparency.
+    pub fn apply(
+        &self,
+        paint: &mut [Color32],
+        tx: i32,
+        ty: i32,
+        tile_size: usize,
+        space: BlendSpace,
+    ) {
+        let over = self.gradient.tile(tx, ty, tile_size, space);
+        let opacity = self.opacity.clamp(0.0, 1.0);
+        for (p, g) in paint.iter_mut().zip(over) {
+            let a = p.a();
+            if a == 0 {
+                continue;
+            }
+            use crate::canvas::blend::Unmultiply;
+            let [br, bg, bb, _] = p.unmultiplied();
+            let [sr, sg, sb, sa] = g.unmultiplied();
+            let unit = |v: u8| v as f32 / 255.0;
+            let base = [unit(br), unit(bg), unit(bb)];
+            let mixed = crate::canvas::blend_modes::blend_color(
+                self.blend,
+                base,
+                [unit(sr), unit(sg), unit(sb)],
+            );
+            let k = unit(sa) * opacity;
+            let q = |i: usize| {
+                ((base[i] + (mixed[i] - base[i]) * k) * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            *p = Color32::from_rgba_unmultiplied(q(0), q(1), q(2), a);
+        }
+    }
 }
 
 impl LayerStyle {
@@ -35,11 +105,31 @@ impl LayerStyle {
             && self.border.is_none()
             && self.impasto.is_none()
             && !self.lightness_map
+            && self.overlay.is_none()
+    }
+
+    /// The gradient the Gradient tool edits on the canvas: a gradient
+    /// fill's, else the gradient overlay's.
+    pub fn gradient_mut(&mut self) -> Option<&mut LayerFill> {
+        match (&mut self.fill, &mut self.overlay) {
+            (Some(fill @ LayerFill::Gradient { .. }), _) => Some(fill),
+            (None, Some(overlay)) => Some(&mut overlay.gradient),
+            _ => None,
+        }
+    }
+
+    /// [`Self::gradient_mut`], to read.
+    pub fn gradient(&self) -> Option<&LayerFill> {
+        match (&self.fill, &self.overlay) {
+            (Some(fill @ LayerFill::Gradient { .. }), _) => Some(fill),
+            (None, Some(overlay)) => Some(&overlay.gradient),
+            _ => None,
+        }
     }
 
     /// How far (pixels) past its paint the layer shows: the border's width.
     pub fn reach(&self) -> i32 {
-        let border = match (self.fill, self.border) {
+        let border = match (&self.fill, self.border) {
             (None, Some(b)) => b.width.clamp(0.0, MAX_BORDER).ceil() as i32 + 1,
             _ => 0,
         };
@@ -49,7 +139,7 @@ impl LayerStyle {
 }
 
 /// A fill layer's content.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayerFill {
     /// One sRGB colour.
     Colour([u8; 3]),
@@ -59,7 +149,38 @@ pub enum LayerFill {
         shape: GradientShape,
         start: [f32; 2],
         end: [f32; 2],
+        #[serde(default)]
+        repeat: GradientRepeat,
+        #[serde(default)]
+        reverse: bool,
     },
+}
+
+thread_local! {
+    /// The last gradient each thread turned into a ramp: a fill's tiles are
+    /// made one by one, on whichever thread composites them.
+    // A single entry: two gradient fills composited in turn on one thread
+    // rebuild each other's ramp (4096 colours) per tile; key a small map by
+    // layer if documents with several gradient fills feel slow.
+    static RAMP: std::cell::RefCell<Option<(GradientMap, BlendSpace, std::sync::Arc<Ramp>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `stops` as a ramp mixed in `space`, from this thread's cache if it
+/// already made it.
+fn ramp(stops: &GradientMap, space: BlendSpace) -> std::sync::Arc<Ramp> {
+    RAMP.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some((s, sp, ramp)) = cell.as_ref()
+            && s == stops
+            && *sp == space
+        {
+            return std::sync::Arc::clone(ramp);
+        }
+        let ramp = std::sync::Arc::new(Ramp::new(stops, space, 1.0));
+        *cell = Some((stops.clone(), space, std::sync::Arc::clone(&ramp)));
+        ramp
+    })
 }
 
 impl LayerFill {
@@ -71,53 +192,87 @@ impl LayerFill {
     }
 
     /// The colour at canvas pixel `(x, y)` (a thumbnail's sample).
-    pub fn pixel(&self, x: i32, y: i32) -> Color32 {
-        match *self {
-            LayerFill::Colour([r, g, b]) => Color32::from_rgb(r, g, b),
+    pub fn pixel(&self, x: i32, y: i32, space: BlendSpace) -> Color32 {
+        match self {
+            LayerFill::Colour([r, g, b]) => Color32::from_rgb(*r, *g, *b),
             LayerFill::Gradient { colours, .. } => {
                 let t = self.gradient().map_or(0.0, |g| {
                     g.position(Vec2::new(x as f32 + 0.5, y as f32 + 0.5))
                 });
-                let [r, g, b] = colours.color_at(t).map(|v| (v * 255.0).round() as u8);
-                Color32::from_rgb(r, g, b)
+                ramp(colours, space).pixel(t, None)
             }
         }
     }
 
-    fn gradient(&self) -> Option<Gradient> {
+    pub fn gradient(&self) -> Option<Gradient> {
         match *self {
             LayerFill::Gradient {
-                shape, start, end, ..
+                shape,
+                start,
+                end,
+                repeat,
+                reverse,
+                ..
             } => Some(Gradient {
                 shape,
-                repeat: GradientRepeat::None,
+                repeat,
                 start: Vec2::from(start),
                 end: Vec2::from(end),
-                reverse: false,
+                reverse,
             }),
             LayerFill::Colour(_) => None,
         }
     }
 
-    /// Tile `(tx, ty)` of a `tile_size` grid, premultiplied (opaque).
-    pub fn tile(&self, tx: i32, ty: i32, tile_size: usize) -> Vec<Color32> {
-        match *self {
-            LayerFill::Colour([r, g, b]) => vec![Color32::from_rgb(r, g, b); tile_size * tile_size],
+    /// Tile `(tx, ty)` of a `tile_size` grid, premultiplied: a gradient
+    /// mixed in `space` and dithered.
+    pub fn tile(&self, tx: i32, ty: i32, tile_size: usize, space: BlendSpace) -> Vec<Color32> {
+        match self {
+            LayerFill::Colour([r, g, b]) => {
+                vec![Color32::from_rgb(*r, *g, *b); tile_size * tile_size]
+            }
             LayerFill::Gradient { colours, .. } => {
-                let gradient = self.gradient().expect("a gradient fill");
+                let (gradient, ramp) = (
+                    self.gradient().expect("a gradient fill"),
+                    ramp(colours, space),
+                );
                 let mut out = Vec::with_capacity(tile_size * tile_size);
                 let mut row = vec![0.0; tile_size];
                 let (x0, y0) = (tx * tile_size as i32, ty * tile_size as i32);
-                for y in 0..tile_size as i32 {
-                    gradient.row_positions(x0, y0 + y, &mut row);
-                    out.extend(row.iter().map(|&t| {
-                        let [r, g, b] = colours.color_at(t).map(|v| (v * 255.0).round() as u8);
-                        Color32::from_rgb(r, g, b)
+                for y in y0..y0 + tile_size as i32 {
+                    gradient.row_positions(x0, y, &mut row);
+                    out.extend(row.iter().enumerate().map(|(i, &t)| {
+                        let noise = pixel_noise((x0 + i as i32) as u32, y as u32);
+                        ramp.pixel(t, Some(noise))
                     }));
                 }
                 out
             }
         }
+    }
+
+    /// Tile `(tx, ty)` at full precision, premultiplied in `space`: for a
+    /// deeper document, where a gradient needs no dither. `None` for a
+    /// plain colour, which 8 bits hold exactly.
+    pub fn tile_precise(
+        &self,
+        tx: i32,
+        ty: i32,
+        tile_size: usize,
+        space: BlendSpace,
+    ) -> Option<Vec<[f32; 4]>> {
+        let LayerFill::Gradient { colours, .. } = self else {
+            return None;
+        };
+        let (gradient, ramp) = (self.gradient()?, ramp(colours, space));
+        let mut out = Vec::with_capacity(tile_size * tile_size);
+        let mut row = vec![0.0; tile_size];
+        let (x0, y0) = (tx * tile_size as i32, ty * tile_size as i32);
+        for y in y0..y0 + tile_size as i32 {
+            gradient.row_positions(x0, y, &mut row);
+            out.extend(row.iter().map(|&t| ramp.premultiplied_in(t, space)));
+        }
+        Some(out)
     }
 }
 
@@ -301,20 +456,66 @@ mod tests {
 
     #[test]
     fn fills_cover_their_tile() {
-        let solid = LayerFill::Colour([10, 20, 30]).tile(3, 1, 8);
+        let solid = LayerFill::Colour([10, 20, 30]).tile(3, 1, 8, BlendSpace::Gamma);
         assert!(solid.iter().all(|&c| c == Color32::from_rgb(10, 20, 30)));
         let gradient = LayerFill::Gradient {
             colours: GradientMap::default(),
             shape: GradientShape::Linear,
             start: [0.0, 0.0],
             end: [16.0, 0.0],
+            repeat: GradientRepeat::None,
+            reverse: false,
         };
         // Left tile dark to mid, right tile mid to light.
-        let left = gradient.tile(0, 0, 8);
-        let right = gradient.tile(1, 0, 8);
+        let left = gradient.tile(0, 0, 8, BlendSpace::Gamma);
+        let right = gradient.tile(1, 0, 8, BlendSpace::Gamma);
         assert!(left[0].r() < 20 && right[7].r() > 235);
         assert!(left[7].r() < right[0].r());
-        assert_eq!(left[0], left[8 * 7], "same down the column");
+        assert!(
+            left[0].r().abs_diff(left[8 * 7].r()) <= 1,
+            "same down the column, but for dither"
+        );
+        // In a deeper document: exact, and in step with the 8-bit tile.
+        let precise = gradient.tile_precise(1, 0, 8, BlendSpace::Gamma).unwrap();
+        assert!((precise[3][0] * 255.0 - right[3].r() as f32).abs() <= 1.0);
+        assert!(
+            LayerFill::Colour([1, 2, 3])
+                .tile_precise(0, 0, 8, BlendSpace::Gamma)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_overlay_colours_the_paint_only_and_keeps_its_transparency() {
+        // Black to white across 16 px, multiplied over half-clear red.
+        let mut overlay = GradientOverlay::new(GradientMap::default(), 16.0, 16.0);
+        overlay.blend = crate::canvas::blend_modes::LayerBlend::Multiply;
+        let red = Color32::from_rgba_unmultiplied(255, 0, 0, 128);
+        let mut paint = vec![red; 16 * 16];
+        paint[1] = Color32::TRANSPARENT;
+        overlay.apply(&mut paint, 0, 0, 16, BlendSpace::Gamma);
+        use crate::canvas::blend::Unmultiply;
+        assert_eq!(paint[1], Color32::TRANSPARENT, "no paint, no overlay");
+        let [r, _, _, a] = paint[0].unmultiplied();
+        assert!(
+            r < 20 && a.abs_diff(128) <= 1,
+            "black multiplied, half clear still"
+        );
+        let [r, g, _, _] = paint[15].unmultiplied();
+        assert!(r > 230 && g < 5, "white multiplied: the red stays");
+        // Half opacity: half way back to the paint.
+        overlay.opacity = 0.5;
+        let mut paint = vec![Color32::from_rgb(255, 0, 0); 16 * 16];
+        overlay.apply(&mut paint, 0, 0, 16, BlendSpace::Gamma);
+        assert!(paint[0].r().abs_diff(128) <= 4, "{:?}", paint[0]);
+    }
+
+    #[test]
+    fn a_fill_saved_before_repeat_and_reverse_still_reads() {
+        let old = r#"{"Gradient":{"colours":{"len":2,"stops":[[0.0,[0,0,0]],[1.0,[255,255,255]],[0.0,[0,0,0]],[0.0,[0,0,0]],[0.0,[0,0,0]],[0.0,[0,0,0]],[0.0,[0,0,0]],[0.0,[0,0,0]]]},"shape":"Radial","start":[1.0,2.0],"end":[3.0,4.0]}}"#;
+        let fill: LayerFill = serde_json::from_str(old).unwrap();
+        assert_eq!(fill.gradient().unwrap().repeat, GradientRepeat::None);
+        assert!(!fill.gradient().unwrap().reverse);
     }
 
     #[test]
@@ -324,6 +525,7 @@ mod tests {
             border: Some(Border::default()),
             impasto: None,
             lightness_map: false,
+            overlay: None,
         };
         let json = serde_json::to_string(&style).unwrap();
         assert_eq!(serde_json::from_str::<LayerStyle>(&json).unwrap(), style);

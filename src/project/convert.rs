@@ -448,8 +448,8 @@ impl From<&LayerMeta> for StoredLayerMeta {
             parent: meta.parent.map(|p| p.0),
             blend: Some(meta.blend.key().to_string()),
             clipped: meta.clipped,
-            adjustment: meta.adjustment,
-            style: meta.style,
+            adjustment: meta.adjustment.clone(),
+            style: meta.style.clone(),
             text: StoredText::from_layer(meta.text.as_deref()),
             vector: meta.vector.as_deref().cloned(),
             heights: meta.height.as_ref().map(|m| {
@@ -589,6 +589,8 @@ pub(super) struct StoredLayerSettings {
     position_locked: bool,
     draft: bool,
     reference: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    style: Option<crate::canvas::layer_style::LayerStyle>,
 }
 
 impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
@@ -667,6 +669,7 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                             position_locked: s.position_locked,
                             draft: s.draft,
                             reference: s.reference,
+                            style: s.style.clone(),
                         };
                         (id.0, stored)
                     })
@@ -814,6 +817,7 @@ impl StoredLayerHistoryOp {
                             position_locked: s.position_locked,
                             draft: s.draft,
                             reference: s.reference,
+                            style: s.style,
                         };
                         (LayerId(id), settings)
                     })

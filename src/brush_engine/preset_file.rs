@@ -499,6 +499,9 @@ impl StoredBrush {
         b.sharpness = self.sharpness.clamp(0.0, 1.0);
         b.sharpness_softness = self.sharpness_softness.clamp(0.0, 1.0);
         b.mixing = self.mixing;
+        // The Pen pressure settings as inputs (files saved before they
+        // were one).
+        b.fold_pressure();
         Ok(b)
     }
 }
@@ -813,6 +816,8 @@ mod tests {
             (library.version, decode(&bytes).unwrap()[0].brush.clone())
         };
         let mut brush = Brush::new(24.0, 20.0, Color32::BLACK, 25.0);
+        // (Read back, pressure settings are inputs: compare like that.)
+        brush.fold_pressure();
         let input = |sensor, setting| InputMapping {
             sensor,
             setting,
@@ -841,7 +846,11 @@ mod tests {
         let mut zip = zip::ZipWriter::default();
         zip.add(PRESETS_ENTRY, json).unwrap();
         let future = &decode(&zip.finish().unwrap()).unwrap()[0].brush;
-        assert_eq!(future.inputs.len(), 1);
+        // (Its pressure size, read as an input too, comes first.)
+        assert!(
+            future.inputs.iter().all(|m| m.setting == DabSetting::Size),
+            "the unknown setting left out"
+        );
         assert_eq!(future.input_combine, [(DabSetting::Size, Combine::Add)]);
     }
 
@@ -1044,7 +1053,10 @@ mod tests {
         assert_eq!(b.dynamics.random.purity, -0.5);
         assert!(b.stay_inside);
         assert_eq!(b.sharpness, 0.4);
-        assert!(b.brush_options.pressure_spacing);
+        // Read back as the Pressure → Spacing input it is now.
+        assert!(b.inputs.iter().any(|m| m.sensor
+            == crate::brush_engine::dynamics::Sensor::Pressure
+            && m.setting == crate::brush_engine::dynamics::DabSetting::Spacing));
         assert!(b.dynamics.tip.random_flip_x && !b.dynamics.tip.random_flip_y);
         assert!(b.dynamics.tip.follow_barrel);
         assert_eq!(b.paint_blend, LayerBlend::Parallel);

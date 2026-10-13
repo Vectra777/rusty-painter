@@ -674,6 +674,33 @@ impl PainterApp {
             self.add_vector_line(layer_idx, &outline);
             return;
         }
+        let fill = matches!(settings.style, ShapeStyle::Fill | ShapeStyle::Both)
+            && session.has_area(settings.closed);
+        let outline = matches!(settings.style, ShapeStyle::Outline | ShapeStyle::Both)
+            || !session.has_area(settings.closed);
+        let fills = if fill {
+            vec![session.outline(true)]
+        } else {
+            Vec::new()
+        };
+        let strokes = if outline {
+            vec![session.outline(settings.closed)]
+        } else {
+            Vec::new()
+        };
+        self.paint_outlines(layer_idx, &fills, &strokes);
+    }
+
+    /// On layer `layer_idx`, as one undo step: `fills`' insides in the
+    /// brush colour, then `strokes` with the brush (steady: no stabilizer
+    /// lag at corners), each mirrored by mirror painting, within the
+    /// selection. The Shape tool's and the Pen's paths alike.
+    pub(crate) fn paint_outlines(
+        &mut self,
+        layer_idx: usize,
+        fills: &[Vec<Vec2>],
+        strokes: &[Vec<Vec2>],
+    ) {
         self.release_canvas();
         let mut undo = UndoAction {
             tiles: Vec::new(),
@@ -688,33 +715,31 @@ impl PainterApp {
 
         // The inside first, so the outline paints over its edge.
         let eraser = self.brush_state.brush.brush_options.blend_mode == BlendMode::Eraser;
-        let fill = matches!(settings.style, ShapeStyle::Fill | ShapeStyle::Both);
-        if fill && !eraser && session.has_area(settings.closed) {
-            let outline = session.outline(true);
+        if !eraser {
             let color = self.brush_state.brush.brush_options.color;
-            let mut polygons = vec![outline.clone()];
-            for copy in &copies {
-                polygons.push(outline.iter().map(|&p| symmetry.map(copy, p)).collect());
-            }
-            for polygon in polygons {
-                if let Some(mask) = self.shape_fill_mask(polygon)
-                    && let Some(rect) = self.canvas.paint_mask(layer_idx, &mask, color, &mut undo)
-                {
-                    grow(rect);
+            for outline in fills {
+                let mut polygons = vec![outline.clone()];
+                for copy in &copies {
+                    polygons.push(outline.iter().map(|&p| symmetry.map(copy, p)).collect());
+                }
+                for polygon in polygons {
+                    if let Some(mask) = self.shape_fill_mask(polygon)
+                        && let Some(rect) =
+                            self.canvas.paint_mask(layer_idx, &mask, color, &mut undo)
+                    {
+                        grow(rect);
+                    }
                 }
             }
         }
 
-        // The outline, with the brush (steady: no stabilizer lag at corners).
-        let outline_style = matches!(settings.style, ShapeStyle::Outline | ShapeStyle::Both);
-        if outline_style || !session.has_area(settings.closed) {
+        if !strokes.is_empty() {
             let mut brush = self.brush_state.brush.clone();
             brush.stabilizer_algorithm = StabilizerAlgorithm::None;
             let selection = self
                 .selection_manager
                 .has_selection()
                 .then(|| SelectionManager::with_shape(self.layer_selection_shape()));
-            let mut stroke = StrokeState::new();
             let mut tiles = StrokeTiles::default();
             let pool = std::sync::Arc::clone(&self.workspace.pool);
             {
@@ -723,10 +748,13 @@ impl PainterApp {
                     StrokeContext::new(&pool, canvas, selection.as_ref(), &mut undo, &mut tiles)
                         .with_symmetry(&symmetry, &copies);
                 pool.install(|| {
-                    for p in session.outline(settings.closed) {
-                        stroke.add_point(&mut brush, p, 1.0, &mut context);
+                    for outline in strokes {
+                        let mut stroke = StrokeState::new();
+                        for &p in outline {
+                            stroke.add_point(&mut brush, p, 1.0, &mut context);
+                        }
+                        stroke.finish(&mut brush, &mut context);
                     }
-                    stroke.finish(&mut brush, &mut context);
                 });
             }
             let ts = self.canvas.tile_size() as f32;
@@ -756,7 +784,7 @@ impl PainterApp {
     }
 
     /// Coverage of `polygon`'s inside, clipped to the selection.
-    fn shape_fill_mask(&self, polygon: Vec<Vec2>) -> Option<SelectionMask> {
+    pub(crate) fn shape_fill_mask(&self, polygon: Vec<Vec2>) -> Option<SelectionMask> {
         let shape = crate::selection::new_lasso_shape(polygon);
         let mut manager = SelectionManager::new();
         manager.canvas_size = [self.canvas.width(), self.canvas.height()];

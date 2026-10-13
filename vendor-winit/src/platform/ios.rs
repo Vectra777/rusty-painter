@@ -115,6 +115,9 @@ pub struct PenSample {
     /// ([`crate::event::Touch::id`]), so it can be told from a finger.
     pub touch_id: u64,
     pub phase: PenPhase,
+    /// When the Pencil was there, in seconds (UIKit's clock): coalesced
+    /// samples keep their own times.
+    pub time: f64,
 }
 
 /// Take the Pencil samples queued since the last call, oldest first.

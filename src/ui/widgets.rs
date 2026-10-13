@@ -76,23 +76,52 @@ pub(crate) fn paint_swatch(painter: &egui::Painter, rect: Rect, color: Color32) 
     painter.rect_stroke(rect, radius, Stroke::new(1.0_f32, BORDER));
 }
 
+/// A blend mode picker, its modes in their groups. Returns whether it
+/// changed.
+pub(crate) fn blend_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    mode: &mut crate::canvas::blend_modes::LayerBlend,
+) -> bool {
+    use crate::canvas::blend_modes::LayerBlend;
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(mode.label())
+        .show_ui(ui, |ui| {
+            for (i, group) in LayerBlend::GROUPS.iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                for &m in *group {
+                    changed |= ui.selectable_value(mode, m, m.label()).changed();
+                }
+            }
+        });
+    changed
+}
+
 /// A gradient's colours left to right across `rect`, over a checkerboard
 /// where they're see-through.
 pub(crate) fn paint_gradient_strip(
     painter: &egui::Painter,
     rect: Rect,
-    stops: &[crate::canvas::gradient::Stop],
+    stops: &crate::canvas::gradient::GradientStops,
 ) {
-    let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
-        return;
-    };
-    if stops.iter().any(|s| s.color.a() < 255) {
+    if stops.has_transparency() {
         draw_checkerboard(painter, rect, (rect.height() / 3.0).clamp(3.0, 8.0));
     }
-    // The end colours carry on to the edges.
-    let points: Vec<(f32, Color32)> = std::iter::once((0.0, first.color))
-        .chain(stops.iter().map(|s| (s.pos.clamp(0.0, 1.0), s.color)))
-        .chain(std::iter::once((1.0, last.color)))
+    // Sampled every few points, so midpoints and opacity stops show.
+    let steps = (rect.width() / 3.0).ceil().clamp(2.0, 256.0) as usize;
+    let points: Vec<(f32, Color32)> = (0..=steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32;
+            let [r, g, b, a] = stops.eval(t, crate::canvas::blend_modes::BlendSpace::Gamma);
+            let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+            (
+                t,
+                Color32::from_rgba_unmultiplied(q(r), q(g), q(b), q(a * 255.0)),
+            )
+        })
         .collect();
     let mut mesh = egui::Mesh::default();
     for (pos, color) in points {
@@ -270,7 +299,8 @@ pub(crate) fn slider_row(ui: &mut egui::Ui, label: &str, slider: impl egui::Widg
     crate::ui::bar_slider::ROW.with(|r| *r.borrow_mut() = label.to_string());
     ui.horizontal(|ui| {
         row_label(ui, label);
-        let value_box = metrics(ui.ctx()).value_box_width;
+        // (A little slack: a value with a sign is a hair wider.)
+        let value_box = metrics(ui.ctx()).value_box_width + 2.0;
         ui.spacing_mut().slider_width = (ui.available_width() - value_box).max(40.0);
         ui.add(slider)
     })
@@ -678,8 +708,13 @@ mod growth_tests {
         for group in Filter::MENU {
             for f in group.iter() {
                 let widths = window_widths(40, |ui| {
-                    let mut f = *f;
-                    crate::ui::filter_dialog::settings(ui, &mut f);
+                    let mut f = f.clone();
+                    let mut library = Default::default();
+                    let mut gradients = crate::ui::filter_dialog::Gradients {
+                        library: &mut library,
+                        colors: (egui::Color32::BLACK, egui::Color32::WHITE),
+                    };
+                    crate::ui::filter_dialog::settings(ui, &mut f, &mut gradients);
                 });
                 let last = widths[widths.len() - 1];
                 assert!(

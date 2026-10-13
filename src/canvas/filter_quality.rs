@@ -31,7 +31,7 @@ fn picture() -> Vec<Color32> {
 fn every_filter() -> Vec<Filter> {
     let mut all: Vec<Filter> = Filter::MENU
         .iter()
-        .flat_map(|g| g.iter().copied())
+        .flat_map(|g| g.iter().cloned())
         .collect();
     all.extend([
         Filter::BrightnessContrast {

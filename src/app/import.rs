@@ -177,6 +177,9 @@ impl PainterApp {
                     source,
                     Some(project.to_path_buf()),
                 );
+            } else if extension("grd") {
+                // Photoshop gradients join the gradient tool's.
+                self.import_gradients_in_background(file.name.clone(), source);
             } else if Self::is_brush_file(&file.name)
                 || path.is_some_and(|p| Self::is_brush_file(&p.to_string_lossy()))
             {

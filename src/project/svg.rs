@@ -81,8 +81,8 @@ fn children(
             LayerKind::Group => children(canvas, Some(layer.id), depth + 1, out, defs)?,
             _ if layer.adjustment.is_some() => {}
             _ => {
-                if let Some(fill) = layer.style.fill {
-                    fill_svg(canvas, layer.id, fill, out, defs);
+                if let Some(fill) = &layer.style.fill {
+                    fill_svg(canvas, i, fill, out, defs)?;
                 } else if let Some(v) = &layer.vector {
                     for s in &v.strokes {
                         out.push_str(&stroke_svg(s));
@@ -140,57 +140,118 @@ fn hex([r, g, b]: [u8; 3]) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-fn fill_svg(canvas: &Canvas, id: LayerId, fill: LayerFill, out: &mut String, defs: &mut String) {
+fn fill_svg(
+    canvas: &Canvas,
+    idx: usize,
+    fill: &LayerFill,
+    out: &mut String,
+    defs: &mut String,
+) -> Result<(), String> {
+    use crate::canvas::gradient::{GradientRepeat, GradientShape};
     let (w, h) = (canvas.width(), canvas.height());
-    match fill {
+    let (colours, shape, start, end, repeat, reverse) = match fill {
         LayerFill::Colour(c) => {
-            let _ = writeln!(out, r#"<rect width="{w}" height="{h}" fill="{}"/>"#, hex(c));
+            let _ = writeln!(
+                out,
+                r#"<rect width="{w}" height="{h}" fill="{}"/>"#,
+                hex(*c)
+            );
+            return Ok(());
         }
         LayerFill::Gradient {
             colours,
             shape,
             start,
             end,
-        } => {
-            use crate::canvas::gradient::GradientShape;
-            let gid = format!("fill-{}", id.0);
-            let stops: String = colours
-                .stops()
-                .iter()
-                .map(|&(pos, c)| format!(r#"<stop offset="{pos:.4}" stop-color="{}"/>"#, hex(c)))
-                .collect();
-            match shape {
-                GradientShape::Radial => {
-                    let r = ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt();
-                    let _ = writeln!(
-                        defs,
-                        r#"<radialGradient id="{gid}" gradientUnits="userSpaceOnUse" cx="{:.2}" cy="{:.2}" r="{r:.2}">{stops}</radialGradient>"#,
-                        start[0], start[1]
-                    );
-                }
-                // SVG has no reflected or conic gradient: linear ones stand in.
-                _ => {
-                    let _ = writeln!(
-                        defs,
-                        r#"<linearGradient id="{gid}" gradientUnits="userSpaceOnUse" x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}"{}>{stops}</linearGradient>"#,
-                        start[0],
-                        start[1],
-                        end[0],
-                        end[1],
-                        if shape == GradientShape::Reflected {
-                            r#" spreadMethod="reflect""#
-                        } else {
-                            ""
-                        }
-                    );
-                }
-            }
-            let _ = writeln!(
-                out,
-                r#"<rect width="{w}" height="{h}" fill="url(#{gid})"/>"#
-            );
-        }
+            repeat,
+            reverse,
+        } => (colours, *shape, *start, *end, *repeat, *reverse),
+    };
+    // SVG has no conic or diamond gradient: the layer as a picture.
+    if matches!(shape, GradientShape::Angle | GradientShape::Diamond) {
+        return pixels_svg(canvas, idx, out);
     }
+    let gid = format!("fill-{}", canvas.layers[idx].id.0);
+    let colours = if reverse {
+        colours.reversed()
+    } else {
+        colours.clone()
+    };
+    // SVG mixes stops straight in sRGB, with no midpoints or separate
+    // opacity: anything else is sampled closely enough to look the same.
+    let exact = canvas.blend_space == crate::canvas::blend_modes::BlendSpace::Gamma
+        && colours.opacity.is_empty()
+        && colours.colors.iter().all(|s| (s.mid - 0.5).abs() < 1e-4);
+    let mut points: Vec<(f32, [f32; 4])> = if exact {
+        colours
+            .colors
+            .iter()
+            .map(|s| {
+                let [r, g, b] = s.color.map(|v| v as f32);
+                (s.pos, [r, g, b, 1.0])
+            })
+            .collect()
+    } else {
+        (0..=64)
+            .map(|i| {
+                let t = i as f32 / 64.0;
+                (t, colours.eval(t, canvas.blend_space))
+            })
+            .collect()
+    };
+    // Reflected: the stops mirrored on both sides of the start, so it stops
+    // at the ends (SVG's own reflection would carry on past them).
+    let (x1, y1) = if shape == GradientShape::Reflected {
+        let mut both: Vec<(f32, [f32; 4])> = points
+            .iter()
+            .rev()
+            .map(|&(t, c)| (0.5 - t / 2.0, c))
+            .collect();
+        both.extend(points.iter().map(|&(t, c)| (0.5 + t / 2.0, c)));
+        points = both;
+        (2.0 * start[0] - end[0], 2.0 * start[1] - end[1])
+    } else {
+        (start[0], start[1])
+    };
+    let stops: String = points
+        .iter()
+        .map(|&(t, [r, g, b, a])| {
+            let q = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+            let opacity = if a < 1.0 {
+                format!(r#" stop-opacity="{a:.3}""#)
+            } else {
+                String::new()
+            };
+            format!(
+                r#"<stop offset="{t:.4}" stop-color="{}"{opacity}/>"#,
+                hex([q(r), q(g), q(b)])
+            )
+        })
+        .collect();
+    let spread = match repeat {
+        GradientRepeat::None => "",
+        GradientRepeat::Repeat => r#" spreadMethod="repeat""#,
+        GradientRepeat::Mirror => r#" spreadMethod="reflect""#,
+    };
+    if shape == GradientShape::Radial {
+        let r = ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt();
+        let _ = writeln!(
+            defs,
+            r#"<radialGradient id="{gid}" gradientUnits="userSpaceOnUse" cx="{:.2}" cy="{:.2}" r="{r:.2}"{spread}>{stops}</radialGradient>"#,
+            start[0], start[1]
+        );
+    } else {
+        let _ = writeln!(
+            defs,
+            r#"<linearGradient id="{gid}" gradientUnits="userSpaceOnUse" x1="{x1:.2}" y1="{y1:.2}" x2="{:.2}" y2="{:.2}"{spread}>{stops}</linearGradient>"#,
+            end[0], end[1],
+        );
+    }
+    let _ = writeln!(
+        out,
+        r#"<rect width="{w}" height="{h}" fill="url(#{gid})"/>"#
+    );
+    Ok(())
 }
 
 /// A vector line as a filled outline: its width at every point kept, round

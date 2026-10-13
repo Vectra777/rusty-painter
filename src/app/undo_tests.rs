@@ -370,9 +370,9 @@ fn an_adjustment_layer_undoes_redoes_and_saves_with_its_filter() {
         saturation: 0.1,
         lightness: 0.0,
     };
-    app.add_adjustment_layer(filter);
+    app.add_adjustment_layer(filter.clone());
     let idx = app.canvas.active_layer_idx;
-    assert_eq!(app.canvas.layers[idx].adjustment, Some(filter));
+    assert_eq!(app.canvas.layers[idx].adjustment, Some(filter.clone()));
     assert_eq!(
         app.workspace.filter.editing,
         app.canvas.layer_id_at(idx),
@@ -385,14 +385,14 @@ fn an_adjustment_layer_undoes_redoes_and_saves_with_its_filter() {
             .canvas
             .layers
             .iter()
-            .any(|l| l.adjustment == Some(filter))
+            .any(|l| l.adjustment == Some(filter.clone()))
     );
     app.remove_layer(idx);
     app.apply_history(false);
     let idx = app.canvas.active_layer_idx;
     assert_eq!(
         app.canvas.layers[idx].adjustment,
-        Some(filter),
+        Some(filter.clone()),
         "undoing the delete"
     );
     app.apply_history(false);
@@ -401,7 +401,7 @@ fn an_adjustment_layer_undoes_redoes_and_saves_with_its_filter() {
         app.canvas
             .layers
             .iter()
-            .any(|l| l.adjustment == Some(filter)),
+            .any(|l| l.adjustment == Some(filter.clone())),
         "redoing the add"
     );
 }
@@ -412,7 +412,11 @@ fn a_fill_layer_and_a_border_undo_redo_and_save() {
     let mut app = app();
     app.add_gradient_fill_layer();
     let idx = app.canvas.active_layer_idx;
-    let fill = app.canvas.layers[idx].style.fill.expect("a fill layer");
+    let fill = app.canvas.layers[idx]
+        .style
+        .fill
+        .clone()
+        .expect("a fill layer");
     assert!(app.canvas.layers[idx].locked, "not painted on");
     assert_eq!(
         app.workspace.filter.fill_editing,
@@ -425,8 +429,9 @@ fn a_fill_layer_and_a_border_undo_redo_and_save() {
         border: Some(Border::default()),
         impasto: None,
         lightness_map: false,
+        overlay: None,
     };
-    app.set_layer_style(below, border);
+    app.set_layer_style(below, border.clone());
     let bytes = crate::project::encode_project(&app).unwrap();
     let loaded = crate::project::decode_project(&bytes).unwrap();
     assert!(
@@ -434,7 +439,7 @@ fn a_fill_layer_and_a_border_undo_redo_and_save() {
             .canvas
             .layers
             .iter()
-            .any(|l| l.style.fill == Some(fill))
+            .any(|l| l.style.fill == Some(fill.clone()))
     );
     assert!(loaded.canvas.layers.iter().any(|l| l.style == border));
     app.remove_layer(idx);
@@ -442,14 +447,17 @@ fn a_fill_layer_and_a_border_undo_redo_and_save() {
     let idx = app.canvas.active_layer_idx;
     assert_eq!(
         app.canvas.layers[idx].style.fill,
-        Some(fill),
+        Some(fill.clone()),
         "undoing the delete"
     );
     app.apply_history(false);
     assert!(app.canvas.layers.iter().all(|l| l.style.fill.is_none()));
     app.apply_history(true);
     assert!(
-        app.canvas.layers.iter().any(|l| l.style.fill == Some(fill)),
+        app.canvas
+            .layers
+            .iter()
+            .any(|l| l.style.fill == Some(fill.clone())),
         "redoing the add"
     );
 }
@@ -466,6 +474,7 @@ fn painting_a_bordered_layer_redraws_the_tiles_around() {
             border: Some(Border::default()),
             impasto: None,
             lightness_map: false,
+            overlay: None,
         },
     );
     app.render_cache = crate::app::state::RenderCache::new(app.canvas.width(), app.canvas.height());
@@ -635,12 +644,12 @@ fn colour_filters_work_at_full_depth() {
     };
     for filter in filters {
         let mut eight = dark_ramp(Depth::U8);
-        eight.filter_open(filter);
+        eight.filter_open(filter.clone());
         eight.filter_commit();
         let want = row(&eight);
         let mut deep = dark_ramp(Depth::U16);
         let before = deep.canvas.get_layer_tile_deep(1, 1, 0).unwrap();
-        deep.filter_open(filter);
+        deep.filter_open(filter.clone());
         deep.filter_commit();
         assert!(
             deep.canvas.get_layer_tile_deep(1, 1, 0).is_some(),

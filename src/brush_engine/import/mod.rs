@@ -11,6 +11,7 @@
 
 mod abr;
 mod gimp;
+pub(crate) mod grd;
 pub(crate) mod krita;
 mod mypaint;
 #[cfg(feature = "sut-import")]
@@ -67,6 +68,10 @@ pub fn import(file_name: &str, bytes: &[u8]) -> Result<Imported, String> {
     }?;
     if imported.presets.is_empty() {
         return Err(format!("{file_name} has no brushes this app can use"));
+    }
+    let mut imported = imported;
+    for p in &mut imported.presets {
+        p.brush.fold_pressure();
     }
     Ok(imported)
 }

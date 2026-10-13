@@ -204,7 +204,7 @@ impl Layer {
     /// heights to light (until then the layer composites, and its strokes
     /// redraw, as a plain one's).
     pub fn shown_style(&self) -> crate::canvas::layer_style::LayerStyle {
-        let mut style = self.style;
+        let mut style = self.style.clone();
         if self.height.as_deref().is_none_or(|h| h.is_empty()) {
             style.impasto = None;
             style.lightness_map = false;
@@ -239,8 +239,8 @@ impl Layer {
             expanded: self.expanded,
             blend: self.blend,
             clipped: self.clipped,
-            adjustment: self.adjustment,
-            style: self.style,
+            adjustment: self.adjustment.clone(),
+            style: self.style.clone(),
             text: self.text.clone(),
             vector: self.vector.clone(),
             height: self.height.clone(),
@@ -355,8 +355,8 @@ impl Layer {
             expanded: self.expanded,
             blend: self.blend,
             clipped: self.clipped,
-            adjustment: self.adjustment,
-            style: self.style,
+            adjustment: self.adjustment.clone(),
+            style: self.style.clone(),
             text: self.text.clone(),
             vector: self.vector.clone(),
             height: self.height.clone(),
@@ -740,8 +740,8 @@ impl Canvas {
         layer.parent = meta.parent;
         layer.blend = meta.blend;
         layer.clipped = meta.clipped;
-        layer.adjustment = meta.adjustment;
-        layer.style = meta.style;
+        layer.adjustment = meta.adjustment.clone();
+        layer.style = meta.style.clone();
         layer.text = meta.text.clone();
         layer.vector = meta.vector.clone();
         layer.height = meta.height.clone();
@@ -803,8 +803,8 @@ impl Canvas {
             parent: layer.parent,
             blend: layer.blend,
             clipped: layer.clipped,
-            adjustment: layer.adjustment,
-            style: layer.style,
+            adjustment: layer.adjustment.clone(),
+            style: layer.style.clone(),
             text: layer.text.clone(),
             vector: layer.vector.clone(),
             height: layer.height.clone(),

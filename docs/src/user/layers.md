@@ -24,7 +24,11 @@ Filter → New Adjustment Layer: brightness/contrast, hue/saturation, levels, cu
 
 ## Fill layers
 
-Layer → New Fill Layer: a colour or a gradient (linear, radial, reflected or angle, any colours). Its mask or clipping says where it shows.
+Layer → New Fill Layer: a colour or a gradient. A new gradient fill starts from the Gradient tool's gradient and shape; its dialog has the [gradient editor](filters.md#gradients), the shape (linear, radial, reflected, angle or diamond), repeat, reverse and angle. Its mask or clipping says where it shows. Gradient fills mix in the document's colour space, are dithered in 8-bit documents and exact in 16-bit and float ones, and follow the canvas when it's resized, rotated or flipped. Select one with the Gradient tool to drag its ends on the canvas. Changes to a fill or a border undo like any other.
+
+## Gradient overlay
+
+Layer → Gradient Overlay… lays a gradient over the layer's paint, only where there is paint, as Photoshop's layer style does: any gradient (the gradient editor and your gradients), its shape, angle, repeat and reverse, a blend mode and an opacity. It follows the paint as you draw and becomes pixels when merged. While its settings are open, the Gradient tool drags its ends on the canvas.
 
 ## Borders
 
@@ -41,7 +45,17 @@ Layer → New Vector Layer: the brush draws lines that stay lines, smoothed and 
 
 ## Text layers
 
-The Text tool types onto a text layer in any shipped or system font, with size, alignment, spacing and colour; drag it into place before keeping it. The text stays editable: click it with the Text tool or double-click the layer. Painting on it turns it into pixels (Layer → Rasterise Text does it on purpose).
+The Text tool (`T`) types on the canvas, onto a text layer:
+
+- **Click** to start point text; **drag** to draw a text box, whose lines wrap at its width (drag its right edge to change it).
+- **Typing**: the caret and selection show on the canvas. Arrows, Ctrl+arrows (by word), Home/End, Shift to select, Ctrl+A, Backspace/Delete (Ctrl: a word), cut, copy and paste, and input methods for other scripts all work as in a text editor. Ctrl+Z undoes typing a run at a time. While typing, keys are the text's: letters don't switch tools.
+- **Click** in the text to move the caret, twice to select a word, three times for the line; drag to select.
+- **Move it** by the square handle at its top-left corner, or Ctrl+drag.
+- **Keep it** with Ctrl+Enter, the Keep button, or a click away from it; Esc or Cancel drops it.
+- **Fonts**: the shipped ones and the system's, by family and style, with a search field (the system's are found in the background, so the list fills in a moment after first use). A character the font lacks comes from another font that has it.
+- Size, alignment, line and letter spacing, and the colour (the brush colour when typing starts; picking one while typing changes it).
+
+The text stays editable: click it with the Text tool or double-click the layer; a layer still named after its text is renamed when it changes. Painting on it turns it into pixels (Layer → Rasterise Text does it on purpose).
 
 ## Shader layers
 

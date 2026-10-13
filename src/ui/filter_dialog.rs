@@ -2,20 +2,21 @@
 //! and Cancel (Enter and Esc).
 
 use crate::PainterApp;
-use crate::canvas::filters::{Filter, GradientMap, MAP_STOPS, MAX_REACH, ToneCurve};
+use crate::canvas::filters::{Filter, GradientMap, MAP_PRESETS, MAX_REACH, ToneCurve};
 use crate::ui::bar_slider::BarSlider;
 use crate::ui::curve_editor::{CurvePreset, curve_editor_with};
 use crate::ui::widgets::FitScreen;
-use crate::ui::widgets::{paint_gradient_strip, percent_of_unit, segmented, slider_row};
+use crate::ui::widgets::{percent_of_unit, segmented, slider_row};
 use eframe::egui::{self, Key};
 
 pub fn filter_dialog(app: &mut PainterApp, ctx: &egui::Context) {
-    let Some(session) = app.workspace.filter.session.as_mut() else {
+    let Some(session) = app.workspace.filter.session.as_ref() else {
         return;
     };
-    let mut filter = session.filter;
+    let mut filter = session.filter.clone();
     let mut open = true;
     let (mut ok, mut cancel) = (false, false);
+    let mut gradients = Gradients::of(app);
     egui::Window::new(filter.name())
         .fit_screen(ctx)
         .open(&mut open)
@@ -23,14 +24,16 @@ pub fn filter_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         .collapsible(false)
         .default_width(340.0)
         .show(ctx, |ui| {
-            settings(ui, &mut filter);
+            settings(ui, &mut filter, &mut gradients);
             ui.separator();
             ui.horizontal(|ui| {
                 ok = ui.button("OK").clicked();
                 cancel = ui.button("Cancel").clicked();
             });
         });
-    if filter != session.filter {
+    if let Some(session) = app.workspace.filter.session.as_mut()
+        && filter != session.filter
+    {
         session.filter = filter;
         session.dirty = true;
     }
@@ -42,7 +45,7 @@ pub fn filter_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     }
 }
 
-pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
+pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter, gradients: &mut Gradients<'_>) {
     let reach = MAX_REACH as f32;
     match filter {
         Filter::BrightnessContrast {
@@ -243,7 +246,7 @@ pub(crate) fn settings(ui: &mut egui::Ui, filter: &mut Filter) {
             ui.checkbox(preserve_luminosity, "Preserve luminosity")
                 .on_hover_text("Shift the colours without making them lighter or darker");
         }
-        Filter::GradientMap(map) => gradient_map_settings(ui, map),
+        Filter::GradientMap(map) => gradient_map_settings(ui, map, gradients),
         Filter::Exposure { stops } => {
             slider_row(
                 ui,
@@ -443,86 +446,53 @@ fn curves_settings(ui: &mut egui::Ui, curves: [&mut ToneCurve; 4]) {
     }
 }
 
-/// The map's colours as a strip, each stop's colour and place, and presets.
-pub(crate) fn gradient_map_settings(ui: &mut egui::Ui, map: &mut GradientMap) {
-    let stops: Vec<crate::canvas::gradient::Stop> = map
-        .stops()
-        .iter()
-        .map(|&(pos, [r, g, b])| crate::canvas::gradient::Stop {
-            pos,
-            color: egui::Color32::from_rgb(r, g, b),
-        })
-        .collect();
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
-    paint_gradient_strip(ui.painter(), rect, &stops);
-    ui.horizontal(|ui| {
-        ui.label("Shadows");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label("Highlights");
-        });
-    });
+/// The gradients a gradient map can start from, and the brush colours
+/// they may use.
+pub(crate) struct Gradients<'a> {
+    pub library: &'a mut crate::app::tools::gradient_colors::GradientLibrary,
+    pub colors: (egui::Color32, egui::Color32),
+}
 
-    let mut remove = None;
-    let len = map.stops().len();
-    for i in 0..len {
-        ui.horizontal(|ui| {
-            let (pos, color) = &mut map.stops[i];
-            ui.color_edit_button_srgb(color);
-            ui.add(
-                BarSlider::new(pos, 0.0..=1.0)
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                    .custom_parser(|t| {
-                        t.trim()
-                            .trim_end_matches('%')
-                            .parse::<f64>()
-                            .ok()
-                            .map(|v| v / 100.0)
-                    }),
-            );
-            if len > 2
-                && ui
-                    .small_button("✕")
-                    .on_hover_text("Remove this colour")
-                    .clicked()
-            {
-                remove = Some(i);
-            }
-        });
+impl<'a> Gradients<'a> {
+    pub fn of(app: &'a mut PainterApp) -> Self {
+        Self {
+            colors: (
+                app.brush_state.brush.brush_options.color,
+                app.brush_state.secondary_color,
+            ),
+            library: &mut app.workspace.gradient.library,
+        }
     }
-    if let Some(i) = remove {
-        let mut stops = map.stops().to_vec();
-        stops.remove(i);
-        *map = GradientMap::from_stops(&stops);
+}
+
+/// The map's colours, shadows to highlights, in the gradient editor, and
+/// the ready-made maps.
+pub(crate) fn gradient_map_settings(
+    ui: &mut egui::Ui,
+    map: &mut GradientMap,
+    gradients: &mut Gradients<'_>,
+) {
+    if map.colors.is_empty() {
+        *map = GradientMap::default();
     }
+    crate::ui::gradient_editor::edit_document_gradient(
+        ui,
+        "gradient map",
+        map,
+        gradients.library,
+        gradients.colors,
+        false,
+    );
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(len < MAP_STOPS, egui::Button::new("Add colour"))
-            .on_hover_text("A colour half way along the widest gap")
-            .clicked()
-        {
-            let stops = map.stops();
-            let (mut at, mut gap) = (0.5, 0.0);
-            for pair in stops.windows(2) {
-                if pair[1].0 - pair[0].0 > gap {
-                    gap = pair[1].0 - pair[0].0;
-                    at = (pair[0].0 + pair[1].0) * 0.5;
-                }
-            }
-            let c = map.color_at(at).map(|v| (v * 255.0).round() as u8);
-            let mut stops = stops.to_vec();
-            stops.push((at, c));
-            *map = GradientMap::from_stops(&stops);
-        }
-        if ui.button("Reverse").clicked() {
-            *map = map.reversed();
-        }
+        ui.label(egui::RichText::new("Shadows").small());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new("Highlights").small());
+        });
     });
-    map.sort();
     ui.horizontal_wrapped(|ui| {
-        for (name, stops) in GradientMap::PRESETS {
+        for (name, stops) in MAP_PRESETS {
             if ui.small_button(name).clicked() {
-                *map = GradientMap::from_stops(stops);
+                *map = GradientMap::from_colors(stops);
             }
         }
     });
@@ -537,7 +507,7 @@ pub fn adjustment_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         app.workspace.filter.editing = None;
         return;
     };
-    let Some(mut filter) = app.canvas.layers[idx].adjustment else {
+    let Some(mut filter) = app.canvas.layers[idx].adjustment.clone() else {
         app.workspace.filter.editing = None;
         return;
     };
@@ -552,7 +522,7 @@ pub fn adjustment_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         .resizable(false)
         .default_width(340.0)
         .show(ctx, |ui| {
-            settings(ui, &mut filter);
+            settings(ui, &mut filter, &mut Gradients::of(app));
             ui.label(
                 egui::RichText::new(
                     "Applies to everything below. Add a layer mask to paint where; use the \
@@ -564,7 +534,7 @@ pub fn adjustment_dialog(app: &mut PainterApp, ctx: &egui::Context) {
             ui.separator();
             done = ui.button("Done").clicked();
         });
-    if app.canvas.layers[idx].adjustment != Some(filter) {
+    if app.canvas.layers[idx].adjustment.as_ref() != Some(&filter) {
         // Dragged: the screen previews at its own resolution until let go.
         app.workspace.filter.adjusting = ctx.input(|i| i.pointer.any_down());
         app.canvas_mut().layers[idx].adjustment = Some(filter);

@@ -297,8 +297,10 @@ fn bench_gradient(c: &mut Criterion) {
     group.bench_function("ramp_build", |b| {
         b.iter(|| {
             black_box(Ramp::new(
-                Color32::from_rgb(240, 120, 30),
-                Color32::from_rgb(40, 30, 120),
+                &rusty_painter::canvas::gradient::GradientStops::two(
+                    Color32::from_rgb(240, 120, 30),
+                    Color32::from_rgb(40, 30, 120),
+                ),
                 BlendSpace::Linear,
                 1.0,
             ))
@@ -310,8 +312,10 @@ fn bench_gradient(c: &mut Criterion) {
         GradientShape::Angle,
     ] {
         let ramp = Ramp::new(
-            Color32::from_rgb(240, 120, 30),
-            Color32::from_rgb(40, 30, 120),
+            &rusty_painter::canvas::gradient::GradientStops::two(
+                Color32::from_rgb(240, 120, 30),
+                Color32::from_rgb(40, 30, 120),
+            ),
             BlendSpace::Linear,
             1.0,
         );
@@ -335,7 +339,14 @@ fn bench_gradient(c: &mut Criterion) {
                         *o = ramp.pixel(t, Some(n));
                     }
                 };
-                pool.install(|| canvas.paint_over_region(1, &region, row));
+                pool.install(|| {
+                    canvas.paint_over_region(
+                        1,
+                        &region,
+                        rusty_painter::canvas::blend_modes::LayerBlend::Normal,
+                        row,
+                    )
+                });
             });
         });
     }
@@ -508,7 +519,14 @@ fn bench_text(c: &mut Criterion) {
     let paragraph = "The quick brown fox jumps\nover the lazy dog, twice\nand then once more.";
     let mut group = c.benchmark_group("text");
     group.bench_function("render_3_lines_64px", |b| {
-        b.iter(|| black_box(text::render(&font, paragraph, &style, Vec2::splat(100.0))))
+        b.iter(|| {
+            black_box(text::render(
+                std::slice::from_ref(&font),
+                paragraph,
+                &style,
+                Vec2::splat(100.0),
+            ))
+        })
     });
     group.finish();
 }

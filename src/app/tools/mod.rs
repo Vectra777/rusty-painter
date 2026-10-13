@@ -14,6 +14,7 @@ pub(crate) mod liquify;
 pub(crate) mod mixer;
 pub(crate) mod palette;
 pub(crate) mod patch;
+pub(crate) mod pen;
 pub(crate) mod puppet;
 pub(crate) mod puppet_rig;
 pub(crate) mod quick_mask;
@@ -61,6 +62,8 @@ pub enum Tool {
     Puppet,
     /// Draw a rig layer's bones, and pose them.
     Bone,
+    /// Bézier paths, as Photoshop's Pen: to select, fill or stroke.
+    Pen,
 }
 
 impl Tool {
@@ -85,6 +88,7 @@ impl Tool {
             Tool::Animate => "Animate",
             Tool::Puppet => "Puppet Warp",
             Tool::Bone => "Bones",
+            Tool::Pen => "Path",
         }
     }
 }

@@ -44,6 +44,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Smudge | Tool::Blur => blend_options(app, ui),
         Tool::Shape(kind) => shape_options(app, ui, kind),
         Tool::Gradient => gradient_options(app, ui, true),
+        Tool::Pen => pen_options(app, ui),
         Tool::VectorEdit => {
             tool_title(ui, "Edit Lines");
             if ui.button("Back to brush").clicked() {
@@ -59,7 +60,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Text => {
             tool_title(ui, "Text");
             crate::ui::text_dialog::text_controls(app, ui);
-            "Click to type; drag the text to move it; Ctrl+Enter keeps it"
+            "Click to type, drag for a text box  ·  click in the text: caret, twice: word, three times: line  ·  move: its corner handle or Ctrl+drag  ·  Ctrl+Enter or a click away keeps it, Esc drops it"
         }
     };
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -373,7 +374,7 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
         }
         (false, _, FilterMode::Filter) => {
             use crate::canvas::filters::Filter;
-            let current = b.brush_filter;
+            let current = b.brush_filter.clone();
             egui::ComboBox::from_id_salt("brush_filter")
                 .selected_text(current.name())
                 .show_ui(ui, |ui| {
@@ -381,7 +382,7 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                         if i > 0 {
                             ui.separator();
                         }
-                        for &f in group.iter() {
+                        for f in group.iter().cloned() {
                             let same =
                                 std::mem::discriminant(&f) == std::mem::discriminant(&current);
                             if ui.selectable_label(same, f.name()).clicked() && !same {
@@ -394,7 +395,14 @@ fn blend_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
                 ui.add_space(6.0);
                 ui.menu_button("Settings…", |ui| {
                     ui.set_min_width(300.0);
-                    crate::ui::filter_dialog::settings(ui, &mut b.brush_filter);
+                    let mut gradients = crate::ui::filter_dialog::Gradients {
+                        library: &mut app.workspace.gradient.library,
+                        colors: (
+                            app.brush_state.brush.brush_options.color,
+                            app.brush_state.secondary_color,
+                        ),
+                    };
+                    crate::ui::filter_dialog::settings(ui, &mut b.brush_filter, &mut gradients);
                 });
             }
             "Paint the filter on through the brush  ·  going over a spot again doesn't filter it twice"
@@ -413,20 +421,33 @@ pub(crate) fn gradient_options(
     ui: &mut egui::Ui,
     compact: bool,
 ) -> &'static str {
-    use crate::canvas::gradient::{GradientRepeat, GradientShape};
+    use crate::canvas::gradient::GradientRepeat;
     if compact {
         tool_title(ui, "Gradient");
+    }
+    let editing_fill = app.active_gradient_fill().is_some();
+    let s = &mut app.workspace.gradient.settings;
+    if editing_fill {
+        ui.label(egui::RichText::new("Editing the fill layer").color(crate::ui::style::TEXT_DIM))
+            .on_hover_text(
+                "Drag its ends, or away from them to place it anew; these settings change it",
+            );
+    } else {
+        segmented(
+            ui,
+            &mut s.fill_layer,
+            &[(false, "Paint"), (true, "Fill layer")],
+            compact,
+        );
+        if compact {
+            vdivider(ui);
+        }
     }
     let s = &mut app.workspace.gradient.settings;
     let mut changed = segmented(
         ui,
         &mut s.shape,
-        &[
-            (GradientShape::Linear, "Linear"),
-            (GradientShape::Radial, "Radial"),
-            (GradientShape::Reflected, "Reflected"),
-            (GradientShape::Angle, "Angle"),
-        ],
+        &crate::ui::layer_style_dialog::SHAPES,
         compact,
     );
     if compact {
@@ -436,8 +457,11 @@ pub(crate) fn gradient_options(
         app.brush_state.brush.brush_options.color,
         app.brush_state.secondary_color,
     );
-    let (picked, edit) = gradient_picker(ui, &mut app.workspace.gradient, brush_colors);
+    let (picked, edit, import) = gradient_picker(ui, &mut app.workspace.gradient, brush_colors);
     changed |= picked;
+    if import {
+        app.pick_open(crate::app::files::OpenFor::Gradients);
+    }
     if let Some(copy) = edit {
         app.gradient_edit(copy);
     }
@@ -471,9 +495,14 @@ pub(crate) fn gradient_options(
         .checkbox(&mut s.dither, "Dither")
         .on_hover_text("Breaks up the bands of a smooth gradient")
         .changed();
+    if compact {
+        vdivider(ui);
+    }
+    changed |= crate::ui::widgets::blend_combo(ui, "gradient_blend", &mut s.blend);
     if changed {
         app.gradient_settings_changed();
     }
+    app.settings_record(ui.input(|i| i.pointer.any_down()));
     if compact {
         vdivider(ui);
     }
@@ -503,7 +532,7 @@ fn gradient_picker(
     ui: &mut egui::Ui,
     state: &mut crate::app::tools::gradient::GradientToolState,
     (primary, secondary): (egui::Color32, egui::Color32),
-) -> (bool, Option<bool>) {
+) -> (bool, Option<bool>, bool) {
     use crate::app::tools::gradient::GradientColors;
     use crate::ui::widgets::paint_gradient_strip;
     let id = ui.make_persistent_id("gradient_colors");
@@ -533,7 +562,7 @@ fn gradient_picker(
         .on_hover_text("Change the colours in the Gradient Editor (a preset is copied first)")
         .clicked()
         .then_some(false);
-    let mut changed = false;
+    let (mut changed, mut import) = (false, false);
     let row_height = if metrics(ui.ctx()).touch { 36.0 } else { 24.0 };
     egui::popup_below_widget(
         ui,
@@ -594,9 +623,98 @@ fn gradient_picker(
             {
                 edit = Some(true);
             }
+            import = ui
+                .button("Import .grd…")
+                .on_hover_text("Photoshop gradients, added to your gradients")
+                .clicked();
         },
     );
-    (changed, edit)
+    (changed, edit, import)
+}
+
+fn pen_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
+    use crate::app::tools::pen::PenMode;
+    tool_title(ui, "Pen");
+    pen_controls(app, ui);
+    match app.workspace.pen.mode {
+        PenMode::Draw => {
+            "Click: corner  ·  drag: curve (Alt breaks it)  ·  first point: close  ·  Enter/Esc: end the line  ·  on the path: add or delete a point  ·  Ctrl: edit  ·  Alt: convert"
+        }
+        PenMode::Edit => "Drag a point, a handle or a curve  ·  Alt+drag a handle: on its own",
+        PenMode::Convert => "Click a point: corner ↔ smooth  ·  drag a handle: on its own",
+    }
+}
+
+/// The Pen's mode and what to do with the path: the options bar's, and
+/// the touch screen's context bar.
+pub(crate) fn pen_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
+    use crate::app::tools::pen::PenMode;
+    use crate::selection::SelectionMode;
+    segmented(
+        ui,
+        &mut app.workspace.pen.mode,
+        &[
+            (PenMode::Draw, "Draw"),
+            (PenMode::Edit, "Edit"),
+            (PenMode::Convert, "Convert"),
+        ],
+        true,
+    );
+    if app.workspace.pen.drawing.is_some() {
+        // For a touch screen, which has no Enter or Backspace.
+        if ui
+            .button("End line")
+            .on_hover_text("Enter or Esc")
+            .clicked()
+        {
+            app.pen_finish();
+        }
+        if ui
+            .button("Remove point")
+            .on_hover_text("Backspace")
+            .clicked()
+        {
+            app.pen_undo_point();
+        }
+    }
+    vdivider(ui);
+    let has_path = !app.workspace.pen.path.is_empty();
+    ui.add_enabled_ui(has_path, |ui| {
+        ui.menu_button("Selection ▾", |ui| {
+            for (mode, label) in [
+                (SelectionMode::Replace, "Make Selection (Ctrl+Enter)"),
+                (SelectionMode::Add, "Add to Selection"),
+                (SelectionMode::Subtract, "Subtract from Selection"),
+                (SelectionMode::Intersect, "Intersect with Selection"),
+            ] {
+                if ui.button(label).clicked() {
+                    app.pen_to_selection(mode);
+                    ui.close_menu();
+                }
+            }
+        });
+        if ui
+            .button("Fill")
+            .on_hover_text("Fill the path's shapes with the brush colour")
+            .clicked()
+        {
+            app.pen_fill();
+        }
+        if ui
+            .button("Stroke")
+            .on_hover_text("Draw the path with the brush (on a vector layer: as lines)")
+            .clicked()
+        {
+            app.pen_stroke();
+        }
+        if ui
+            .button("Clear")
+            .on_hover_text("Remove the path")
+            .clicked()
+        {
+            app.pen_clear();
+        }
+    });
 }
 
 fn shape_options(

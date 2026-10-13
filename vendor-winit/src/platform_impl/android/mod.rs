@@ -46,6 +46,8 @@ struct PenPose {
     pressure: f32,
     tilt: f32,
     orientation: f32,
+    /// When the pen was there (`CLOCK_MONOTONIC`, nanoseconds).
+    time_ns: i64,
 }
 
 fn push_pen(pose: PenPose, tool: ToolType, phase: PenPhase) {
@@ -63,6 +65,7 @@ fn push_pen(pose: PenPose, tool: ToolType, phase: PenPhase) {
         orientation: pose.orientation,
         is_eraser: matches!(tool, ToolType::Eraser),
         phase,
+        time: pose.time_ns as f64 * 1e-9,
     });
 }
 
@@ -70,14 +73,26 @@ fn is_pen(tool: ToolType) -> bool {
     matches!(tool, ToolType::Stylus | ToolType::Eraser)
 }
 
-fn push_pen_pointer(pointer: &android_activity::input::Pointer<'_>, phase: PenPhase) {
+fn push_pen_pointer(
+    motion_event: &android_activity::input::MotionEvent<'_>,
+    pointer: &android_activity::input::Pointer<'_>,
+    phase: PenPhase,
+) {
     let tool = pointer.tool_type();
     if is_pen(tool) {
-        push_pen(pointer_pose(pointer), tool, phase);
+        push_pen(pointer_pose(motion_event, pointer), tool, phase);
     }
 }
 
-fn pointer_pose(p: &android_activity::input::Pointer<'_>) -> PenPose {
+/// The event's time: the newest sample's.
+fn event_time(motion_event: &android_activity::input::MotionEvent<'_>) -> i64 {
+    ndk_motion_event(motion_event).map_or(0, |e| e.event_time())
+}
+
+fn pointer_pose(
+    motion_event: &android_activity::input::MotionEvent<'_>,
+    p: &android_activity::input::Pointer<'_>,
+) -> PenPose {
     use android_activity::input::Axis;
     PenPose {
         x: p.x(),
@@ -85,6 +100,7 @@ fn pointer_pose(p: &android_activity::input::Pointer<'_>) -> PenPose {
         pressure: p.pressure(),
         tilt: p.axis_value(Axis::Tilt),
         orientation: p.axis_value(Axis::Orientation),
+        time_ns: event_time(motion_event),
     }
 }
 
@@ -108,12 +124,13 @@ fn push_pen_move(
                     pressure: p.pressure(),
                     tilt: p.axis_value(Axis::Tilt),
                     orientation: p.axis_value(Axis::Orientation),
+                    time_ns: historical.event_time(),
                 };
                 push_pen(pose, tool, PenPhase::Move);
             }
         }
     }
-    push_pen(pointer_pose(pointer), tool, PenPhase::Move);
+    push_pen(pointer_pose(motion_event, pointer), tool, PenPhase::Move);
 }
 
 /// The NDK event behind android-activity's wrapper, which doesn't expose the
@@ -499,7 +516,7 @@ impl<T: 'static> EventLoop<T> {
                             PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                         match pointer.tool_type() {
                             ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
-                                push_pen_pointer(&pointer, PenPhase::Down);
+                                push_pen_pointer(motion_event, &pointer, PenPhase::Down);
                                 trace!(
                                     "Pointer input {device_id:?}, press, loc={location:?}, \
                                      pointer={pointer:?}"
@@ -559,7 +576,7 @@ impl<T: 'static> EventLoop<T> {
                         match pointer.tool_type() {
                             ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
                                 let phase = if canceled { PenPhase::Cancel } else { PenPhase::Up };
-                                push_pen_pointer(&pointer, phase);
+                                push_pen_pointer(motion_event, &pointer, phase);
                                 trace!(
                                     "Pointer input {device_id:?}, release, loc={location:?}, \
                                      pointer={pointer:?}"
@@ -667,7 +684,7 @@ impl<T: 'static> EventLoop<T> {
                                 PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
                             match pointer.tool_type() {
                                 ToolType::Stylus | ToolType::Eraser | ToolType::Mouse => {
-                                    push_pen_pointer(&pointer, PenPhase::Cancel);
+                                    push_pen_pointer(motion_event, &pointer, PenPhase::Cancel);
                                     trace!(
                                         "Pointer input {device_id:?}, cancel, loc={location:?}, \
                                          pointer={pointer:?}"

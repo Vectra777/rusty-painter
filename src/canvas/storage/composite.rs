@@ -800,6 +800,23 @@ impl Canvas {
         {
             return Some(self.shrunk_input(i, pixels, space));
         }
+        // A deeper document's gradient fill: at full precision.
+        if shrink.is_none()
+            && self.depth().is_deep()
+            && let Some(fill) = &layer.style.fill
+            && let Some(pixels) = fill.tile_precise(tx, ty, self.tile_size, space)
+        {
+            return Some(LayerInput {
+                opacity: layer.opacity,
+                fill: Rgba::TRANSPARENT,
+                linear: Some(
+                    pixels
+                        .into_iter()
+                        .map(|[r, g, b, a]| Rgba::from_rgba_premultiplied(r, g, b, a))
+                        .collect(),
+                ),
+            });
+        }
         // A fill layer or a bordered one: pixels made for this tile.
         if !layer.shown_style().is_plain() {
             let data = self.styled_tile(i, tx, ty)?;
@@ -882,8 +899,8 @@ impl Canvas {
     pub(crate) fn styled_tile(&self, i: usize, tx: i32, ty: i32) -> Option<Vec<Color32>> {
         let layer = &self.layers[i];
         let ts = self.tile_size;
-        if let Some(fill) = layer.style.fill {
-            return Some(fill.tile(tx, ty, ts));
+        if let Some(fill) = &layer.style.fill {
+            return Some(fill.tile(tx, ty, ts, self.blend_space));
         }
         let mut out = match layer.style.border {
             Some(border) => self.bordered_tile(i, tx, ty, border)?,
@@ -898,7 +915,10 @@ impl Canvas {
         };
         // Impasto: the paint lit by its thickness, or by its lightness map.
         if let Some(heights) = layer.height.as_deref() {
-            crate::canvas::impasto::relief(layer.shown_style(), heights, &mut out, tx, ty, ts);
+            crate::canvas::impasto::relief(&layer.shown_style(), heights, &mut out, tx, ty, ts);
+        }
+        if let Some(overlay) = &layer.style.overlay {
+            overlay.apply(&mut out, tx, ty, ts, self.blend_space);
         }
         Some(out)
     }
@@ -1130,8 +1150,8 @@ impl Canvas {
                 })
             }
             LayerKind::Paint if layer.adjustment.is_some() => Some(CompositeNode::Adjust {
-                filter: layer.adjustment?,
-                lut: layer.adjustment?.channel_lut(),
+                filter: layer.adjustment.clone()?,
+                lut: layer.adjustment.as_ref()?.channel_lut(),
                 opacity: layer.opacity,
                 mask: masks
                     .get(&layer.id)

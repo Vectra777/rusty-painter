@@ -165,6 +165,21 @@ impl LayerBlend {
     }
 }
 
+/// Saved by its key (as projects and brush presets name it); an unknown
+/// key reads as Normal.
+impl serde::Serialize for LayerBlend {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.key())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LayerBlend {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let key = String::deserialize(d)?;
+        Ok(Self::from_key(&key).unwrap_or_default())
+    }
+}
+
 /// The colour space layers and strokes blend in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendSpace {

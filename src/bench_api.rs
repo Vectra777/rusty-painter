@@ -448,7 +448,7 @@ pub fn timelapse_frame(app: &mut PainterApp) -> usize {
 pub fn type_text(app: &mut PainterApp, text: &str, size: f32, pos: Vec2) {
     app.active_tool = Tool::Text;
     app.workspace.text.style.size = size;
-    app.text_press(pos);
+    app.text_press(pos, false, false);
     if let Some(s) = app.workspace.text.session.as_mut() {
         s.text = text.to_string();
     }
