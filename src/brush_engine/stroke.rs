@@ -609,7 +609,7 @@ impl Sizing {
 struct Plan {
     pos: Vec2,
     /// Its pressure (runs of dabs the same to the eye are painted
-    /// together: see [`Runs`]).
+    /// together: see [`run_key`]).
     pressure: f32,
     var: DabVar,
     along: f32,
@@ -1338,7 +1338,7 @@ impl StrokeState {
             }
             // Pressure blends along the segment, so a slow pen (or a big
             // pressure change between samples) doesn't paint visible steps.
-            // Dabs that look the same are painted together (see [`Runs`]).
+            // Dabs that look the same are painted together (see `run_key`).
             let mut run = std::mem::take(&mut self.run);
             let mut key = None;
             let mut run_pressure = 0.0;

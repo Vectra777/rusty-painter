@@ -1,0 +1,13 @@
+# Advisories `cargo audit` lets through, each with why. Remove an entry once
+# the dependency moves past it.
+[advisories]
+ignore = [
+    # quick-xml 0.30: slow parsing of a start tag with many attributes, and
+    # unbounded namespace declarations in NsReader. It comes in through egui
+    # 0.29's accessibility support on Linux (accesskit → atspi → zbus_xml),
+    # which only parses the D-Bus introspection XML of the desktop's own
+    # accessibility bus. Clearing it means moving to a newer egui (see the
+    # roadmap's Dependencies).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
