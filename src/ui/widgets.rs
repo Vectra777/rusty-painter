@@ -299,7 +299,8 @@ pub(crate) fn slider_row(ui: &mut egui::Ui, label: &str, slider: impl egui::Widg
     crate::ui::bar_slider::ROW.with(|r| *r.borrow_mut() = label.to_string());
     ui.horizontal(|ui| {
         row_label(ui, label);
-        let value_box = metrics(ui.ctx()).value_box_width;
+        // (A little slack: a value with a sign is a hair wider.)
+        let value_box = metrics(ui.ctx()).value_box_width + 2.0;
         ui.spacing_mut().slider_width = (ui.available_width() - value_box).max(40.0);
         ui.add(slider)
     })

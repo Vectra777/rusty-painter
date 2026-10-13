@@ -1524,13 +1524,10 @@ impl BlendSession {
     }
 
     fn blend_diameter(&self, pressure: f32) -> f32 {
-        let o = &self.brush.brush_options;
-        let k = if o.pressure_size {
-            o.pressure_min_size + (1.0 - o.pressure_min_size) * o.pressure_curves.size(pressure)
-        } else {
-            1.0
-        };
-        (o.diameter * k).max(1.0)
+        let k = self
+            .brush
+            .pressure_scale(crate::brush_engine::dynamics::DabSetting::Size, pressure);
+        (self.brush.brush_options.diameter * k).max(1.0)
     }
 
     /// A dab at `center` and its mirror copies.
@@ -1563,16 +1560,19 @@ impl BlendSession {
         let o = &self.brush.brush_options;
         let r = diameter * 0.5;
         let mut strength = o.flow / 100.0 * o.opacity;
-        if o.pressure_opacity {
-            strength *= o.pressure_curves.opacity(pressure);
-        }
-        if o.pressure_flow {
-            strength *= o.pressure_curves.flow(pressure);
+        {
+            use crate::brush_engine::dynamics::DabSetting;
+            strength *= self.brush.pressure_scale(DabSetting::Opacity, pressure)
+                * self.brush.pressure_scale(DabSetting::Flow, pressure);
         }
         let hardness = (o.hardness / 100.0).clamp(0.0, 1.0);
         // The share of a brush width between dabs.
-        let gap = (o.spacing_px(diameter, o.spacing_factor(pressure)).max(1.0) / diameter.max(1.0))
-            .min(1.0);
+        let spacing = o.spacing_factor(pressure)
+            * self
+                .brush
+                .pressure_scale(crate::brush_engine::dynamics::DabSetting::Spacing, pressure)
+                .max(0.05);
+        let gap = (o.spacing_px(diameter, spacing).max(1.0) / diameter.max(1.0)).min(1.0);
         let blur_size = self.blur_size;
         let brush_paint = self.paint_of(placed);
         let idx = self.idx;

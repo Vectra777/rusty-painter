@@ -5,7 +5,7 @@
 use crate::brush_engine::brush::{Brush, BrushType, RibbonSeg, Target};
 use crate::brush_engine::brush_options::{BrushOptions, PixelBrushShape, TipOrder};
 use crate::brush_engine::dynamics::{
-    DabVar, FAST_SPEED, PenBarrel, PenTilt, compose, direction, tip_orientation,
+    DabSetting, DabVar, FAST_SPEED, PenBarrel, PenTilt, compose, direction, tip_orientation,
 };
 use crate::brush_engine::stabilizer::Stabilizer;
 use crate::brush_engine::symmetry::{Copy2, Symmetry};
@@ -1826,8 +1826,7 @@ impl StrokeState {
             if chord == 0.0 {
                 // Held still, pressing harder: a dab where it is, once the
                 // brush has grown a pixel (and a tenth) since the last.
-                let size =
-                    sizing.original.0 * pressure_size_factor(&brush.brush_options, sizing.to);
+                let size = sizing.original.0 * brush.pressure_scale(DabSetting::Size, sizing.to);
                 if size > self.last_dab_size + (self.last_dab_size * 0.1).max(1.0) {
                     let mut dab = Pending {
                         pos,
@@ -1916,14 +1915,18 @@ impl StrokeState {
                             var: None,
                         };
                         let pressure = sizing.from + (sizing.to - sizing.from) * dab.t;
-                        self.last_dab_size = sizing.original.0
-                            * pressure_size_factor(&brush.brush_options, pressure);
+                        self.last_dab_size =
+                            sizing.original.0 * brush.pressure_scale(DabSetting::Size, pressure);
                         if sizing.per_dab {
                             // Its variation now, so its own size (pressure,
                             // inputs and all) spaces the next dab.
                             let var = self.dab_var(brush, &dab, pressure);
                             next = (sizing.spacing_at(brush, pressure, &var) * reach).max(0.5);
                             dab.var = Some(var);
+                        } else if spaced_by_tip {
+                            // Its size by pressure spaces the next.
+                            next = (sizing.spacing_at(brush, pressure, &DabVar::default()) * reach)
+                                .max(0.5);
                         }
                         self.pending.push(dab);
                     }
@@ -1939,19 +1942,31 @@ impl StrokeState {
             self.travel += length;
         } else {
             // first point
+            let mut next = spacing_dist;
             for _ in 0..count {
                 let p = if defer { pos } else { self.scatter(brush, pos) };
-                self.pending.push(Pending {
+                let mut dab = Pending {
                     pos: p,
                     t: 1.0,
                     along: 0.0,
                     dir: None,
                     var: None,
-                });
+                };
+                // Its own size spaces the next, as for every dab.
+                if sizing.per_dab {
+                    let var = self.dab_var(brush, &dab, sizing.to);
+                    next = sizing.spacing_at(brush, sizing.to, &var).max(0.5);
+                    dab.var = Some(var);
+                } else if spaced_by_tip {
+                    next = sizing
+                        .spacing_at(brush, sizing.to, &DabVar::default())
+                        .max(0.5);
+                }
+                self.pending.push(dab);
             }
-            self.dist_until_next_blit = spacing_dist;
+            self.dist_until_next_blit = next;
             self.last_dab_size =
-                sizing.original.0 * pressure_size_factor(&brush.brush_options, sizing.to);
+                sizing.original.0 * brush.pressure_scale(DabSetting::Size, sizing.to);
         }
 
         self.last_pos = Some(pos);

@@ -113,13 +113,9 @@ impl PainterApp {
 
     /// The width a line has at `pressure`, as the brush's size would be.
     fn vector_width(&self, pressure: f32) -> f32 {
-        let o = &self.brush_state.brush.brush_options;
-        let k = if o.pressure_size {
-            o.pressure_min_size + (1.0 - o.pressure_min_size) * o.pressure_curves.size(pressure)
-        } else {
-            1.0
-        };
-        (o.diameter * k).clamp(0.0, vector::MAX_WIDTH)
+        let brush = &self.brush_state.brush;
+        let k = brush.pressure_scale(crate::brush_engine::dynamics::DabSetting::Size, pressure);
+        (brush.brush_options.diameter * k).clamp(0.0, vector::MAX_WIDTH)
     }
 
     /// Add a line through `points` (a shape's outline) to vector layer

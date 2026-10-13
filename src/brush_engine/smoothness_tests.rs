@@ -491,3 +491,58 @@ fn pressing_harder_in_place_grows_the_mark() {
     eprintln!("pressed in place: {inked} px across");
     assert!(inked > 150, "the mark stayed {inked} px across");
 }
+
+#[test]
+fn pressure_settings_folded_into_inputs_paint_the_same() {
+    // The Pen pressure settings and the Pressure inputs they become: the
+    // same stroke either way.
+    use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
+    let samples: Vec<Sample> = (0..=200)
+        .map(|i| {
+            let t = i as f32 / 200.0;
+            let p = 0.1 + 0.9 * (t * std::f32::consts::PI).sin();
+            (
+                Vec2::new(100.0 + t * 1000.0, 200.0 + 60.0 * (t * 9.0).sin()),
+                p,
+                t as f64,
+                None,
+            )
+        })
+        .collect();
+    let mut a = Brush::new(80.0, 60.0, Color32::BLACK, 12.0);
+    let o = &mut a.brush_options;
+    (o.pressure_size, o.pressure_min_size, o.pressure_opacity) = (true, 0.2, true);
+    o.pressure_curves.size = Some(SoftnessCurve {
+        points: vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 0.4, y: 0.7 },
+            CurvePoint { x: 1.0, y: 1.0 },
+        ],
+    });
+    let mut b = a.clone();
+    b.fold_pressure();
+    assert!(
+        !b.brush_options.pressure_size && b.inputs.len() == 2,
+        "folded"
+    );
+    let mut again = b.clone();
+    again.fold_pressure();
+    assert_eq!(again.inputs, b.inputs, "folding twice changes nothing");
+    let (ca, _) = run(&mut a, &samples, (1200, 400));
+    let (cb, _) = run(&mut b, &samples, (1200, 400));
+    let mut worst = 0u8;
+    for ty in 0..(400 / 64 + 1) {
+        for tx in 0..(1200 / 64 + 1) {
+            let (pa, pb) = (
+                ca.get_layer_tile_data(1, tx, ty),
+                cb.get_layer_tile_data(1, tx, ty),
+            );
+            let (pa, pb) = (pa.unwrap_or_default(), pb.unwrap_or_default());
+            for (x, y) in pa.iter().zip(pb.iter()) {
+                worst = worst.max(x.a().abs_diff(y.a()));
+            }
+        }
+    }
+    eprintln!("folded vs settings: alphas differ by at most {worst}");
+    assert!(worst <= 1, "alphas differ by {worst}");
+}
