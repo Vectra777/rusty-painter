@@ -1246,7 +1246,7 @@ impl StrokeState {
                         };
                         Plan {
                             pos,
-                            level: pressure_level(pressure),
+                            level: pressure_level(pressure, brush, original.0),
                             var,
                             along: d.along,
                         }
@@ -1279,12 +1279,16 @@ impl StrokeState {
             let mut run = std::mem::take(&mut self.run);
             let mut level = None;
             for d in &pending {
-                let q = pressure_level(from + (p - from) * d.t);
+                let q = pressure_level(from + (p - from) * d.t, brush, original.0);
                 if level != Some(q) {
                     if let Some(prev) = level
                         && !run.is_empty()
                     {
-                        apply_pressure(brush, original, prev as f32 / PRESSURE_LEVELS);
+                        apply_pressure(
+                            brush,
+                            original,
+                            prev as f32 / pressure_levels(brush, original.0),
+                        );
                         context.dabs(brush, &run);
                         run.clear();
                     }
@@ -1295,7 +1299,11 @@ impl StrokeState {
             if let Some(last) = level
                 && !run.is_empty()
             {
-                apply_pressure(brush, original, last as f32 / PRESSURE_LEVELS);
+                apply_pressure(
+                    brush,
+                    original,
+                    last as f32 / pressure_levels(brush, original.0),
+                );
                 context.dabs(brush, &run);
             }
             run.clear();
@@ -2063,7 +2071,11 @@ fn paint_plans(
             .iter()
             .position(|p| p.level != level)
             .map_or(plans.len(), |n| start + n);
-        apply_pressure(brush, original, level as f32 / PRESSURE_LEVELS);
+        apply_pressure(
+            brush,
+            original,
+            level as f32 / pressure_levels(brush, original.0),
+        );
         let run = &plans[start..end];
         let centers: Vec<Vec2> = run.iter().map(|p| p.pos).collect();
         let vars: Vec<DabVar> = run.iter().map(|p| p.var).collect();
@@ -2087,11 +2099,23 @@ fn airbrush_interval(brush: &Brush) -> f64 {
     1.0 / f64::from(brush.airbrush_rate.max(0.1))
 }
 
-/// Pressure steps dabs are grouped by; finer than any visible change.
-const PRESSURE_LEVELS: f32 = 64.0;
+/// Pressure steps dabs are grouped by, for `brush` at `diameter` across:
+/// at most half a pixel of width each (a 233 px brush in 64 steps changed
+/// width 3.6 px at a time, which its edges showed as notches), and when
+/// pressure sets opacity or flow, a step per level an 8-bit pixel shows
+/// (in 64, a slow fade showed bands).
+fn pressure_levels(brush: &Brush, diameter: f32) -> f32 {
+    let o = &brush.brush_options;
+    let fine = if o.pressure_opacity || o.pressure_flow {
+        256.0
+    } else {
+        64.0
+    };
+    (diameter * 2.0).clamp(fine, 4096.0)
+}
 
-fn pressure_level(p: f32) -> u32 {
-    (p.clamp(0.0, 1.0) * PRESSURE_LEVELS).round() as u32
+fn pressure_level(p: f32, brush: &Brush, diameter: f32) -> u32 {
+    (p.clamp(0.0, 1.0) * pressure_levels(brush, diameter)).round() as u32
 }
 
 /// Set what pressure `p` drives on the brush, from its unpressured

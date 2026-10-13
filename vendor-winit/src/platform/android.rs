@@ -107,6 +107,9 @@ pub struct PenSample {
     /// The pen's eraser end is in use.
     pub is_eraser: bool,
     pub phase: PenPhase,
+    /// When the pen was there, in seconds (`CLOCK_MONOTONIC`): batched
+    /// samples keep their own times, a few milliseconds apart.
+    pub time: f64,
 }
 
 /// Take the stylus samples queued since the last call, oldest first.

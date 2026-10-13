@@ -88,6 +88,7 @@ fn handle_pen(
         let pressure = app.map_pressure(sample.pressure);
         // The lean in canvas terms: a short screen vector mapped through the
         // view (zoom, rotation, flip), like the pen's position.
+        app.viewport.touch.pen_time = sample.time;
         app.viewport.touch.pen_tilt = sample.tilt.map(|[x, y]| {
             let lean = (x * x + y * y).sqrt().min(1.0);
             let tip = pos + egui::vec2(x, y) * (20.0 / lean.max(1e-3));
@@ -705,6 +706,7 @@ fn handle_tool_move(
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2) {
     // Mouse and finger input paint at full pressure (the pen has its own path).
     app.viewport.touch.pen_tilt = None;
+    app.viewport.touch.pen_time = None;
     app.viewport.touch.pen_barrel = Default::default();
     if app.brush_state.is_drawing {
         app.add_stroke_point(pos, 1.0);

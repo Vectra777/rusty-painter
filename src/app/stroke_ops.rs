@@ -445,6 +445,7 @@ impl PainterApp {
             pressure,
             self.viewport.touch.pen_tilt,
             self.viewport.touch.pen_barrel,
+            self.viewport.touch.pen_time,
         );
         self.viewport.touch.stroke_started = Some(std::time::Instant::now());
     }
@@ -472,6 +473,7 @@ impl PainterApp {
                 pressure,
                 self.viewport.touch.pen_tilt,
                 self.viewport.touch.pen_barrel,
+                self.viewport.touch.pen_time,
             );
         }
     }

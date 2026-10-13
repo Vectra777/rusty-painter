@@ -278,3 +278,77 @@ fn a_fast_curve_stays_round_between_far_apart_samples() {
     eprintln!("fast curve: painted pixels up to {worst:.2} px off the circle");
     assert!(worst < 3.0, "{worst:.2} px off the circle");
 }
+
+#[test]
+fn a_big_widely_spaced_brush_widens_without_notches() {
+    // A 233 px brush at 16 % spacing (Ink-7's), pressure rising slowly:
+    // its edge should rise a little at a time, not in steps.
+    let samples: Vec<Sample> = (0..=300)
+        .map(|i| {
+            let t = i as f32 / 300.0;
+            (
+                Vec2::new(200.0 + t * 1400.0, 300.0),
+                0.4 + 0.3 * t,
+                t as f64,
+                None,
+            )
+        })
+        .collect();
+    let mut b = Brush::new(233.0, 100.0, Color32::BLACK, 16.0);
+    let (canvas, _) = run(&mut b, &samples, (1800, 600));
+    // The top edge's height in each column.
+    let top = |x: usize| {
+        (0..600)
+            .find(|&y| {
+                canvas
+                    .get_layer_tile_data(1, (x / 64) as i32, (y / 64) as i32)
+                    .is_some_and(|t| t[(y % 64) * 64 + x % 64].a() > 127)
+            })
+            .unwrap_or(600) as i32
+    };
+    let edge: Vec<f32> = (400..1500).map(|x| top(x) as f32).collect();
+    // Against its own trend (75 px around, two dabs' spacing): the dabs'
+    // own scallops are a pixel or so; a step in width shows more.
+    let wobble = (37..edge.len() - 37)
+        .map(|i| {
+            let avg = edge[i - 37..=i + 37].iter().sum::<f32>() / 75.0;
+            (edge[i] - avg).abs()
+        })
+        .fold(0.0, f32::max);
+    eprintln!("big brush: its edge strays {wobble:.2} px from its trend");
+    assert!(wobble < 1.1, "the edge wobbles {wobble:.2} px");
+}
+
+#[test]
+fn pressure_opacity_fades_without_bands() {
+    // A small brush whose opacity follows pressure, pressed slowly harder:
+    // its transparency should change a level or two at a time (in 64
+    // pressure steps it rose in stairs of up to 5).
+    let samples: Vec<Sample> = (0..=300)
+        .map(|i| {
+            let t = i as f32 / 300.0;
+            (
+                Vec2::new(100.0 + t * 1400.0, 50.0),
+                0.2 + 0.6 * t,
+                t as f64,
+                None,
+            )
+        })
+        .collect();
+    let mut b = Brush::new(12.0, 100.0, Color32::BLACK, 5.0);
+    b.brush_options.pressure_size = false;
+    b.brush_options.pressure_opacity = true;
+    // Wash: pressure sets the opacity the stroke settles at (build-up
+    // would pile the dabs up to opaque).
+    b.brush_options.painting_mode = crate::brush_engine::brush_options::PaintingMode::Wash;
+    let (canvas, _) = run(&mut b, &samples, (1600, 100));
+    let alpha = |x: usize| {
+        canvas
+            .get_layer_tile_data(1, (x / 64) as i32, 0)
+            .map_or(0, |t| t[50 * 64 + x % 64].a() as i32)
+    };
+    let row: Vec<i32> = (300..1400).map(alpha).collect();
+    let step = row.windows(2).map(|w| (w[1] - w[0]).abs()).max().unwrap();
+    eprintln!("opacity: biggest step between columns {step}/255");
+    assert!(step <= 2, "opacity steps {step}/255 at once");
+}

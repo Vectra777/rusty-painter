@@ -44,6 +44,10 @@ pub struct TabletSample {
     pub wheel: Option<f32>,
     pub is_eraser: bool,
     pub phase: TabletPhase,
+    /// When the pen was there (seconds, the platform's own clock), where
+    /// the platform says: samples batched into one frame keep their own
+    /// times rather than all getting the frame's.
+    pub time: Option<f64>,
 }
 
 /// A lean vector from angles from perpendicular along x and y (radians).
@@ -118,6 +122,7 @@ impl ToolState {
                     wheel: state.wheel,
                     is_eraser,
                     phase,
+                    time: None,
                 });
             }
         };
@@ -247,6 +252,7 @@ fn winit_sample(s: WinitPose, scale: f32, phase: TabletPhase) -> TabletSample {
         wheel: s.wheel,
         is_eraser: s.is_eraser,
         phase,
+        time: None,
     }
 }
 
@@ -350,22 +356,21 @@ impl TabletInput {
 #[cfg(target_os = "android")]
 const LIFT_PRESSURE: f32 = 0.002;
 
-/// How far each Android pen move goes towards its own pressure: about a
-/// 9 ms time constant at 240 Hz. A Xiaomi Focus Pen updates pressure on
-/// about every other sample and holds it between, so it comes in steps of
-/// up to a third of the range, which a big brush shows as bulges.
-// Per sample, not per millisecond: a pen sampling much slower than 240 Hz
-// would lag more; key it to the event time if one turns up.
+/// The time constant (seconds) of the smoothing of Android pen pressure.
+/// A Xiaomi Focus Pen updates pressure on about every other sample and
+/// holds it between, so it comes in steps of up to a third of the range,
+/// which a big brush shows as bulges.
 #[cfg(target_os = "android")]
-const PRESSURE_SMOOTHING: f32 = 0.35;
+const PRESSURE_SMOOTHING: f64 = 0.009;
 
 /// Drains the stylus samples the patched winit queues (every batched sample,
 /// with its pressure).
 #[cfg(target_os = "android")]
 pub struct TabletInput {
     down: bool,
-    /// The stroke's pressure so far, smoothed.
+    /// The stroke's pressure so far, smoothed, and when it was.
     pressure: f32,
+    pressure_time: f64,
 }
 
 #[cfg(target_os = "android")]
@@ -374,6 +379,7 @@ impl TabletInput {
         Some(Self {
             down: false,
             pressure: 0.0,
+            pressure_time: 0.0,
         })
     }
 
@@ -392,10 +398,15 @@ impl TabletInput {
                     if matches!(s.phase, PenPhase::Down) {
                         self.pressure = s.pressure;
                     } else {
-                        self.pressure += PRESSURE_SMOOTHING * (s.pressure - self.pressure);
+                        // By the time between samples, not their count.
+                        let dt = (s.time - self.pressure_time).clamp(0.0, 0.1);
+                        let k = 1.0 - (-dt / PRESSURE_SMOOTHING).exp();
+                        self.pressure += k as f32 * (s.pressure - self.pressure);
                     }
+                    self.pressure_time = s.time;
                     self.pressure
                 },
+                time: Some(s.time),
                 // Android: angle from perpendicular, and the direction the
                 // pen points (0 up, clockwise).
                 tilt: Some({
@@ -469,6 +480,7 @@ impl TabletInput {
                     PenPhase::Up => TabletPhase::Up,
                     PenPhase::Cancel => TabletPhase::Cancel,
                 },
+                time: None,
             })
             .collect();
         if let Some(last) = samples.last() {

@@ -148,6 +148,7 @@ mod tests {
             tilt: None,
             roll: None,
             wheel: None,
+            time: None,
             is_eraser: false,
             phase,
         };
