@@ -10,3 +10,4 @@ flamegraph.svg
 keystore.properties
 *.keystore
 *.jks
+/docs/book
