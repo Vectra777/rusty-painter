@@ -18,15 +18,79 @@
 use std::sync::{Arc, OnceLock};
 
 /// A repeating grey pattern, 0 (valley) ..= 1 (peak).
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Pattern {
     pub name: String,
     /// Power-of-two sides, so wrapping is a mask.
     pub size: usize,
-    pub data: Vec<f32>,
+    data: OnceLock<Vec<f32>>,
+    /// A pattern read from a preset file: where its packed heights are, in
+    /// place of the heights until something needs them.
+    packed: Option<crate::project::zip::FileEntry>,
+}
+
+impl PartialEq for Pattern {
+    fn eq(&self, other: &Self) -> bool {
+        if (&self.name, self.size) != (&other.name, other.size) {
+            return false;
+        }
+        // Both from preset files: the same packed heights (by CRC and size).
+        if let (Some(a), Some(b)) = (&self.packed, &other.packed) {
+            return (a.len, a.crc) == (b.len, b.crc);
+        }
+        self.data() == other.data()
+    }
 }
 
 impl Pattern {
+    pub fn new(name: String, size: usize, data: Vec<f32>) -> Self {
+        Self {
+            name,
+            size,
+            data: OnceLock::from(data),
+            packed: None,
+        }
+    }
+
+    /// A `size`-sided pattern whose heights are `packed` (see
+    /// [`pack`]), read when first needed.
+    pub(crate) fn from_file(
+        name: String,
+        size: usize,
+        packed: crate::project::zip::FileEntry,
+    ) -> Self {
+        Self {
+            name,
+            size,
+            data: OnceLock::new(),
+            packed: Some(packed),
+        }
+    }
+
+    /// The heights, row by row.
+    pub fn data(&self) -> &[f32] {
+        self.data.get_or_init(|| {
+            let read = self
+                .packed
+                .as_ref()
+                .map(|e| e.read().and_then(|p| unpack(&p, self.size)));
+            match read {
+                Some(Ok(data)) => data,
+                Some(Err(e)) => {
+                    log::warn!("The texture {} can't be read: {e}", self.name);
+                    vec![0.5; self.size * self.size]
+                }
+                None => vec![0.5; self.size * self.size],
+            }
+        })
+    }
+
+    /// The packed heights of a pattern read from a preset file, as they
+    /// are there (`None` for another, or if they can't be read any more).
+    pub(crate) fn packed(&self) -> Option<Vec<u8>> {
+        self.packed.as_ref()?.read().ok()
+    }
+
     /// From a greyscale picture, resampled to a power-of-two square (the
     /// nearest size up to 1024) and stretched to use the full range.
     pub fn from_image(name: &str, img: &image::DynamicImage) -> Arc<Self> {
@@ -40,11 +104,7 @@ impl Pattern {
             image::imageops::FilterType::Triangle,
         );
         let data = resized.pixels().map(|p| p[0] as f32 / 255.0).collect();
-        Arc::new(Self {
-            name: name.to_string(),
-            size,
-            data: normalized(data),
-        })
+        Arc::new(Self::new(name.to_string(), size, normalized(data)))
     }
 
     /// A picture's grey (transparent counting as white) through `adjust`,
@@ -73,11 +133,7 @@ impl Pattern {
                 adjust(grey / 255.0 * a + (1.0 - a))
             })
             .collect();
-        Arc::new(Self {
-            name: name.to_string(),
-            size,
-            data,
-        })
+        Arc::new(Self::new(name.to_string(), size, data))
     }
 
     /// Height at canvas point `(x, y)` with the pattern scaled by `scale`
@@ -92,7 +148,8 @@ impl Pattern {
         let (du, dv) = (u - iu as f32, v - iv as f32);
         let (x0, y0) = ((iu + mask) & mask, (iv + mask) & mask);
         let (x1, y1) = (iu & mask, iv & mask);
-        let at = |x: usize, y: usize| self.data[y * self.size + x];
+        let data = self.data();
+        let at = |x: usize, y: usize| data[y * self.size + x];
         let top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * du;
         let bottom = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * du;
         top + (bottom - top) * dv
@@ -378,6 +435,7 @@ impl BrushTexture {
         combine: impl Fn(f32, f32, f32) -> f32,
     ) {
         let p = &*self.pattern;
+        let data = p.data();
         let inv = 1.0 / self.scale.max(0.05);
         let s = (self.strength * factor).clamp(0.0, 1.0);
         let mask = p.size - 1;
@@ -397,8 +455,8 @@ impl BrushTexture {
             let iu = here as usize;
             let du = here - iu as f32;
             let (c0, c1) = ((iu + mask) & mask, iu & mask);
-            let top = p.data[r0 + c0] + (p.data[r0 + c1] - p.data[r0 + c0]) * du;
-            let bottom = p.data[r1 + c0] + (p.data[r1 + c1] - p.data[r1 + c0]) * du;
+            let top = data[r0 + c0] + (data[r0 + c1] - data[r0 + c0]) * du;
+            let bottom = data[r1 + c0] + (data[r1 + c1] - data[r1 + c0]) * du;
             let mut t = top + (bottom - top) * dv;
             if self.invert {
                 t = 1.0 - t;
@@ -475,6 +533,7 @@ impl BrushTexture {
         combine: impl Fn(f32, f32, f32) -> f32,
     ) {
         let p = &*self.pattern;
+        let data = p.data();
         let place = &self.placement;
         let scale = self.scale.max(0.05);
         let inv = 1.0 / scale;
@@ -517,8 +576,8 @@ impl BrushTexture {
                 ((iv - 1) & mask) as usize * p.size,
                 (iv & mask) as usize * p.size,
             );
-            let top = p.data[r0 + c0] + (p.data[r0 + c1] - p.data[r0 + c0]) * du;
-            let bottom = p.data[r1 + c0] + (p.data[r1 + c1] - p.data[r1 + c0]) * du;
+            let top = data[r0 + c0] + (data[r0 + c1] - data[r0 + c0]) * du;
+            let bottom = data[r1 + c0] + (data[r1 + c1] - data[r1 + c0]) * du;
             let mut t = top + (bottom - top) * dv;
             if self.invert {
                 t = 1.0 - t;
@@ -562,11 +621,7 @@ pub fn builtin() -> &'static [Arc<Pattern>] {
             let data = (0..TILE * TILE)
                 .map(|i| f((i % TILE) as f32, (i / TILE) as f32))
                 .collect();
-            Arc::new(Pattern {
-                name: name.to_string(),
-                size: TILE,
-                data: normalized(data),
-            })
+            Arc::new(Pattern::new(name.to_string(), TILE, normalized(data)))
         };
         type Recipe<'a> = (&'a str, &'a (dyn Fn(f32, f32) -> f32 + Sync));
         let recipes: [Recipe; 5] = [
@@ -628,6 +683,27 @@ fn weave(x: f32, y: f32) -> f32 {
 }
 
 /// Stretch values to 0..=1.
+/// Heights packed for a preset file: `f32` little-endian, zstd-compressed
+/// (a PNG would round them to 8 bits).
+pub(crate) fn pack(data: &[f32]) -> Result<Vec<u8>, String> {
+    let raw: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+    zstd::encode_all(&raw[..], 9).map_err(|e| e.to_string())
+}
+
+/// [`pack`]ed heights of a `size`-sided pattern.
+pub(crate) fn unpack(packed: &[u8], size: usize) -> Result<Vec<f32>, String> {
+    let raw = zstd::decode_all(packed).map_err(|e| e.to_string())?;
+    if raw.len() != size * size * 4 {
+        return Err("the wrong size".into());
+    }
+    Ok(raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect())
+}
+
 fn normalized(mut data: Vec<f32>) -> Vec<f32> {
     let (lo, hi) = data
         .iter()
@@ -711,19 +787,19 @@ mod tests {
     fn built_in_patterns_repeat_seamlessly_and_use_the_full_range() {
         for p in builtin() {
             assert!(p.size.is_power_of_two());
-            let (lo, hi) = p
-                .data
+            let data = p.data();
+            let (lo, hi) = data
                 .iter()
                 .fold((1.0f32, 0.0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
             assert!(lo < 0.02 && hi > 0.98, "{}: {lo}..{hi}", p.name);
             // The edges meet: a row's last and first texels are close.
             let n = p.size;
             let seam: f32 = (0..n)
-                .map(|y| (p.data[y * n] - p.data[y * n + n - 1]).abs())
+                .map(|y| (data[y * n] - data[y * n + n - 1]).abs())
                 .sum::<f32>()
                 / n as f32;
             let inside: f32 = (0..n)
-                .map(|y| (p.data[y * n + n / 2] - p.data[y * n + n / 2 - 1]).abs())
+                .map(|y| (data[y * n + n / 2] - data[y * n + n / 2 - 1]).abs())
                 .sum::<f32>()
                 / n as f32;
             assert!(

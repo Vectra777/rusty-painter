@@ -55,7 +55,8 @@ pub(super) fn push_blobs(blobs: &mut Vec<u8>, raws: &[Vec<u8>]) -> Result<Vec<St
         .collect())
 }
 
-pub(super) fn read_blob(blobs: &[u8], blob: &StoredBlob) -> Result<Vec<u8>, String> {
+/// Where `blob` is in `blobs`.
+fn range(blobs: &[u8], blob: &StoredBlob) -> Result<(usize, usize), String> {
     let start = usize::try_from(blob.offset).map_err(|_| "Blob offset is too large")?;
     let len = usize::try_from(blob.len).map_err(|_| "Blob length is too large")?;
     let end = start
@@ -64,6 +65,28 @@ pub(super) fn read_blob(blobs: &[u8], blob: &StoredBlob) -> Result<Vec<u8>, Stri
     if end > blobs.len() {
         return Err("Project blob is out of range".to_string());
     }
+    Ok((start, end))
+}
+
+/// A compressed blob's zstd payload as it is, for keeping it compressed
+/// (undo history), when it holds `raw_len` bytes; `None` for a raw blob or
+/// one of another size.
+pub(super) fn packed_blob<'a>(
+    blobs: &'a [u8],
+    blob: &StoredBlob,
+    raw_len: usize,
+) -> Result<Option<&'a [u8]>, String> {
+    let (start, end) = range(blobs, blob)?;
+    let payload = &blobs[start..end];
+    let frame_len = zstd::zstd_safe::get_frame_content_size(payload);
+    Ok((blob.compressed
+        && blob.raw_len == raw_len as u64
+        && matches!(frame_len, Ok(Some(n)) if n == blob.raw_len))
+    .then_some(payload))
+}
+
+pub(super) fn read_blob(blobs: &[u8], blob: &StoredBlob) -> Result<Vec<u8>, String> {
+    let (start, end) = range(blobs, blob)?;
     let raw_len = usize::try_from(blob.raw_len)
         .ok()
         .filter(|_| blob.raw_len <= MAX_BLOB)

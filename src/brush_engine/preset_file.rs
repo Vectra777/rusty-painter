@@ -23,7 +23,7 @@ use crate::brush_engine::dual::{DualMode, DualTip};
 use crate::brush_engine::dynamics::BrushDynamics;
 use crate::brush_engine::hardness::{SoftnessCurve, SoftnessSelector};
 use crate::brush_engine::texture::{BrushTexture, Pattern, TextureMode};
-use crate::brush_engine::tip::TipMask;
+use crate::brush_engine::tip::{PngSource, TipMask};
 use crate::canvas::blend_modes::LayerBlend;
 use crate::project::zip;
 use eframe::egui::Color32;
@@ -606,21 +606,26 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
         if builtin_tip_name(tip).is_some() || tip.svg.is_some() {
             continue;
         }
+        // Read from a file and untouched: its PNG as it was.
+        if let Some(png) = tip.png() {
+            zip.add(&format!("tips/{i}.png"), &png)?;
+            continue;
+        }
         let (w, h) = (tip.width as u32, tip.height as u32);
-        let img: image::DynamicImage = match &tip.colors {
+        let img: image::DynamicImage = match tip.colors() {
             // A colour tip: its colours, with the mask as alpha.
             Some(colors) => image::RgbaImage::from_raw(
                 w,
                 h,
                 colors
                     .iter()
-                    .zip(&tip.pixels)
+                    .zip(tip.pixels())
                     .flat_map(|(c, &a)| [c[0], c[1], c[2], a])
                     .collect(),
             )
             .ok_or("Brush tip has the wrong size")?
             .into(),
-            None => image::GrayImage::from_raw(w, h, tip.pixels.clone())
+            None => image::GrayImage::from_raw(w, h, tip.pixels().to_vec())
                 .ok_or("Brush tip has the wrong size")?
                 .into(),
         };
@@ -633,8 +638,11 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
         if is_builtin_texture(pattern) {
             continue;
         }
-        let raw: Vec<u8> = pattern.data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let packed = zstd::encode_all(&raw[..], 9).map_err(|e| e.to_string())?;
+        // Read from a file and untouched: packed as it was.
+        let packed = match pattern.packed() {
+            Some(packed) => packed,
+            None => crate::brush_engine::texture::pack(pattern.data())?,
+        };
         zip.add(&format!("textures/{i}.bin"), &packed)?;
     }
     zip.finish()
@@ -651,6 +659,35 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<BrushPreset>, String> {
 
 /// [`decode`], with each preset's tags and star.
 pub fn decode_with_meta(bytes: &[u8]) -> Result<Vec<(BrushPreset, PresetMeta)>, String> {
+    decode_from(bytes, None)
+}
+
+/// [`decode`] for the file at `path` (`bytes` its contents): its tips and
+/// textures are read from it again when needed rather than kept in memory.
+pub fn decode_file(path: &std::path::Path, bytes: &[u8]) -> Result<Vec<BrushPreset>, String> {
+    Ok(decode_from(bytes, Some(&path.into()))?
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect())
+}
+
+/// Read every tip and texture `preset` uses into memory: its file is about
+/// to go, and brushes may still be painting with them.
+pub fn load_from_file(preset: &BrushPreset) {
+    let mut res = Resources::default();
+    StoredBrush::from_brush(&preset.brush, &mut res);
+    for tip in &res.tips {
+        let _ = tip.pixels();
+    }
+    for pattern in &res.textures {
+        let _ = pattern.data();
+    }
+}
+
+fn decode_from(
+    bytes: &[u8],
+    path: Option<&Arc<std::path::Path>>,
+) -> Result<Vec<(BrushPreset, PresetMeta)>, String> {
     if !bytes.starts_with(zip::SIGNATURE) {
         return Err("Not a brush preset file".into());
     }
@@ -687,17 +724,40 @@ pub fn decode_with_meta(bytes: &[u8]) -> Result<Vec<(BrushPreset, PresetMeta)>, 
             continue;
         }
         let png = zip::read_entry(bytes, &format!("tips/{i}.png")).map_err(damaged)?;
-        let img = image::load_from_memory(png).map_err(|e| damaged(e.to_string()))?;
-        if (img.width() as usize, img.height() as usize) != (stored.width, stored.height) {
+        // Only the header is read now; the pixels when they're needed.
+        let header =
+            image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+        let decoder = header.into_decoder().map_err(|e| damaged(e.to_string()))?;
+        let (w, h) = image::ImageDecoder::dimensions(&decoder);
+        let colored = image::ImageDecoder::color_type(&decoder).has_alpha();
+        if (w as usize, h as usize) != (stored.width, stored.height) {
             return Err(damaged(format!("tip {i} size")));
         }
+        // A built-in tip's size: decoded now, to share the built-in one.
+        let builtin_sized = crate::brush_engine::tip::builtin()
+            .iter()
+            .any(|(_, t)| (t.width, t.height) == (stored.width, stored.height));
+        if !builtin_sized {
+            let source = match path {
+                Some(path) => PngSource::File(zip::FileEntry::locate(path, bytes, png)),
+                None => PngSource::bytes(png),
+            };
+            res.tips.push(TipMask::from_png(
+                stored.width,
+                stored.height,
+                source,
+                colored,
+            ));
+            continue;
+        }
+        let img = image::load_from_memory(png).map_err(|e| damaged(e.to_string()))?;
         if img.color().has_alpha() {
             let rgba = img.to_rgba8();
             let pixels: Vec<u8> = rgba.pixels().map(|p| p[3]).collect();
             let colors: Vec<[u8; 3]> = rgba.pixels().map(|p| [p[0], p[1], p[2]]).collect();
             let builtin = crate::brush_engine::tip::builtin()
                 .iter()
-                .find(|(_, t)| t.pixels == pixels && t.colors.as_ref() == Some(&colors));
+                .find(|(_, t)| t.pixels() == pixels && t.colors() == Some(&colors[..]));
             res.tips.push(match builtin {
                 Some((_, t)) => t.clone(),
                 None => TipMask::from_colored(stored.width, stored.height, pixels, colors),
@@ -706,7 +766,7 @@ pub fn decode_with_meta(bytes: &[u8]) -> Result<Vec<(BrushPreset, PresetMeta)>, 
         }
         let pixels = img.to_luma8().into_raw();
         let builtin = crate::brush_engine::tip::builtin().iter().find(|(_, t)| {
-            (t.width, t.height) == (stored.width, stored.height) && t.pixels == pixels
+            (t.width, t.height) == (stored.width, stored.height) && t.pixels() == pixels
         });
         res.tips.push(match builtin {
             Some((_, t)) => t.clone(),
@@ -729,24 +789,26 @@ pub fn decode_with_meta(bytes: &[u8]) -> Result<Vec<(BrushPreset, PresetMeta)>, 
             return Err(damaged(format!("texture {i} size")));
         }
         let packed = zip::read_entry(bytes, &format!("textures/{i}.bin")).map_err(damaged)?;
-        let raw = zstd::decode_all(packed).map_err(|e| damaged(e.to_string()))?;
-        if raw.len() != stored.size * stored.size * 4 {
-            return Err(damaged(format!("texture {i} size")));
-        }
-        let data: Vec<f32> = raw
-            .as_chunks::<4>()
-            .0
+        // Named and sized like a built-in one (files from before version
+        // 2): unpacked now, to share the built-in one if it's the same.
+        let builtin_like = crate::brush_engine::texture::builtin()
             .iter()
-            .map(|b| f32::from_le_bytes(*b))
-            .collect();
-        let pattern = Pattern {
-            name: stored.name.clone(),
-            size: stored.size,
-            data,
+            .any(|p| (&p.name, p.size) == (&stored.name, stored.size));
+        let pattern = match path {
+            Some(path) if !builtin_like => Pattern::from_file(
+                stored.name.clone(),
+                stored.size,
+                zip::FileEntry::locate(path, bytes, packed),
+            ),
+            _ => {
+                let data = crate::brush_engine::texture::unpack(packed, stored.size)
+                    .map_err(|e| damaged(format!("texture {i}: {e}")))?;
+                Pattern::new(stored.name.clone(), stored.size, data)
+            }
         };
         let builtin = crate::brush_engine::texture::builtin()
             .iter()
-            .find(|p| ***p == pattern);
+            .find(|p| builtin_like && ***p == pattern);
         res.textures
             .push(builtin.cloned().unwrap_or_else(|| Arc::new(pattern)));
     }
@@ -1107,11 +1169,11 @@ mod tests {
     #[test]
     fn a_custom_tip_and_texture_survive_exactly() {
         let tip = TipMask::from_mask(3, 2, vec![0, 128, 255, 7, 9, 200]);
-        let pattern = Arc::new(Pattern {
-            name: "Mine".into(),
-            size: 2,
-            data: vec![0.0, 0.123_456_7, 0.5, 1.0],
-        });
+        let pattern = Arc::new(Pattern::new(
+            "Mine".into(),
+            2,
+            vec![0.0, 0.123_456_7, 0.5, 1.0],
+        ));
         let mut brush = Brush::new(
             30.0,
             50.0,
@@ -1135,6 +1197,59 @@ mod tests {
             Color32::from_rgba_premultiplied(10, 20, 30, 40)
         );
         assert_eq!(b.paint_blend, LayerBlend::Multiply);
+    }
+
+    #[test]
+    fn tips_and_textures_are_read_from_their_file_when_needed() {
+        let dir = std::env::temp_dir().join(format!("preset-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.rpbrush");
+        let preset = |shade: u8| {
+            let pixels = (0..300 * 200).map(|i| (i % 251) as u8 | shade).collect();
+            let tip = TipMask::from_mask(300, 200, pixels);
+            let pattern = Arc::new(Pattern::new("Mine".into(), 2, vec![0.0, 0.25, 0.5, 1.0]));
+            let mut brush = Brush::new(30.0, 50.0, Color32::BLACK, 12.0);
+            brush.brush_options.pixel_shape = PixelBrushShape::Custom(tip.clone());
+            brush.texture = Some(BrushTexture::new(pattern.clone()));
+            let name = format!("Big {shade}");
+            (
+                BrushPreset {
+                    name,
+                    brush,
+                    file: None,
+                },
+                tip,
+                pattern,
+            )
+        };
+        let (big, tip, pattern) = preset(0);
+        let bytes = encode(&[big]).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let back = decode_file(&path, &bytes).unwrap();
+        let PixelBrushShape::Custom(read) = &back[0].brush.brush_options.pixel_shape else {
+            panic!("a picture tip");
+        };
+        let read_pattern = &back[0].brush.texture.as_ref().unwrap().pattern;
+        // Written back as they were, without reading them in.
+        let again = encode(&back).unwrap();
+        let entry = |b: &[u8], name| zip::read_entry(b, name).unwrap().to_vec();
+        assert_eq!(entry(&again, "tips/0.png"), entry(&bytes, "tips/0.png"));
+        assert_eq!(
+            entry(&again, "textures/0.bin"),
+            entry(&bytes, "textures/0.bin")
+        );
+        assert!(!read.is_decoded());
+        // The file written again with another tip first: found where it went.
+        let other = preset(1).0;
+        std::fs::write(&path, encode(&[other, back[0].clone()]).unwrap()).unwrap();
+        assert_eq!(**read, *tip);
+        assert!(!read.is_decoded());
+        // Read in before the file goes, then painting on without it.
+        load_from_file(&back[0]);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read.pixels(), tip.pixels());
+        assert_eq!(read_pattern.data(), pattern.data());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

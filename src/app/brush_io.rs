@@ -9,8 +9,11 @@ use crate::brush_engine::brush_options::PixelBrushShape;
 use crate::brush_engine::preset_file;
 use crate::brush_engine::tip::TipMask;
 use eframe::egui::{self, Color32, TextureOptions};
+use std::sync::Arc;
 
 const MAX_BRUSH_TIP_PIXELS: u32 = 4_194_304;
+/// The longest side of a tip's picture in the tip list.
+const THUMBNAIL_SIDE: usize = 128;
 /// Most tips taken from one folder.
 const MAX_TIPS_PER_SET: usize = 64;
 
@@ -166,7 +169,7 @@ impl PainterApp {
             return None;
         }
         let img = image::open(path).ok()?;
-        Some(TipMask::from_image(&img))
+        Some(TipMask::from_image(&img).shrunk_to(crate::brush_engine::tip::MAX_TIP_SIDE))
     }
 
     /// Make the selected part of the picture (everything visible) a brush
@@ -239,17 +242,19 @@ impl PainterApp {
             .unwrap_or(false)
     }
 
-    fn create_brush_texture(tip: &TipMask, ctx: &egui::Context) -> egui::TextureHandle {
+    fn create_brush_texture(tip: &Arc<TipMask>, ctx: &egui::Context) -> egui::TextureHandle {
+        // The list shows it small: no need for a full-size texture.
+        let tip = tip.shrunk_to(THUMBNAIL_SIDE);
         // A colour tip shows its colours; a grey one, white.
-        let pixels: Vec<Color32> = match &tip.colors {
+        let pixels: Vec<Color32> = match tip.colors() {
             Some(colors) => tip
-                .pixels
+                .pixels()
                 .iter()
                 .zip(colors)
                 .map(|(&a, c)| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], a))
                 .collect(),
             None => tip
-                .pixels
+                .pixels()
                 .iter()
                 .map(|&alpha| Color32::from_white_alpha(alpha))
                 .collect(),
@@ -296,7 +301,7 @@ impl PainterApp {
                     .map(|path| {
                         let presets = std::fs::read(&path)
                             .map_err(|e| e.to_string())
-                            .and_then(|bytes| preset_file::decode(&bytes));
+                            .and_then(|bytes| preset_file::decode_file(&path, &bytes));
                         (path, presets)
                     })
                     .collect()
@@ -314,6 +319,9 @@ impl PainterApp {
                 Err(err) => log::warn!("Skipping brush preset {}: {err}", path.display()),
             }
         }
+        // Reading them on every core leaves each thread's malloc arena
+        // holding tens of MB.
+        crate::app::release_freed_memory();
     }
 
     /// `name`, or `name 2`, `name 3`… if a preset already has it.
@@ -497,6 +505,8 @@ impl PainterApp {
         };
         // A change to it still on its way to the disk would bring it back.
         crate::app::jobs::flush_writes();
+        // The brush in hand (or one parked) may be painting with its tips.
+        preset_file::load_from_file(preset);
         if let Err(err) = std::fs::remove_file(&path)
             && err.kind() != std::io::ErrorKind::NotFound
         {

@@ -4,7 +4,7 @@
 use crate::app::PainterApp;
 use crate::app::state::BrushSlot;
 use crate::app::tools::Tool;
-use crate::brush_engine::brush_options::BlendMode;
+use crate::brush_engine::brush_options::{BlendMode, PixelBrushShape};
 use crate::selection::SelectionType;
 use crate::selection::transform::TransformInfo;
 use crate::ui;
@@ -75,6 +75,20 @@ impl PainterApp {
         bs.library.file.remember(&preset.name);
         bs.library.dirty = true;
         bs.active_preset = Some(preset.name);
+        // Its tips' pixels and levels, ready before the first stroke.
+        let o = &bs.brush.brush_options;
+        let r = o.diameter * 0.5;
+        let tips: Vec<_> = match &o.pixel_shape {
+            PixelBrushShape::Custom(tip) => std::iter::once(tip.clone())
+                .chain(o.extra_tips.iter().cloned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !tips.is_empty() {
+            self.workspace
+                .pool
+                .spawn(move || tips.iter().for_each(|t| t.warm(r)));
+        }
         // Double-clicking a slider now returns it to this preset's value.
         crate::ui::widgets::new_slider_defaults();
     }

@@ -53,7 +53,7 @@ pub(crate) fn trace(tip: &TipMask) -> Vec<[[f32; 2]; 2]> {
             let (x1, y1) = ((x0 + block).min(w), (y0 + block).min(h));
             let mut sum = 0u32;
             for y in y0..y1 {
-                for &v in &tip.pixels[y * w + x0..y * w + x1] {
+                for &v in &tip.pixels()[y * w + x0..y * w + x1] {
                     sum += v as u32;
                 }
             }

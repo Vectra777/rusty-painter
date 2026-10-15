@@ -57,3 +57,18 @@ mod undo_tests;
 pub(crate) mod view;
 
 pub use painter::PainterApp;
+
+/// Give the system back memory that was freed but kept: glibc holds on to
+/// it (freed big buffers, each thread's arena), so a burst of work (presets
+/// read on every core, a whole canvas uploaded) would stay in the app's
+/// footprint for good.
+pub(crate) fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: malloc_trim only returns free pages to the system.
+        unsafe { malloc_trim(0) };
+    }
+}

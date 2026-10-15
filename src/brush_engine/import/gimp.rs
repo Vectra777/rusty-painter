@@ -220,7 +220,7 @@ pub(super) mod tests {
         let PixelBrushShape::Custom(tip) = &o.pixel_shape else {
             panic!("an image tip");
         };
-        assert_eq!(tip.colors.as_ref().unwrap()[0], [200, 30, 40]);
+        assert_eq!(tip.colors().unwrap()[0], [200, 30, 40]);
     }
 
     #[test]

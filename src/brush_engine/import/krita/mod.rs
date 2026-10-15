@@ -1257,14 +1257,14 @@ struct GreyLevels {
 
 impl GreyLevels {
     fn apply(&self, tip: &Arc<TipMask>) -> Arc<TipMask> {
-        let Some(colors) = &tip.colors else {
+        let Some(colors) = tip.colors() else {
             return tip.clone();
         };
         // Krita's grey (`qGray`).
         let grey = |c: &[u8; 3]| (c[0] as u32 * 11 + c[1] as u32 * 16 + c[2] as u32 * 5) / 32;
         let mid_x = self.mid.unwrap_or_else(|| {
             let (mut sum, mut cover) = (0u64, 0u64);
-            for (c, &a) in colors.iter().zip(&tip.pixels) {
+            for (c, &a) in colors.iter().zip(tip.pixels()) {
                 sum += (grey(c) as f64 * a as f64 / 255.0).round() as u64;
                 cover += a as u64;
             }
@@ -1313,7 +1313,7 @@ impl GreyLevels {
                 [v as u8; 3]
             })
             .collect();
-        TipMask::from_colored(tip.width, tip.height, tip.pixels.clone(), out)
+        TipMask::from_colored(tip.width, tip.height, tip.pixels().to_vec(), out)
     }
 }
 
