@@ -1276,13 +1276,27 @@ fn tile(
                     },
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (r, _) =
-                        ui.allocate_exact_size(egui::Vec2::splat(more), egui::Sense::hover());
-                    ui.put(r, |ui: &mut egui::Ui| {
-                        ui.menu_button(" ", |ui| entry_menu(ui, entry, act))
-                            .response
-                    });
-                    let hovered = ui.rect_contains_pointer(r);
+                    // Just the dots (a menu button grows to touch size).
+                    let (r, dots) =
+                        ui.allocate_exact_size(egui::Vec2::splat(more), egui::Sense::click());
+                    let id = menu_id(&entry.path).with("dots");
+                    if dots.clicked() {
+                        ui.memory_mut(|mem| mem.toggle_popup(id));
+                    }
+                    egui::popup_below_widget(
+                        ui,
+                        id,
+                        &dots,
+                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                        |ui| {
+                            ui.set_min_width(160.0);
+                            entry_menu(ui, entry, act);
+                        },
+                    );
+                    if act.is_some() {
+                        ui.memory_mut(|mem| mem.close_popup());
+                    }
+                    let hovered = dots.hovered();
                     paint_icon(
                         ui.painter(),
                         r.shrink(4.0),
