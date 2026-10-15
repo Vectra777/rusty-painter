@@ -163,19 +163,35 @@ pub(crate) fn read_entry<'a>(bytes: &'a [u8], name: &str) -> Result<&'a [u8], St
 /// the directory and that entry (a project's thumbnail without loading the
 /// whole project).
 pub(crate) fn read_entry_from_file(path: &std::path::Path, name: &str) -> Result<Vec<u8>, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let (at, size, crc) = find_in_file(&mut file, |n, _, _| n == name.as_bytes())?
+        .ok_or_else(|| format!("{name} is missing from the project file"))?;
+    let data = read_at(&mut file, at, size)?;
+    if crc32fast::hash(&data) != crc {
+        return Err("Damaged project file".into());
+    }
+    Ok(data)
+}
+
+fn read_at(file: &mut std::fs::File, at: u64, n: usize) -> Result<Vec<u8>, String> {
     use std::io::{Read, Seek, SeekFrom};
+    let mut buf = vec![0; n];
+    file.seek(SeekFrom::Start(at)).map_err(|e| e.to_string())?;
+    file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// The first stored entry of the archive in `file` that `wanted(name, crc,
+/// size)` picks: where its data starts, its size and CRC. Reads only the
+/// directory (and the entry's local header).
+fn find_in_file(
+    file: &mut std::fs::File,
+    wanted: impl Fn(&[u8], u32, usize) -> bool,
+) -> Result<Option<(u64, usize, u32)>, String> {
     let broken = || "Damaged project file".to_string();
-    let io = |e: std::io::Error| e.to_string();
-    let mut file = std::fs::File::open(path).map_err(io)?;
-    let len = file.metadata().map_err(io)?.len();
-    let mut read_at = |at: u64, n: usize| -> Result<Vec<u8>, String> {
-        let mut buf = vec![0; n];
-        file.seek(SeekFrom::Start(at)).map_err(io)?;
-        file.read_exact(&mut buf).map_err(io)?;
-        Ok(buf)
-    };
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
     let tail_len = len.min(22 + u64::from(u16::MAX));
-    let tail = read_at(len - tail_len, tail_len as usize)?;
+    let tail = read_at(file, len - tail_len, tail_len as usize)?;
     let end = (0..=tail.len().saturating_sub(22))
         .rev()
         .find(|&at| get32(&tail, at) == Some(END_OF_DIRECTORY))
@@ -183,7 +199,7 @@ pub(crate) fn read_entry_from_file(path: &std::path::Path, name: &str) -> Result
     let count = get16(&tail, end + 10).ok_or_else(broken)?;
     let dir_len = get32(&tail, end + 12).ok_or_else(broken)? as usize;
     let dir_start = get32(&tail, end + 16).ok_or_else(broken)?;
-    let dir = read_at(u64::from(dir_start), dir_len)?;
+    let dir = read_at(file, u64::from(dir_start), dir_len)?;
     let mut at = 0;
     for _ in 0..count {
         if get32(&dir, at) != Some(CENTRAL_HEADER) {
@@ -196,26 +212,74 @@ pub(crate) fn read_entry_from_file(path: &std::path::Path, name: &str) -> Result
         let extra_len = get16(&dir, at + 30).ok_or_else(broken)? as usize;
         let comment_len = get16(&dir, at + 32).ok_or_else(broken)? as usize;
         let offset = u64::from(get32(&dir, at + 42).ok_or_else(broken)?);
-        if dir.get(at + 46..at + 46 + name_len) == Some(name.as_bytes()) {
+        let name = dir.get(at + 46..at + 46 + name_len).ok_or_else(broken)?;
+        if wanted(name, crc, size) {
             if method != 0 {
-                return Err(format!("Unsupported compression for {name}"));
+                return Err(format!(
+                    "Unsupported compression for {}",
+                    String::from_utf8_lossy(name)
+                ));
             }
-            let local = read_at(offset, 30)?;
+            let local = read_at(file, offset, 30)?;
             if get32(&local, 0) != Some(LOCAL_HEADER) {
                 return Err(broken());
             }
             let skip = 30
                 + get16(&local, 26).ok_or_else(broken)? as u64
                 + get16(&local, 28).ok_or_else(broken)? as u64;
-            let data = read_at(offset + skip, size)?;
-            if crc32fast::hash(&data) != crc {
-                return Err(broken());
-            }
-            return Ok(data);
+            return Ok(Some((offset + skip, size, crc)));
         }
         at += 46 + name_len + extra_len + comment_len;
     }
-    Err(format!("{name} is missing from the project file"))
+    Ok(None)
+}
+
+/// Where a stored entry's data is in an archive on disk, to read it again
+/// later rather than keep it in memory.
+#[derive(Debug)]
+pub(crate) struct FileEntry {
+    pub path: std::sync::Arc<std::path::Path>,
+    /// Where the data starts (moved when the archive is written again).
+    offset: std::sync::atomic::AtomicU64,
+    pub len: u32,
+    pub crc: u32,
+}
+
+impl FileEntry {
+    /// `data`, which [`read_entry`] found in `bytes`, the archive at `path`.
+    pub fn locate(path: &std::sync::Arc<std::path::Path>, bytes: &[u8], data: &[u8]) -> Self {
+        Self {
+            path: path.clone(),
+            offset: ((data.as_ptr() as usize - bytes.as_ptr() as usize) as u64).into(),
+            len: data.len() as u32,
+            crc: crc32fast::hash(data),
+        }
+    }
+
+    /// The data again: where it was, or, the archive written again since,
+    /// wherever an entry with the same CRC and size is now (remembered for
+    /// next time).
+    pub fn read(&self) -> Result<Vec<u8>, String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let io = |e: String| format!("{}: {e}", self.path.display());
+        let mut file = std::fs::File::open(&self.path).map_err(|e| io(e.to_string()))?;
+        let len = self.len as usize;
+        let data = read_at(&mut file, self.offset.load(Relaxed), len);
+        if let Ok(data) = data
+            && crc32fast::hash(&data) == self.crc
+        {
+            return Ok(data);
+        }
+        let (at, ..) = find_in_file(&mut file, |_, crc, size| (crc, size) == (self.crc, len))
+            .map_err(io)?
+            .ok_or_else(|| io("an entry is missing".into()))?;
+        let data = read_at(&mut file, at, len).map_err(io)?;
+        if crc32fast::hash(&data) != self.crc {
+            return Err(io("damaged".into()));
+        }
+        self.offset.store(at, Relaxed);
+        Ok(data)
+    }
 }
 
 /// Largest entry inflated from another app's archive (a brush bundle).
@@ -295,6 +359,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_entry_is_found_again_after_its_archive_is_rewritten() {
+        let dir = std::env::temp_dir().join(format!("zip-entry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path: std::sync::Arc<std::path::Path> = dir.join("a.zip").into();
+        let archive = |names: &[(&str, &[u8])]| {
+            let mut zip = ZipWriter::default();
+            for (n, d) in names {
+                zip.add(n, d).unwrap();
+            }
+            zip.finish().unwrap()
+        };
+        let bytes = archive(&[("a", b"first"), ("b", b"second")]);
+        std::fs::write(&path, &bytes).unwrap();
+        let entry = FileEntry::locate(&path, &bytes, read_entry(&bytes, "b").unwrap());
+        assert_eq!(entry.read().unwrap(), b"second");
+        // Moved, and renamed: found by its CRC and size.
+        std::fs::write(&path, archive(&[("c", b"longer first"), ("d", b"second")])).unwrap();
+        assert_eq!(entry.read().unwrap(), b"second");
+        std::fs::write(&path, archive(&[("d", b"other!")])).unwrap();
+        assert!(entry.read().is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn entries_round_trip() {

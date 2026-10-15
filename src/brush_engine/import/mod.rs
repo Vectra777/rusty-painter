@@ -70,8 +70,26 @@ pub fn import(file_name: &str, bytes: &[u8]) -> Result<Imported, String> {
         return Err(format!("{file_name} has no brushes this app can use"));
     }
     let mut imported = imported;
+    let max = crate::brush_engine::tip::MAX_TIP_SIDE;
+    let mut shrunk_count = 0;
     for p in &mut imported.presets {
         p.brush.fold_pressure();
+        let o = &mut p.brush.brush_options;
+        let mut shrunk = false;
+        if let PixelBrushShape::Custom(tip) = &mut o.pixel_shape {
+            shrunk |= tip.width.max(tip.height) > max;
+            *tip = tip.shrunk_to(max);
+        }
+        for tip in &mut o.extra_tips {
+            shrunk |= tip.width.max(tip.height) > max;
+            *tip = tip.shrunk_to(max);
+        }
+        shrunk_count += usize::from(shrunk);
+    }
+    if shrunk_count > 0 {
+        imported.notes.push(format!(
+            "{shrunk_count} tip(s) bigger than {max} px (the largest brush size) were shrunk to it"
+        ));
     }
     Ok(imported)
 }

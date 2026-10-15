@@ -639,7 +639,7 @@ fn render_presets_and_tips() {
     for p in crate::brush_engine::texture::builtin() {
         let n = p.size as u32;
         let img = image::GrayImage::from_fn(n * 2, n * 2, |x, y| {
-            image::Luma([(p.data[((y % n) * n + x % n) as usize] * 255.0) as u8])
+            image::Luma([(p.data()[((y % n) * n + x % n) as usize] * 255.0) as u8])
         });
         img.save(dir.join(format!("paper_{}.png", p.name))).unwrap();
     }
@@ -647,7 +647,7 @@ fn render_presets_and_tips() {
         let img = image::GrayImage::from_raw(
             tip.width as u32,
             tip.height as u32,
-            tip.pixels.iter().map(|v| 255 - v).collect(),
+            tip.pixels().iter().map(|v| 255 - v).collect(),
         )
         .unwrap();
         img.save(dir.join(format!("tip_{name}.png"))).unwrap();

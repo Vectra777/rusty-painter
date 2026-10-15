@@ -12,17 +12,15 @@
 //!   within each (trilinear), so a large picture used as a small tip neither
 //!   shimmers nor jumps as pressure changes the size.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug)]
 struct Level {
     w: usize,
     h: usize,
-    /// Coverage 0..=1, row-major.
-    data: Vec<f32>,
-    /// `data` in an empty border, one texel before it and two after
-    /// (`(w + 3) × (h + 3)`), so bilinear reads need no bounds checks and
-    /// anything past the edge reads as nothing.
+    /// Coverage 0..=1, row-major, in an empty border one texel before it
+    /// and two after (`(w + 3) × (h + 3)`), so bilinear reads need no
+    /// bounds checks and anything past the edge reads as nothing.
     padded: Vec<f32>,
 }
 
@@ -34,7 +32,7 @@ impl Level {
             padded[(y + 1) * pw + 1..(y + 1) * pw + 1 + w]
                 .copy_from_slice(&data[y * w..(y + 1) * w]);
         }
-        Self { w, h, data, padded }
+        Self { w, h, padded }
     }
 
     /// Bilinear at texel position `(x, y)` (texel centres at +0.5).
@@ -142,24 +140,77 @@ pub fn svg_side(diameter: f32) -> usize {
         .clamp(1024, 4096)
 }
 
+/// The largest side a picture tip keeps (the largest brush size): a
+/// bigger one is shrunk when it's loaded, as its extra pixels would never
+/// be painted.
+pub const MAX_TIP_SIDE: usize = 3000;
+
 /// A brush tip mask with its mipmaps. Shared (`Arc`) between brushes and
 /// presets.
+///
+/// Only what's used is kept in memory: a tip read from a preset file stays
+/// its PNG until its pixels are asked for, and each mip level is built the
+/// first time a dab samples at its scale (from the PNG, decoded for the
+/// while, if the pixels aren't kept), so a big tip seen only in a preview
+/// costs its file size and a few small levels.
 #[derive(Debug)]
 pub struct TipMask {
-    /// The full-size mask, 0..=255 (for previews and the tip list).
+    /// The full-size mask's size (see [`Self::pixels`]).
     pub width: usize,
     pub height: usize,
-    pub pixels: Vec<u8>,
-    levels: Vec<Level>,
-    /// A colour picture's colours (unmultiplied sRGB), full size; `None`
-    /// for a grey tip. Brushes paint with them when asked to.
-    pub colors: Option<Vec<[u8; 3]>>,
-    /// The colours' mipmaps: red, green and blue, premultiplied by the
-    /// mask, one set per level of `levels`.
-    color_levels: Vec<[Level; 3]>,
+    picture: OnceLock<Picture>,
+    /// A tip read from a preset file: its PNG, in place of the picture
+    /// until something needs that.
+    png: Option<PngSource>,
+    /// Whether it has colours (known before the PNG is decoded).
+    colored: bool,
+    /// The mipmaps, from full size down to 1×1, each built when needed.
+    levels: Box<[OnceLock<Mip>]>,
     /// An SVG tip's picture, drawn again (sharp) for a brush bigger than
     /// the mask.
     pub svg: Option<Arc<str>>,
+}
+
+/// Where a tip's PNG is.
+#[derive(Debug)]
+pub(crate) enum PngSource {
+    /// In memory (a preset file opened from elsewhere), with its CRC.
+    Bytes(Arc<[u8]>, u32),
+    /// In a preset file on disk, read when needed.
+    File(crate::project::zip::FileEntry),
+}
+
+impl PngSource {
+    pub fn bytes(png: &[u8]) -> Self {
+        Self::Bytes(png.into(), crc32fast::hash(png))
+    }
+
+    /// The same PNG as `other` (by CRC and size: a match the odd time it
+    /// isn't only costs a tip written twice).
+    fn same(&self, other: &Self) -> bool {
+        let key = |s: &Self| match s {
+            Self::Bytes(b, crc) => (b.len(), *crc),
+            Self::File(e) => (e.len as usize, e.crc),
+        };
+        key(self) == key(other)
+    }
+}
+
+#[derive(Debug)]
+struct Picture {
+    /// The mask, 0..=255.
+    pixels: Vec<u8>,
+    /// A colour picture's colours (unmultiplied sRGB); `None` for a grey
+    /// tip.
+    colors: Option<Vec<[u8; 3]>>,
+}
+
+/// One mip level: the coverage, and a colour tip's red, green and blue
+/// premultiplied by it.
+#[derive(Debug)]
+struct Mip {
+    alpha: Level,
+    colors: Option<[Level; 3]>,
 }
 
 impl PartialEq for TipMask {
@@ -168,10 +219,16 @@ impl PartialEq for TipMask {
             // The same picture, whatever size it's drawn at.
             return a == b;
         }
-        self.width == other.width
-            && self.height == other.height
-            && self.pixels == other.pixels
-            && self.colors == other.colors
+        if (self.width, self.height, self.colored) != (other.width, other.height, other.colored) {
+            return false;
+        }
+        // Two PNGs from preset files: alike if they're the same PNG (the
+        // app writes the same pixels the same way). Not decoded, as saving a
+        // file compares its every tip with the others.
+        if let (Some(a), Some(b)) = (&self.png, &other.png) {
+            return a.same(b);
+        }
+        self.with_picture(|a| other.with_picture(|b| a.pixels == b.pixels && a.colors == b.colors))
     }
 }
 
@@ -203,42 +260,172 @@ impl TipMask {
             colors.map(|c| crop(&c, width, rect)),
         );
         let [x0, y0, x1, y1] = rect;
-        let (width, height) = (x1 - x0, y1 - y0);
-        let alpha: Vec<f32> = pixels.iter().map(|&v| v as f32 / 255.0).collect();
-        let mut levels = vec![Level::new(width, height, alpha.clone())];
-        while let Some(last) = levels.last()
-            && (last.w > 1 || last.h > 1)
-        {
-            let next = halve(last);
-            levels.push(next);
+        let colored = colors.is_some();
+        let tip = Self::assemble(x1 - x0, y1 - y0, None, colored);
+        let _ = tip.picture.set(Picture { pixels, colors });
+        Arc::new(tip)
+    }
+
+    /// A tip whose picture is `png` (a preset file's `tips/<n>.png`, of
+    /// this size, with alpha if `colored`), decoded when first needed.
+    pub(crate) fn from_png(
+        width: usize,
+        height: usize,
+        png: PngSource,
+        colored: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self::assemble(width, height, Some(png), colored))
+    }
+
+    fn assemble(width: usize, height: usize, png: Option<PngSource>, colored: bool) -> Self {
+        let mut count = 1;
+        let (mut w, mut h) = (width, height);
+        while w > 1 || h > 1 {
+            (w, h) = (w.div_ceil(2), h.div_ceil(2));
+            count += 1;
         }
-        let mut color_levels = Vec::new();
-        if let Some(colors) = &colors {
-            // Premultiplied, so a transparent texel's colour doesn't bleed.
-            let plane = |k: usize| {
-                let data = colors
-                    .iter()
-                    .zip(&alpha)
-                    .map(|(c, a)| c[k] as f32 / 255.0 * a)
-                    .collect();
-                Level::new(width, height, data)
-            };
-            color_levels.push([plane(0), plane(1), plane(2)]);
-            while color_levels.len() < levels.len() {
-                let last = color_levels.last().expect("one level at least");
-                let next = [halve(&last[0]), halve(&last[1]), halve(&last[2])];
-                color_levels.push(next);
-            }
-        }
-        Arc::new(Self {
+        Self {
             width,
             height,
-            pixels,
-            levels,
-            colors,
-            color_levels,
+            picture: OnceLock::new(),
+            png,
+            colored,
+            levels: (0..count).map(|_| OnceLock::new()).collect(),
             svg: None,
-        })
+        }
+    }
+
+    /// The full-size mask, 0..=255 (decoded and kept, for a tip read from
+    /// a preset file).
+    pub fn pixels(&self) -> &[u8] {
+        &self.picture().pixels
+    }
+
+    /// A colour picture's colours (unmultiplied sRGB), full size; `None`
+    /// for a grey tip. Brushes paint with them when asked to.
+    pub fn colors(&self) -> Option<&[[u8; 3]]> {
+        self.picture().colors.as_deref()
+    }
+
+    /// The PNG a tip read from a preset file was in (written back as it
+    /// is, without decoding it); `None` if it can't be read any more.
+    pub fn png(&self) -> Option<std::borrow::Cow<'_, [u8]>> {
+        match self.png.as_ref()? {
+            PngSource::Bytes(b, _) => Some(std::borrow::Cow::Borrowed(b)),
+            PngSource::File(entry) => entry
+                .read()
+                .inspect_err(|e| log::warn!("A brush tip can't be read: {e}"))
+                .ok()
+                .map(std::borrow::Cow::Owned),
+        }
+    }
+
+    fn picture(&self) -> &Picture {
+        self.picture.get_or_init(|| self.decode_png())
+    }
+
+    /// The picture, decoded for the while if it isn't kept.
+    fn with_picture<R>(&self, f: impl FnOnce(&Picture) -> R) -> R {
+        match self.picture.get() {
+            Some(p) => f(p),
+            None => f(&self.decode_png()),
+        }
+    }
+
+    /// The PNG's picture; empty if it doesn't decode to this size (a
+    /// damaged file paints nothing rather than failing later).
+    fn decode_png(&self) -> Picture {
+        let (w, h) = (self.width, self.height);
+        let img = self
+            .png()
+            .and_then(|png| image::load_from_memory(&png).ok())
+            .filter(|img| (img.width() as usize, img.height() as usize) == (w, h));
+        match img {
+            Some(img) if self.colored => {
+                let rgba = img.to_rgba8();
+                Picture {
+                    pixels: rgba.pixels().map(|p| p[3]).collect(),
+                    colors: Some(rgba.pixels().map(|p| [p[0], p[1], p[2]]).collect()),
+                }
+            }
+            Some(img) => Picture {
+                pixels: img.to_luma8().into_raw(),
+                colors: None,
+            },
+            None => {
+                log::warn!("A brush tip's picture is damaged");
+                Picture {
+                    pixels: vec![0; w * h],
+                    colors: self.colored.then(|| vec![[0; 3]; w * h]),
+                }
+            }
+        }
+    }
+
+    /// Whether the picture is decoded (kept) yet.
+    #[cfg(test)]
+    pub(crate) fn is_decoded(&self) -> bool {
+        self.picture.get().is_some()
+    }
+
+    /// Mip level `k`, built if it isn't yet.
+    fn level(&self, k: usize) -> &Mip {
+        // Always from the picture (never halved from the size up): built in
+        // whatever order, a level is the same, so a brush paints the same.
+        self.levels[k]
+            .get_or_init(|| self.with_picture(|p| build_mip(self.width, self.height, p, k)))
+    }
+
+    /// Decode the picture and build the levels a dab of radius `r` and
+    /// the next few smaller sizes sample, so a stroke's first dabs don't
+    /// wait for them.
+    pub fn warm(&self, r: f32) {
+        if self.svg.is_some() {
+            return;
+        }
+        let _ = self.pixels();
+        let lo = self.sampler(r).lo;
+        for k in lo..(lo + 4).min(self.levels.len()) {
+            self.level(k);
+        }
+    }
+
+    /// This tip, shrunk so its longest side is at most `longest` if it's
+    /// bigger. An SVG tip is kept as it is (it's drawn at the size it
+    /// paints).
+    pub fn shrunk_to(self: &Arc<Self>, longest: usize) -> Arc<Self> {
+        use image::imageops::{FilterType, resize};
+        let side = self.width.max(self.height);
+        if side <= longest || self.svg.is_some() {
+            return self.clone();
+        }
+        let scale = longest as f64 / side as f64;
+        let w = ((self.width as f64 * scale).round() as u32).max(1);
+        let h = ((self.height as f64 * scale).round() as u32).max(1);
+        let (sw, sh) = (self.width as u32, self.height as u32);
+        match self.colors() {
+            Some(colors) => {
+                let raw = colors
+                    .iter()
+                    .zip(self.pixels())
+                    .flat_map(|(c, &a)| [c[0], c[1], c[2], a])
+                    .collect();
+                let img = image::RgbaImage::from_raw(sw, sh, raw).expect("the tip's size");
+                let small = resize(&img, w, h, FilterType::Triangle);
+                Self::from_colored(
+                    w as usize,
+                    h as usize,
+                    small.pixels().map(|p| p[3]).collect(),
+                    small.pixels().map(|p| [p[0], p[1], p[2]]).collect(),
+                )
+            }
+            None => {
+                let img = image::GrayImage::from_raw(sw, sh, self.pixels().to_vec())
+                    .expect("the tip's size");
+                let small = resize(&img, w, h, FilterType::Triangle);
+                Self::from_mask(w as usize, h as usize, small.into_raw())
+            }
+        }
     }
 
     /// An SVG picture as a tip (its coverage; colours left out), drawn so
@@ -281,7 +468,7 @@ impl TipMask {
 
     /// Whether the tip has colours of its own.
     pub fn has_colors(&self) -> bool {
-        self.colors.is_some()
+        self.colored
     }
 
     /// The colours along a row sampled like [`Self::row`] (same sampler,
@@ -296,7 +483,7 @@ impl TipMask {
         alpha_scale: f32,
         out: &mut [[f32; 3]],
     ) {
-        if self.color_levels.is_empty() {
+        if !self.colored {
             out.fill([0.0; 3]);
             return;
         }
@@ -320,10 +507,14 @@ impl TipMask {
         let inv_scale = 1.0 / alpha_scale.max(1e-6);
         let blend = if s.blend < 0.02 { 0.0 } else { s.blend };
         let mut plane = vec![0.0f32; out.len()];
+        let (Some(lo), Some(hi)) = (&self.level(s.lo).colors, &self.level(s.hi).colors) else {
+            out.fill([0.0; 3]);
+            return;
+        };
         for k in 0..3 {
             let run = RowRun {
-                lo: &self.color_levels[s.lo][k],
-                hi: &self.color_levels[s.hi][k],
+                lo: &lo[k],
+                hi: &hi[k],
                 blend,
                 scale_lo: s.scale_lo,
                 scale_hi: s.scale_hi,
@@ -349,8 +540,8 @@ impl TipMask {
         let mut out = [0.0];
         let blend = if s.blend < 0.02 { 0.0 } else { s.blend };
         RowRun {
-            lo: &self.levels[s.lo],
-            hi: &self.levels[s.hi],
+            lo: &self.level(s.lo).alpha,
+            hi: &self.level(s.hi).alpha,
             blend,
             scale_lo: s.scale_lo,
             scale_hi: s.scale_hi,
@@ -365,7 +556,7 @@ impl TipMask {
     /// (unmultiplied sRGB 0..1; black for a grey tip).
     #[inline]
     pub fn color_texel(&self, s: &TipSampler, tx: f32, ty: f32, alpha: f32) -> [f32; 3] {
-        if self.color_levels.is_empty() {
+        if !self.colored {
             return [0.0; 3];
         }
         let mut out = [[0.0; 3]];
@@ -446,8 +637,8 @@ impl TipMask {
         Self::from_parts(
             self.width,
             self.height,
-            self.pixels.iter().map(|&v| 255 - v).collect(),
-            self.colors.clone(),
+            self.pixels().iter().map(|&v| 255 - v).collect(),
+            self.colors().map(<[_]>::to_vec),
         )
     }
 
@@ -472,11 +663,11 @@ impl TipMask {
         let lod = per_px.max(1.0).log2().min((self.levels.len() - 1) as f32);
         let lo = lod.floor() as usize;
         let hi = (lo + 1).min(self.levels.len() - 1);
+        // A level's size without building it.
         let scale = |k: usize| {
-            let l = &self.levels[k];
             (
-                l.w as f32 / self.width as f32,
-                l.h as f32 / self.height as f32,
+                self.width.div_ceil(1 << k) as f32 / self.width as f32,
+                self.height.div_ceil(1 << k) as f32 / self.height as f32,
             )
         };
         TipSampler {
@@ -526,7 +717,7 @@ impl TipMask {
         let last = (hi.ceil().max(0.0) as usize).clamp(first, out.len());
         out[..first].fill(0.0);
         out[last..].fill(0.0);
-        let (lo_level, hi_level) = (&self.levels[s.lo], &self.levels[s.hi]);
+        let (lo_level, hi_level) = (&self.level(s.lo).alpha, &self.level(s.hi).alpha);
         // A blend this close to one level isn't worth the second.
         let blend = if s.blend < 0.02 { 0.0 } else { s.blend };
         let run = RowRun {
@@ -553,11 +744,10 @@ impl TipMask {
             return 0.0;
         }
         let (x, y) = (tx as usize, ty as usize);
-        let level = &self.levels[0];
-        if x >= level.w || y >= level.h {
+        if x >= self.width || y >= self.height {
             return 0.0;
         }
-        level.data[y * level.w + x]
+        self.pixels()[y * self.width + x] as f32 / 255.0
     }
 }
 
@@ -822,25 +1012,81 @@ impl RowRun<'_> {
     }
 }
 
-/// Half the size, each texel the average of the (up to) four it covers.
-fn halve(level: &Level) -> Level {
-    let (w, h) = (level.w.div_ceil(2).max(1), level.h.div_ceil(2).max(1));
-    let mut data = vec![0.0; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let mut sum = 0.0;
-            let mut n = 0.0;
-            for (sx, sy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                let (px, py) = (2 * x + sx, 2 * y + sy);
-                if px < level.w && py < level.h {
-                    sum += level.data[py * level.w + px];
-                    n += 1.0;
+/// Mip level `k` of a `w × h` picture: each texel the average of the
+/// `2^k × 2^k` full-size block it covers (fewer at the edges), colours
+/// premultiplied by the mask so a transparent texel's colour doesn't bleed.
+/// Summed in integers, as a dab may be waiting. On this thread: run on
+/// the pool, waiting for its share, it could take up another dab wanting
+/// this very level, and wait on itself.
+fn build_mip(w: usize, h: usize, p: &Picture, k: usize) -> Mip {
+    let (lw, lh) = (w.div_ceil(1 << k), h.div_ceil(1 << k));
+    let colors = p.colors.as_deref();
+    if k == 0 {
+        // Full size: the texels themselves.
+        let alpha: Vec<f32> = p.pixels.iter().map(|&a| f32::from(a) / 255.0).collect();
+        let plane = |c: &[[u8; 3]], i: usize| {
+            let data = c
+                .iter()
+                .zip(&alpha)
+                .map(|(c, a)| f32::from(c[i]) / 255.0 * a);
+            Level::new(w, h, data.collect())
+        };
+        return Mip {
+            colors: colors.map(|c| [0, 1, 2].map(|i| plane(c, i))),
+            alpha: Level::new(w, h, alpha),
+        };
+    }
+    // Per level row: the coverage of each texel, and its premultiplied
+    // colours (`None` for a grey tip).
+    type Row = (Vec<f32>, Option<[Vec<f32>; 3]>);
+    let rows: Vec<Row> = (0..lh)
+        .map(|ly| {
+            let ys = ly << k..h.min((ly + 1) << k);
+            let mut alpha = vec![0u64; lw];
+            let mut rgb = colors.map(|_| vec![[0u64; 3]; lw]);
+            for y in ys.clone() {
+                let row = &p.pixels[y * w..(y + 1) * w];
+                for (x, &a) in row.iter().enumerate() {
+                    alpha[x >> k] += u64::from(a);
+                }
+                if let (Some(rgb), Some(colors)) = (&mut rgb, colors) {
+                    let crow = &colors[y * w..(y + 1) * w];
+                    for (x, (c, &a)) in crow.iter().zip(row).enumerate() {
+                        for (sum, &v) in rgb[x >> k].iter_mut().zip(c) {
+                            *sum += u64::from(v) * u64::from(a);
+                        }
+                    }
                 }
             }
-            data[y * w + x] = sum / n;
-        }
+            // Texels per block, fewer at the right and bottom edges.
+            let count = |lx: usize| ((w.min((lx + 1) << k) - (lx << k)) * ys.len()) as f64;
+            let alpha_row = (0..lw)
+                .map(|lx| (alpha[lx] as f64 / (255.0 * count(lx))) as f32)
+                .collect();
+            let rgb_rows = rgb.map(|rgb| {
+                [0, 1, 2].map(|c| {
+                    (0..lw)
+                        .map(|lx| (rgb[lx][c] as f64 / (65025.0 * count(lx))) as f32)
+                        .collect()
+                })
+            });
+            (alpha_row, rgb_rows)
+        })
+        .collect();
+    let colored = colors.is_some();
+    let (alpha, rgb): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+    Mip {
+        alpha: Level::new(lw, lh, alpha.concat()),
+        colors: colored.then(|| {
+            let mut planes = [Vec::new(), Vec::new(), Vec::new()];
+            for row in rgb.into_iter().flatten() {
+                for (plane, part) in planes.iter_mut().zip(row) {
+                    plane.extend(part);
+                }
+            }
+            planes.map(|plane| Level::new(lw, lh, plane))
+        }),
     }
-    Level::new(w, h, data)
 }
 
 /// The part `[x0, y0, x1, y1)` of a `width`-wide picture.
@@ -878,7 +1124,7 @@ mod tests {
         let tip = TipMask::from_svg(svg, 1024).unwrap();
         // The square only (trimmed), full in the middle, its edge crisp.
         assert_eq!((tip.width, tip.height), (512, 512));
-        assert_eq!(tip.pixels[256 * 512 + 256], 255);
+        assert_eq!(tip.pixels()[256 * 512 + 256], 255);
         assert!(tip.sharper_for(900.0).is_none());
         let big = tip.sharper_for(3000.0).unwrap();
         assert_eq!((big.width, big.height), (2048, 2048));
@@ -904,7 +1150,7 @@ mod tests {
     #[test]
     fn built_in_tips_have_paint_and_hold_steady() {
         for (name, tip) in builtin() {
-            let painted = tip.pixels.iter().filter(|&&v| v > 40).count();
+            let painted = tip.pixels().iter().filter(|&&v| v > 40).count();
             assert!(painted > 100, "{name}: {painted}");
             // Thin tips (stitches, bars) are still a few pixels across.
             assert!(tip.width.max(tip.height) > 60, "{name}");
@@ -981,8 +1227,22 @@ mod tests {
             shape(black, white),              // white on black
         ] {
             assert_eq!((tip.width, tip.height), (4, 4), "only the shape");
-            assert!(tip.pixels.iter().all(|&v| v == 255));
+            assert!(tip.pixels().iter().all(|&v| v == 255));
         }
+    }
+
+    #[test]
+    fn levels_are_built_only_where_sampled_each_averaging_its_block() {
+        let tip = disc(512);
+        // 512 texels over 16 pixels: level 5.
+        tip.sample(0.0, 0.0, 8.0);
+        assert!(tip.levels[0].get().is_none());
+        assert!(tip.levels[5].get().is_some());
+        // Level 1 of 3×2: a 2×2 block, then a 1×2 one at the edge.
+        let t = TipMask::from_mask(3, 2, vec![255, 0, 255, 255, 255, 0]);
+        let l = &t.level(1).alpha;
+        let texel = |x: usize| l.padded[l.w + 3 + x + 1];
+        assert_eq!((l.w, l.h, texel(0), texel(1)), (2, 1, 0.75, 0.5));
     }
 
     #[test]

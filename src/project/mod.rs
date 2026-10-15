@@ -36,7 +36,7 @@ pub(crate) mod svg;
 pub(crate) mod video;
 pub(crate) mod zip;
 
-use blobs::{StoredBlob, push_blobs, read_blob};
+use blobs::{StoredBlob, packed_blob, push_blobs, read_blob};
 use convert::{
     StoredColor, StoredColorModel, StoredLayerHistoryOp, StoredSelectionShape, StoredTransformInfo,
 };
@@ -1416,20 +1416,46 @@ struct StoredTileSnapshot {
 
 impl StoredTileSnapshot {
     fn into_snapshot(self, tile_size: usize, blobs: &[u8]) -> Result<TileSnapshot, String> {
-        let data = bytes_to_colors(read_blob(blobs, &self.rgba_zstd)?)?;
-        let deep = match &self.deep {
-            Some((depth, blob)) => read_deep(blobs, Some(blob), *depth, data.len())?,
-            None => None,
-        };
         let fits = |at: usize, len: usize| at.checked_add(len).is_some_and(|end| end <= tile_size);
         if self.width == 0
             || self.height == 0
             || !fits(self.x0, self.width)
             || !fits(self.y0, self.height)
-            || Some(data.len()) != self.width.checked_mul(self.height)
         {
             return Err("Invalid undo tile snapshot".to_string());
         }
+        let len = self.width * self.height;
+        // Kept compressed as the file has it, as older undo steps are kept
+        // while painting: unpacked, a long history takes gigabytes.
+        let data = match &self.deep {
+            Some((depth, blob)) if depth.is_deep() => {
+                let per_pixel = if *depth == Depth::U16 { 8 } else { 16 };
+                match packed_blob(blobs, blob, len * per_pixel)? {
+                    Some(bytes) => SnapshotPixels::DeepCompressed {
+                        bytes: bytes.to_vec(),
+                        len,
+                        depth: *depth,
+                    },
+                    None => SnapshotPixels::Deep(
+                        read_deep(blobs, Some(blob), *depth, len)?
+                            .ok_or("Invalid undo tile snapshot")?,
+                    ),
+                }
+            }
+            _ => match packed_blob(blobs, &self.rgba_zstd, len * 4)? {
+                Some(bytes) => SnapshotPixels::Compressed {
+                    bytes: bytes.to_vec(),
+                    len,
+                },
+                None => {
+                    let data = bytes_to_colors(read_blob(blobs, &self.rgba_zstd)?)?;
+                    if data.len() != len {
+                        return Err("Invalid undo tile snapshot".to_string());
+                    }
+                    data.into()
+                }
+            },
+        };
         let layer_id = LayerId(self.layer_id.unwrap_or(self.layer_idx as u64));
         Ok(TileSnapshot {
             tx: self.tx,
@@ -1439,10 +1465,7 @@ impl StoredTileSnapshot {
             y0: self.y0,
             width: self.width,
             height: self.height,
-            data: match deep {
-                Some(deep) => SnapshotPixels::Deep(deep),
-                None => data.into(),
-            },
+            data,
         })
     }
 }

@@ -602,7 +602,7 @@ mod tests {
             panic!("a sampled tip");
         };
         assert_eq!((tip.width, tip.height), (8, 8));
-        assert!(tip.pixels.iter().all(|&p| p == 255));
+        assert!(tip.pixels().iter().all(|&p| p == 255));
     }
 
     #[test]

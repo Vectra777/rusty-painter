@@ -199,6 +199,9 @@ fn merge_uploads(mut uploads: Vec<TileUpload>) -> Vec<TileUpload> {
     merged
 }
 
+/// An upload this big frees enough to give back to the system.
+const BIG_UPLOAD_BYTES: usize = 32 << 20;
+
 /// Upper bound per staging buffer. One buffer for a whole 8K canvas
 /// (256 MiB+) exceeds wgpu's default `max_buffer_size`.
 const MAX_STAGING_BYTES: u64 = 32 << 20;
@@ -696,7 +699,13 @@ impl egui_wgpu::CallbackTrait for CanvasPaint {
                 .lock()
                 .map(|mut u| std::mem::take(&mut *u))
                 .unwrap_or_default();
+            let bytes: usize = uploads.iter().map(|u| u.pixels.len()).sum();
             gpu.upload(device, egui_encoder, &merge_uploads(uploads));
+            // A whole canvas uploaded (a document opened): its buffers are
+            // gone, but glibc would keep them.
+            if bytes >= BIG_UPLOAD_BYTES {
+                crate::app::release_freed_memory();
+            }
             gpu.prepare_quads(device, &self.quads);
             gpu.compose(device, egui_encoder, self.compose.as_ref());
         }

@@ -614,7 +614,7 @@ fn krita_paint_thickness_and_grey_levels_come_across() {
         mid: Some(127.0),
     };
     let out = levels.apply(&tip);
-    let greys: Vec<u8> = out.colors.as_ref().unwrap().iter().map(|c| c[0]).collect();
+    let greys: Vec<u8> = out.colors().unwrap().iter().map(|c| c[0]).collect();
     assert_eq!(greys, [64, 127, 191]);
     // By its own average: a picture all at one grey stays at mid.
     let flat = TipMask::from_colored(2, 1, vec![255; 2], vec![[200; 3]; 2]);
@@ -622,7 +622,7 @@ fn krita_paint_thickness_and_grey_levels_come_across() {
         mid: None,
         ..levels
     };
-    assert_eq!(auto.apply(&flat).colors.as_ref().unwrap()[0][0], 127);
+    assert_eq!(auto.apply(&flat).colors().unwrap()[0][0], 127);
 }
 
 #[test]

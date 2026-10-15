@@ -956,12 +956,30 @@ fn project_round_trips_tiles_and_history_old_and_new_format() {
     let bare = encode_project_data(&ProjectSnapshot::capture(&app)).unwrap();
     assert!(bare.starts_with(MAGIC));
     for bytes in [&encoded, &bare] {
-        let loaded = decode_project(bytes).unwrap();
+        let mut loaded = decode_project(bytes).unwrap();
         assert_eq!(
             loaded.canvas.get_layer_tile_data(1, 0, 0).unwrap()[0],
             Color32::from_rgb(255, 0, 0)
         );
-        assert_eq!(loaded.history.stacks().0.len(), 1);
+        let undo = loaded.history.stacks().0;
+        assert_eq!(undo.len(), 1);
+        // Kept compressed, as the file has it, and undone all the same.
+        assert!(matches!(
+            undo[0].tiles[0].data,
+            SnapshotPixels::Compressed { .. }
+        ));
+        loaded
+            .canvas
+            .set_layer_tile_data(1, 0, 0, vec![Color32::BLUE; TILE_SIZE * TILE_SIZE]);
+        let mut selection = crate::selection::SelectionManager::new();
+        let mut tool = crate::app::tools::Tool::Brush;
+        loaded
+            .history
+            .undo(&mut loaded.canvas, &mut selection, &mut tool);
+        assert_eq!(
+            loaded.canvas.get_layer_tile_data(1, 0, 0).unwrap()[0],
+            Color32::from_rgb(255, 0, 0)
+        );
     }
 }
 

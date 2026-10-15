@@ -78,6 +78,20 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Puppet Warp and Bones share a toolbar button: this switches between them.
+fn puppet_kind(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let mut tool = app.active_tool;
+    if segmented(
+        ui,
+        &mut tool,
+        &[(Tool::Puppet, "Pins"), (Tool::Bone, "Bones")],
+        true,
+    ) {
+        app.active_tool = tool;
+    }
+    vdivider(ui);
+}
+
 fn tool_title(ui: &mut egui::Ui, title: &str) {
     ui.label(RichText::new(title).strong().color(TEXT_STRONG));
     vdivider(ui);
@@ -1050,7 +1064,7 @@ pub(crate) fn liquify_options(
 /// selected pins' turn and depth; remove pins; apply and cancel.
 fn puppet_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     use crate::canvas::puppet::arap::PuppetMode;
-    tool_title(ui, "Puppet Warp");
+    puppet_kind(app, ui);
     if app.puppet_on_rig() {
         return puppet_rig_options(app, ui);
     }
@@ -1264,7 +1278,7 @@ fn puppet_rig_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
 
 /// The Bone tool: setup or pose, binding the parts, removing a bone.
 fn bone_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
-    tool_title(ui, "Bones");
+    puppet_kind(app, ui);
     let on_rig = app.active_rig().is_some();
     let pose = &mut app.workspace.bone.settings.pose;
     ui.selectable_value(pose, false, "Setup")

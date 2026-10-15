@@ -1058,7 +1058,7 @@ impl Brush {
         let b = &self.bristles;
         let hairs = match &self.brush_options.pixel_shape {
             PixelBrushShape::Custom(tip) if b.from_tip => {
-                b.hairs_from_mask(tip.width, tip.height, &tip.pixels)
+                b.hairs_from_mask(tip.width, tip.height, tip.pixels())
             }
             _ => b.hairs(),
         };
