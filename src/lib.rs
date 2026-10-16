@@ -39,6 +39,7 @@ pub(crate) const APP_NAME: &str = "Rusty Painter";
 /// screen on iOS.
 #[cfg(not(target_os = "android"))]
 pub fn run() -> eframe::Result<()> {
+    app::tune_malloc();
     startup::init_logging();
     log::info!(
         "Starting {APP_NAME} {} on {} ({})",
@@ -60,6 +61,10 @@ pub fn run() -> eframe::Result<()> {
         viewport,
         // The canvas is drawn by a custom wgpu pipeline (GPU mipmaps).
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            power_preference: app::settings::startup_power_preference(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let result = eframe::run_native(

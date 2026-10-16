@@ -360,7 +360,25 @@ pub struct UndoAction {
 /// Pixel memory one layer's undo stack may hold before its oldest actions are
 /// dropped, counting older steps at their compressed size. Uncompressed, a
 /// stroke across a 4K canvas saves about 4000 tiles, roughly 64 MiB.
-const MAX_UNDO_BYTES: usize = 512 * 1024 * 1024;
+static MAX_UNDO_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_UNDO_MB << 20);
+
+/// The undo memory budget unless changed in Settings, in MiB.
+pub const DEFAULT_UNDO_MB: usize = 512;
+
+/// The undo memory budget in MiB (Settings); a lower one trims at the
+/// next step.
+pub fn max_undo_mb() -> usize {
+    MAX_UNDO_BYTES.load(std::sync::atomic::Ordering::Relaxed) >> 20
+}
+
+pub fn set_max_undo_mb(mb: usize) {
+    MAX_UNDO_BYTES.store(mb.max(1) << 20, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn max_undo_bytes() -> usize {
+    MAX_UNDO_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Memory a step holds: its tile snapshots, and whatever its layer change
 /// keeps (whole layers, for a resize, rotation or merge; the lines of a
@@ -618,7 +636,7 @@ impl History {
         self.redo_stack.clear();
         self.redo_labels.clear();
         compress_older_actions(&mut self.undo_stack);
-        let dropped = trim_oldest(&mut self.undo_stack, MAX_UNDO_BYTES);
+        let dropped = trim_oldest(&mut self.undo_stack, max_undo_bytes());
         self.undo_labels.drain(..dropped);
     }
 
@@ -637,7 +655,7 @@ impl History {
             merged.redo_stack.extend(h.redo_stack);
         }
         compress_older_actions(&mut merged.undo_stack);
-        trim_oldest(&mut merged.undo_stack, MAX_UNDO_BYTES);
+        trim_oldest(&mut merged.undo_stack, max_undo_bytes());
         merged.fill_labels();
         merged
     }

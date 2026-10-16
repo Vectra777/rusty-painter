@@ -1266,4 +1266,187 @@ mod tests {
             live_composite_matches_the_cpu(blend, above, space);
         }
     }
+
+    /// The canvas's GPU work on the adapter `WGPU_POWER_PREF` picks (low or
+    /// high), to tell whether the canvas needs the discrete GPU:
+    ///     WGPU_POWER_PREF=low cargo test --release gpu_bench -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing"]
+    fn gpu_bench() {
+        use std::time::Instant;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let power = wgpu::util::power_preference_from_env().unwrap_or_default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: power,
+            ..Default::default()
+        }))
+        .expect("adapter");
+        let info = adapter.get_info();
+        eprintln!("adapter: {} ({:?})", info.name, info.device_type);
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            },
+            None,
+        ))
+        .expect("device");
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 2560,
+                height: 1600,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        // An 8192 px canvas: 4x4 atlases.
+        let (side, atlases) = (4usize, 16usize);
+        let mut canvas = GpuCanvas::new(&device, format);
+        canvas.ensure_atlases(&device, 0, atlases);
+        let border = ATLAS_BORDER as u32;
+        let uv = |a: f32, b: f32| {
+            let t = ATLAS_TEXTURE_SIZE as f32;
+            [(border as f32 + a) / t, (border as f32 + b) / t]
+        };
+        let block = ATLAS_SIZE as f32;
+        let frame = |canvas: &mut GpuCanvas, uploads: &[TileUpload], quads: &[AtlasQuad]| {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            canvas.upload(&device, &mut encoder, uploads);
+            canvas.prepare_quads(&device, quads);
+            {
+                let mut pass = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    })
+                    .forget_lifetime();
+                canvas.paint(&mut pass);
+            }
+            queue.submit([encoder.finish()]);
+            device.poll(wgpu::Maintain::Wait);
+        };
+        let report = |label: &str, mut times: Vec<f64>| {
+            times.sort_by(f64::total_cmp);
+            let avg = times.iter().sum::<f64>() / times.len() as f64;
+            let p95 = times[times.len() * 95 / 100];
+            eprintln!("{label:<44} avg {avg:7.2} ms  p95 {p95:7.2} ms");
+        };
+        // Opening a document: every atlas uploaded whole.
+        let full: Vec<TileUpload> = (0..atlases)
+            .map(|atlas| TileUpload {
+                atlas,
+                level: 0,
+                x: border,
+                y: border,
+                width: ATLAS_SIZE as u32,
+                height: ATLAS_SIZE as u32,
+                pixels: (0..ATLAS_SIZE * ATLAS_SIZE * 4)
+                    .map(|i| (i * 7 % 251) as u8)
+                    .collect(),
+            })
+            .collect();
+        let opens: Vec<f64> = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                frame(&mut canvas, &full, &[]);
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        report("open: upload 8192 px canvas + mips", opens);
+        // Zoomed out to fit: every atlas on screen, sampled from the mips.
+        let fit: Vec<AtlasQuad> = (0..atlases)
+            .map(|atlas| {
+                let (ax, ay) = ((atlas % side) as f32, (atlas / side) as f32);
+                let s = 2.0 / side as f32;
+                let (x0, y0) = (-1.0 + ax * s, 1.0 - ay * s);
+                AtlasQuad {
+                    atlas,
+                    corners: [[x0, y0], [x0 + s, y0], [x0 + s, y0 - s], [x0, y0 - s]],
+                    uvs: [
+                        uv(0.0, 0.0),
+                        uv(block, 0.0),
+                        uv(block, block),
+                        uv(0.0, block),
+                    ],
+                }
+            })
+            .collect();
+        // At 200%: part of one atlas filling the screen.
+        let zoomed = [AtlasQuad {
+            atlas: 5,
+            corners: [[-1.0, 1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]],
+            uvs: [
+                uv(0.0, 0.0),
+                uv(1280.0, 0.0),
+                uv(1280.0, 800.0),
+                uv(0.0, 800.0),
+            ],
+        }];
+        for (label, quads) in [
+            ("view: fit (16 atlases, mips)", &fit[..]),
+            ("view: 200% zoom", &zoomed[..]),
+        ] {
+            for _ in 0..20 {
+                frame(&mut canvas, &[], quads);
+            }
+            let times = (0..300)
+                .map(|_| {
+                    let t = Instant::now();
+                    frame(&mut canvas, &[], quads);
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            report(label, times);
+        }
+        // Painting: each frame a brush's worth of fresh tiles (a 256 px dab
+        // trail: 5x5 tiles) uploaded with their mips, then the view drawn.
+        for (label, quads, tiles) in [
+            ("paint: 25 tiles/frame, fit view", &fit[..], 5u32),
+            ("paint: 25 tiles/frame, 200% zoom", &zoomed[..], 5),
+            ("paint: 144 tiles/frame (big brush), fit", &fit[..], 12),
+        ] {
+            let times = (0..300u32)
+                .map(|f| {
+                    let mut uploads = Vec::new();
+                    for ty in 0..tiles {
+                        for tx in 0..tiles {
+                            let (x, y) = ((f * 3 + tx) % 32, (f / 4 + ty) % 32);
+                            uploads.push(TileUpload {
+                                atlas: 5,
+                                level: 0,
+                                x: border + x * TILE_SIZE as u32,
+                                y: border + y * TILE_SIZE as u32,
+                                width: TILE_SIZE as u32,
+                                height: TILE_SIZE as u32,
+                                pixels: vec![(f % 255) as u8; TILE_SIZE * TILE_SIZE * 4],
+                            });
+                        }
+                    }
+                    let uploads = merge_uploads(uploads);
+                    let t = Instant::now();
+                    frame(&mut canvas, &uploads, quads);
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            report(label, times);
+        }
+    }
 }

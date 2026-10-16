@@ -707,6 +707,10 @@ pub struct WorkspaceState {
     pub settings_saved: Option<crate::app::settings::Saved>,
     /// The documents open in tabs.
     pub tabs: crate::app::tabs::Tabs,
+    /// The GPU asked for at the next start (Settings).
+    pub gpu: crate::app::settings::GpuChoice,
+    /// The GPU drawing now, and every one found, for Settings.
+    pub gpus: (String, Vec<String>),
 }
 
 impl WorkspaceState {
@@ -792,6 +796,8 @@ impl WorkspaceState {
             recording_shortcut: None,
             settings_saved: None,
             tabs: Default::default(),
+            gpu: Default::default(),
+            gpus: Default::default(),
         }
     }
 }

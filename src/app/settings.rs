@@ -90,6 +90,47 @@ pub struct AppSettings {
     export_base_name: String,
     /// The folder the file dialogs open in.
     last_dir: Option<PathBuf>,
+    /// Which GPU draws (read at startup, before the window opens).
+    gpu: GpuChoice,
+    /// The undo history's memory budget, in MiB.
+    undo_memory_mb: usize,
+}
+
+/// Which GPU the app asks for. On a machine with one kind only, either
+/// gets that one.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum GpuChoice {
+    /// The integrated GPU: the discrete one stays asleep (battery, heat),
+    /// and the canvas's GPU work is under a millisecond a frame on it.
+    #[default]
+    Integrated,
+    Discrete,
+}
+
+impl GpuChoice {
+    pub const ALL: [Self; 2] = [Self::Integrated, Self::Discrete];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Integrated => "Integrated (saves power)",
+            Self::Discrete => "Discrete (high performance)",
+        }
+    }
+}
+
+/// The GPU to ask for when the window opens: `WGPU_POWER_PREF` (low/high)
+/// if set, else the one chosen in Settings.
+pub fn startup_power_preference() -> eframe::wgpu::PowerPreference {
+    use eframe::wgpu::{PowerPreference, util::power_preference_from_env};
+    let chosen = || {
+        let bytes = std::fs::read(crate::app::init::data_dir().join("settings.json")).ok()?;
+        let file: Value = serde_json::from_slice(&bytes).ok()?;
+        serde_json::from_value::<GpuChoice>(file.get("gpu")?.clone()).ok()
+    };
+    power_preference_from_env().unwrap_or(match chosen().unwrap_or_default() {
+        GpuChoice::Integrated => PowerPreference::LowPower,
+        GpuChoice::Discrete => PowerPreference::HighPerformance,
+    })
 }
 
 /// The folder a file was last opened or saved in. A global because the
@@ -184,6 +225,8 @@ impl AppSettings {
             export_format: app.export_state.settings.format,
             export_base_name: app.export_state.settings.base_name.clone(),
             last_dir: last_dir(),
+            gpu: ws.gpu,
+            undo_memory_mb: crate::canvas::history::max_undo_mb(),
         }
     }
 
@@ -276,6 +319,8 @@ impl AppSettings {
         if let Ok(mut last) = LAST_DIR.lock() {
             *last = self.last_dir;
         }
+        app.workspace.gpu = self.gpu;
+        crate::canvas::history::set_max_undo_mb(self.undo_memory_mb);
     }
 }
 
