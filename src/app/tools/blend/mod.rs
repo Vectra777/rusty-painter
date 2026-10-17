@@ -2316,8 +2316,12 @@ impl BlendSession {
             // (Picked-up paint copied, alpha too; or over what's there.)
             let copied = k.smear_alpha;
             let mut result = under;
+            // Rounded at random, in proportion: at tight spacing a dab's
+            // colour is under a level and would round to nothing every time.
+            let seed = center.x.to_bits() ^ center.y.to_bits().rotate_left(16);
             let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i, u| {
                 let (u, s) = (u.to_array().map(f32::from), source[i].to_array().map(f32::from));
+                let mut h = (i as u32 ^ seed).wrapping_mul(0x9E37_79B9);
                 let sa = s[3] * smear / 255.0;
                 let m = mask[i].min(1.0);
                 let v: [u8; 4] = std::array::from_fn(|c| {
@@ -2327,7 +2331,9 @@ impl BlendSession {
                         s[c] * smear + u[c] * (1.0 - sa)
                     };
                     let v = v + (paint[c] - v) * colour;
-                    (u[c] + (v - u[c]) * m).round().clamp(0.0, 255.0) as u8
+                    h = (h ^ (h >> 15)).wrapping_mul(0x2C1B_3C6D);
+                    let dither = (h >> 8) as f32 / (1 << 24) as f32;
+                    (u[c] + (v - u[c]) * m + dither).floor().clamp(0.0, 255.0) as u8
                 });
                 let a = v[3];
                 Color32::from_rgba_premultiplied(v[0].min(a), v[1].min(a), v[2].min(a), a)

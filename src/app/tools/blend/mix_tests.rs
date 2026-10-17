@@ -1215,3 +1215,32 @@ fn a_mixing_brush_smears_8_bit_paint_as_krita_does() {
     app.apply_history(false);
     assert!(layer(&app) == before);
 }
+
+#[test]
+fn a_tapered_tight_mixing_stroke_is_laid_once_and_shows() {
+    use crate::brush_engine::brush_options::Mixing;
+    let mut app = app(None);
+    app.active_tool = crate::app::tools::Tool::Brush;
+    let b = &mut app.brush_state.brush;
+    b.mixing = Some(Mixing {
+        smudge_length: 0.5,
+        color_rate: 0.05,
+        ..Default::default()
+    });
+    b.brush_options.spacing = 1.0;
+    b.brush_options.diameter = 60.0;
+    b.dynamics.taper.start = 20.0;
+    b.dynamics.taper.percent = true;
+    app.start_stroke_with_pressure(Vec2::new(4.0, 32.0), 1.0);
+    for i in 1..=30 {
+        app.add_stroke_point(Vec2::new(4.0 + i as f32 * 2.0, 32.0), 1.0);
+    }
+    app.settle_strokes();
+    let drawn = px(&app, 30, 32);
+    app.finish_stroke();
+    app.settle_strokes();
+    // 1% spacing: each dab's colour is under one 8-bit level, yet it adds up.
+    assert!(drawn.a() > 5, "tight spacing paints: {drawn:?}");
+    // The pen lift lays nothing again behind the pen.
+    assert_eq!(px(&app, 30, 32), drawn);
+}
