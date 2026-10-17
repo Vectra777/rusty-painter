@@ -1211,7 +1211,7 @@ mod tests {
         );
         let (finished, ended) = worker.take_finished();
         assert_eq!(ended, 2, "both strokes ended");
-        assert!(finished.len() >= 1);
+        assert!(!finished.is_empty());
     }
 
     /// `samples` painted with `brush` on the worker, on a fresh canvas.
