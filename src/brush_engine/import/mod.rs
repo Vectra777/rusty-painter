@@ -6,12 +6,13 @@
 //! and each app's brushes can do things this engine doesn't, so imports are
 //! best effort: the tips come across as they are, the settings that have a
 //! counterpart here are carried over, and [`Imported::notes`] says what was
-//! approximated or left out. ibisPaint brushes can't be imported: the app
-//! only shares them as QR codes through its own online library.
+//! approximated or left out. ibisPaint brushes come as pictures of the QR
+//! codes it exports them as.
 
 mod abr;
 mod gimp;
 pub(crate) mod grd;
+pub(crate) mod ibis;
 pub(crate) mod krita;
 mod mypaint;
 #[cfg(feature = "sut-import")]
@@ -62,6 +63,7 @@ pub fn import(file_name: &str, bytes: &[u8]) -> Result<Imported, String> {
         "kpp" => krita::import_kpp(bytes, &stem),
         "bundle" => krita::import_bundle(bytes),
         "myb" => mypaint::import(bytes, &stem),
+        e if ibis::IMAGE_EXTENSIONS.contains(&e) => ibis::import(bytes, &stem),
         #[cfg(feature = "sut-import")]
         "sut" => sut::import(bytes, &stem),
         _ => Err(format!("{file_name}: not a brush file this app can import")),

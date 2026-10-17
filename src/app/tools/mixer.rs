@@ -155,7 +155,8 @@ impl Mixer {
                 let mut cx = StrokeContext::new(pool, &self.canvas, None, &mut undo, &mut tiles);
                 state.finish(&mut brush, &mut cx);
             }
-            Some(Stroke::Smudge(session)) => {
+            Some(Stroke::Smudge(mut session)) => {
+                session.lift();
                 session.finish();
             }
             None => return,

@@ -68,6 +68,8 @@ impl OpenFor {
             OpenFor::Brushes => {
                 let mut e = vec![crate::brush_engine::preset_file::EXTENSION];
                 e.extend(crate::brush_engine::import::EXTENSIONS);
+                // ibisPaint brushes: pictures of its QR codes.
+                e.extend(crate::brush_engine::import::ibis::IMAGE_EXTENSIONS);
                 ("Brushes", e)
             }
             OpenFor::Palette | OpenFor::Image | OpenFor::Reference => {

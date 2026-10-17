@@ -104,7 +104,10 @@ pub trait SequentialStroke: Send {
     fn canvas(&self) -> &Canvas;
     /// The layer painted, for filing the undo record.
     fn layer_idx(&self) -> usize;
-    /// The pen lifted: the stroke's undo record, if it changed anything.
+    /// The pen lifted: paint what's left (a stabiliser's tail, a
+    /// correction), its damage collected before [`Self::finish`].
+    fn lift(&mut self) {}
+    /// The stroke's undo record, if it changed anything.
     fn finish(self: Box<Self>) -> Option<UndoAction>;
 }
 
@@ -223,6 +226,12 @@ pub struct StrokeWorker {
     /// Strokes ended so far ([`Self::end`] calls).
     ends_sent: std::sync::atomic::AtomicU64,
     shared: Arc<Shared>,
+    /// Strokes begun so far ([`Self::begin`] and [`Self::begin_sequential`]
+    /// calls).
+    begins_sent: std::sync::atomic::AtomicU64,
+    /// Set by [`Self::drop_queued_samples`]: the stroke (counting begins
+    /// from 1) whose samples still queued are skipped; 0 for none.
+    skip_stroke: Arc<std::sync::atomic::AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -237,11 +246,15 @@ impl StrokeWorker {
         let (jobs, receiver) = mpsc::channel();
         let shared = Arc::new(Shared::default());
         let thread_shared = Arc::clone(&shared);
+        let skip_stroke = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let thread_skip = Arc::clone(&skip_stroke);
         let epoch = std::time::Instant::now();
         let thread = std::thread::Builder::new()
             .name("stroke-worker".into())
             .spawn(move || {
                 let mut session: Option<Session> = None;
+                // Strokes begun, the one being painted's number.
+                let mut begun = 0u64;
                 let mut sequential: Option<Box<dyn SequentialStroke>> = None;
                 loop {
                     // An airbrush keeps painting between samples, and wet
@@ -293,8 +306,15 @@ impl StrokeWorker {
                         }
                     };
                     let is_end = matches!(job, Job::End);
+                    if matches!(job, Job::Begin(_) | Job::BeginSequential(_)) {
+                        begun += 1;
+                    }
+                    let skip = matches!(job, Job::Sample { .. })
+                        && thread_skip.load(std::sync::atomic::Ordering::Relaxed) == begun;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_job(&mut session, &mut sequential, job, &thread_shared)
+                        if !skip {
+                            run_job(&mut session, &mut sequential, job, &thread_shared)
+                        }
                     }));
                     if result.is_err() {
                         log::error!("stroke worker panicked; dropping the current stroke");
@@ -319,17 +339,33 @@ impl StrokeWorker {
             jobs: Some(jobs),
             ends_sent: Default::default(),
             shared,
+            begins_sent: Default::default(),
+            skip_stroke,
             thread: Some(thread),
         }
     }
 
+    /// Skip the latest stroke's pen samples not yet painted (its end is
+    /// still painted, so what was painted gets its undo record): undo takes
+    /// back a stroke a heavy brush is seconds behind on without waiting for
+    /// it to be painted first. Earlier strokes are painted in full.
+    pub fn drop_queued_samples(&self) {
+        let latest = self.begins_sent.load(std::sync::atomic::Ordering::Relaxed);
+        self.skip_stroke
+            .store(latest, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn begin(&self, setup: StrokeSetup) {
+        self.begins_sent
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.send(Job::Begin(Box::new(setup)));
     }
 
     /// Start a sequential stroke; samples and the end go to it until it
     /// ends.
     pub fn begin_sequential(&self, stroke: Box<dyn SequentialStroke>) {
+        self.begins_sent
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.send(Job::BeginSequential(stroke));
     }
 
@@ -551,7 +587,9 @@ fn run_job(
                 return;
             }
             Job::End => {
-                if let Some(stroke) = sequential.take() {
+                if let Some(mut stroke) = sequential.take() {
+                    stroke.lift();
+                    hand_over_damage(stroke.as_mut(), shared);
                     let layer_idx = stroke.layer_idx();
                     if let Some(undo) = stroke.finish() {
                         shared.lock().finish(layer_idx, undo);
@@ -1085,6 +1123,88 @@ mod tests {
             1,
             "an idle worker holds no canvas"
         );
+    }
+
+    #[test]
+    fn what_a_sequential_stroke_paints_as_the_pen_lifts_is_redrawn() {
+        struct Lifts {
+            canvas: Arc<Canvas>,
+            damage: Vec<[i32; 4]>,
+        }
+        impl SequentialStroke for Lifts {
+            fn start(&mut self) {}
+            fn drag(&mut self, _: Vec2, _: f32) {}
+            fn lift(&mut self) {
+                self.damage.push([70, 70, 80, 80]);
+            }
+            fn take_damage(&mut self) -> Vec<[i32; 4]> {
+                std::mem::take(&mut self.damage)
+            }
+            fn canvas(&self) -> &Canvas {
+                &self.canvas
+            }
+            fn layer_idx(&self) -> usize {
+                1
+            }
+            fn finish(self: Box<Self>) -> Option<UndoAction> {
+                None
+            }
+        }
+        let canvas = Arc::new(Canvas::new(128, 128, Color32::TRANSPARENT, 64));
+        let worker = StrokeWorker::new();
+        worker.begin_sequential(Box::new(Lifts {
+            canvas,
+            damage: Vec::new(),
+        }));
+        worker.end();
+        worker.wait_idle();
+        assert_eq!(worker.take_dirty().get(&(1, 1)), Some(&[6, 6, 16, 16]));
+    }
+
+    #[test]
+    fn undo_drops_only_the_latest_strokes_unpainted_samples() {
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+        let canvas = Arc::new(Canvas::new(128, 128, Color32::TRANSPARENT, 64));
+        let worker = StrokeWorker::new();
+        let begin = || {
+            worker.begin(StrokeSetup {
+                canvas: Arc::clone(&canvas),
+                brush: Brush::new(8.0, 100.0, Color32::BLACK, 10.0),
+                selection: None,
+                pool: Arc::clone(&pool),
+                layer_idx: 1,
+                symmetry: Default::default(),
+                view_scale: 1.0,
+                perspective: Vec::new(),
+                wet_gravity: Vec2::new(0.0, 1.0),
+                inside: None,
+                wrap: false,
+            })
+        };
+        let line = |y: f32| (0..=20).map(move |i| Vec2::new(10.0 + i as f32 * 5.0, y));
+        // Stroke 1, queued in full; stroke 2 begun, then undone before
+        // its samples come (as undo while the worker is behind).
+        begin();
+        line(30.0).for_each(|p| worker.sample(p, 1.0));
+        worker.end();
+        begin();
+        worker.drop_queued_samples();
+        line(90.0).for_each(|p| worker.sample(p, 1.0));
+        worker.end();
+        worker.wait_idle();
+        let alpha = |x: usize, y: usize| {
+            canvas
+                .get_layer_tile_data(1, (x / 64) as i32, (y / 64) as i32)
+                .map_or(0, |t| t[(y % 64) * 64 + x % 64].a())
+        };
+        assert!(alpha(108, 30) > 0, "the earlier stroke painted to its end");
+        assert!(
+            (0..128).all(|x| alpha(x, 90) == 0),
+            "the undone one skipped"
+        );
+        let (finished, ended) = worker.take_finished();
+        assert_eq!(ended, 2, "both strokes ended");
+        assert!(finished.len() >= 1);
     }
 
     /// `samples` painted with `brush` on the worker, on a fresh canvas.

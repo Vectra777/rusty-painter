@@ -7,7 +7,7 @@ A painting app built with Rust, egui and wgpu, for Linux, Windows, Android and i
 **📖 Documentation: <https://vectra777.github.io/rusty-painter/>** (user guide, developer guide and API reference; the source is in [`docs/`](docs/)).
 
 ## Features
-- **Brushes**: soft, pixel, bristle, image-tip and Krita-style engines (spray, chalk, particle…), dynamics and input curves, paper textures, colour mixing, wet paint and impasto; brushes import from GIMP, Photoshop, Krita, MyPaint and Clip Studio.
+- **Brushes**: soft, pixel, bristle, image-tip and Krita-style engines (spray, chalk, particle…), dynamics and input curves, paper textures, colour mixing, wet paint and impasto; brushes import from GIMP, Photoshop, Krita, MyPaint, Clip Studio and ibisPaint (its brush QR codes).
 - **Tablets**: pressure, tilt and the eraser on Windows, Linux (X11 and Wayland), Android and iPad (Apple Pencil Pro barrel roll included).
 - **Layers**: folders, masks, clipping, adjustment, fill, vector, text and live GLSL shader layers.
 - **Selections, transforms and filters**: magic wand to magnetic lasso, perspective, distort, liquify and puppet warp, over 30 filters previewed live, content-aware fill.

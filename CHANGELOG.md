@@ -5,6 +5,9 @@
 ### A window that never stops answering
 - Liquify keeps up with a pen: its dabs are spaced along the stroke however finely the tablet reports it (a pen's many short moves did the full work each, and twirl, pinch and bloat came out stronger than with a mouse), and the layer is drawn once a frame.
 - File dialogs no longer hold up the window while they're open.
+- Big colour-mixing and smudge dabs keep one scratch buffer from dab to dab instead of a fresh one each (half or more of their page faults gone; about a sixth less time at 200–400 px).
+- Mixing brushes smudge as Krita's colour smudge does: each dab drags the paint from where the last one was and mixes in the brush colour (the colour rate still per brush width), on 8-bit documents straight on the stored pixels; a stroke of a 300 px brush is done 2–3× sooner (a brush kept dirty keeps the paint-carrying engine). A pen lift's last dabs and post-correction are redrawn at once (they showed as blocks of the old picture until the document was reopened).
+- Undo no longer waits for a stroke a heavy brush is behind on to be painted to the end before taking it back: the samples not yet painted are dropped (a big colour-mixing stroke froze the window up to 10 s; now well under a second).
 - Opening, saving, autosaving and exporting a document, importing an image, a reference picture or a palette's picture, and importing brushes are read, decoded, encoded and written on other threads; the canvas waits (with a note) only while a document is being opened or saved.
 - Brush previews (the presets list, the pop-up palette, the brush settings strip) are drawn on a thread of their own, only for the presets on screen; a brush that fails to draw loses its preview, not the app.
 - Settings, presets, the brush library, swatches, gradients and panel sizes are written to disk on their own thread.
@@ -50,6 +53,10 @@
 - Wet paint flows while you paint, as Clip Studio's watercolour does: the stroke so far spreads, darkens at its edges and runs, and the dabs after go on top of it; one undo takes it all back.
 - SVG brush tips (Krita's, or an `.svg` in the brushes folder), drawn again at the size the brush paints so they stay sharp however big; Krita's Stamp Leaves joins the default brushes.
 - Bristle brushes dry along a curve (Krita's ink depletion curve) and can soak up the layer's colour where the stroke starts (Krita's soak ink); Krita's bristle presets bring both, and their ink amount and random offset (both were read under the wrong names).
+
+### ibisPaint brushes
+- Import brushes from ibisPaint: pick the picture of its brush QR codes (Export Brush QR Code) in Import brushes, a brush per code. Size, opacity, flow, spacing, pressure, speed, start and end, rotation, jitter (position, size, opacity, angle, hue, saturation, brightness), anti-aliasing, paper texture, particles (as a spray of the tip, each speck's colour jittered), outline brushes (as the stroke's edge), Double brushes' second tip and Water brushes' mixing come across; blurring, spacing jitter and Color brushes' tips are named in the import report.
+- ibisPaint's tips (162) are in the tip list as `ibis …`, kept as their PNG until a stroke uses one; its paper textures (62) come with the brushes that use them. They're placeholders in `assets/ibis`, to be redrawn.
 
 ### Shader layers
 - A layer drawn by a GLSL shader (Shadertoy style: `mainImage`, `iTime`, `iResolution`, `iMouse`, `iChannel0` = the layers below), animated live on the GPU with the layer's blend mode and opacity.

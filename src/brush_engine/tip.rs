@@ -178,11 +178,17 @@ pub(crate) enum PngSource {
     Bytes(Arc<[u8]>, u32),
     /// In a preset file on disk, read when needed.
     File(crate::project::zip::FileEntry),
+    /// Built into the app (the ibisPaint tips), with its CRC.
+    Static(&'static [u8], u32),
 }
 
 impl PngSource {
     pub fn bytes(png: &[u8]) -> Self {
         Self::Bytes(png.into(), crc32fast::hash(png))
+    }
+
+    pub fn built_in(png: &'static [u8]) -> Self {
+        Self::Static(png, crc32fast::hash(png))
     }
 
     /// The same PNG as `other` (by CRC and size: a match the odd time it
@@ -191,6 +197,7 @@ impl PngSource {
         let key = |s: &Self| match s {
             Self::Bytes(b, crc) => (b.len(), *crc),
             Self::File(e) => (e.len as usize, e.crc),
+            Self::Static(b, crc) => (b.len(), *crc),
         };
         key(self) == key(other)
     }
@@ -312,6 +319,7 @@ impl TipMask {
     pub fn png(&self) -> Option<std::borrow::Cow<'_, [u8]>> {
         match self.png.as_ref()? {
             PngSource::Bytes(b, _) => Some(std::borrow::Cow::Borrowed(b)),
+            PngSource::Static(b, _) => Some(std::borrow::Cow::Borrowed(b)),
             PngSource::File(entry) => entry
                 .read()
                 .inspect_err(|e| log::warn!("A brush tip can't be read: {e}"))

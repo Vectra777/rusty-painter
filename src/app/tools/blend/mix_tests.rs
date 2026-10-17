@@ -191,8 +191,9 @@ fn smudging_leaves_every_pixel_outside_the_brush_exactly_as_it_was() {
     }
 }
 
+/// (A brush kept dirty: the others take Krita's engine.)
 #[test]
-fn a_mixing_brush_paints_what_the_smudge_tool_does() {
+fn a_dirty_mixing_brush_paints_what_the_smudge_tool_does() {
     use crate::brush_engine::brush_options::Mixing;
     let red = Color32::from_rgb(230, 30, 20);
     let mut tool = app(Some(red));
@@ -204,6 +205,7 @@ fn a_mixing_brush_paints_what_the_smudge_tool_does() {
     brush.brush_state.brush.mixing = Some(Mixing {
         smudge_length: 0.6,
         color_rate: 0.3,
+        keep_dirty: true,
         ..Default::default()
     });
     brush.start_stroke_with_pressure(Vec2::new(10.0, 32.0), 1.0);
@@ -1182,4 +1184,34 @@ fn smudge_and_blur_dont_take_the_paint_outside_the_selection() {
         }
         assert_eq!(pixel(&app, 66), Color32::BLUE, "outside untouched");
     }
+}
+
+#[test]
+fn a_mixing_brush_smears_8_bit_paint_as_krita_does() {
+    use crate::brush_engine::brush_options::Mixing;
+    // Red on the left half, clear on the right; a stroke out of the red.
+    let red = Color32::from_rgb(230, 30, 20);
+    let mut app = app(None);
+    app.canvas_mut()
+        .set_layer_tile_data(1, 0, 0, vec![red; 64 * 64]);
+    app.active_tool = crate::app::tools::Tool::Brush;
+    app.brush_state.brush.mixing = Some(Mixing {
+        smudge_length: 0.9,
+        color_rate: 0.0,
+        ..Default::default()
+    });
+    let before = layer(&app);
+    app.start_stroke_with_pressure(Vec2::new(40.0, 32.0), 1.0);
+    for i in 1..=30 {
+        app.add_stroke_point(Vec2::new(40.0 + i as f32 * 2.0, 32.0), 1.0);
+    }
+    app.finish_stroke();
+    app.settle_strokes();
+    let p = px(&app, 80, 32);
+    assert!(p.a() > 100 && p.r() > p.g() * 3, "red dragged into the clear: {p:?}");
+    assert_eq!(px(&app, 80, 5), Color32::TRANSPARENT, "outside the brush");
+    assert_ne!(layer(&app), before);
+    // Undo puts it back exactly.
+    app.apply_history(false);
+    assert!(layer(&app) == before);
 }
