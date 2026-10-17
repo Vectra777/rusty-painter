@@ -86,8 +86,13 @@ impl ProjectSnapshot {
 
     /// The `.rpainter` file's bytes.
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
-        let data = encode_project_data(self)?;
-        let flat = self.canvas.flatten_final();
+        // The project and the flattened picture, side by side.
+        let (data, flat) = std::thread::scope(|scope| {
+            let data = scope.spawn(|| encode_project_data(self));
+            let flat = self.canvas.flatten_final();
+            (data.join(), flat)
+        });
+        let data = data.map_err(|_| "Encoding the project panicked".to_string())??;
         let thumbnail =
             preview::encode_png(preview::thumbnail(&flat, preview::THUMBNAIL_MAX_EDGE))?;
         let [w, h] = flat.size;

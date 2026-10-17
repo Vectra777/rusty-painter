@@ -16,6 +16,10 @@
 - Brush presets load in parallel at startup.
 - Filters, merges (down, visible, flatten) and fills run on the stroke worker, in order with the strokes: the window keeps drawing while a big blur works (the filter dialog closes at once), and undo, the layer panel and saving wait their turn.
 - The Smudge and Blur tools and mixing brushes paint big dabs across all cores and convert colours without a table lookup per pixel: a 200 px smudge stroke about 40% faster, blur 45%, deform, clone and sharpen 15–20%.
+- Big round and square tips, squashed or turned, work out only the pixels each row of a dab reaches, and fill their solid middle at once: only the anti-aliased edge is worked out pixel by pixel. A 326 px calligraphy tip squashed to 0.18 paints in under a quarter of the time, the same pixels.
+- With the integrated GPU chosen, NVIDIA's Vulkan driver isn't loaded on a machine that has another GPU: listing its card woke the sleeping discrete GPU, about 2 s before the window opened and again as the app quit.
+- The built-in paper textures are made in less than half the time at startup (each lattice point's gradient worked out once, not at every pixel; the same textures).
+- Saving and autosaving encode the project and its flattened picture side by side, and the picture with one PNG filter for every row rather than a pick per row: a 4096² painting saves in about half the time (the file 0.3% larger).
 
 ### Brushes: what Clip Studio and Photoshop had
 - Stay inside the lines (Brush → Options), as Clip Studio's: a stroke paints only the area the pen goes down in, found on the reference layers as the Fill tool finds it (its tolerance, gap closing and spread), within the selection. Mixing brushes too.
@@ -109,6 +113,7 @@
 - Bristle: hairs from an image tip's pixels, shear, density, random offset, light pressure lifting hairs off, and colour fading as the hairs run dry; Krita bristle presets bring their settings.
 
 ### Fixed
+- A brush with a time-based stabiliser no longer draws straight segments when the app falls behind: the mouse's moves (and a frame late pen's samples) kept no time of their own, so a slow frame's all came at one instant and the stabiliser jumped straight to the last one.
 - A Photoshop brush file with a tip whose bounds are far apart is refused instead of crashing a debug build (or reading a wrong size in a release one).
 
 ### Development

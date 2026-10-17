@@ -402,8 +402,9 @@ impl StrokeWorker {
         let shift = f64::from_bits(self.pen_clock.load(Ordering::Relaxed));
         let mapped = t + shift;
         // A batch comes oldest first, so its later samples land a little
-        // ahead of now (up to a frame or two).
-        if shift.is_finite() && mapped <= now + 0.1 && now - mapped < 0.25 {
+        // ahead of now (up to a frame or two); a late frame's land well
+        // behind it, and keep their spacing (only a clock jump is reset).
+        if shift.is_finite() && mapped <= now + 0.1 && now - mapped < 5.0 {
             return mapped;
         }
         self.pen_clock.store((now - t).to_bits(), Ordering::Relaxed);
@@ -1046,6 +1047,12 @@ mod tests {
             let at = worker.pen_to_epoch(t, now + 0.016);
             assert!((at - a - 0.012 - i as f64 * 0.004).abs() < 1e-9);
         }
+        // A frame half a second late: its samples keep their spacing too
+        // (collapsed, the stabiliser drew them as one straight jump).
+        let late: Vec<f64> = (0..100)
+            .map(|i| worker.pen_to_epoch(500.028 + i as f64 * 0.004, now + 0.5))
+            .collect();
+        assert!(late.windows(2).all(|w| (w[1] - w[0] - 0.004).abs() < 1e-9));
         // After a pause the shift is set again.
         assert_eq!(worker.pen_to_epoch(900.0, 5.0), 5.0);
     }

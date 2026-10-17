@@ -244,6 +244,21 @@ fn handle_events(
     // Nothing else joins a pen stroke in progress (a mouse moved meanwhile).
     let pen_stroke = app.viewport.touch.pen_on_canvas;
     let mut from_touch = false;
+    let (now, moves) = ctx.input(|i| {
+        let moves = i
+            .events
+            .iter()
+            .filter(|e| matches!(e, egui::Event::PointerMoved(_)));
+        (i.time, moves.count())
+    });
+    let touch = &mut app.viewport.touch;
+    // Each frame's moves spread over the time since the last (egui gives
+    // them none of their own), up to a slow frame's (not a pause's).
+    let since = touch.pointer_frame.map_or(now, |t| t.max(now - 0.25));
+    if moves > 0 {
+        touch.pointer_frame = Some(now);
+    }
+    let mut moved = 0;
 
     for event in events {
         let is_pointer = matches!(
@@ -279,6 +294,9 @@ fn handle_events(
                 handle_keyboard(app, key, pressed, modifiers.command);
             }
             egui::Event::PointerMoved(pos) => {
+                moved += 1;
+                app.viewport.touch.pointer_time =
+                    Some(since + (now - since) * moved as f64 / moves as f64);
                 handle_pointer_move(app, ctx, response, pos, placement);
             }
             egui::Event::PointerGone => {
@@ -706,7 +724,7 @@ fn handle_tool_move(
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2) {
     // Mouse and finger input paint at full pressure (the pen has its own path).
     app.viewport.touch.pen_tilt = None;
-    app.viewport.touch.pen_time = None;
+    app.viewport.touch.pen_time = app.viewport.touch.pointer_time;
     app.viewport.touch.pen_barrel = Default::default();
     if app.brush_state.is_drawing {
         app.add_stroke_point(pos, 1.0);
@@ -758,12 +776,24 @@ mod tests {
         events: Vec<egui::Event>,
         covered: bool,
     ) {
+        frame_at(app, ctx, events, covered, None);
+    }
+
+    /// [`frame`] at `time` (seconds).
+    fn frame_at(
+        app: &mut crate::PainterApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        covered: bool,
+        time: Option<f64>,
+    ) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(800.0, 600.0),
             )),
             events,
+            time,
             ..Default::default()
         };
         let _ = ctx.run(input, |ctx| {
@@ -796,6 +826,72 @@ mod tests {
             crate::project::tests::test_app_pub(Canvas::new(400, 300, Color32::WHITE, 64));
         app.canvas_mut().active_layer_idx = 1;
         app
+    }
+
+    #[test]
+    fn a_slow_frames_mouse_moves_are_smoothed_like_a_fast_ones() {
+        // A strong time-based stabiliser: a frame's moves all at one
+        // instant didn't move it, then it jumped straight to the pointer.
+        let paint = |per_frame: usize| {
+            let (mut app, ctx) = (app(), egui::Context::default());
+            app.brush_state.brush.stabilizer_algorithm =
+                crate::brush_engine::brush::StabilizerAlgorithm::Simple;
+            app.brush_state.brush.stabilizer = 0.9;
+            app.brush_state.brush.brush_options.diameter = 20.0;
+            let at = |i: usize| {
+                let t = i as f32 / 120.0;
+                egui::pos2(60.0 + 280.0 * t, 150.0 + 80.0 * (t * 9.0).sin())
+            };
+            // In real time: the worker keeps sample times near its clock.
+            let start = std::time::Instant::now();
+            let now = || Some(start.elapsed().as_secs_f64());
+            frame_at(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(at(0))],
+                false,
+                now(),
+            );
+            frame_at(&mut app, &ctx, vec![press(at(0), true)], false, now());
+            // 120 moves 4 ms apart, `per_frame` to a frame (30: 120 ms frames).
+            for chunk in (1..=120).collect::<Vec<_>>().chunks(per_frame) {
+                std::thread::sleep(std::time::Duration::from_millis(4 * chunk.len() as u64));
+                let moves = chunk
+                    .iter()
+                    .map(|&i| egui::Event::PointerMoved(at(i)))
+                    .collect();
+                frame_at(&mut app, &ctx, moves, false, now());
+            }
+            app.finish_stroke();
+            app.release_canvas();
+            let tile = |(tx, ty)| {
+                let blank = vec![Color32::TRANSPARENT; 64 * 64];
+                app.canvas.get_layer_tile_data(1, tx, ty).unwrap_or(blank)
+            };
+            let tiles = (0..7).flat_map(|tx| (0..5).map(move |ty| (tx, ty)));
+            tiles.flat_map(tile).collect::<Vec<_>>()
+        };
+        let (fast, slow) = (paint(1), paint(30));
+        // The slow stroke may trail a little, but stays on the fast one's
+        // path rather than cutting across its bends.
+        let at = |px: &[Color32], x: i32, y: i32| {
+            let (tx, ty) = (x / 64, y / 64);
+            (0..448).contains(&x)
+                && (0..320).contains(&y)
+                && px[((tx * 5 + ty) * 4096 + (y % 64) * 64 + x % 64) as usize].a() > 128
+        };
+        let (mut painted, mut off) = (0, 0);
+        for y in 0..320 {
+            for x in 0..448 {
+                if at(&slow, x, y) {
+                    painted += 1;
+                    let near = (-2..=2).any(|dy| (-2..=2).any(|dx| at(&fast, x + dx, y + dy)));
+                    off += usize::from(!near);
+                }
+            }
+        }
+        assert!(painted > 1000, "{painted}");
+        assert!(off * 10 < painted, "{off} of {painted} pixels off the path");
     }
 
     #[test]

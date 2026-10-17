@@ -41,6 +41,8 @@ pub(crate) const APP_NAME: &str = "Rusty Painter";
 pub fn run() -> eframe::Result<()> {
     app::tune_malloc();
     startup::init_logging();
+    let power_preference = app::settings::startup_power_preference();
+    app::settings::keep_discrete_gpu_asleep(power_preference);
     log::info!(
         "Starting {APP_NAME} {} on {} ({})",
         env!("CARGO_PKG_VERSION"),
@@ -62,7 +64,7 @@ pub fn run() -> eframe::Result<()> {
         // The canvas is drawn by a custom wgpu pipeline (GPU mipmaps).
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
-            power_preference: app::settings::startup_power_preference(),
+            power_preference,
             ..Default::default()
         },
         ..Default::default()

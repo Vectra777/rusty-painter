@@ -751,16 +751,52 @@ fn gradient_noise(x: f32, y: f32, period: (u32, u32), seed: u32) -> f32 {
     let (fx, fy) = (x - xi, y - yi);
     let fade = |t: f32| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
     let (u, v) = (fade(fx), fade(fy));
-    let corner = |dx: u32, dy: u32| {
-        let cx = (xi as i64 as u32).wrapping_add(dx) % period.0;
-        let cy = (yi as i64 as u32).wrapping_add(dy) % period.1;
-        let a = hash(cx, cy, seed) * std::f32::consts::TAU;
-        // The corner's gradient dotted with the offset to it.
-        a.cos() * (fx - dx as f32) + a.sin() * (fy - dy as f32)
+    GRADIENTS.with_borrow_mut(|tables| {
+        let gradients = lattice_gradients(tables, period, seed);
+        let corner = |dx: u32, dy: u32| {
+            let cx = (xi as i64 as u32).wrapping_add(dx) % period.0;
+            let cy = (yi as i64 as u32).wrapping_add(dy) % period.1;
+            let (cos, sin) = gradients[(cy * period.0 + cx) as usize];
+            // The corner's gradient dotted with the offset to it.
+            cos * (fx - dx as f32) + sin * (fy - dy as f32)
+        };
+        let top = corner(0, 0) + (corner(1, 0) - corner(0, 0)) * u;
+        let bottom = corner(0, 1) + (corner(1, 1) - corner(0, 1)) * u;
+        (top + (bottom - top) * v) * std::f32::consts::SQRT_2
+    })
+}
+
+/// A lattice's gradients, `(period, seed)` and each point's `(cos, sin)`,
+/// worked out once rather than at every pixel (the patterns are made a
+/// thread each, so each thread keeps its own).
+type GradientTable = ((u32, u32), u32, Vec<(f32, f32)>);
+
+thread_local! {
+    static GRADIENTS: std::cell::RefCell<Vec<GradientTable>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The gradients of the lattice repeating every `period` cells, for `seed`.
+fn lattice_gradients(
+    tables: &mut Vec<GradientTable>,
+    period: (u32, u32),
+    seed: u32,
+) -> &[(f32, f32)] {
+    let at = match tables.iter().position(|t| t.0 == period && t.1 == seed) {
+        Some(at) => at,
+        None => {
+            let points = (0..period.1)
+                .flat_map(|cy| (0..period.0).map(move |cx| (cx, cy)))
+                .map(|(cx, cy)| {
+                    let a = hash(cx, cy, seed) * std::f32::consts::TAU;
+                    (a.cos(), a.sin())
+                })
+                .collect();
+            tables.push((period, seed, points));
+            tables.len() - 1
+        }
     };
-    let top = corner(0, 0) + (corner(1, 0) - corner(0, 0)) * u;
-    let bottom = corner(0, 1) + (corner(1, 1) - corner(0, 1)) * u;
-    (top + (bottom - top) * v) * std::f32::consts::SQRT_2
+    &tables[at].2
 }
 
 /// A repeatable pseudo-random value in 0..1 for a lattice point: x, y and
