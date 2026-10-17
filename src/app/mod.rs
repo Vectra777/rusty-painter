@@ -58,6 +58,31 @@ pub(crate) mod view;
 
 pub use painter::PainterApp;
 
+/// Keep glibc from sitting on freed memory. Each thread gets its own arena
+/// and a worker thread's arena only gives back its free top once it passes
+/// the trim threshold, which glibc raises to 64 MB after a big buffer is
+/// freed (and `malloc_trim` leaves those tops alone): 35 arenas idled at
+/// 15-20 MB each, 0 used. So: 4 arenas, a fixed 2 MB threshold, and big
+/// buffers up to 32 MB still from the heap as the raised threshold had them
+/// (brush benches unchanged).
+pub(crate) fn tune_malloc() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        const M_TRIM_THRESHOLD: i32 = -1;
+        const M_MMAP_THRESHOLD: i32 = -3;
+        const M_ARENA_MAX: i32 = -8;
+        // SAFETY: called before any other thread exists; only tunes malloc.
+        unsafe {
+            mallopt(M_ARENA_MAX, 4);
+            mallopt(M_TRIM_THRESHOLD, 2 << 20);
+            mallopt(M_MMAP_THRESHOLD, 32 << 20);
+        }
+    }
+}
+
 /// Give the system back memory that was freed but kept: glibc holds on to
 /// it (freed big buffers, each thread's arena), so a burst of work (presets
 /// read on every core, a whole canvas uploaded) would stay in the app's

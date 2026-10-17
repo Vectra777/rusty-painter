@@ -40,11 +40,13 @@ pub(super) fn thumbnail(img: &ColorImage, max_edge: usize) -> ColorImage {
 }
 
 /// PNG with fast compression: saving a large canvas shouldn't stall.
+/// Every row Paeth-filtered: about as small as picking each row's filter
+/// (+2.5% on a 4096² painting) in an eighth of the time.
 pub(super) fn encode_png(img: ColorImage) -> Result<Vec<u8>, String> {
     let (w, h) = (img.size[0] as u32, img.size[1] as u32);
     let rgba = super::export::to_rgba_image(img)?;
     let mut png = Vec::new();
-    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive)
+    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Paeth)
         .write_image(rgba.as_raw(), w, h, image::ExtendedColorType::Rgba8)
         .map_err(|err| format!("Image encode failed: {err}"))?;
     Ok(png)

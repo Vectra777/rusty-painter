@@ -1768,7 +1768,9 @@ impl StrokeState {
             true => taper.end,
             false => 0.0,
         };
-        if end <= 0.0 {
+        // Dabs collected (a mixing brush) are laid for good: no tail to
+        // taper and redraw at the lift, which would lay them twice.
+        if end <= 0.0 || context.stroke_tiles.collect.is_some() {
             paint_plans(brush, original, &plans, Target::Stroke, context);
             return;
         }

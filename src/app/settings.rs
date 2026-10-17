@@ -90,6 +90,104 @@ pub struct AppSettings {
     export_base_name: String,
     /// The folder the file dialogs open in.
     last_dir: Option<PathBuf>,
+    /// Which GPU draws (read at startup, before the window opens).
+    gpu: GpuChoice,
+    /// The undo history's memory budget, in MiB.
+    undo_memory_mb: usize,
+}
+
+/// Which GPU the app asks for. On a machine with one kind only, either
+/// gets that one.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum GpuChoice {
+    /// The integrated GPU: the discrete one stays asleep (battery, heat),
+    /// and the canvas's GPU work is under a millisecond a frame on it.
+    #[default]
+    Integrated,
+    Discrete,
+}
+
+impl GpuChoice {
+    pub const ALL: [Self; 2] = [Self::Integrated, Self::Discrete];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Integrated => "Integrated (saves power)",
+            Self::Discrete => "Discrete (high performance)",
+        }
+    }
+}
+
+/// The GPU to ask for when the window opens: `WGPU_POWER_PREF` (low/high)
+/// if set, else the one chosen in Settings.
+pub fn startup_power_preference() -> eframe::wgpu::PowerPreference {
+    use eframe::wgpu::{PowerPreference, util::power_preference_from_env};
+    let chosen = || {
+        let bytes = std::fs::read(crate::app::init::data_dir().join("settings.json")).ok()?;
+        let file: Value = serde_json::from_slice(&bytes).ok()?;
+        serde_json::from_value::<GpuChoice>(file.get("gpu")?.clone()).ok()
+    };
+    power_preference_from_env().unwrap_or(match chosen().unwrap_or_default() {
+        GpuChoice::Integrated => PowerPreference::LowPower,
+        GpuChoice::Discrete => PowerPreference::HighPerformance,
+    })
+}
+
+/// The integrated GPU asked for: keep NVIDIA's Vulkan driver from being
+/// loaded at all. Loading it (only to list its GPU) wakes a sleeping
+/// discrete card, about 2 s before the window opens and again as the app
+/// quits, and keeps it awake meanwhile. Only when another GPU is there to
+/// draw on and the Vulkan loader's own variables are left unset. Call
+/// before any other thread starts (it sets an environment variable).
+pub fn keep_discrete_gpu_asleep(power: eframe::wgpu::PowerPreference) {
+    #[cfg(target_os = "linux")]
+    {
+        const LOADER_VARS: [&str; 4] = [
+            "VK_LOADER_DRIVERS_SELECT",
+            "VK_LOADER_DRIVERS_DISABLE",
+            "VK_DRIVER_FILES",
+            "VK_ICD_FILENAMES",
+        ];
+        if power != eframe::wgpu::PowerPreference::LowPower
+            || LOADER_VARS.iter().any(|v| std::env::var_os(v).is_some())
+            || !hides_nvidia(&display_vendors())
+        {
+            return;
+        }
+        log::info!("Integrated GPU chosen: NVIDIA's Vulkan driver left unloaded");
+        // SAFETY: called at start-up, before any other thread exists.
+        unsafe { std::env::set_var("VK_LOADER_DRIVERS_DISABLE", "*nvidia*") };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = power;
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const NVIDIA: u32 = 0x10de;
+
+/// Whether NVIDIA's driver can be left out: there's an NVIDIA GPU and
+/// another one besides (`vendors`: the PCI vendor of each display
+/// controller).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn hides_nvidia(vendors: &[u32]) -> bool {
+    vendors.contains(&NVIDIA) && vendors.iter().any(|&v| v != NVIDIA)
+}
+
+/// The PCI vendor of each display controller (class 0x03).
+#[cfg(target_os = "linux")]
+fn display_vendors() -> Vec<u32> {
+    let read = |path: std::path::PathBuf| {
+        let text = std::fs::read_to_string(path).ok()?;
+        u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
+    };
+    let Ok(devices) = std::fs::read_dir("/sys/bus/pci/devices") else {
+        return Vec::new();
+    };
+    devices
+        .flatten()
+        .filter(|d| read(d.path().join("class")).is_some_and(|c| c >> 16 == 0x03))
+        .filter_map(|d| read(d.path().join("vendor")))
+        .collect()
 }
 
 /// The folder a file was last opened or saved in. A global because the
@@ -184,6 +282,8 @@ impl AppSettings {
             export_format: app.export_state.settings.format,
             export_base_name: app.export_state.settings.base_name.clone(),
             last_dir: last_dir(),
+            gpu: ws.gpu,
+            undo_memory_mb: crate::canvas::history::max_undo_mb(),
         }
     }
 
@@ -276,6 +376,8 @@ impl AppSettings {
         if let Ok(mut last) = LAST_DIR.lock() {
             *last = self.last_dir;
         }
+        app.workspace.gpu = self.gpu;
+        crate::canvas::history::set_max_undo_mb(self.undo_memory_mb);
     }
 }
 
@@ -409,6 +511,19 @@ mod tests {
 
     /// The tests that load settings take turns: the last folder is global.
     static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// NVIDIA's driver is left out only with another GPU to draw on.
+    #[test]
+    fn nvidias_driver_is_left_out_only_beside_another_gpu() {
+        const AMD: u32 = 0x1002;
+        const INTEL: u32 = 0x8086;
+        assert!(hides_nvidia(&[AMD, NVIDIA]));
+        assert!(hides_nvidia(&[NVIDIA, INTEL]));
+        // NVIDIA alone (a desktop), or no NVIDIA: nothing to hide.
+        assert!(!hides_nvidia(&[NVIDIA]));
+        assert!(!hides_nvidia(&[AMD, INTEL]));
+        assert!(!hides_nvidia(&[]));
+    }
 
     fn app_in(dir: &std::path::Path) -> PainterApp {
         let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));

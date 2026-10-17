@@ -29,6 +29,7 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.workspace.pool = std::sync::Arc::new(pool);
     }
     keyboard_layout_row(app, ui);
+    memory_and_gpu_settings(app, ui);
     ui.separator();
     appearance_settings(app, ui);
     ui.separator();
@@ -74,6 +75,50 @@ pub fn general_settings_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
             app.load_brush_tips(ctx);
         }
     });
+}
+
+/// The undo history's memory budget, and which GPU draws.
+fn memory_and_gpu_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
+    use crate::app::settings::GpuChoice;
+    use crate::canvas::history;
+    let mut mb = history::max_undo_mb();
+    let response = ui.add(
+        BarSlider::new(&mut mb, 64..=8192)
+            .suffix(" MB")
+            .text("Undo memory"),
+    );
+    if response.changed() {
+        history::set_max_undo_mb(mb);
+    }
+    response.on_hover_text(format!(
+        "The most memory undo steps may take (older steps count compressed); \
+         past it the oldest are forgotten. Default {} MB.",
+        history::DEFAULT_UNDO_MB
+    ));
+    let ws = &mut app.workspace;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("GPU");
+        egui::ComboBox::from_id_salt("gpu_choice")
+            .selected_text(ws.gpu.label())
+            .show_ui(ui, |ui| {
+                for choice in GpuChoice::ALL {
+                    ui.selectable_value(&mut ws.gpu, choice, choice.label());
+                }
+            })
+            .response
+            .on_hover_text(format!(
+                "Applies at the next start. A machine with one GPU uses it either way.\n\
+                 Found:\n{}",
+                ws.gpus.1.join("\n")
+            ));
+    });
+    if !ws.gpus.0.is_empty() {
+        ui.label(
+            egui::RichText::new(format!("Drawing on {}", ws.gpus.0))
+                .small()
+                .color(crate::ui::style::TEXT_DIM),
+        );
+    }
 }
 
 /// The accent colour: a preset, or any colour picked.

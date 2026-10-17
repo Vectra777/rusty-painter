@@ -789,7 +789,12 @@ impl PainterApp {
         if crate::app::tools::transform::transform_running(self) {
             crate::app::tools::transform::commit_floating_layer(self);
         }
-        // Finish any stroke first so it is in the history (and undoable).
+        // Finish any stroke first so it is in the history (and undoable). A
+        // stroke being undone isn't painted to the end first: a heavy brush
+        // can be seconds behind the pen.
+        if !redo {
+            self.stroke_worker.drop_queued_samples();
+        }
         self.release_canvas();
         {
             let history = &mut self.layer_state.history;

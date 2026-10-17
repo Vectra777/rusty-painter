@@ -48,6 +48,42 @@ fn nonzero_span(out: &[f32]) -> Range<usize> {
     }
 }
 
+/// The offsets `t` from a dab's centre along a row `q` below it where a
+/// round (`square`: square) tip of radius `r` can cover: the point
+/// `(t, q)`, turned and squashed by `orient` into the tip's frame, inside
+/// the disc (or square) of radius `r`. `None` if the row misses it.
+fn tip_row_span(orient: [f32; 4], q: f32, r: f32, square: bool) -> Option<(f32, f32)> {
+    let [a, b, c, d] = orient;
+    if square {
+        // |a t + b q| < r and |c t + d q| < r.
+        let mut span = (f32::NEG_INFINITY, f32::INFINITY);
+        for (k, m) in [(a, b * q), (c, d * q)] {
+            if k.abs() < 1e-12 {
+                if m.abs() >= r {
+                    return None;
+                }
+                continue;
+            }
+            let (e0, e1) = ((-r - m) / k, (r - m) / k);
+            span = (span.0.max(e0.min(e1)), span.1.min(e0.max(e1)));
+        }
+        return (span.0 < span.1).then_some(span);
+    }
+    // |(a t + b q, c t + d q)|² < r²: a quadratic in t.
+    let qa = a * a + c * c;
+    let qb = 2.0 * (a * b + c * d) * q;
+    let qc = (b * b + d * d) * q * q - r * r;
+    if qa < 1e-12 {
+        return (qc < 0.0).then_some((f32::NEG_INFINITY, f32::INFINITY));
+    }
+    let disc = qb * qb - 4.0 * qa * qc;
+    if disc <= 0.0 {
+        return None;
+    }
+    let root = disc.sqrt();
+    Some(((-qb - root) / (2.0 * qa), (-qb + root) / (2.0 * qa)))
+}
+
 /// Stamp every tile's dabs into its stroke coverage (`cov += a * (1 - cov)`,
 /// in stroke order), then re-resolve the pixels those dabs touched, once per
 /// tile. `stamp(dab, gy, x0, out)` writes the dab's alpha, already scaled by
@@ -2028,9 +2064,72 @@ impl<'a> SoftTip<'a> {
         };
         let offset = |s: usize| (s as f32 + 0.5) / samples as f32 - 0.5;
         let pdy_canvas = gy as f32 + 0.5 - dab.center.y;
-        for (i, slot) in out.iter_mut().enumerate() {
+        // A round or square tip covers one run of the row: only it is
+        // worked out (a thin turned tip covers little of its rectangle).
+        let mut reach = 0..out.len();
+        // And where it's solid (the falloff still 1, inside the edge's
+        // fade): there its alpha is 1 without working it out.
+        let mut solid = 0..0;
+        if samples == 1 && spikes.is_none() {
+            let square = match pixel_shape {
+                PixelBrushShape::Circle => Some(false),
+                PixelBrushShape::Square => Some(true),
+                _ => None,
+            };
+            if let Some(square) = square {
+                let orient = if turned {
+                    dab.orient
+                } else {
+                    [1.0, 0.0, 0.0, 1.0]
+                };
+                let Some((t0, t1)) = tip_row_span(orient, pdy_canvas, r, square) else {
+                    out.fill(0.0);
+                    return 0..0;
+                };
+                // Pixel i sits at t = x0 + i + 0.5 - cx; a pixel more each
+                // side for rounding.
+                let base = x0 as f32 + 0.5 - dab.center.x;
+                let lo = (t0 - base).floor() - 1.0;
+                let hi = (t1 - base).ceil() + 2.0;
+                reach =
+                    (lo.max(0.0) as usize).min(out.len())..(hi.max(0.0) as usize).min(out.len());
+                out[..reach.start].fill(0.0);
+                out[reach.end..].fill(0.0);
+                let edge = if anti_aliasing { self.edge } else { 0.0 };
+                let hard = if hardness_val >= 1.0 {
+                    r
+                } else {
+                    hardness_val * r
+                };
+                let inner = (r - edge).max(0.0).min(hard);
+                if softness_selector == SoftnessSelector::Gaussian
+                    && !fade
+                    && let Some((s0, s1)) = tip_row_span(orient, pdy_canvas, inner, square)
+                {
+                    // A pixel in from each end for rounding.
+                    let lo = (s0 - base).ceil() + 1.0;
+                    let hi = (s1 - base).floor() - 1.0;
+                    if lo < hi {
+                        solid = (lo.max(0.0) as usize).min(out.len())
+                            ..(hi.max(0.0) as usize).min(out.len());
+                    }
+                }
+            }
+        }
+        // Without grain, the solid run is the dab's strength throughout:
+        // only the edges either side of it are worked out.
+        let edges = if !grainy && !solid.is_empty() {
+            out[solid.clone()].fill(strength.clamp(0.0, 1.0));
+            [reach.start..solid.start, solid.end..reach.end]
+        } else {
+            [reach.clone(), 0..0]
+        };
+        for i in edges.into_iter().flatten() {
+            let slot = &mut out[i];
             let pdx_canvas = (x0 + i) as f32 + 0.5 - dab.center.x;
-            let alpha_factor = if samples == 1 {
+            let alpha_factor = if solid.contains(&i) {
+                1.0
+            } else if samples == 1 {
                 alpha_at(pdx_canvas, pdy_canvas)
             } else {
                 let mut sum = 0.0;
@@ -2052,7 +2151,55 @@ impl<'a> SoftTip<'a> {
                 (strength * alpha_factor).clamp(0.0, 1.0)
             };
         }
-        nonzero_span(out)
+        let span = nonzero_span(&out[reach.clone()]);
+        if span.is_empty() {
+            return 0..0;
+        }
+        reach.start + span.start..reach.start + span.end
+    }
+}
+
+#[cfg(test)]
+mod tip_row_span_tests {
+    use super::*;
+
+    /// Every point of a row a turned, squashed round or square tip covers
+    /// is within its span, and the span's ends are on its edge.
+    #[test]
+    fn a_rows_span_holds_all_the_tip_covers() {
+        for square in [false, true] {
+            for (turn, squash) in [(0.0f32, 1.0f32), (0.785, 0.18), (1.2, 0.5), (2.9, 0.05)] {
+                let (cos, sin) = (turn.cos(), turn.sin());
+                // Canvas offsets into the tip's frame: turned, then the
+                // narrow axis stretched.
+                let orient = [cos, sin, -sin / squash, cos / squash];
+                let r = 40.0;
+                for q in (-45..=45).map(|q| q as f32) {
+                    let inside = |t: f32| {
+                        let (u, v) = (orient[0] * t + orient[1] * q, orient[2] * t + orient[3] * q);
+                        if square {
+                            u.abs().max(v.abs()) < r
+                        } else {
+                            u * u + v * v < r * r
+                        }
+                    };
+                    let span = tip_row_span(orient, q, r, square);
+                    for t in (-600..=600).map(|t| t as f32 * 0.1) {
+                        if inside(t) {
+                            let (t0, t1) =
+                                span.unwrap_or_else(|| panic!("{t} at row {q}: no span"));
+                            assert!(t >= t0 - 1e-3 && t <= t1 + 1e-3, "{t} outside {t0}..{t1}");
+                        }
+                    }
+                    if let Some((t0, t1)) = span {
+                        assert!(
+                            !inside(t0 - 0.05) && !inside(t1 + 0.05),
+                            "row {q}: {t0}..{t1} too wide"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

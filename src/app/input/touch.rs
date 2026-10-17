@@ -60,6 +60,12 @@ pub struct TouchState {
     /// When the latest pen sample was taken, where the platform says
     /// (seconds, its own clock); `None` for the mouse and fingers.
     pub(crate) pen_time: Option<f64>,
+    /// The mouse's (and fingers') moves have no time of their own: each
+    /// frame's are spread over the time since the last frame (egui's clock,
+    /// seconds), so a slow frame's moves don't all land at one instant.
+    pub(crate) pointer_time: Option<f64>,
+    /// When the last frame with pointer moves was.
+    pub(crate) pointer_frame: Option<f64>,
     /// The current pen contact started on the canvas.
     pub(crate) pen_on_canvas: bool,
     /// Where the history stood when the current stroke began, to take the

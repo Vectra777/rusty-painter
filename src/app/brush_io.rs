@@ -49,6 +49,24 @@ impl PainterApp {
                 extra: tips,
             });
         }
+        // ibisPaint's tips (for its brushes' imports): their thumbnails from
+        // a picture decoded for the while, so a tip keeps only its PNG until
+        // it paints.
+        let ibis = crate::brush_engine::import::ibis::tips();
+        let thumbnails: Vec<_> = {
+            use rayon::prelude::*;
+            ibis.par_iter()
+                .map(|(_, tip)| crate::brush_engine::import::ibis::decode_tip(tip))
+                .collect()
+        };
+        for ((name, tip), full) in ibis.iter().zip(thumbnails) {
+            builtin.push(LoadedTip {
+                name: name.clone(),
+                shape: PixelBrushShape::Custom(tip.clone()),
+                extra: Vec::new(),
+                texture: full.map(|full| Self::create_brush_texture(&full, &ctx)),
+            });
+        }
         self.brush_state.loaded_brush_tips.splice(0..0, builtin);
         self.load_textures();
     }

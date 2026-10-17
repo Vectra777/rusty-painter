@@ -57,6 +57,8 @@ resvg = { version = "0.48", default-features = false }
 # Puppet Warp: meshes that follow the paint's outline (constrained
 # Delaunay triangulation).
 spade = "2.15"
+# ibisPaint brushes: the QR codes it exports them as (binary payloads).
+rqrr = { version = "0.11", default-features = false }
 
 [dev-dependencies]
 pollster = "0.4"

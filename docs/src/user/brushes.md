@@ -42,7 +42,7 @@ Brush → Inputs: any input (pressure, speed, tilt, direction, distance, time, r
 
 ## Colour mixing
 
-Any brush can pick up the paint under it and mix in its own colour, like Krita's Colour Smudge, with all its settings (tip, angle, texture, inputs, scatter, stabiliser, airbrush).
+Any brush can pick up the paint under it and mix in its own colour, like Krita's Colour Smudge, with all its settings (tip, angle, texture, inputs, scatter, stabiliser, airbrush). Each dab drags the paint from where the last one was, as Krita's does; a brush set to **Keep dirty** instead carries the paint it picked up on the brush, into the next stroke too.
 
 ## Wet paint and impasto
 
@@ -70,5 +70,8 @@ Your presets save and share as `.rpbrush` files (with their tags and favourite s
 | Krita | `.kpp`, `.bundle` |
 | MyPaint | `.myb` |
 | Clip Studio | `.sut` |
+| ibisPaint | a picture of its brush QR codes (`.png`, `.jpg`): Export Brush QR Code in ibisPaint, then pick the picture in Import |
+
+ibisPaint's own tips are in the tip list, named `ibis …`.
 
 See [how the brush engine compares](brush-comparison.md) with Krita, Clip Studio and ibisPaint.

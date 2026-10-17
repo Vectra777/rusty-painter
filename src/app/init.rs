@@ -143,6 +143,16 @@ impl PainterApp {
         };
 
         app.workspace.shaders.gpu = cc.wgpu_render_state.clone();
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            let name = |a: &eframe::wgpu::Adapter| {
+                let info = a.get_info();
+                format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend)
+            };
+            app.workspace.gpus = (
+                name(&render_state.adapter),
+                render_state.available_adapters.iter().map(name).collect(),
+            );
+        }
         // The rest loads a step a frame behind the splash screen (see
         // `run_load_step`), so the window shows at once.
         app.workspace.loading = Some(0);

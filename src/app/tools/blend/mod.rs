@@ -218,6 +218,9 @@ pub struct DirtyBrush(std::sync::Mutex<Vec<Option<Carry>>>);
 #[derive(Clone)]
 pub struct Carry {
     side: usize,
+    /// The dab radius it was picked up at (a turned tip's patch changes
+    /// side without the paint changing size).
+    r: f32,
     px: Vec<[f32; 4]>,
 }
 
@@ -255,6 +258,10 @@ pub(crate) struct BlendSession {
     /// Smudge or blur laid over the paint, never thinning it (see
     /// [`BlendToolSettings::keep_paint`]).
     keep_paint: bool,
+    /// Smudging's sums along the way, kept from dab to dab (a big dab's
+    /// are most of a megabyte; allocated and cleared each dab they were a
+    /// tenth of its time).
+    sums: Vec<[f32; 4]>,
 }
 
 impl BlendSession {
@@ -312,6 +319,7 @@ impl BlendSession {
             blur_size: 1.0,
             wrap: false,
             damage: Vec::new(),
+            sums: Vec::new(),
             dabber,
             stroke: BlendStroke {
                 kind,
@@ -595,7 +603,7 @@ fn for_rows<T: Send>(
 /// samples, and waking them for each part of a smaller dab cost more than
 /// sharing it saved.)
 const PARALLEL_SIDE: usize = 192;
-const PARALLEL_PIXELS: usize = 32768;
+const PARALLEL_PIXELS: usize = 8192;
 
 /// The pixels of layer `source` (all visible layers when `None`) over the
 /// `w`×`h` canvas rectangle at `origin`; with `wrap`, what's past an edge
@@ -1007,7 +1015,9 @@ impl PainterApp {
             pressure_color: m.pressure_color,
             blend: brush.paint_blend,
             from_brush: true,
-            krita: m.krita,
+            // Krita's colour smudge, this app's own mixing brushes too
+            // (but one kept dirty: the paint it carries is what it keeps).
+            krita: m.krita.or((!m.keep_dirty).then(Default::default)),
             sample_all: m.sample_all,
             load: m.load.max(0.0),
             dirty: m
@@ -1236,12 +1246,15 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
 
     /// The stroke's undo step: the tiles as they were before it (none if
     /// it changed nothing).
-    fn finish(mut self: Box<Self>) -> Option<UndoAction> {
+    fn lift(&mut self) {
         if self.dabber.is_some() {
             self.correct();
             let dabs = self.place(|stroke, brush, context| stroke.finish(brush, context));
             self.lay(dabs);
         }
+    }
+
+    fn finish(mut self: Box<Self>) -> Option<UndoAction> {
         if let Some(d) = &self.stroke.mix.dirty {
             *d.0.lock().unwrap_or_else(|e| e.into_inner()) =
                 std::mem::take(&mut self.stroke.carries);
@@ -1814,17 +1827,36 @@ impl BlendSession {
                 }
                 let mut carry = match carries[copy].take() {
                     Some(c) if c.side == side => c,
-                    Some(c) => Carry {
-                        side,
-                        px: (0..side * side)
-                            .map(|i| {
-                                let (x, y) = (i % side * c.side / side, i / side * c.side / side);
-                                c.px[y * c.side + x]
-                            })
-                            .collect(),
-                    },
+                    // The same size, a patch around it larger or smaller
+                    // (a tip turned): the paint where it was, centred, the
+                    // part new to it what's under it.
+                    Some(c) if c.r == r => {
+                        let mut px = picked.clone();
+                        let d = (side as i32 - c.side as i32) / 2;
+                        let (from, to) = (d.max(0) as usize, (-d).max(0) as usize);
+                        let n = side.min(c.side);
+                        for row in 0..n {
+                            let (at, src) = ((row + from) * side + from, (row + to) * c.side + to);
+                            px[at..at + n].copy_from_slice(&c.px[src..src + n]);
+                        }
+                        Carry { side, r, px }
+                    }
+                    Some(c) => {
+                        // (Nearest pixel; each row's and column's source
+                        // worked out once.)
+                        let at: Vec<usize> = (0..side).map(|i| i * c.side / side).collect();
+                        let mut px = vec![[0.0f32; 4]; side * side];
+                        for_rows(&pool, &mut px, side, |row, line| {
+                            let src = &c.px[at[row] * c.side..];
+                            for (p, &x) in line.iter_mut().zip(&at) {
+                                *p = src[x];
+                            }
+                        });
+                        Carry { side, r, px }
+                    }
                     None => Carry {
                         side,
+                        r,
                         px: fresh.unwrap_or_else(|| under.clone()),
                     },
                 };
@@ -1843,7 +1875,8 @@ impl BlendSession {
                         }
                     }
                 });
-                let px = carry.px.clone();
+                // (Lent as the target, put back once it's laid.)
+                let px = std::mem::take(&mut carry.px);
                 carries[copy] = Some(carry);
                 px
             }
@@ -1854,8 +1887,8 @@ impl BlendSession {
         // Pixel `i` under the dab: the target mixed into what's there (or,
         // keeping the paint, laid over it: an empty or thin target adds
         // what it has without wearing away what's there).
-        let mixed = |i: usize| {
-            let (u, t) = (under[i], target[i]);
+        let mixed = |i: usize, u: [f32; 4]| {
+            let t = target[i];
             let m = if weights_are_mask { mask[i] } else { 1.0 };
             // A mixing brush's blend mode: its paint over what's there.
             let t = if paint_blend == crate::canvas::blend_modes::LayerBlend::Normal {
@@ -1879,17 +1912,23 @@ impl BlendSession {
             v
         };
         let spans = spans_of(&mask, side);
-        let mut result = under.clone();
-        let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i| {
-            let v = mixed(i);
+        // (Mixed where it is: a pixel's mix reads only its own.)
+        let mut result = under;
+        let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i, u| {
+            let v = mixed(i, u);
             if alpha_lock {
-                with_alpha_linear(v, under[i][3])
+                with_alpha_linear(v, u[3])
             } else {
                 v
             }
         });
         if changed {
-            self.write_blend_patch((x0, y0), side, &stored, &result, &mask);
+            self.write_blend_patch((x0, y0), side, &stored, &result, &mask, &spans);
+        }
+        if self.stroke.kind == BlendKind::Smudge
+            && let Some(Some(carry)) = self.stroke.carries.get_mut(copy)
+        {
+            carry.px = target;
         }
     }
 
@@ -1988,11 +2027,13 @@ impl BlendSession {
         let first = at_minor as i32 - highest;
         let lines = (at_minor as i32 + side as i32 - 1 - lowest - first + 1) as usize;
         // Each line's sums: `sums[l * (len + 1) + m]`, everything on line l
-        // before place m.
-        let mut sums = vec![[0.0f32; 4]; lines * (len + 1)];
+        // before place m (every one written below: no need to clear them).
+        let mut sums = std::mem::take(&mut self.sums);
+        sums.resize(lines * (len + 1), [0.0; 4]);
         for_rows(&self.pool, &mut sums, len + 1, |l, line| {
             let c = first + l as i32;
             let mut acc = [0.0f32; 4];
+            line[0] = acc;
             for m in 0..len {
                 let k = c + rise(m);
                 if (0..breadth as i32).contains(&k) {
@@ -2029,6 +2070,7 @@ impl BlendSession {
                 ];
             }
         });
+        self.sums = sums;
         (stored, under, picked)
     }
 
@@ -2128,27 +2170,49 @@ impl BlendSession {
         }
         let stored = read_patch(&self.canvas, Some(self.idx), origin, w, h, self.wrap);
         let mut paint = vec![[0.0f32; 4]; w * h];
+        let precise = &self.stroke.precise;
+        // Each row decoded, and what the stroke painted laid over it, in
+        // one pass: the row's pieces in each tile worked out once.
+        let ts = self.canvas.tile_size();
+        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let wrap = self.wrap;
+        let columns: Vec<(i32, usize, usize, usize)> = wrap_pieces_or_clip(origin.0, w, cw, wrap)
+            .into_iter()
+            .flat_map(|(at, offset, run)| {
+                let (at, end) = (at as usize, at as usize + run);
+                std::iter::successors(Some(at), move |&c| {
+                    let to = (c / ts + 1) * ts;
+                    (to < end).then_some(to)
+                })
+                .map(move |c| {
+                    let to = ((c / ts + 1) * ts).min(end);
+                    ((c / ts) as i32, c % ts, offset + c - at, to - c)
+                })
+            })
+            .collect();
         for_rows(&self.pool, &mut paint, w, |row, line| {
             for (p, &c) in line.iter_mut().zip(&stored[row * w..]) {
                 *p = codec.to_f(c);
             }
-        });
-        let precise = &self.stroke.precise;
-        if !precise.is_empty() {
-            tile_blocks(&self.canvas, origin, (w, h), self.wrap, |key, block| {
-                let Some(t) = precise.get(&key) else {
-                    return;
+            if precise.is_empty() {
+                return;
+            }
+            let Some(y) = canvas_row(origin.1 + row as i32, ch, wrap) else {
+                return;
+            };
+            let (ty, in_y) = ((y / ts) as i32, y % ts);
+            for &(tx, in_x, dx, run) in &columns {
+                let Some(t) = precise.get(&(tx, ty)) else {
+                    continue;
                 };
-                let n = block.run;
-                for (at, from) in block.rows() {
-                    for (p, v) in paint[from..from + n].iter_mut().zip(&t[at..at + n]) {
-                        if v[3] >= 0.0 {
-                            *p = *v;
-                        }
+                let at = in_y * ts + in_x;
+                for (p, v) in line[dx..dx + run].iter_mut().zip(&t[at..at + run]) {
+                    if v[3] >= 0.0 {
+                        *p = *v;
                     }
                 }
-            });
-        }
+            }
+        });
         (stored, paint)
     }
 }
@@ -2171,9 +2235,11 @@ impl BlendSession {
         let Some(m) = brush.mixing else {
             return;
         };
-        let Some(k) = m.krita else {
+        let Some(k) = self.stroke.mix.krita else {
             return;
         };
+        // This app's own mixing brush, on Krita's engine.
+        let native = m.krita.is_none();
         // (A lightness tip always takes the new engine, as in Krita.)
         let legacy = k.legacy && !brush.lays_lightness();
         let by = |on: bool| if on { p } else { 1.0 };
@@ -2182,7 +2248,20 @@ impl BlendSession {
         let color_rate = m.color_rate * by(m.pressure_color) * placed.dab.color_rate * left;
         // How much of what's picked up goes over the layer, how much brush
         // colour then, and how much of the result is put down.
-        let (smear, colour, laid) = if legacy {
+        let (smear, colour, laid) = if native {
+            // The smudge length as the smudge rate; the colour rate per
+            // brush width travelled, whatever the spacing (per dab, the
+            // share that compounds to it over one width).
+            let o = &brush.brush_options;
+            let spacing = o.spacing_factor(pressure)
+                * brush
+                    .pressure_scale(crate::brush_engine::dynamics::DabSetting::Spacing, pressure)
+                    .max(0.05);
+            let d = (r * 2.0).max(1.0);
+            let gap = (o.spacing_px(d, spacing).max(1.0) / d).min(1.0);
+            let per_dab = 1.0 - (1.0 - color_rate.clamp(0.0, 1.0)).powf(gap);
+            ((rate * opacity).clamp(0.0, 1.0), (per_dab * opacity).clamp(0.0, 1.0), 1.0)
+        } else if legacy {
             // The brush colour at most what the most smudge leaves (at
             // least a fifth).
             let most = (1.0 - m.smudge_length).max(0.2);
@@ -2204,8 +2283,12 @@ impl BlendSession {
         if stroke.krita_last.len() <= copy {
             stroke.krita_last.resize(copy + 1, None);
         }
-        let Some(last) = stroke.krita_last[copy].replace(at) else {
-            return;
+        // (Krita's first dab only says where it is; this app's lays its
+        // colour, picking up what's under it.)
+        let last = match stroke.krita_last[copy].replace(at) {
+            Some(last) => last,
+            None if native => at,
+            None => return,
         };
         let alpha_lock = self.canvas.layers[self.idx].alpha_locked;
         let rc = placed.dab.reach.ceil() as i32;
@@ -2221,8 +2304,47 @@ impl BlendSession {
         let pool = Arc::clone(&self.pool);
         // Each row's part under the tip: the rest is left as it is.
         let spans = spans_of(&mask, side);
-        let (stored, under) = self.read_layer((x0, y0), side, side);
         let from = (x0 + last.0 - at.0, y0 + last.1 - at.1);
+        let normal = paint_blend == crate::canvas::blend_modes::LayerBlend::Normal;
+        // An 8-bit layer smeared as Krita does it: the stored pixels mixed
+        // as they are (sRGB, premultiplied), nothing decoded.
+        if !self.canvas.depth().is_deep() && normal && !alpha_lock && !k.dulling && !legacy {
+            let under = read_patch(&self.canvas, Some(self.idx), (x0, y0), side, side, self.wrap);
+            let layers = (!self.stroke.mix.sample_all).then_some(self.idx);
+            let source = read_patch(&self.canvas, layers, from, side, side, self.wrap);
+            let paint = self.codec.to_c(paint).to_array().map(f32::from);
+            // (Picked-up paint copied, alpha too; or over what's there.)
+            let copied = k.smear_alpha;
+            let mut result = under;
+            // Rounded at random, in proportion: at tight spacing a dab's
+            // colour is under a level and would round to nothing every time.
+            let seed = center.x.to_bits() ^ center.y.to_bits().rotate_left(16);
+            let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i, u| {
+                let (u, s) = (u.to_array().map(f32::from), source[i].to_array().map(f32::from));
+                let mut h = (i as u32 ^ seed).wrapping_mul(0x9E37_79B9);
+                let sa = s[3] * smear / 255.0;
+                let m = mask[i].min(1.0);
+                let v: [u8; 4] = std::array::from_fn(|c| {
+                    let v = if copied {
+                        u[c] + (s[c] - u[c]) * smear
+                    } else {
+                        s[c] * smear + u[c] * (1.0 - sa)
+                    };
+                    let v = v + (paint[c] - v) * colour;
+                    h = (h ^ (h >> 15)).wrapping_mul(0x2C1B_3C6D);
+                    let dither = (h >> 8) as f32 / (1 << 24) as f32;
+                    (u[c] + (v - u[c]) * m + dither).floor().clamp(0.0, 255.0) as u8
+                });
+                let a = v[3];
+                Color32::from_rgba_premultiplied(v[0].min(a), v[1].min(a), v[2].min(a), a)
+            });
+            if changed {
+                self.write_stored((x0, y0), side, &result);
+            }
+            self.lightness_after(k, placed, rate, opacity, (x0, y0), side);
+            return;
+        }
+        let (stored, under) = self.read_layer((x0, y0), side, side);
         // (Overlay mode: what all the layers show there.)
         let source = if self.stroke.mix.sample_all {
             self.read_merged(from, side)
@@ -2261,7 +2383,6 @@ impl BlendSession {
                 }
             }
         });
-        let normal = paint_blend == crate::canvas::blend_modes::LayerBlend::Normal;
         // With both going over the layer (no smear alpha, a Normal brush),
         // Krita mixes the brush colour into the dulled colour first, and
         // lays that at the dulling rate.
@@ -2316,7 +2437,7 @@ impl BlendSession {
         };
 
         let mut result = under.clone();
-        let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i| {
+        let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i, _| {
             let v = smudge_pixel(i);
             if alpha_lock {
                 with_alpha_linear(v, under[i][3])
@@ -2325,11 +2446,23 @@ impl BlendSession {
             }
         });
         if changed {
-            self.write_blend_patch((x0, y0), side, &stored, &result, &mask);
+            self.write_blend_patch((x0, y0), side, &stored, &result, &mask, &spans);
         }
-        // A lightness tip: its grey on the lightness map, as much as the
-        // paint thickness says (overwriting: at the dab's opacity; else as
-        // much more as the smudge length leaves).
+        self.lightness_after(k, placed, rate, opacity, (x0, y0), side);
+    }
+
+    /// A lightness tip: its grey on the lightness map, as much as the
+    /// paint thickness says (overwriting: at the dab's opacity; else as
+    /// much more as the smudge length leaves).
+    fn lightness_after(
+        &mut self,
+        k: crate::brush_engine::brush_options::KritaSmudge,
+        placed: &Placed,
+        rate: f32,
+        opacity: f32,
+        origin: (i32, i32),
+        side: usize,
+    ) {
         if self.brush.lays_lightness() {
             let thickness = (k.thickness * placed.dab.thickness).clamp(0.0, 1.0);
             let share = if k.overwrite {
@@ -2337,7 +2470,7 @@ impl BlendSession {
             } else {
                 (rate - 0.01) + (1.0 - (rate - 0.01)) * thickness
             };
-            self.lay_lightness(placed, (x0, y0), side, opacity * share, thickness);
+            self.lay_lightness(placed, origin, side, opacity * share, thickness);
         }
     }
 
@@ -2436,6 +2569,39 @@ impl BlendSession {
     /// deeper document takes it at full depth; an 8-bit one rounded
     /// (`stored`, its pixels as they were, kept exactly where the mask
     /// doesn't reach), the paint itself kept for the stroke to read back.
+    /// Where each piece of the `side`² patch at `(x0, y0)` lands on the
+    /// canvas (round the edges with wrap-around): canvas x and y, place in
+    /// the patch, size.
+    fn patch_pieces(
+        &self,
+        (x0, y0): (i32, i32),
+        side: usize,
+    ) -> Vec<(i32, i32, usize, usize, usize, usize)> {
+        if !self.wrap {
+            return vec![(x0, y0, 0, 0, side, side)];
+        }
+        let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        let rows = wrap_pieces(y0, side, ch);
+        wrap_pieces(x0, side, cw)
+            .into_iter()
+            .flat_map(|(sx, dx, w)| rows.iter().map(move |&(sy, dy, h)| (sx, sy, dx, dy, w, h)))
+            .collect()
+    }
+
+    /// The 8-bit `side`² patch at `origin` written to the layer (its tiles
+    /// kept for undo the first time).
+    fn write_stored(&mut self, origin: (i32, i32), side: usize, result: &[Color32]) {
+        for (sx, sy, dx, dy, w, h) in self.patch_pieces(origin, side) {
+            self.canvas.write_layer_region(
+                self.idx,
+                (sx, sy, w, h),
+                &patch_block(result, side, (dx, dy, w, h)),
+                Some(&mut self.stroke.before),
+            );
+            self.damage.push([sx, sy, sx + w as i32, sy + h as i32]);
+        }
+    }
+
     fn write_blend_patch(
         &mut self,
         (x0, y0): (i32, i32),
@@ -2443,19 +2609,9 @@ impl BlendSession {
         stored: &[Color32],
         paint: &[[f32; 4]],
         mask: &[f32],
+        spans: &[(usize, usize)],
     ) {
         let (idx, wrap, codec) = (self.idx, self.wrap, self.codec);
-        // Wrap-around: each piece of the patch where it lands on the canvas.
-        let pieces: Vec<_> = if wrap {
-            let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
-            let rows = wrap_pieces(y0, side, ch);
-            wrap_pieces(x0, side, cw)
-                .into_iter()
-                .flat_map(|(sx, dx, w)| rows.iter().map(move |&(sy, dy, h)| (sx, sy, dx, dy, w, h)))
-                .collect()
-        } else {
-            vec![(x0, y0, 0, 0, side, side)]
-        };
         let deep = self.canvas.depth().is_deep();
         let linear: std::borrow::Cow<'_, [[f32; 4]]> = match deep && codec.gamma.is_some() {
             true => paint.iter().map(|&v| codec.to_linear(v)).collect(),
@@ -2463,9 +2619,11 @@ impl BlendSession {
         };
         let mut result = Vec::new();
         if !deep {
-            result = stored.to_vec();
+            result = vec![Color32::TRANSPARENT; side * side];
             for_rows(&self.pool, &mut result, side, |row, line| {
-                for (lx, out) in line.iter_mut().enumerate() {
+                line.copy_from_slice(&stored[row * side..(row + 1) * side]);
+                let (first, last) = spans[row];
+                for (lx, out) in line.iter_mut().enumerate().take(last).skip(first) {
                     let i = row * side + lx;
                     if mask[i] > 0.0 {
                         *out = codec.to_c(paint[i]);
@@ -2473,32 +2631,26 @@ impl BlendSession {
                 }
             });
         }
-        let stroke = &mut self.stroke;
-        for (sx, sy, dx, dy, w, h) in pieces {
-            let rect = (sx, sy, w, h);
-            if deep {
+        if deep {
+            let pieces = self.patch_pieces((x0, y0), side);
+            let stroke = &mut self.stroke;
+            for (sx, sy, dx, dy, w, h) in pieces {
                 self.canvas.write_layer_region_deep(
                     idx,
-                    rect,
+                    (sx, sy, w, h),
                     &patch_block(&linear, side, (dx, dy, w, h)),
                     &mut stroke.before,
                     &mut stroke.before_deep,
                 );
-            } else {
-                self.canvas.write_layer_region(
-                    idx,
-                    rect,
-                    &patch_block(&result, side, (dx, dy, w, h)),
-                    Some(&mut stroke.before),
-                );
+                self.damage.push([sx, sy, sx + w as i32, sy + h as i32]);
             }
-            self.damage.push([sx, sy, sx + w as i32, sy + h as i32]);
-        }
-        if deep {
             return;
         }
+        self.write_stored((x0, y0), side, &result);
+        let stroke = &mut self.stroke;
         // The paint, for the stroke to read back (a tile met for the first
-        // time holds none: an alpha below 0).
+        // time holds none: an alpha below 0). Only under the tip: elsewhere
+        // it reads back the same without it.
         let ts = self.canvas.tile_size();
         let precise = &mut stroke.precise;
         tile_blocks(&self.canvas, (x0, y0), (side, side), wrap, |key, block| {
@@ -2507,7 +2659,13 @@ impl BlendSession {
                 .or_insert_with(|| vec![[0.0, 0.0, 0.0, -1.0]; ts * ts]);
             let n = block.run;
             for (at, from) in block.rows() {
-                tile[at..at + n].copy_from_slice(&paint[from..from + n]);
+                // This row's span, within the block.
+                let (row, lx) = (from / side, from % side);
+                let (first, last) = spans[row];
+                let (a, b) = (first.max(lx), last.min(lx + n));
+                if a < b {
+                    tile[at + a - lx..at + b - lx].copy_from_slice(&paint[from + a - lx..from + b - lx]);
+                }
             }
         });
     }
@@ -2590,15 +2748,15 @@ impl TileBlock {
 }
 
 /// Set each pixel of the `side`-wide `patch` under the tip (by row, the
-/// span `spans` gives, where `mask` reaches) to `f` of its index, rows on
-/// `pool`: whether any changed.
-fn lay_spans<T: PartialEq + Send>(
+/// span `spans` gives, where `mask` reaches) to `f` of its index and what
+/// it was, rows on `pool`: whether any changed.
+fn lay_spans<T: PartialEq + Copy + Send>(
     pool: &rayon::ThreadPool,
     patch: &mut [T],
     side: usize,
     spans: &[(usize, usize)],
     mask: &[f32],
-    f: impl Fn(usize) -> T + Sync,
+    f: impl Fn(usize, T) -> T + Sync,
 ) -> bool {
     let lay_row = |ly: usize, row: &mut [T]| {
         let (first, last) = spans[ly];
@@ -2608,7 +2766,7 @@ fn lay_spans<T: PartialEq + Send>(
             if mask[i] <= 0.0 {
                 continue;
             }
-            let out = f(i);
+            let out = f(i, *px);
             changed |= out != *px;
             *px = out;
         }
@@ -2728,3 +2886,4 @@ mod mix_tests;
 
 #[cfg(test)]
 mod mode_tests;
+
