@@ -1208,7 +1208,10 @@ fn a_mixing_brush_smears_8_bit_paint_as_krita_does() {
     app.finish_stroke();
     app.settle_strokes();
     let p = px(&app, 80, 32);
-    assert!(p.a() > 100 && p.r() > p.g() * 3, "red dragged into the clear: {p:?}");
+    assert!(
+        p.a() > 100 && p.r() > p.g() * 3,
+        "red dragged into the clear: {p:?}"
+    );
     assert_eq!(px(&app, 80, 5), Color32::TRANSPARENT, "outside the brush");
     assert_ne!(layer(&app), before);
     // Undo puts it back exactly.

@@ -2260,7 +2260,11 @@ impl BlendSession {
             let d = (r * 2.0).max(1.0);
             let gap = (o.spacing_px(d, spacing).max(1.0) / d).min(1.0);
             let per_dab = 1.0 - (1.0 - color_rate.clamp(0.0, 1.0)).powf(gap);
-            ((rate * opacity).clamp(0.0, 1.0), (per_dab * opacity).clamp(0.0, 1.0), 1.0)
+            (
+                (rate * opacity).clamp(0.0, 1.0),
+                (per_dab * opacity).clamp(0.0, 1.0),
+                1.0,
+            )
         } else if legacy {
             // The brush colour at most what the most smudge leaves (at
             // least a fifth).
@@ -2309,7 +2313,14 @@ impl BlendSession {
         // An 8-bit layer smeared as Krita does it: the stored pixels mixed
         // as they are (sRGB, premultiplied), nothing decoded.
         if !self.canvas.depth().is_deep() && normal && !alpha_lock && !k.dulling && !legacy {
-            let under = read_patch(&self.canvas, Some(self.idx), (x0, y0), side, side, self.wrap);
+            let under = read_patch(
+                &self.canvas,
+                Some(self.idx),
+                (x0, y0),
+                side,
+                side,
+                self.wrap,
+            );
             let layers = (!self.stroke.mix.sample_all).then_some(self.idx);
             let source = read_patch(&self.canvas, layers, from, side, side, self.wrap);
             let paint = self.codec.to_c(paint).to_array().map(f32::from);
@@ -2320,7 +2331,10 @@ impl BlendSession {
             // colour is under a level and would round to nothing every time.
             let seed = center.x.to_bits() ^ center.y.to_bits().rotate_left(16);
             let changed = lay_spans(&pool, &mut result, side, &spans, &mask, |i, u| {
-                let (u, s) = (u.to_array().map(f32::from), source[i].to_array().map(f32::from));
+                let (u, s) = (
+                    u.to_array().map(f32::from),
+                    source[i].to_array().map(f32::from),
+                );
                 let mut h = (i as u32 ^ seed).wrapping_mul(0x9E37_79B9);
                 let sa = s[3] * smear / 255.0;
                 let m = mask[i].min(1.0);
@@ -2664,7 +2678,8 @@ impl BlendSession {
                 let (first, last) = spans[row];
                 let (a, b) = (first.max(lx), last.min(lx + n));
                 if a < b {
-                    tile[at + a - lx..at + b - lx].copy_from_slice(&paint[from + a - lx..from + b - lx]);
+                    tile[at + a - lx..at + b - lx]
+                        .copy_from_slice(&paint[from + a - lx..from + b - lx]);
                 }
             }
         });
@@ -2886,4 +2901,3 @@ mod mix_tests;
 
 #[cfg(test)]
 mod mode_tests;
-
