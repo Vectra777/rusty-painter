@@ -3,6 +3,7 @@ name = "rusty-painter"
 version = "0.1.0"
 authors = ["Valentin Belougne <valentin.belougne@gmail.com>"]
 edition = "2024"
+rust-version = "1.88"
 description = "Native tiled painting playground built with egui."
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -191,6 +192,10 @@ sut-import = ["dep:rusqlite"]
 
 [[example]]
 name = "profile_presets"
+required-features = ["bench"]
+
+[[example]]
+name = "brush_showcase"
 required-features = ["bench"]
 
 [[bench]]

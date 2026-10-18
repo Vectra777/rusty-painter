@@ -2,7 +2,7 @@
 
 ## Desktop
 
-With a Rust toolchain (`cargo`, `rustc`):
+With a Rust toolchain (`cargo`, `rustc`), stable 1.88 or newer:
 
 ```bash
 cargo run --release
@@ -16,6 +16,18 @@ Build with the MSVC Rust toolchain (Visual Studio's C++ build tools and the Wind
 
 ### Icons
 `scripts/make-icons.sh` makes every platform's icon (window, `.exe`, Android's adaptive icon, iPad) from one picture.
+
+### README pictures
+The demo GIF and the screenshot come from the app painting a scene by itself (`RP_DEMO`, in `src/app/dev_shot.rs`), the brush showcase from an example:
+
+```bash
+mkdir -p /tmp/demo
+RUSTY_PAINTER_DATA=/tmp/demo-data RP_SIZE=1600x1000 RP_OPEN=brush,colour,layers RP_DEMO=/tmp/demo cargo run --release
+cp "$(ls /tmp/demo/*.png | tail -1)" docs/src/screenshot.png
+ffmpeg -framerate 15 -i /tmp/demo/%04d.png -vf "tpad=stop_mode=clone:stop_duration=2,scale=800:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=192[p];[b][p]paletteuse=dither=bayer:bayer_scale=4" docs/src/demo.gif
+cargo run --release --features bench --example brush_showcase -- docs/src/brushes.png
+```
+`RUSTY_PAINTER_DATA` keeps your own settings and autosave out of it.
 
 ## Android (APK)
 Building for Android needs more than the target and `cargo-apk`: this repo vendors and patches `winit` and ships its own NDK linker wrappers, both required for the build to work:
