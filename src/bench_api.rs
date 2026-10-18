@@ -50,6 +50,13 @@ pub fn painted_app(size: usize) -> PainterApp {
     app
 }
 
+/// A blank `width`×`height` app (white background, layer 1 active).
+pub fn blank_app(width: usize, height: usize) -> PainterApp {
+    let mut app = headless(Canvas::new(width, height, Color32::WHITE, TILE_SIZE));
+    app.canvas_mut().active_layer_idx = 1;
+    app
+}
+
 fn headless(canvas: Canvas) -> PainterApp {
     let layers = canvas.layers.len();
     let (w, h) = (canvas.width(), canvas.height());

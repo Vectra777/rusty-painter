@@ -1,8 +1,12 @@
 # Rusty Painter
 
+[![CI](https://github.com/Vectra777/rusty-painter/actions/workflows/ci.yml/badge.svg)](https://github.com/Vectra777/rusty-painter/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Vectra777/rusty-painter)](https://github.com/Vectra777/rusty-painter/releases)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+
 A painting app built with Rust, egui and wgpu, for Linux, Windows, Android and iPad. The canvas is split into tiles, brushes paint on their own thread, and the UI stays out of the way.
 
-![](docs/src/demo.gif)
+![Painting a small scene in Rusty Painter](docs/src/demo.gif)
 
 **📖 Documentation: <https://vectra777.github.io/rusty-painter/>** (user guide, developer guide and API reference; the source is in [`docs/`](docs/)).
 
@@ -15,8 +19,14 @@ A painting app built with Rust, egui and wgpu, for Linux, Windows, Android and i
 - **Colour**: 8, 16-bit or float documents, ICC profiles and soft proofing.
 - **Files**: `.rpainter` projects (OpenRaster, with the whole undo history), PNG, JPEG, TIFF, WebP, PSD and SVG export; `.psd`, `.kra` and `.clip` open with their layers.
 
+![The main window: brush settings, canvas, colour and layers](docs/src/screenshot.png)
+
+A few of the built-in brushes:
+
+![One stroke from each of 24 built-in brush presets](docs/src/brushes.png)
+
 ## Install
-Download a release from the [releases page](https://github.com/Vectra777/rusty-painter/releases) (Linux tarball or Flatpak, Windows zip, Android APK), or build it:
+Download a release from the [releases page](https://github.com/Vectra777/rusty-painter/releases) (Linux tarball or Flatpak, Windows zip, Android APK), or build it (stable Rust 1.88 or newer; on Windows, the MSVC toolchain):
 
 ```bash
 cargo run --release
