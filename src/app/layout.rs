@@ -644,7 +644,7 @@ pub(crate) fn notices(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
                         ui.horizontal(|ui| {
                             if let Some(p) = progress {
                                 if ui
-                                    .small_button("✕")
+                                    .small_button("×")
                                     .on_hover_text("Cancel the fill")
                                     .clicked()
                                 {
@@ -654,7 +654,7 @@ pub(crate) fn notices(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
                                     egui::RichText::new("Filling from surroundings").small(),
                                 ));
                             } else if let Some(m) = &message {
-                                if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
+                                if ui.small_button("×").on_hover_text("Dismiss").clicked() {
                                     app.export_state.message = None;
                                 }
                                 ui.add(egui::Label::new(egui::RichText::new(m).small()).wrap());

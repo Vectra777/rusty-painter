@@ -1456,7 +1456,7 @@ fn inputs_section(
                                     ui.selectable_value(&mut m.setting, s, s.label()).changed();
                             }
                         });
-                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                    if ui.small_button("×").on_hover_text("Remove").clicked() {
                         remove = Some(i);
                     }
                 });

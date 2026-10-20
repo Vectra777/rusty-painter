@@ -8,7 +8,25 @@ use eframe::egui::{self, Color32, FontId, Margin, Rounding, Shadow, Stroke, Text
 /// neutral grays, a single accent and compact spacing, so the UI stays
 /// quiet and dense around the canvas.
 pub fn apply_global_style(ctx: &egui::Context) {
+    apply_fonts(ctx);
     apply_style(ctx, false);
+}
+
+/// The default fonts, with the monospace one (Hack) last in the UI's
+/// fallbacks: the UI fonts have no arrows (→ ↓), triangles (▾ ▲ ▼) or
+/// circles (● ◐), which showed as empty boxes.
+fn apply_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(mono) = fonts
+        .families
+        .get(&egui::FontFamily::Monospace)
+        .and_then(|f| f.first().cloned())
+        && let Some(ui) = fonts.families.get_mut(&egui::FontFamily::Proportional)
+        && !ui.contains(&mono)
+    {
+        ui.push(mono);
+    }
+    ctx.set_fonts(fonts);
 }
 
 /// Build the theme for desktop or touch (larger text and hit targets,
@@ -115,4 +133,25 @@ pub fn apply_style(ctx: &egui::Context, touch: bool) {
     }
 
     ctx.set_style(style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ui_font_draws_the_symbols_the_ui_uses() {
+        let ctx = egui::Context::default();
+        apply_global_style(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let symbols = "↓→◐▾●▲▼×·…α";
+        let font = FontId::proportional(14.0);
+        let missing: String = ctx.fonts(|f| {
+            symbols
+                .chars()
+                .filter(|&c| !f.has_glyph(&font, c))
+                .collect()
+        });
+        assert!(missing.is_empty(), "no glyph for {missing:?}");
+    }
 }

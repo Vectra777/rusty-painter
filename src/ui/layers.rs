@@ -505,6 +505,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 let mut opacity_released = false;
                 let mut opacity_moved = false;
                 let mut opacity_drag = (false, false);
+                let mut opacity_rect = egui::Rect::NOTHING;
                 // Widgets edit copies; the canvas is only borrowed exclusively
                 // (which ends an in-progress stroke) when something changed.
                 let current = &app.canvas.layers[i];
@@ -740,6 +741,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                             );
                         }
                         opacity_drag = (response.drag_started(), response.dragged());
+                        opacity_rect = response.rect;
                         // A right-click opens the row's menu; it doesn't set the opacity.
                         let secondary = ui.input(|i| {
                             i.pointer.button_down(egui::PointerButton::Secondary)
@@ -776,7 +778,12 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 }
                 // The background stays at the bottom.
                 // (Not while searching: the rows shown aren't the stack.)
-                if row_response.drag_started() && i != 0 && !filtering {
+                // A press just off the opacity bar (meant for it) doesn't
+                // move the layer: the bar is thin, the row all around it.
+                let near_opacity = ui.input(|inp| inp.pointer.press_origin()).is_some_and(|p| {
+                    opacity_rect.expand2(egui::vec2(6.0, 8.0)).contains(p)
+                });
+                if row_response.drag_started() && i != 0 && !filtering && !near_opacity {
                     app.layer_state.layer_dragging = Some(i);
                 }
 
@@ -1030,7 +1037,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     drop_target(
                         &rows,
                         from,
-                        p.y,
+                        p,
                         |id, ancestor| {
                             canvas.is_within(id, ancestor)
                                 || along.iter().any(|&j| canvas.is_within(id, canvas.layers[j].id))
@@ -1414,8 +1421,9 @@ fn color_tag_picker(ui: &mut egui::Ui, current: &mut Color32) -> bool {
 /// How a dragged layer would be dropped.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum DropKind {
-    /// Between rows, at screen height `y`, indented to `depth`.
-    Gap { y: f32, depth: usize },
+    /// Between rows, at screen height `y`, indented to `depth`; `under`
+    /// when it lands below the caption's row rather than above it.
+    Gap { y: f32, depth: usize, under: bool },
     /// Into the folder shown at `rows[row]`, on top of its contents.
     Into { row: usize },
 }
@@ -1428,7 +1436,7 @@ struct DropTarget {
     /// Folder it ends up in.
     parent: Option<LayerId>,
     kind: DropKind,
-    /// Row named in the caption ("above X" / "into X").
+    /// Row named in the caption ("above X" / "below X" / "into X").
     caption_row: usize,
 }
 
@@ -1442,17 +1450,21 @@ impl DropTarget {
     }
 }
 
-/// Drop target for dragging layer `from` to pointer height `y`. `rows` are
-/// in display order. Over the middle of a folder row the layer goes into
-/// the folder; otherwise it goes into the gap between rows, directly above
-/// the row below the gap and in that row's folder.
+/// Drop target for dragging layer `from` to `pointer`. `rows` are in
+/// display order. Over the middle of a folder row the layer goes into the
+/// folder; otherwise it goes into the gap between rows, directly above the
+/// row below the gap and in that row's folder. Where the row above the gap
+/// is nested deeper (the bottom of an open folder), the pointer's distance
+/// from the left picks how deep: to the right it stays in the folder, below
+/// its last row; to the left it goes out, above the row below.
 fn drop_target(
     rows: &[RowInfo],
     from: usize,
-    y: f32,
+    pointer: egui::Pos2,
     is_within: impl Fn(LayerId, LayerId) -> bool,
     last_child: impl Fn(LayerId) -> Option<usize>,
 ) -> Option<DropTarget> {
+    let y = pointer.y;
     let dragged = rows.iter().find(|r| r.idx == from)?;
     let final_index = |insert_at: usize| {
         if insert_at > from {
@@ -1498,6 +1510,33 @@ fn drop_target(
     } else {
         (rows[slot - 1].rect.bottom() + below.rect.top()) * 0.5
     };
+    // The bottom of an open folder: deeper than the row below, as far as
+    // the pointer asks, under the row (or folder) at that depth.
+    if slot > 0 && rows[slot - 1].depth > below.depth {
+        let left = dragged.rect.left() + 8.0;
+        let wanted = ((pointer.x - left) / (2.0 * INDENT)).floor().max(0.0) as usize;
+        let deepest = wanted.min(rows[slot - 1].depth);
+        for depth in (below.depth + 1..=deepest).rev() {
+            // The nearest row above at that depth holds the one above the gap.
+            let Some(pos) = rows[..slot].iter().rposition(|r| r.depth == depth) else {
+                continue;
+            };
+            let over = rows[pos];
+            if over.parent.is_some_and(|p| is_within(p, dragged.id)) {
+                continue;
+            }
+            return Some(DropTarget {
+                to: final_index(over.idx),
+                parent: over.parent,
+                kind: DropKind::Gap {
+                    y: gap_y,
+                    depth,
+                    under: true,
+                },
+                caption_row: pos,
+            });
+        }
+    }
     if let Some(p) = below.parent
         && is_within(p, dragged.id)
     {
@@ -1509,6 +1548,7 @@ fn drop_target(
         kind: DropKind::Gap {
             y: gap_y,
             depth: below.depth,
+            under: false,
         },
         caption_row: slot,
     })
@@ -1559,7 +1599,7 @@ fn paint_drag_feedback(
                     );
                     format!("into {}", name_of(row.idx))
                 }
-                DropKind::Gap { y, depth } => {
+                DropKind::Gap { y, depth, under } => {
                     let left = from_rect.left() + 8.0 + depth as f32 * INDENT;
                     let x = egui::Rangef::new(left, from_rect.right());
                     painter.hline(x, y, Stroke::new(3.0_f32, accent()));
@@ -1568,7 +1608,8 @@ fn paint_drag_feedback(
                             egui::Rect::from_center_size(egui::pos2(end, y), egui::vec2(7.0, 9.0));
                         painter.rect_filled(marker, 2.0, accent());
                     }
-                    format!("above {}", name_of(row.idx))
+                    let side = if under { "below" } else { "above" };
+                    format!("{side} {}", name_of(row.idx))
                 }
             }
         }
@@ -1653,7 +1694,7 @@ mod tests {
     }
 
     fn target(rows: &[RowInfo], from: usize, y: f32) -> Option<DropTarget> {
-        drop_target(rows, from, y, |a, b| a == b, |_| None)
+        drop_target(rows, from, egui::pos2(0.0, y), |a, b| a == b, |_| None)
     }
 
     #[test]
@@ -1713,6 +1754,42 @@ mod tests {
     }
 
     #[test]
+    fn the_bottom_of_an_open_folder_follows_the_pointer_across() {
+        // Folder 4 containing layer 3, then layer 2, layer 1, background.
+        let r = rows(&[
+            (4, 40, None, true),
+            (3, 3, Some(40), false),
+            (2, 2, None, false),
+            (1, 1, None, false),
+            (0, 0, None, false),
+        ]);
+        // Between layer 3 (in the folder) and layer 2, to the right: in
+        // the folder, below layer 3 ([bg, 1, 2, 3, 4] -> [bg, 2, 1, 3, 4]).
+        let t = drop_target(&r, 1, egui::pos2(80.0, 20.0), |a, b| a == b, |_| None).unwrap();
+        assert_eq!(t.parent, Some(LayerId(40)));
+        assert_eq!(t.to, 2);
+        assert!(matches!(
+            t.kind,
+            DropKind::Gap {
+                depth: 1,
+                under: true,
+                ..
+            }
+        ));
+        // At the left edge: out of the folder, above layer 2 (no change).
+        let t = drop_target(&r, 1, egui::pos2(10.0, 20.0), |a, b| a == b, |_| None).unwrap();
+        assert_eq!(t.parent, None);
+        assert!(matches!(
+            t.kind,
+            DropKind::Gap {
+                depth: 0,
+                under: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn a_folder_cannot_move_inside_itself() {
         let r = rows(&[
             (4, 40, None, true),
@@ -1721,6 +1798,6 @@ mod tests {
             (0, 0, None, false),
         ]);
         // Dropping the folder into the gap above its own child.
-        assert!(drop_target(&r, 4, 10.0, |a, b| a == b, |_| Some(3)).is_none());
+        assert!(drop_target(&r, 4, egui::pos2(0.0, 10.0), |a, b| a == b, |_| Some(3)).is_none());
     }
 }
