@@ -13,6 +13,7 @@ pub(crate) mod guides;
 pub(crate) mod liquify;
 pub(crate) mod mixer;
 pub(crate) mod palette;
+pub(crate) mod palettes;
 pub(crate) mod patch;
 pub(crate) mod pen;
 pub(crate) mod puppet;

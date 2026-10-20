@@ -781,78 +781,9 @@ fn write_preset_file(
     Ok(path)
 }
 
-impl PainterApp {
-    /// Where the swatches are kept: next to the brushes folder.
-    fn swatches_path(&self) -> std::path::PathBuf {
-        self.brush_state
-            .brushes_path
-            .with_file_name("swatches.json")
-    }
-
-    /// The swatches saved last time (the defaults if there are none).
-    pub(crate) fn load_swatches(&mut self) {
-        let Ok(bytes) = std::fs::read(self.swatches_path()) else {
-            return;
-        };
-        match serde_json::from_slice::<Vec<String>>(&bytes) {
-            Ok(hex) => {
-                self.brush_state.swatches = hex.iter().filter_map(|h| parse_hex(h)).collect();
-            }
-            Err(err) => log::warn!("Ignoring swatches.json: {err}"),
-        }
-    }
-
-    /// Keep the swatches for next time. Errors are logged: a read-only
-    /// folder shouldn't get in the way of painting.
-    pub(crate) fn save_swatches(&self) {
-        let hex: Vec<String> = self
-            .brush_state
-            .swatches
-            .iter()
-            .map(|c| {
-                let [r, g, b, a] = c.to_srgba_unmultiplied();
-                format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
-            })
-            .collect();
-        match serde_json::to_vec_pretty(&hex) {
-            Ok(bytes) => {
-                crate::app::jobs::write_later(self.swatches_path(), "swatches", move || Ok(bytes))
-            }
-            Err(err) => log::warn!("Couldn't save swatches: {err}"),
-        }
-    }
-}
-
-/// `#RRGGBB` or `#RRGGBBAA`.
-fn parse_hex(hex: &str) -> Option<Color32> {
-    let h = hex.strip_prefix('#')?;
-    if h.len() != 6 && h.len() != 8 {
-        return None;
-    }
-    let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
-    let a = if h.len() == 8 { byte(6)? } else { 255 };
-    Some(Color32::from_rgba_unmultiplied(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        a,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn swatch_colours_read_back_as_written() {
-        assert_eq!(parse_hex("#FF8000"), Some(Color32::from_rgb(255, 128, 0)));
-        assert_eq!(
-            parse_hex("#10203080"),
-            Some(Color32::from_rgba_unmultiplied(16, 32, 48, 128))
-        );
-        assert_eq!(parse_hex("FF8000"), None);
-        assert_eq!(parse_hex("#GG0000"), None);
-    }
 
     #[test]
     fn an_edited_preset_keeps_its_old_preview_until_the_next_frame() {

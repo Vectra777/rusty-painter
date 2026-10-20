@@ -169,6 +169,7 @@ impl PainterApp {
         self.selection_manager.clear_selection();
         self.selection_manager.canvas_size = [width, height];
         self.workspace.select.saved.clear();
+        self.brush_state.palettes.forget_document();
         self.reset_viewport_state();
         self.mark_saved();
     }

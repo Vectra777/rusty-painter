@@ -68,7 +68,7 @@ pub(crate) const LOAD_STEPS: [(&str, LoadStep); 7] = [
         app.install_default_presets();
         app.brush_state.pick_eraser();
     }),
-    ("Loading gradients and swatches", |app, _| {
+    ("Loading gradients and palettes", |app, _| {
         // The user's gradients sit next to the brushes folder.
         let gradients = app
             .brush_state
@@ -76,7 +76,11 @@ pub(crate) const LOAD_STEPS: [(&str, LoadStep); 7] = [
             .with_file_name("gradients.json");
         app.workspace.gradient.library =
             crate::app::tools::gradient::GradientLibrary::load(gradients);
-        app.load_swatches();
+        let beside = |name| app.brush_state.brushes_path.with_file_name(name);
+        app.brush_state.palettes = crate::app::tools::palettes::Palettes::load(
+            beside("palettes.json"),
+            beside("swatches.json"),
+        );
     }),
     ("Loading settings", |app, ctx| {
         app.load_view_settings();

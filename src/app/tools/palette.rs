@@ -1,11 +1,14 @@
-//! Palette window actions: extract a palette from the picture, keep it as
-//! swatches, and recolour a layer to it.
+//! Palette window actions: extract a palette from the picture, keep it in
+//! a palette, make ramps, open and save other apps' palette files, and
+//! recolour a layer to a palette.
 
 use crate::PainterApp;
 use crate::app::stroke_ops::exclusive;
+use crate::app::tools::palettes::Palette;
 use crate::canvas::history::UndoAction;
-use crate::canvas::palette::{Recolor, extract_palette};
+use crate::canvas::palette::{Recolor, extract_palette, ramp, shades};
 use crate::canvas::storage::LayerKind;
+use crate::project::palette_files::Format;
 use eframe::egui::Color32;
 
 pub struct PaletteToolState {
@@ -21,6 +24,24 @@ pub struct PaletteToolState {
     /// Where the window was last frame: a file dropped on it gives the
     /// palette instead of a new layer.
     pub window_rect: Option<eframe::egui::Rect>,
+    /// What the ramp maker makes, how many steps, and how far its shades
+    /// turn the hue (degrees).
+    pub ramp_kind: RampKind,
+    pub ramp_steps: usize,
+    pub hue_shift: f32,
+    /// The palette's name being typed, while renaming it.
+    pub renaming: Option<String>,
+    /// A new group's name being typed.
+    pub new_group: Option<String>,
+}
+
+/// What the ramp maker makes from the brush colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RampKind {
+    /// The primary colour's shades, near black to near white.
+    Shades,
+    /// The primary colour to the secondary.
+    Blend,
 }
 
 impl Default for PaletteToolState {
@@ -33,6 +54,11 @@ impl Default for PaletteToolState {
             extracted: Vec::new(),
             source_image: None,
             window_rect: None,
+            ramp_kind: RampKind::Shades,
+            ramp_steps: 7,
+            hue_shift: 20.0,
+            renaming: None,
+            new_group: None,
         }
     }
 }
@@ -154,15 +180,67 @@ impl PainterApp {
             })
     }
 
-    /// Add colours to the swatches, skipping ones already there.
-    pub(crate) fn add_swatches(&mut self, colors: &[Color32]) {
-        let swatches = &mut self.brush_state.swatches;
-        for &c in colors {
-            if !swatches.contains(&c) {
-                swatches.push(c);
-            }
+    /// Add colours to the palette shown, as new rows, leaving out ones
+    /// already there.
+    pub(crate) fn add_to_palette(&mut self, colors: &[Color32]) {
+        let palette = self.brush_state.palettes.edit_active();
+        let new: Vec<Color32> = colors
+            .iter()
+            .copied()
+            .filter(|&c| !palette.contains(c))
+            .collect();
+        palette.add_rows(0, &new);
+    }
+
+    /// A new palette of `colors` in rows of a hue each, shown.
+    pub(crate) fn new_palette_from(&mut self, name: &str, colors: &[Color32]) {
+        let mut palette = Palette::new(name, colors);
+        palette.arrange_by_hue();
+        self.brush_state.palettes.add(palette, false);
+    }
+
+    /// The ramp the Palette window offers, from the brush colours.
+    pub(crate) fn palette_ramp(&self) -> Vec<Color32> {
+        let p = &self.workspace.palette;
+        let primary = self.brush_state.brush.brush_options.color;
+        match p.ramp_kind {
+            RampKind::Shades => shades(primary, p.ramp_steps, p.hue_shift.to_radians()),
+            RampKind::Blend => ramp(primary, self.brush_state.secondary_color, p.ramp_steps),
         }
-        self.save_swatches();
+    }
+
+    /// Open the palette file `name` (from `source`) as a new palette of
+    /// the user's, shown.
+    pub(crate) fn import_palette_in_background(
+        &mut self,
+        name: String,
+        source: crate::app::import::FileSource,
+    ) {
+        self.spawn_job(None, move || {
+            let result = source
+                .read()
+                .and_then(|bytes| crate::project::palette_files::read(&name, &bytes));
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok(palette) => {
+                    let message = format!("{} colours from {name}", palette.len());
+                    app.brush_state.palettes.add(palette, false);
+                    app.export_state.message = Some(message);
+                }
+                Err(err) => app.report(format!("{name}: {err}")),
+            })
+        });
+    }
+
+    /// Ask where to save the palette shown as `format`.
+    pub(crate) fn export_palette(&mut self, format: Format) {
+        let palette = self.brush_state.palettes.active();
+        match crate::project::palette_files::write(palette, format) {
+            Ok(bytes) => {
+                let name = format!("{}.{}", palette.name, format.extension());
+                self.pick_save(&name, format.extension(), format.mime(), bytes);
+            }
+            Err(err) => self.report(err),
+        }
     }
 
     /// Recolour the selected layer (inside the selection) to `palette`.
@@ -238,5 +316,36 @@ mod tests {
             app.extract_palette_from_image("bad", b"not an image")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_documents_palettes_are_saved_in_it_and_editing_them_is_a_change() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(
+            64,
+            64,
+            Color32::WHITE,
+            crate::app::document::TILE_SIZE,
+        ));
+        app.mark_saved();
+        let which = app.brush_state.palettes.add(
+            Palette::new("Skin", &[Color32::from_rgb(200, 150, 120)]),
+            true,
+        );
+        assert!(app.has_unsaved_work());
+        app.mark_saved();
+        app.brush_state
+            .palettes
+            .edit(which)
+            .unwrap()
+            .push(Color32::BLACK);
+        assert!(app.has_unsaved_work());
+
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let loaded = crate::project::decode_project(&bytes).unwrap();
+        assert_eq!(loaded.palettes, app.brush_state.palettes.document);
+        // A new document has none of its own.
+        app.replace_document(Canvas::new(32, 32, Color32::WHITE, 64), Default::default());
+        assert!(app.brush_state.palettes.document.is_empty());
+        assert!(!app.has_unsaved_work());
     }
 }

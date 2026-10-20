@@ -50,15 +50,51 @@ impl Lab {
     }
 
     pub fn to_rgb(self) -> [u8; 3] {
+        self.to_linear().map(linear_to_srgb)
+    }
+
+    /// Linear sRGB, unclamped (outside 0..1 when out of gamut).
+    fn to_linear(self) -> [f32; 3] {
         let [lo, a, b] = self.0;
         let l = (lo + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
         let m = (lo - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
         let s = (lo - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
         [
-            linear_to_srgb(4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s),
-            linear_to_srgb(-1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s),
-            linear_to_srgb(-0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s),
+            4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
+            -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
+            -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
         ]
+    }
+
+    /// Lightness, chroma and hue (radians).
+    pub fn lch(self) -> (f32, f32, f32) {
+        let [l, a, b] = self.0;
+        (l, a.hypot(b), b.atan2(a))
+    }
+
+    /// The colour of lightness `l` and hue `h` with chroma `c`, or as
+    /// much of it as sRGB can show.
+    pub fn from_lch_in_gamut(l: f32, c: f32, h: f32) -> Self {
+        let at = |c: f32| Lab([l, c * h.cos(), c * h.sin()]);
+        let fits = |lab: Lab| lab.to_linear().iter().all(|v| (-1e-4..=1.0001).contains(v));
+        if fits(at(c)) {
+            return at(c);
+        }
+        let (mut lo, mut hi) = (0.0, c);
+        for _ in 0..16 {
+            let mid = (lo + hi) / 2.0;
+            if fits(at(mid)) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        at(lo)
+    }
+
+    fn to_color(self) -> Color32 {
+        let [r, g, b] = self.to_rgb();
+        Color32::from_rgb(r, g, b)
     }
 
     #[inline]
@@ -68,7 +104,7 @@ impl Lab {
     }
 }
 
-fn lab_of(c: Color32) -> Lab {
+pub fn lab_of(c: Color32) -> Lab {
     let [r, g, b, _] = crate::canvas::blend::unmultiply(c);
     Lab::from_rgb(r, g, b)
 }
@@ -161,13 +197,194 @@ pub fn extract_palette(pixels: &[Color32], n: usize) -> Vec<Color32> {
         .map(|(c, _)| c)
         .collect();
     centres.sort_by(|a, b| a.0[0].total_cmp(&b.0[0]));
-    centres
-        .into_iter()
-        .map(|l| {
-            let [r, g, b] = l.to_rgb();
-            Color32::from_rgb(r, g, b)
+    centres.into_iter().map(Lab::to_color).collect()
+}
+
+/// What to sort colours by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortKey {
+    /// Dark to light.
+    Lightness,
+    /// The greys (dark to light), then round the colour wheel from red.
+    Hue,
+    /// Greyest to most vivid.
+    Chroma,
+}
+
+/// Below this chroma a colour reads as a grey.
+const GREY_CHROMA: f32 = 0.035;
+/// Where the wheel starts: a little before Oklab's hue of red (about
+/// 29°), so reds come first.
+const RED_HUE: f32 = 0.35;
+
+/// How far round the wheel from red `h` is (0..2π).
+fn from_red(h: f32) -> f32 {
+    (h - RED_HUE).rem_euclid(std::f32::consts::TAU)
+}
+
+/// The order to put `colors` in, sorted by `key`: indices into `colors`.
+pub fn sort_order(colors: &[Color32], key: SortKey) -> Vec<usize> {
+    let lch: Vec<_> = colors.iter().map(|&c| lab_of(c).lch()).collect();
+    let mut order: Vec<usize> = (0..colors.len()).collect();
+    order.sort_by(|&i, &j| {
+        let ((l1, c1, h1), (l2, c2, h2)) = (lch[i], lch[j]);
+        match key {
+            SortKey::Lightness => l1.total_cmp(&l2),
+            SortKey::Chroma => {
+                // Greys' chroma is rounding noise: they tie, dark to light.
+                let c = |c: f32| (c * 1000.0).round();
+                c(c1).total_cmp(&c(c2)).then(l1.total_cmp(&l2))
+            }
+            SortKey::Hue => {
+                let (g1, g2) = (c1 < GREY_CHROMA, c2 < GREY_CHROMA);
+                g2.cmp(&g1).then_with(|| {
+                    if g1 {
+                        l1.total_cmp(&l2)
+                    } else {
+                        from_red(h1)
+                            .total_cmp(&from_red(h2))
+                            .then(l1.total_cmp(&l2))
+                    }
+                })
+            }
+        }
+    });
+    order
+}
+
+/// `colors` in families of a hue each, as indices: the greys first, then
+/// round the wheel from red; each family dark to light. A family ends at
+/// a gap in hue, or once it spans too much of the wheel to read as one.
+pub fn hue_families(colors: &[Color32]) -> Vec<Vec<usize>> {
+    const GAP: f32 = 0.35; // About 20°.
+    const SPAN: f32 = 0.9; // About 50°.
+    let lch: Vec<_> = colors.iter().map(|&c| lab_of(c).lch()).collect();
+    let (greys, mut hued): (Vec<usize>, Vec<usize>) =
+        (0..colors.len()).partition(|&i| lch[i].1 < GREY_CHROMA);
+    let mut families = Vec::new();
+    if !greys.is_empty() {
+        families.push(greys);
+    }
+    hued.sort_by(|&i, &j| from_red(lch[i].2).total_cmp(&from_red(lch[j].2)));
+    // Start after the widest gap, so no family wraps round past red.
+    let hue = |k: usize| from_red(lch[hued[k % hued.len()]].2);
+    let start = (0..hued.len())
+        .max_by(|&a, &b| {
+            let gap = |k: usize| (hue(k + 1) - hue(k)).rem_euclid(std::f32::consts::TAU);
+            gap(a).total_cmp(&gap(b))
+        })
+        .map_or(0, |k| k + 1);
+    let mut family: Vec<usize> = Vec::new();
+    let mut first = 0.0;
+    for k in start..start + hued.len() {
+        let h = hue(k);
+        if let Some(&last) = family.last() {
+            let prev = from_red(lch[last].2);
+            let turn = |a: f32, b: f32| (b - a).rem_euclid(std::f32::consts::TAU);
+            if turn(prev, h) > GAP || turn(first, h) > SPAN {
+                families.push(std::mem::take(&mut family));
+            }
+        }
+        if family.is_empty() {
+            first = h;
+        }
+        family.push(hued[k % hued.len()]);
+    }
+    if !family.is_empty() {
+        families.push(family);
+    }
+    // Greys stay first; the rest round the wheel from red.
+    let grey_first = usize::from(families.first().is_some_and(|f| lch[f[0]].1 < GREY_CHROMA));
+    let mean_hue = |f: &Vec<usize>| {
+        let (x, y) = f.iter().fold((0.0, 0.0), |(x, y), &i| {
+            (x + lch[i].2.cos(), y + lch[i].2.sin())
+        });
+        from_red(y.atan2(x))
+    };
+    families[grey_first..].sort_by(|a, b| mean_hue(a).total_cmp(&mean_hue(b)));
+    for f in &mut families {
+        f.sort_by(|&i, &j| lch[i].0.total_cmp(&lch[j].0));
+    }
+    families
+}
+
+/// `n` colours from `a` to `b`, both included, evenly spaced in Oklab
+/// (so the steps look even).
+pub fn ramp(a: Color32, b: Color32, n: usize) -> Vec<Color32> {
+    let (a, b) = (lab_of(a).0, lab_of(b).0);
+    let last = n.saturating_sub(1).max(1) as f32;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / last;
+            Lab(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t)).to_color()
         })
         .collect()
+}
+
+/// Oklab hues the shadows and lights of [`shades`] turn toward: a blue
+/// and a yellow.
+const SHADOW_HUE: f32 = -1.7;
+const LIGHT_HUE: f32 = 1.75;
+
+/// `n` shades of `c`, from near black to near white, with `c` itself at
+/// the step nearest its lightness. Chroma eases off away from `c`, and
+/// the hue turns by up to `hue_shift` radians at the ends: toward blue in
+/// the shadows and yellow in the lights, as painters shift them.
+pub fn shades(c: Color32, n: usize, hue_shift: f32) -> Vec<Color32> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let (l, chroma, h) = lab_of(c).lch();
+    let (darkest, lightest) = (0.12f32.min(l), 0.97f32.max(l));
+    let last = n.saturating_sub(1).max(1) as f32;
+    let at = |i: usize| darkest + (lightest - darkest) * i as f32 / last;
+    let own = (0..n)
+        .min_by(|&a, &b| (at(a) - l).abs().total_cmp(&(at(b) - l).abs()))
+        .unwrap_or(0);
+    // Turn `h` toward `target` by at most `by`.
+    let toward = |target: f32, by: f32| {
+        let d = (target - h + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        h + d.signum() * d.abs().min(by)
+    };
+    (0..n)
+        .map(|i| {
+            if i == own {
+                return Lab::from_lch_in_gamut(l, chroma, h).to_color();
+            }
+            let li = at(i);
+            let (t, hi) = if li < l {
+                let t = (l - li) / (l - darkest).max(1e-3);
+                (t, toward(SHADOW_HUE, hue_shift * t))
+            } else {
+                let t = (li - l) / (lightest - l).max(1e-3);
+                (t, toward(LIGHT_HUE, hue_shift * t))
+            };
+            let t = t.clamp(0.0, 1.0);
+            Lab::from_lch_in_gamut(li, chroma * (1.0 - 0.55 * t * t), hi).to_color()
+        })
+        .collect()
+}
+
+/// A CIE L*a*b* colour (D50, as Photoshop and Krita keep them) in sRGB.
+pub fn cielab_to_rgb(l: f32, a: f32, b: f32) -> [u8; 3] {
+    let fy = (l + 16.0) / 116.0;
+    let (fx, fz) = (fy + a / 500.0, fy - b / 200.0);
+    let f = |t: f32| {
+        if t > 6.0 / 29.0 {
+            t * t * t
+        } else {
+            3.0 * (6.0f32 / 29.0).powi(2) * (t - 4.0 / 29.0)
+        }
+    };
+    let (x, y, z) = (0.964_22 * f(fx), f(fy), 0.825_21 * f(fz));
+    // XYZ (D50) to linear sRGB, Bradford-adapted to D65.
+    [
+        3.133_856 * x - 1.616_866_7 * y - 0.490_614_6 * z,
+        -0.978_768_4 * x + 1.916_141_5 * y + 0.033_454 * z,
+        0.071_945_3 * x - 0.228_991_4 * y + 1.405_242_7 * z,
+    ]
+    .map(linear_to_srgb)
 }
 
 #[inline]
@@ -317,6 +534,77 @@ mod tests {
         }
         // Asking for more colours than exist gives just the distinct ones.
         assert_eq!(extract_palette(&px, 10).len(), 3);
+    }
+
+    #[test]
+    fn sorting_and_hue_families() {
+        let red = Color32::from_rgb(220, 30, 30);
+        let dark_red = Color32::from_rgb(100, 15, 20);
+        let orange = Color32::from_rgb(240, 140, 30);
+        let blue = Color32::from_rgb(30, 60, 220);
+        let grey = Color32::from_rgb(120, 120, 120);
+        let colors = [blue, grey, red, Color32::WHITE, dark_red, orange];
+        let by = |key| -> Vec<Color32> {
+            sort_order(&colors, key)
+                .iter()
+                .map(|&i| colors[i])
+                .collect()
+        };
+        assert_eq!(by(SortKey::Lightness)[0], dark_red);
+        assert_eq!(*by(SortKey::Lightness).last().unwrap(), Color32::WHITE);
+        assert_eq!(&by(SortKey::Hue)[..2], &[grey, Color32::WHITE]);
+        assert_eq!(by(SortKey::Chroma)[0], grey);
+        let families: Vec<Vec<Color32>> = hue_families(&colors)
+            .into_iter()
+            .map(|f| f.into_iter().map(|i| colors[i]).collect())
+            .collect();
+        assert_eq!(
+            families,
+            vec![
+                vec![grey, Color32::WHITE],
+                vec![dark_red, red],
+                vec![orange],
+                vec![blue]
+            ]
+        );
+        assert!(hue_families(&[]).is_empty());
+    }
+
+    #[test]
+    fn ramps_go_end_to_end_and_shades_dark_to_light() {
+        let (a, b) = (
+            Color32::from_rgb(200, 40, 40),
+            Color32::from_rgb(40, 40, 200),
+        );
+        let r = ramp(a, b, 5);
+        assert_eq!(r.len(), 5);
+        let close = |x: Color32, y: Color32| {
+            x.r().abs_diff(y.r()) <= 1 && x.g().abs_diff(y.g()) <= 1 && x.b().abs_diff(y.b()) <= 1
+        };
+        assert!(close(r[0], a) && close(r[4], b), "{r:?}");
+
+        let c = Color32::from_rgb(60, 150, 90);
+        for shift in [0.0, 0.5] {
+            let s = shades(c, 7, shift);
+            assert_eq!(s.len(), 7);
+            assert!(s.iter().any(|&x| close(x, c)), "the colour itself: {s:?}");
+            let l: Vec<f32> = s.iter().map(|&x| lab_of(x).lch().0).collect();
+            assert!(l.windows(2).all(|w| w[0] < w[1]), "dark to light: {l:?}");
+        }
+        // Black's go up to near white, no step twice.
+        let s = shades(Color32::BLACK, 5, 0.3);
+        assert_eq!(s[0], Color32::BLACK);
+        assert!(s.windows(2).all(|w| w[0] != w[1]), "{s:?}");
+        assert_eq!(shades(c, 1, 0.3).len(), 1);
+        assert!(shades(c, 0, 0.3).is_empty());
+    }
+
+    #[test]
+    fn cielab_colours() {
+        assert_eq!(cielab_to_rgb(100.0, 0.0, 0.0), [255, 255, 255]);
+        assert_eq!(cielab_to_rgb(0.0, 0.0, 0.0), [0, 0, 0]);
+        let [r, g, b] = cielab_to_rgb(54.3, 80.8, 69.9);
+        assert!(r > 245 && g < 30 && b < 30, "{r} {g} {b}");
     }
 
     #[test]

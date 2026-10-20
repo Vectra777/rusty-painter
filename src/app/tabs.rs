@@ -31,6 +31,8 @@ pub struct Document {
     motion: crate::app::motion::MotionEditState,
     guides: crate::app::tools::guides::GuideState,
     pen_path: crate::canvas::path::Path,
+    palettes: Vec<crate::app::tools::palettes::Palette>,
+    palette_edits: u64,
     wet_clock: Option<std::time::Instant>,
     wet_step: Option<(u64, usize)>,
     wet_drying: Option<crate::app::stroke_ops::WetDrying>,
@@ -58,6 +60,8 @@ impl Document {
             motion: Default::default(),
             guides: Default::default(),
             pen_path: Default::default(),
+            palettes: Vec::new(),
+            palette_edits: 0,
             wet_clock: None,
             wet_step: None,
             wet_drying: None,
@@ -74,7 +78,9 @@ impl Document {
         let history = &self.layer_state.history;
         let (undo, redo) = history.stacks();
         let version = (
-            history.push_count().wrapping_add(self.shader_edits),
+            (history.push_count())
+                .wrapping_add(self.shader_edits)
+                .wrapping_add(self.palette_edits),
             undo.len(),
             redo.len(),
         );
@@ -141,6 +147,7 @@ impl PainterApp {
         std::mem::swap(&mut ws.motion, &mut doc.motion);
         std::mem::swap(&mut ws.guides, &mut doc.guides);
         std::mem::swap(&mut ws.pen.path, &mut doc.pen_path);
+        (self.brush_state.palettes).swap_document(&mut doc.palettes, &mut doc.palette_edits);
         ws.pen.end_session();
         std::mem::swap(&mut ws.wet_clock, &mut doc.wet_clock);
         std::mem::swap(&mut ws.wet_step, &mut doc.wet_step);

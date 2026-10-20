@@ -20,6 +20,8 @@ pub(crate) enum OpenFor {
     Gradients,
     /// An image whose colours become a palette.
     Palette,
+    /// Other apps' palette files (several at once).
+    PaletteFiles,
     /// An ICC profile, for what [`ProfileUse`] says.
     Profile(ProfileUse),
     /// A picture to import as a layer (iOS: from Photos; Android has its
@@ -77,6 +79,10 @@ impl OpenFor {
             }
             OpenFor::Profile(_) => ("ICC profiles", vec!["icc", "icm"]),
             OpenFor::Gradients => ("Photoshop gradients", vec!["grd"]),
+            OpenFor::PaletteFiles => (
+                "Palettes",
+                crate::project::palette_files::EXTENSIONS.to_vec(),
+            ),
         }
     }
 
@@ -103,7 +109,10 @@ impl PainterApp {
         let mut all: Vec<&str> = extensions.clone();
         all.extend(upper.iter().map(String::as_str));
         let dialog = crate::app::settings::file_dialog().add_filter(label, &all);
-        let pick = if matches!(purpose, OpenFor::Brushes | OpenFor::Gradients) {
+        let pick = if matches!(
+            purpose,
+            OpenFor::Brushes | OpenFor::Gradients | OpenFor::PaletteFiles
+        ) {
             crate::app::jobs::Pick::Files
         } else {
             crate::app::jobs::Pick::File
@@ -120,7 +129,10 @@ impl PainterApp {
 
     #[cfg(mobile)]
     pub(crate) fn pick_open(&mut self, purpose: OpenFor) {
-        let multiple = matches!(purpose, OpenFor::Brushes | OpenFor::Gradients);
+        let multiple = matches!(
+            purpose,
+            OpenFor::Brushes | OpenFor::Gradients | OpenFor::PaletteFiles
+        );
         match crate::platform::picker_open(purpose.mimes(), multiple) {
             Ok(()) => self.workspace.file_pick = Some(PendingPick::Open(purpose)),
             Err(err) => self.report(err),
@@ -225,6 +237,7 @@ impl PainterApp {
             }
             OpenFor::Brushes => self.import_brushes_in_background(name, source),
             OpenFor::Gradients => self.import_gradients_in_background(name, source),
+            OpenFor::PaletteFiles => self.import_palette_in_background(name, source),
             OpenFor::Palette => {
                 let stem = std::path::Path::new(&name)
                     .file_stem()

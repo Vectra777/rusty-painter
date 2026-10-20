@@ -30,6 +30,7 @@ pub(crate) mod clip;
 mod convert;
 pub(crate) mod export;
 pub(crate) mod kra;
+pub(crate) mod palette_files;
 mod preview;
 pub(crate) mod psd;
 pub(crate) mod svg;
@@ -60,6 +61,7 @@ pub(crate) struct LoadedProject {
     pub guides: Option<crate::app::tools::guides::StoredGuides>,
     pub saved_selections: Vec<crate::app::tools::select::SavedSelection>,
     pub work_path: crate::canvas::path::Path,
+    pub palettes: Vec<crate::app::tools::palettes::Palette>,
 }
 
 /// Everything a project file holds, copied off the app: it's encoded and
@@ -71,6 +73,7 @@ pub(crate) struct ProjectSnapshot {
     guides: crate::app::tools::guides::StoredGuides,
     saved_selections: Vec<crate::app::tools::select::SavedSelection>,
     work_path: crate::canvas::path::Path,
+    palettes: Vec<crate::app::tools::palettes::Palette>,
 }
 
 impl ProjectSnapshot {
@@ -84,6 +87,7 @@ impl ProjectSnapshot {
             guides: crate::app::tools::guides::StoredGuides::from_app(app),
             saved_selections: app.workspace.select.saved.clone(),
             work_path: app.workspace.pen.path.clone(),
+            palettes: app.brush_state.palettes.document.clone(),
         }
     }
 
@@ -302,6 +306,7 @@ impl PainterApp {
                 }
                 self.workspace.select.saved = loaded.saved_selections;
                 self.workspace.pen.path = loaded.work_path;
+                self.brush_state.palettes.document = loaded.palettes;
             }
         }
         self.set_brush_tool(self.brush_state.eraser_active());
@@ -480,6 +485,9 @@ struct ProjectFile {
     /// The Pen's path; absent in older files.
     #[serde(default, skip_serializing_if = "crate::canvas::path::Path::is_empty")]
     work_path: crate::canvas::path::Path,
+    /// The document's own palettes; absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    palettes: Vec<crate::app::tools::palettes::Palette>,
 }
 
 impl ProjectFile {
@@ -512,6 +520,7 @@ impl ProjectFile {
             guides: Some(snapshot.guides.clone()),
             saved_selections: StoredSavedSelection::from_saved(&snapshot.saved_selections, blobs)?,
             work_path: snapshot.work_path.clone(),
+            palettes: snapshot.palettes.clone(),
         })
     }
 
@@ -575,6 +584,14 @@ impl ProjectFile {
             guides: self.guides,
             saved_selections,
             work_path: self.work_path,
+            palettes: self
+                .palettes
+                .into_iter()
+                .map(|mut p| {
+                    p.tidy();
+                    p
+                })
+                .collect(),
         })
     }
 }

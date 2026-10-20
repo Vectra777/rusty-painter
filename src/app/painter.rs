@@ -310,9 +310,7 @@ impl eframe::App for PainterApp {
         self.show_windows(ctx);
         self.show_job_progress(ctx);
         self.workspace.frame_stats.mark(Stage::Windows);
-        if std::mem::take(&mut self.brush_state.swatches_dirty) {
-            self.save_swatches();
-        }
+        self.brush_state.palettes.save_if_changed();
         self.save_view_settings(ctx);
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.save_active_preset(pointer_down);

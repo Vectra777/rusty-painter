@@ -40,10 +40,8 @@ pub struct BrushState {
     pub secondary_color: Color32,
     /// Most recently painted colors, newest first.
     pub recent_colors: Vec<Color32>,
-    /// Colours kept on purpose (the palette), in order.
-    pub swatches: Vec<Color32>,
-    /// The swatches changed: saved at the end of the frame.
-    pub swatches_dirty: bool,
+    /// Colours kept on purpose: the user's palettes and the document's.
+    pub palettes: crate::app::tools::palettes::Palettes,
     /// Brush, eraser, smudge and blur keep separate settings (tip, size,
     /// preset...): `brush` is the active slot's, these are the others' with
     /// their presets, swapped in when the tool changes. `None` for the
@@ -131,8 +129,7 @@ impl BrushState {
             new_preset_name: String::new(),
             secondary_color: Color32::WHITE,
             recent_colors: Vec::new(),
-            swatches: vec![Color32::BLACK, Color32::WHITE],
-            swatches_dirty: false,
+            palettes: Default::default(),
             parked: Default::default(),
             slot: BrushSlot::Brush,
             active_preset: None,

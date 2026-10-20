@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Palettes
+- Several named palettes instead of one list of swatches, chosen in the colour panel. Each is a grid with a set number of columns that can have gaps, and named groups below its first rows; swatches can be named. The swatches of older versions become the first palette.
+- In the colour panel a swatch is dragged to move it (onto a gap or another swatch), right-clicked or long-pressed to name, replace or remove it, and a click on a gap puts the brush colour there.
+- A palette can be kept in the document: it's saved in the project file and goes with it from tab to tab.
+- Sort a palette by value, hue or saturation, or arrange it in rows of a hue each, dark to light; hues and lightness in Oklab.
+- Open GIMP (`.gpl`), Adobe (`.ase`, `.aco`) and Krita (`.kpl`) palettes, from the Palette window or dropped on the app; save `.gpl`, `.ase` and `.kpl`.
+- Ramps from the brush colours: the brush colour's shades with an optional hue shift (cooler shadows, warmer lights), or even steps from the primary colour to the secondary; added to the palette as a row.
+- Colours taken from the picture go into the palette shown as new rows, or become a new palette arranged by hue.
+
 ### Vector layers: shapes, SVG, and drawn in the background
 - Vector layers hold shapes besides brush lines: Bézier paths filled and outlined, the outline with flat, round or square ends, sharp, round or cut corners, dashes and markers (arrow, open arrow, dot, square, bar), fill and outline each a colour or a gradient, a fill's even-odd rule, an opacity; and groups of them. The Shape tool on a vector layer keeps its shape exactly (a rectangle's corners, an ellipse's arcs, a curve's handles; filled with the secondary colour, outlined with the brush's), and so do the Pen's Fill and Stroke.
 - Edit Lines is Edit Vectors: a shape's points and handles are dragged as the Pen's are (Alt: a handle alone; Alt+click the outline adds a point, Alt+click a point turns it smooth or back), a shape or the items Shift+clicked move together, and Delete takes out the point or the items. Its options set the picked shapes' fill, outline, width, ends, corners, dashes, markers and opacity (a slider dragged is one undo step), group and ungroup them, and move them up or down the stack.

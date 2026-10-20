@@ -395,11 +395,12 @@ fn palette_extracts_and_recolours_a_layer() {
     );
     app.apply_history(false);
     assert_eq!(layer_pixels(&app, 1), before);
-    app.add_swatches(&pal);
+    app.add_to_palette(&pal);
     assert!(
         app.brush_state
-            .swatches
-            .contains(&Color32::from_rgb(255, 0, 0))
+            .palettes
+            .active()
+            .contains(Color32::from_rgb(255, 0, 0))
     );
 }
 
