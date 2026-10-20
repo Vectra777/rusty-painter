@@ -24,8 +24,9 @@ pub use merge::LayerSwap;
 pub use pixels::Region;
 pub(crate) use pixels::mix;
 pub(crate) use posed::transformed_rect;
-pub(crate) use transform::rect_corners;
+pub use transform::length_scale;
 pub use transform::{Distort, DistortKind, InverseMap, TransformParams, is_convex_quad};
+pub(crate) use transform::{apply_homography, invert3, mul3, rect_corners};
 
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex};

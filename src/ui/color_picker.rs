@@ -84,6 +84,17 @@ enum WheelDrag {
     Triangle,
 }
 
+/// Where a slider's menu leaves its colours for the palette.
+const SLIDER_PALETTE: &str = "slider_palette_request";
+
+/// A slider's colours asked for as a palette row (`new`: a new palette).
+#[derive(Clone)]
+struct SliderPalette {
+    colors: Vec<Color32>,
+    new: bool,
+    name: String,
+}
+
 /// Horizontal gradient bar with a handle; returns whether `value` changed.
 fn gradient_slider(
     ui: &mut egui::Ui,
@@ -154,6 +165,40 @@ fn gradient_slider(
             painter.circle_filled(center, knob - 2.5, CHECKERBOARD_DARK);
         }
         painter.circle_filled(center, knob - 2.5, inner);
+
+        // Right-click (or long-press): the bar's colours into a palette.
+        response.context_menu(|ui| {
+            let steps_id = egui::Id::new("slider_palette_steps");
+            let mut steps: usize = ui.data(|d| d.get_temp(steps_id)).unwrap_or(9);
+            ui.horizontal(|ui| {
+                ui.label("Steps");
+                ui.add(egui::DragValue::new(&mut steps).range(2..=32));
+            });
+            ui.data_mut(|d| d.insert_temp(steps_id, steps));
+            let colors: Vec<Color32> = (0..steps)
+                .map(|i| {
+                    let c = color_at(i as f32 / (steps - 1) as f32);
+                    let [r, g, b, _] = c.to_srgba_unmultiplied();
+                    Color32::from_rgb(r, g, b)
+                })
+                .collect();
+            let mut new = None;
+            if ui.button("Add as a palette row").clicked() {
+                new = Some(false);
+            }
+            if ui.button("New palette from it").clicked() {
+                new = Some(true);
+            }
+            if let Some(new) = new {
+                let request = SliderPalette {
+                    colors,
+                    new,
+                    name: format!("{label} steps"),
+                };
+                ui.data_mut(|d| d.insert_temp(egui::Id::new(SLIDER_PALETTE), request));
+                ui.close_menu();
+            }
+        });
 
         let mut changed = false;
         if (response.dragged() || response.clicked())
@@ -678,6 +723,22 @@ pub fn color_picker_panel(
                 new_color = Some((c, true));
             }
         });
+    let request: Option<SliderPalette> = ui.ctx().data_mut(|d| {
+        let id = egui::Id::new(SLIDER_PALETTE);
+        let r = d.get_temp(id);
+        d.remove::<SliderPalette>(id);
+        r
+    });
+    if let Some(r) = request {
+        let palettes = &mut brush_state.palettes;
+        if r.new {
+            let mut p = crate::app::tools::palettes::Palette::new(&r.name, &r.colors);
+            p.columns = r.colors.len().min(crate::app::tools::palettes::MAX_COLUMNS);
+            palettes.add(p, false);
+        } else {
+            palettes.edit_active().add_rows(0, &r.colors);
+        }
+    }
     let below = scroll.content_size.y - wheel_side;
     if (below - rest).abs() > 0.5 {
         ui.data_mut(|d| d.insert_temp(rest_id, below));

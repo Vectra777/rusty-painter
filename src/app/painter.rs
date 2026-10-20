@@ -282,6 +282,10 @@ impl eframe::App for PainterApp {
                 if self.vector_tick() {
                     needs_repaint = true;
                 }
+                // Vector and text layers drawn sharp when zoomed in.
+                if self.sharp_tick(ctx, &view, ui.clip_rect()) {
+                    needs_repaint = true;
+                }
                 // Composite and paint after input, so this frame's dabs and any
                 // pan/zoom show up in this frame.
                 let (uploads, more_tiles) =
@@ -535,6 +539,7 @@ impl PainterApp {
         // Overlays follow the canvas exactly (zoom, pan and rotation).
         let map = render::screen_map(self, view);
         let panel = view.response.rect;
+        crate::app::view::sharp::draw_sharp(self, ui.painter(), &map);
         crate::app::playback::draw_cached_frame(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::view::grid::draw_grid(self, ui.painter(), &map, panel);
         crate::app::view::guide_lines::draw_guide_lines(self, ctx, ui.painter(), &map, panel);

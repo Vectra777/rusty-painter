@@ -358,6 +358,8 @@ pub(super) struct StoredText {
     style: TextStyle,
     color: StoredColor,
     pos: StoredVec2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transform: Option<[f64; 9]>,
 }
 
 impl From<&TextLayer> for StoredText {
@@ -368,6 +370,7 @@ impl From<&TextLayer> for StoredText {
             style: text.style,
             color: StoredColor::from_color(text.color),
             pos: text.pos.into(),
+            transform: text.transform,
         }
     }
 }
@@ -385,6 +388,7 @@ impl StoredText {
                 style: s.style,
                 color: s.color.to_color(),
                 pos: s.pos.into(),
+                transform: s.transform,
             })
         })
     }

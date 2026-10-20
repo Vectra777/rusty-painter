@@ -60,6 +60,9 @@ resvg = { version = "0.48", default-features = false }
 spade = "2.15"
 # ibisPaint brushes: the QR codes it exports them as (binary payloads).
 rqrr = { version = "0.11", default-features = false }
+# Edit Vectors' Combine (union, intersect, subtract, exclude): robust
+# polygon booleans.
+i_overlay = "=8.1.2"
 
 [dev-dependencies]
 pollster = "0.4"

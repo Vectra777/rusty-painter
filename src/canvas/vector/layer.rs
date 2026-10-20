@@ -20,10 +20,24 @@ const LOOSE: usize = 256;
 
 /// A vector layer's lines and shapes, bottom first. Copies share them (and
 /// the index while neither changes): the copy an undo step keeps is cheap.
-#[derive(Default)]
 pub struct VectorLayer {
     items: Vec<Arc<VectorItem>>,
     index: OnceLock<Arc<Index>>,
+    /// Changes with every edit (never the same for different lines): what
+    /// a picture of them was drawn from, to tell it's out of date.
+    version: u64,
+}
+
+impl Default for VectorLayer {
+    fn default() -> Self {
+        Self::from_items(Vec::new())
+    }
+}
+
+/// The next [`VectorLayer::version`].
+fn next_version() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Where the lines are: each one's box, and a grid over them.
@@ -190,7 +204,13 @@ impl VectorLayer {
         VectorLayer {
             items: items.into_iter().map(Arc::new).collect(),
             index: OnceLock::new(),
+            version: next_version(),
         }
+    }
+
+    /// See the field: changes with every edit.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// The lines and shapes, bottom first.
@@ -258,6 +278,7 @@ impl VectorLayer {
 
     /// An item on top.
     pub fn push_item(&mut self, item: VectorItem) {
+        self.version = next_version();
         let bounds = item.bounds();
         self.items.push(Arc::new(item));
         let i = self.items.len() - 1;
@@ -269,6 +290,7 @@ impl VectorLayer {
 
     /// A point on the end of the top line (the one being drawn).
     pub fn append_point(&mut self, point: [f32; 3]) {
+        self.version = next_version();
         let Some(last) = self.items.last_mut() else {
             return;
         };
@@ -301,6 +323,7 @@ impl VectorLayer {
 
     /// Change item `i`.
     pub fn edit_item(&mut self, i: usize, edit: impl FnOnce(&mut VectorItem)) {
+        self.version = next_version();
         let Some(item) = self.items.get_mut(i) else {
             return;
         };
@@ -315,6 +338,7 @@ impl VectorLayer {
     /// Put each `(i, pieces)`'s pieces in place of item `i` (none takes it
     /// out), the indices ascending and different.
     pub fn splice(&mut self, edits: Vec<(usize, Vec<VectorItem>)>) {
+        self.version = next_version();
         if edits.is_empty() {
             return;
         }
@@ -368,6 +392,7 @@ impl VectorLayer {
 
     /// Change every item.
     pub fn edit_all_items(&mut self, mut edit: impl FnMut(&mut VectorItem)) {
+        self.version = next_version();
         for item in &mut self.items {
             edit(Arc::make_mut(item));
         }
@@ -384,6 +409,7 @@ impl Clone for VectorLayer {
         VectorLayer {
             items: self.items.clone(),
             index,
+            version: self.version,
         }
     }
 }

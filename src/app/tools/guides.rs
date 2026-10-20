@@ -84,6 +84,10 @@ pub(crate) struct StoredGuides {
     /// The horizontal and vertical guide lines (View → Guides).
     guide_lines: Vec<crate::app::view::guide_lines::GuideLine>,
     guides_locked: bool,
+    /// The curve ruler's points, if there is one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    curve_ruler: Vec<[f32; 2]>,
+    curve_enabled: bool,
 }
 
 impl StoredGuides {
@@ -110,6 +114,11 @@ impl StoredGuides {
             wrap_around: app.workspace.wrap_around,
             guide_lines: app.workspace.view_aids.guides.lines.clone(),
             guides_locked: app.workspace.view_aids.guides.locked,
+            curve_ruler: g
+                .curve_ruler
+                .as_ref()
+                .map_or(Vec::new(), |c| c.iter().map(|p| [p.x, p.y]).collect()),
+            curve_enabled: g.curve_enabled,
         }
     }
 
@@ -123,6 +132,15 @@ impl StoredGuides {
             parallel: self.ruler_parallel,
         };
         g.assistants = self.assistants;
+        g.curve_ruler = (self.curve_ruler.len() >= 2).then(|| {
+            std::sync::Arc::new(
+                self.curve_ruler
+                    .iter()
+                    .map(|p| Vec2::new(p[0], p[1]))
+                    .collect(),
+            )
+        });
+        g.curve_enabled = self.curve_enabled && g.curve_ruler.is_some();
         g.end_drag();
         let s = &mut app.workspace.symmetry;
         s.mode = match self.symmetry.as_str() {
@@ -161,6 +179,10 @@ pub struct GuideState {
     pub ruler: Ruler,
     /// The drawing assistants.
     pub assistants: Vec<Assistant>,
+    /// A curve ruler made from a vector line (Edit Vectors → Make ruler):
+    /// strokes started near it run along it.
+    pub curve_ruler: Option<std::sync::Arc<Vec<Vec2>>>,
+    pub curve_enabled: bool,
     /// What the current stroke follows (a ruler line, an assistant).
     lock: Option<Lock>,
     /// The current stroke's last point on an ellipse, and its pressure: the
@@ -271,7 +293,13 @@ impl PainterApp {
         if !dirs.is_empty() && enabled().any(|a| a.kind == AssistantKind::Perspective) {
             dirs.push(Vec2::new(0.0, 1.0));
         }
-        guides.lock = if let (true, Some(dir)) = (near_ruler, ruler_dir) {
+        let near_curve = guides.curve_ruler.clone().filter(|c| {
+            guides.curve_enabled
+                && crate::app::tools::assistants::nearest_on_polyline(c, pos).1 <= snap
+        });
+        guides.lock = if let Some(curve) = near_curve {
+            Some(Lock::Curve(curve))
+        } else if let (true, Some(dir)) = (near_ruler, ruler_dir) {
             Some(Lock::Fixed(Constraint::Line {
                 origin: ruler.a,
                 dir,
@@ -509,6 +537,17 @@ fn clip_to_canvas(p: Vec2, dir: Vec2, t0: f32, t1: f32, w: f32, h: f32) -> Optio
 /// Draw the guides over the canvas.
 pub(crate) fn draw_guides(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
     draw_ruler(app, painter, map);
+    let guides = &app.workspace.guides;
+    if guides.curve_enabled
+        && let Some(curve) = &guides.curve_ruler
+    {
+        let pts: Vec<Pos2> = curve.iter().map(|&p| map.to_screen(p)).collect();
+        painter.add(egui::Shape::line(
+            pts.clone(),
+            Stroke::new(3.0_f32, Color32::from_black_alpha(140)),
+        ));
+        painter.add(egui::Shape::line(pts, Stroke::new(1.0_f32, GUIDE_COLOR)));
+    }
     draw_assistants(app, painter, map);
     if !app.symmetry_guides_shown() {
         return;
@@ -689,6 +728,45 @@ fn draw_ruler(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stroke_started_near_the_curve_ruler_runs_along_it_and_it_saves() {
+        let mut app = crate::project::tests::test_app_pub(crate::canvas::Canvas::new(
+            200,
+            200,
+            Color32::WHITE,
+            64,
+        ));
+        app.viewport.zoom = 1.0;
+        // An arc.
+        let arc: Vec<Vec2> = (0..=40)
+            .map(|i| {
+                let a = std::f32::consts::PI * i as f32 / 40.0;
+                Vec2::new(100.0 + 80.0 * a.cos(), 100.0 + 80.0 * a.sin())
+            })
+            .collect();
+        app.workspace.guides.curve_ruler = Some(std::sync::Arc::new(arc));
+        app.workspace.guides.curve_enabled = true;
+        let start = app.ruler_begin_stroke(Vec2::new(185.0, 105.0));
+        assert!(((start - Vec2::new(100.0, 100.0)).length() - 80.0).abs() < 1.0);
+        let on = app.ruler_snap(Vec2::new(100.0, 170.0));
+        assert!((on - Vec2::new(100.0, 180.0)).length() < 1.0, "{on:?}");
+        // Far from it: left alone.
+        app.workspace.guides.end_drag();
+        assert_eq!(
+            app.ruler_begin_stroke(Vec2::new(100.0, 100.0)),
+            Vec2::new(100.0, 100.0)
+        );
+        let stored = serde_json::to_string(&StoredGuides::from_app(&app)).unwrap();
+        app.workspace.guides.curve_ruler = None;
+        serde_json::from_str::<StoredGuides>(&stored)
+            .unwrap()
+            .apply(&mut app);
+        assert_eq!(
+            app.workspace.guides.curve_ruler.as_ref().map(|c| c.len()),
+            Some(41)
+        );
+    }
 
     #[test]
     fn lines_are_clipped_to_the_canvas() {

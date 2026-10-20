@@ -56,6 +56,10 @@ pub struct TextLayer {
     pub color: Color32,
     /// Top-left of the text block, canvas pixels.
     pub pos: Vec2,
+    /// Where the Transform tool put it: a 3×3 projective map (row-major)
+    /// from where the text would be untransformed to the canvas. It's drawn
+    /// through it from its glyphs' outlines, so it stays sharp.
+    pub transform: Option<[f64; 9]>,
 }
 
 /// A line of laid-out text.
@@ -312,7 +316,11 @@ pub fn render(
     text: &str,
     style: &TextStyle,
     origin: Vec2,
+    transform: Option<&[f64; 9]>,
 ) -> Option<SelectionMask> {
+    if let Some(h) = transform {
+        return render_transformed(fonts, text, style, origin, h);
+    }
     let layout = layout(fonts, text, style);
     let outlined: Vec<_> = layout
         .glyphs
@@ -350,6 +358,83 @@ pub fn render(
             }
         });
     }
+    Some(SelectionMask::new(x0, y0, w, h, data))
+}
+
+/// [`render`] through the projective map `h`: the glyphs' outlines cut
+/// into straight pieces, mapped, and filled with exact coverage.
+fn render_transformed(
+    fonts: &[FontArc],
+    text: &str,
+    style: &TextStyle,
+    origin: Vec2,
+    h: &[f64; 9],
+) -> Option<SelectionMask> {
+    use crate::canvas::raster::{Edges, FillRule};
+    use ab_glyph::OutlineCurve;
+    let map = |p: Vec2| crate::canvas::storage::apply_homography(h, p);
+    let mut edges = Edges::new();
+    for (f, g) in layout(fonts, text, style).glyphs {
+        let font = &fonts[f];
+        let Some(outline) = font.outline(g.id) else {
+            continue;
+        };
+        let sf = font.as_scaled(g.scale);
+        let (hs, vs) = (sf.h_scale_factor(), sf.v_scale_factor());
+        let at = |p: ab_glyph::Point| {
+            map(Vec2::new(
+                origin.x + g.position.x + p.x * hs,
+                origin.y + g.position.y - p.y * vs,
+            ))
+        };
+        // Pieces short enough at the text's size to look curved.
+        let steps = ((style.size / 6.0).ceil() as usize).clamp(4, 24);
+        for curve in &outline.curves {
+            let points: Vec<Vec2> = match *curve {
+                OutlineCurve::Line(a, b) => vec![at(a), at(b)],
+                OutlineCurve::Quad(a, b, c) => (0..=steps)
+                    .map(|i| {
+                        let t = i as f32 / steps as f32;
+                        let u = 1.0 - t;
+                        at(ab_glyph::point(
+                            u * u * a.x + 2.0 * u * t * b.x + t * t * c.x,
+                            u * u * a.y + 2.0 * u * t * b.y + t * t * c.y,
+                        ))
+                    })
+                    .collect(),
+                OutlineCurve::Cubic(a, b, c, d) => (0..=steps)
+                    .map(|i| {
+                        let t = i as f32 / steps as f32;
+                        let u = 1.0 - t;
+                        let (k0, k1, k2, k3) =
+                            (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                        at(ab_glyph::point(
+                            k0 * a.x + k1 * b.x + k2 * c.x + k3 * d.x,
+                            k0 * a.y + k1 * b.y + k2 * c.y + k3 * d.y,
+                        ))
+                    })
+                    .collect(),
+            };
+            for w in points.windows(2) {
+                edges.edge(w[0], w[1]);
+            }
+        }
+    }
+    if edges.is_empty() {
+        return None;
+    }
+    // ponytail: a map that throws the text far away is cut to 16k pixels a side.
+    let [x0, y0, x1, y1] = edges.pixel_bounds();
+    let (x1, y1) = (x1.min(x0 + 16384), y1.min(y0 + 16384));
+    let (w, h) = ((x1 - x0).max(1) as usize, (y1 - y0).max(1) as usize);
+    let mut cov = vec![0.0f32; w * h];
+    if !edges.coverage(FillRule::NonZero, [x0, y0, x1, y1], &mut cov) {
+        return None;
+    }
+    let data = cov
+        .iter()
+        .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
     Some(SelectionMask::new(x0, y0, w, h, data))
 }
 
@@ -438,7 +523,7 @@ mod tests {
             size: 40.0,
             ..Default::default()
         };
-        let mask = render(&font(), "Hi", &style, Vec2::new(100.0, 50.0)).unwrap();
+        let mask = render(&font(), "Hi", &style, Vec2::new(100.0, 50.0), None).unwrap();
         assert!(mask.x0 >= 100 && mask.y0 >= 50);
         assert!(mask.data.contains(&255), "solid inside the letters");
         assert!(mask.w < 80 && mask.h <= 45, "{}x{}", mask.w, mask.h);
@@ -459,8 +544,8 @@ mod tests {
             align: TextAlign::Right,
             ..style
         };
-        let left_x = render(&f, "wide line\nx", &style, Vec2::ZERO).unwrap();
-        let right_x = render(&f, "wide line\nx", &right, Vec2::ZERO).unwrap();
+        let left_x = render(&f, "wide line\nx", &style, Vec2::ZERO, None).unwrap();
+        let right_x = render(&f, "wide line\nx", &right, Vec2::ZERO, None).unwrap();
         // The short line moves right: the lower half's leftmost ink too.
         let first_ink = |m: &SelectionMask| {
             (m.h / 2..m.h)
@@ -546,6 +631,6 @@ mod tests {
 
     #[test]
     fn blank_text_renders_nothing() {
-        assert!(render(&font(), "  \n ", &TextStyle::default(), Vec2::ZERO).is_none());
+        assert!(render(&font(), "  \n ", &TextStyle::default(), Vec2::ZERO, None).is_none());
     }
 }

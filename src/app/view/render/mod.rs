@@ -390,7 +390,18 @@ pub fn update_dirty_textures(
             .map(|shown| Some(crate::canvas::shader::run_view(canvas, shown)))
             .collect(),
         Some(_) => Vec::new(),
-        None => vec![None],
+        // Layers drawn sharp over the composite are left out of it.
+        None => {
+            let hidden = &app.workspace.vector.sharp.hidden;
+            vec![(!hidden.is_empty()).then(|| {
+                let shown: Vec<bool> = canvas
+                    .layers
+                    .iter()
+                    .map(|l| !hidden.contains(&l.id))
+                    .collect();
+                crate::canvas::shader::run_view(canvas, &shown)
+            })]
+        }
     };
     let per_run = cache.atlases_x * cache.atlases_y;
     // The below-cache holds everything under the active layer: only the

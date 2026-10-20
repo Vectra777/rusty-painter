@@ -1262,6 +1262,7 @@ mod tests {
             style: Default::default(),
             color: Color32::BLACK,
             pos: Vec2::ZERO,
+            transform: None,
         }));
         click(&mut app, Vec2::new(100.0, 128.0), false, false);
         assert!(app.canvas.layers[1].text.is_none());

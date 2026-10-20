@@ -58,6 +58,62 @@ fn gradient_across(shape: &PathShape, from: Color32, to: Color32, kind: Gradient
     }))
 }
 
+/// What Edit Vectors' drags do (edit, or a correcting brush) and that
+/// mode's settings, and the switches for every mode.
+pub(crate) fn vector_mode_options(
+    app: &mut PainterApp,
+    ui: &mut egui::Ui,
+) -> crate::app::tools::vector_correct::CorrectMode {
+    use crate::app::tools::vector_arrange::BoxPick;
+    use crate::app::tools::vector_correct::CorrectMode;
+    let v = &mut app.workspace.vector;
+    egui::ComboBox::from_id_salt("vector_mode")
+        .selected_text(v.mode.label())
+        .show_ui(ui, |ui| {
+            for m in CorrectMode::ALL {
+                ui.selectable_value(&mut v.mode, m, m.label())
+                    .on_hover_text(m.hint());
+            }
+        });
+    match v.mode {
+        CorrectMode::Edit => {
+            combo(
+                ui,
+                "box_pick",
+                &mut v.box_pick,
+                &[
+                    (BoxPick::Touching, "Box: touching"),
+                    (BoxPick::Inside, "Box: inside"),
+                ],
+            );
+            ui.checkbox(&mut v.snap_points, "Snap points")
+                .on_hover_text("A dragged end or point snaps to other items' points");
+        }
+        mode => {
+            ui.label("Size");
+            ui.add(
+                egui::DragValue::new(&mut v.correct.size)
+                    .range(1.0..=400.0)
+                    .speed(0.5)
+                    .suffix(" px"),
+            );
+            if mode == CorrectMode::Simplify {
+                ui.label("Amount");
+                ui.add(
+                    egui::DragValue::new(&mut v.correct.simplify)
+                        .range(0.1..=40.0)
+                        .speed(0.1)
+                        .suffix(" px"),
+                )
+                .on_hover_text("How far a line may move to lose points");
+            }
+        }
+    }
+    ui.checkbox(&mut v.show_paths, "Show paths")
+        .on_hover_text("Every line's centre and points, over the vector layer");
+    v.mode
+}
+
 /// The options bar for Edit Vectors; returns its hint.
 pub(crate) fn vector_edit_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     let hint = "Click a line or shape (Shift: more); drag a point or handle (Alt: a handle alone), a shape to move it; Alt+click the outline: add a point; Delete removes it";
@@ -104,7 +160,80 @@ pub(crate) fn vector_edit_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'
     if ui.button("Delete").clicked() {
         app.delete_vector_items();
     }
+    arrange_controls(app, ui, &all);
     hint
+}
+
+/// Line up, spread out, flip and combine the picked items; a ruler from
+/// one.
+fn arrange_controls(app: &mut PainterApp, ui: &mut egui::Ui, all: &[usize]) {
+    use crate::app::tools::vector_arrange::{Align, Combine};
+    ui.separator();
+    ui.menu_button("Align", |ui| {
+        let tip = if all.len() > 1 {
+            "To the box round them all"
+        } else {
+            "To the canvas"
+        };
+        for (label, side) in [
+            ("Left", Align::Left),
+            ("Centre", Align::Centre),
+            ("Right", Align::Right),
+            ("Top", Align::Top),
+            ("Middle", Align::Middle),
+            ("Bottom", Align::Bottom),
+        ] {
+            if ui.button(label).on_hover_text(tip).clicked() {
+                app.align_vector_items(side);
+                ui.close_menu();
+            }
+        }
+        if all.len() > 2 {
+            ui.separator();
+            if ui.button("Spread across").clicked() {
+                app.distribute_vector_items(true);
+                ui.close_menu();
+            }
+            if ui.button("Spread down").clicked() {
+                app.distribute_vector_items(false);
+                ui.close_menu();
+            }
+        }
+    });
+    if ui.button("⇆").on_hover_text("Flip across").clicked() {
+        app.flip_vector_items(true);
+    }
+    if ui.button("⇅").on_hover_text("Flip upside down").clicked() {
+        app.flip_vector_items(false);
+    }
+    if all.len() > 1 {
+        ui.menu_button("Combine", |ui| {
+            for how in Combine::ALL {
+                if ui
+                    .button(how.label())
+                    .on_hover_text("The picked shapes as one, with the bottom one's look")
+                    .clicked()
+                {
+                    if !app.combine_vector_shapes(how) {
+                        app.report(
+                            "Combine needs two shapes (brush lines and groups can't)".to_string(),
+                        );
+                    }
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+    if ui
+        .button("Make ruler")
+        .on_hover_text(
+            "The picked line becomes a curve ruler: strokes started near it run along it",
+        )
+        .clicked()
+        && app.picked_to_curve_ruler()
+    {
+        app.report("Curve ruler made (Shapes menu: turn it off or remove it)".to_string());
+    }
 }
 
 /// Fill, outline and opacity of the picked shapes, shown as `shape`'s.

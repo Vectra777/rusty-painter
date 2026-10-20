@@ -59,6 +59,7 @@ impl PainterApp {
     /// Draw vector layer `idx` again over `region` (canvas pixels), in the
     /// background.
     pub(crate) fn request_vector_redraw(&mut self, idx: usize, region: [i32; 4]) {
+        self.sharp_damage(region);
         let Some(layer) = self.canvas.layers.get(idx) else {
             return;
         };
@@ -77,6 +78,7 @@ impl PainterApp {
     /// `region` drawn now (a pen's last stretch, small): newer than any
     /// job's picture of these tiles, which won't overwrite it.
     pub(crate) fn mark_vector_drawn(&mut self, idx: usize, region: [i32; 4]) {
+        self.sharp_damage(region);
         let Some(layer) = self.canvas.layers.get(idx) else {
             return;
         };

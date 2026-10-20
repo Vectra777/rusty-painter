@@ -89,6 +89,32 @@ fn palettes_section(app: &mut PainterApp, ui: &mut egui::Ui) {
                 false,
             );
         }
+        ui.menu_button("Presets", |ui| {
+            let presets = crate::project::palette_files::presets();
+            let mut categories: Vec<&str> = Vec::new();
+            for (c, _) in presets {
+                if !categories.contains(&c.as_str()) {
+                    categories.push(c);
+                }
+            }
+            for category in categories {
+                ui.menu_button(category, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(400.0)
+                        .show(ui, |ui| {
+                            for (_, p) in presets.iter().filter(|(c, _)| c == category) {
+                                let label = format!("{} ({})", p.name, p.len());
+                                if ui.button(label).clicked() {
+                                    palettes.add(p.clone(), false);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                });
+            }
+        })
+        .response
+        .on_hover_text("Add a copy of a palette that comes with the app");
         if ui.button("Duplicate").clicked() {
             let mut copy = palettes.active().clone();
             copy.name = format!("{} copy", copy.name);
@@ -323,41 +349,117 @@ fn picture_section(app: &mut PainterApp, ui: &mut egui::Ui, swatch: f32) {
 }
 
 fn ramp_section(app: &mut PainterApp, ui: &mut egui::Ui, swatch: f32) {
-    heading(ui, "RAMP FROM THE BRUSH COLOURS");
+    heading(ui, "MAKE COLOURS");
     let p = &mut app.workspace.palette;
-    segmented(
-        ui,
-        &mut p.ramp_kind,
-        &[
-            (RampKind::Shades, "Shades"),
-            (RampKind::Blend, "Primary to secondary"),
-        ],
-        false,
-    );
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Steps").color(TEXT_DIM));
-        ui.add(BarSlider::new(&mut p.ramp_steps, 2..=16));
-    });
-    if p.ramp_kind == RampKind::Shades {
+    egui::ComboBox::from_id_salt("palette_maker_kind")
+        .selected_text(p.ramp_kind.label())
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for kind in RampKind::ALL {
+                ui.selectable_value(&mut p.ramp_kind, kind, kind.label());
+            }
+        });
+    let row = |ui: &mut egui::Ui, label: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Hue shift").color(TEXT_DIM))
-                .on_hover_text("Shadows turn toward blue and lights toward yellow");
+            ui.label(RichText::new(label).color(TEXT_DIM));
+            add(ui);
+        });
+    };
+    match p.ramp_kind {
+        RampKind::Shades | RampKind::Blend | RampKind::Gradient => {
+            row(ui, "Steps", &mut |ui| {
+                ui.add(BarSlider::new(&mut p.ramp_steps, 2..=32));
+            });
+        }
+        RampKind::Grid | RampKind::Variations => {
+            row(ui, "Columns", &mut |ui| {
+                ui.add(BarSlider::new(&mut p.grid_cols, 1..=16));
+            });
+            row(ui, "Rows", &mut |ui| {
+                ui.add(BarSlider::new(&mut p.grid_rows, 1..=16));
+            });
+        }
+    }
+    match p.ramp_kind {
+        RampKind::Shades => row(ui, "Hue shift", &mut |ui| {
             ui.add(
                 BarSlider::new(&mut p.hue_shift, 0.0..=60.0)
                     .suffix("°")
                     .max_decimals(0),
+            )
+            .on_hover_text("Shadows turn toward blue and lights toward yellow");
+        }),
+        RampKind::Variations => {
+            row(ui, "Hue", &mut |ui| {
+                ui.add(
+                    BarSlider::new(&mut p.vary_hue, 0.0..=180.0)
+                        .suffix("°")
+                        .max_decimals(0),
+                )
+                .on_hover_text("How far the hue turns either way across a row");
+            });
+            row(ui, "Lightness", &mut |ui| {
+                ui.add(BarSlider::new(&mut p.vary_light, 0.0..=0.5).max_decimals(2))
+                    .on_hover_text("How much lighter the top row and darker the bottom");
+            });
+        }
+        RampKind::Grid => {
+            // The corners, as the grid lays them out; a click puts the brush
+            // colour in one.
+            let brush = app.brush_state.brush.brush_options.color;
+            let corners = &mut app.workspace.palette.grid_corners;
+            ui.label(
+                RichText::new("Corners (click one to put the brush colour there):")
+                    .small()
+                    .color(TEXT_DIM),
             );
-        });
+            egui::Grid::new("grid_corners").show(ui, |ui| {
+                for (i, c) in corners.iter_mut().enumerate() {
+                    if color_swatch(ui, *c, egui::vec2(swatch, swatch))
+                        .on_hover_text("Click: the brush colour goes here")
+                        .clicked()
+                    {
+                        *c = brush;
+                    }
+                    if i % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+        }
+        RampKind::Gradient => {
+            let library = &app.workspace.gradient.library;
+            let current = app.workspace.palette.gradient;
+            let mut picked = current;
+            egui::ComboBox::from_id_salt("palette_maker_gradient")
+                .selected_text(library.name(current).to_string())
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for g in library.choices() {
+                        ui.selectable_value(&mut picked, g, library.name(g));
+                    }
+                });
+            app.workspace.palette.gradient = picked;
+        }
+        RampKind::Blend => {}
     }
-    let ramp = app.palette_ramp();
-    strip(app, ui, &ramp, swatch * 0.8);
-    if ui
-        .button("Add as a row")
-        .on_hover_text("At the end of the palette shown")
-        .clicked()
-    {
-        app.brush_state.palettes.edit_active().add_rows(0, &ramp);
+    let (colors, cols) = app.palette_ramp();
+    for r in colors.chunks(cols.max(1)) {
+        strip(app, ui, r, swatch * 0.8);
     }
+    ui.horizontal(|ui| {
+        if ui
+            .button("Add as rows")
+            .on_hover_text("At the end of the palette shown")
+            .clicked()
+        {
+            app.add_rows_to_palette(&colors, cols);
+        }
+        if ui.button("New palette").clicked() {
+            let name = app.workspace.palette.ramp_kind.label().to_string();
+            app.new_palette_of_rows(&name, &colors, cols);
+        }
+    });
 }
 
 fn recolour_section(app: &mut PainterApp, ui: &mut egui::Ui) {

@@ -321,6 +321,49 @@ pub fn ramp(a: Color32, b: Color32, n: usize) -> Vec<Color32> {
         .collect()
 }
 
+/// A grid of `rows` rows of `cols` colours between four corners (top-left,
+/// top-right, bottom-left, bottom-right), mixed evenly in Oklab: Clip
+/// Studio's intermediate colours. Row after row.
+pub fn grid(corners: [Color32; 4], cols: usize, rows: usize) -> Vec<Color32> {
+    let [tl, tr, bl, br] = corners.map(|c| lab_of(c).0);
+    let at = |n: usize, i: usize| i as f32 / n.saturating_sub(1).max(1) as f32;
+    (0..rows)
+        .flat_map(|r| (0..cols).map(move |c| (at(cols, c), at(rows, r))))
+        .map(|(x, y)| {
+            Lab(std::array::from_fn(|k| {
+                let top = tl[k] + (tr[k] - tl[k]) * x;
+                let bottom = bl[k] + (br[k] - bl[k]) * x;
+                top + (bottom - top) * y
+            }))
+            .to_color()
+        })
+        .collect()
+}
+
+/// Colours around `c`: `rows` rows from lighter to darker (by up to
+/// `light` in Oklab lightness either way), and along each, `cols` hues
+/// turning by up to `hue` radians either way, with `c` in the middle;
+/// chroma kept where the screen can show it. Clip Studio's approximate
+/// colours.
+pub fn variations(c: Color32, cols: usize, rows: usize, hue: f32, light: f32) -> Vec<Color32> {
+    let (l, chroma, h) = lab_of(c).lch();
+    // -1..=1 across `n` steps (0 for one).
+    let step = |n: usize, i: usize| {
+        if n <= 1 {
+            0.0
+        } else {
+            i as f32 / (n - 1) as f32 * 2.0 - 1.0
+        }
+    };
+    (0..rows)
+        .flat_map(|r| (0..cols).map(move |k| (step(cols, k), step(rows, r))))
+        .map(|(x, y)| {
+            let li = (l - y * light).clamp(0.0, 1.0);
+            Lab::from_lch_in_gamut(li, chroma, h + x * hue).to_color()
+        })
+        .collect()
+}
+
 /// Oklab hues the shadows and lights of [`shades`] turn toward: a blue
 /// and a yellow.
 const SHADOW_HUE: f32 = -1.7;
@@ -625,5 +668,46 @@ mod tests {
             .filter(|i| d.apply(grey, i % 4, i / 4) == Color32::WHITE)
             .count();
         assert!((4..=12).contains(&whites), "{whites}");
+    }
+
+    #[test]
+    fn a_grid_has_its_corners_and_mixes_between_them() {
+        let (r, g, b, w) = (
+            Color32::from_rgb(255, 0, 0),
+            Color32::from_rgb(0, 255, 0),
+            Color32::from_rgb(0, 0, 255),
+            Color32::WHITE,
+        );
+        let cells = grid([r, g, b, w], 4, 3);
+        assert_eq!(cells.len(), 12);
+        let near = |a: Color32, b: Color32| {
+            a.to_array()
+                .iter()
+                .zip(b.to_array())
+                .all(|(x, y)| x.abs_diff(y) <= 2)
+        };
+        assert!(near(cells[0], r) && near(cells[3], g));
+        assert!(near(cells[8], b) && near(cells[11], w));
+        // Two corners alike: that side is one colour.
+        let side = grid([r, r, b, b], 3, 2);
+        assert!(near(side[1], r) && near(side[4], b));
+    }
+
+    #[test]
+    fn variations_have_the_colour_in_the_middle_lighter_above() {
+        let c = Color32::from_rgb(180, 90, 60);
+        let v = variations(c, 5, 3, 0.4, 0.2);
+        assert_eq!(v.len(), 15);
+        let mid = v[7];
+        assert!(
+            mid.to_array()
+                .iter()
+                .zip(c.to_array())
+                .all(|(x, y)| x.abs_diff(y) <= 2)
+        );
+        let l = |c: Color32| lab_of(c).0[0];
+        assert!(l(v[2]) > l(mid) && l(mid) > l(v[12]));
+        // The hue turns across a row.
+        assert_ne!(v[5], v[9]);
     }
 }

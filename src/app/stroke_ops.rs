@@ -358,6 +358,15 @@ impl PainterApp {
         {
             return;
         }
+        // Painting on text goes on a new layer above it, as in Clip Studio
+        // (the eraser still makes it pixels: that's what erasing it means).
+        if matches!(self.active_tool, crate::app::tools::Tool::Brush)
+            && !self.brush_state.eraser_active()
+            && self.brush_state.brush.brush_options.blend_mode != BlendMode::Eraser
+            && self.is_text_layer(self.canvas.active_layer_idx)
+        {
+            self.add_layer_and_select();
+        }
         self.rasterise_text_for_stroke();
         self.rasterise_vector_for_stroke();
         if self.brush_state.brush.impasto.is_some() {

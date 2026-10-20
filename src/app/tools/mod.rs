@@ -25,6 +25,8 @@ pub(crate) mod shape;
 pub(crate) mod text;
 pub(crate) mod transform;
 pub(crate) mod vector;
+pub(crate) mod vector_arrange;
+pub(crate) mod vector_correct;
 pub(crate) mod vector_shapes;
 
 use crate::selection::SelectionType;

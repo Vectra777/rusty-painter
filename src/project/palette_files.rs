@@ -459,9 +459,34 @@ fn write_kpl(palette: &Palette) -> Result<Vec<u8>, String> {
     zip.finish()
 }
 
+/// The palettes that come with the app, and each one's category, in
+/// the order of `assets/palettes.gpl`.
+pub(crate) fn presets() -> &'static [(String, Palette)] {
+    static PRESETS: std::sync::OnceLock<Vec<(String, Palette)>> = std::sync::OnceLock::new();
+    PRESETS.get_or_init(|| {
+        let text = include_str!("../../assets/palettes.gpl");
+        text.split("GIMP Palette\n")
+            .skip(1)
+            .filter_map(|gpl| {
+                let category = gpl.lines().find_map(|l| l.strip_prefix("# Category: "))?;
+                let mut palette = read_gpl(&format!("GIMP Palette\n{gpl}")).ok()?;
+                palette.tidy();
+                Some((category.to_string(), palette))
+            })
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presets_all_read() {
+        let text = include_str!("../../assets/palettes.gpl");
+        assert_eq!(presets().len(), text.matches("GIMP Palette\n").count());
+        assert!(presets().iter().all(|(_, p)| p.len() > 0));
+    }
 
     fn sample() -> Palette {
         let mut p = Palette::new("Skin & sky", &[Color32::from_rgb(200, 150, 120)]);

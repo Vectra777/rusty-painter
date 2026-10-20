@@ -10,6 +10,7 @@ pub(crate) mod grid;
 pub(crate) mod guide_lines;
 pub(crate) mod render;
 pub(crate) mod shader_gpu;
+pub(crate) mod sharp;
 pub(crate) mod viewport;
 
 /// The GPU tests' device, made once (making one takes about a second) and

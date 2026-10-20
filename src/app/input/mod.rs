@@ -182,7 +182,10 @@ fn handle_pen_drag(
         Tool::Shape(_) => app.shape_move(raw, shape_mods(ctx)),
         Tool::Gradient => app.gradient_drag(raw, ctx.input(|i| i.modifiers.shift)),
         Tool::Text => app.text_drag(raw),
-        Tool::VectorEdit => app.line_edit_drag(raw),
+        Tool::VectorEdit => {
+            app.workspace.vector.correct.pressure = pressure;
+            app.line_edit_drag(raw)
+        }
         Tool::Animate => app.animate_drag(raw, ctx.input(|i| i.modifiers.shift)),
         Tool::Pen => app.pen_drag(raw, pen_keys(ctx)),
     }
@@ -494,6 +497,7 @@ fn handle_primary_press(
         }
         Tool::VectorEdit => {
             let m = response.ctx.input(|i| i.modifiers);
+            app.workspace.vector.correct.pressure = pressure;
             app.line_edit_press(raw, m.shift, m.alt);
         }
         Tool::Animate => app.animate_press(raw, response.ctx.input(|i| i.modifiers.alt)),
