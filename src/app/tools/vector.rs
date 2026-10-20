@@ -62,7 +62,14 @@ pub struct VectorState {
     pub correct: super::vector_correct::CorrectState,
     /// Vector and text layers drawn sharp when zoomed in.
     pub(crate) sharp: crate::app::view::sharp::SharpState,
+    /// Erasing up to crossings: the other lines' smoothed paths, made once
+    /// for the stroke. Keyed by the item, which they hold: an item changed
+    /// meanwhile is a new one (a shared one is copied to change).
+    pub(super) crossing_paths: rustc_hash::FxHashMap<usize, CrossingPath>,
 }
+
+/// An item and its smoothed path, for finding what it crosses.
+pub(super) type CrossingPath = (std::sync::Arc<VectorItem>, std::sync::Arc<vector::RunPath>);
 
 impl Default for VectorState {
     fn default() -> Self {
@@ -82,6 +89,7 @@ impl Default for VectorState {
             mode: Default::default(),
             correct: Default::default(),
             sharp: Default::default(),
+            crossing_paths: Default::default(),
         }
     }
 }
@@ -275,6 +283,7 @@ impl PainterApp {
         }
         self.release_canvas_for_lines();
         self.mark_action();
+        self.workspace.vector.crossing_paths.clear();
         let layer = &self.canvas.layers[idx];
         let before = layer.vector.clone().unwrap_or_default();
         let erasing = self.brush_state.eraser_active();
@@ -354,23 +363,32 @@ impl PainterApp {
         let Some(session) = self.workspace.vector.session.take() else {
             return;
         };
+        self.workspace.vector.crossing_paths.clear();
         self.brush_state.is_drawing = false;
         let Some(idx) = self.canvas.layer_index_of(session.layer) else {
             return;
         };
         if session.drawing.is_some() {
-            // Fewer points, the same line: quicker to draw and edit.
-            let old = span_bounds(&self.canvas.layers[idx], usize::MAX);
+            // Fewer points, the same line: quicker to draw and edit. Drawn
+            // again where it was and is, piece by piece.
+            let mut boxes = Vec::new();
+            let last_line = |l: &crate::canvas::storage::Layer| {
+                l.vector.as_ref().and_then(|v| v.items().last().cloned())
+            };
+            if let Some(item) = last_line(&self.canvas.layers[idx]) {
+                item.reach(&mut boxes);
+            }
             self.edit_vector(idx, |v| {
                 if let Some(last) = v.len().checked_sub(1) {
                     v.edit(last, |s| s.points = vector::simplify(&s.points, 0.3));
                 }
             });
-            let new = span_bounds(&self.canvas.layers[idx], usize::MAX);
-            let region = vector::union([old, new]).unwrap_or(old);
+            if let Some(item) = last_line(&self.canvas.layers[idx]) {
+                item.reach(&mut boxes);
+            }
             // The redraw notes the region in the step, so it's filed after.
             self.workspace.vector.session = Some(session);
-            self.redraw_vector(idx, region);
+            self.redraw_vector_boxes(idx, &boxes);
             if let Some(session) = self.workspace.vector.session.take() {
                 self.push_vector_step(session, "Vector line");
             }
@@ -398,28 +416,58 @@ impl PainterApp {
             [x - r, y - r, x + r + 1, y + r + 1]
         };
         let near = v.candidates(vector::union(spots.iter().map(|&c| reach(c))).unwrap_or([0; 4]));
+        // Where the lines changed, piece by piece.
         let mut changed = Vec::new();
         let mut edits = Vec::new();
-        // Other lines' smoothed paths, made once for this move whichever
+        // Other lines' smoothed paths, made once for the stroke whichever
         // lines need them.
-        let mut paths: rustc_hash::FxHashMap<usize, vector::RunPath> = Default::default();
+        let paths = &mut self.workspace.vector.crossing_paths;
         for n in near {
             let item = &v.items()[n];
-            if !spots.iter().any(|&c| item.touches(c, radius)) {
+            // A line's smoothed path made once for every spot.
+            let path = item.as_line().map(|s| s.smoothed());
+            let touched = match &path {
+                Some(path) => spots
+                    .iter()
+                    .any(|&c| VectorStroke::path_touches(path, c, radius)),
+                None => spots.iter().any(|&c| item.touches(c, radius)),
+            };
+            if !touched {
                 continue;
             }
-            changed.push(v.bounds(n));
+            item.reach(&mut changed);
             // A shape (or group) goes whole; a line as the mode says.
             let Some(s) = item.as_line() else {
                 edits.push((n, Vec::new()));
                 continue;
             };
-            let mut pieces = vec![s.clone()];
+            let path = path.unwrap_or_default();
+            // The pieces, with their smoothed paths (the line's own until
+            // it's cut).
+            let mut pieces = vec![(s.clone(), path)];
             match mode {
                 VectorErase::WholeLine => pieces.clear(),
                 VectorErase::Touched => {
                     for &c in &spots {
-                        pieces = pieces.iter().flat_map(|p| p.cut(c, radius)).collect();
+                        if !pieces
+                            .iter()
+                            .any(|(_, path)| VectorStroke::path_touches(path, c, radius))
+                        {
+                            continue;
+                        }
+                        pieces = (pieces.into_iter())
+                            .flat_map(|(p, path)| {
+                                if !VectorStroke::path_touches(&path, c, radius) {
+                                    return vec![(p, path)];
+                                }
+                                (p.cut_path(&path, c, radius).into_iter())
+                                    .map(|q| {
+                                        let path = q.smoothed();
+                                        (q, path)
+                                    })
+                                    .collect()
+                            })
+                            .collect();
                     }
                 }
                 VectorErase::ToCrossing => {
@@ -431,29 +479,45 @@ impl PainterApp {
                             let Some(other) = v.line(m).filter(|_| m != n) else {
                                 continue;
                             };
-                            let path = (paths.entry(m))
-                                .or_insert_with(|| vector::RunPath::new(other.smoothed()));
+                            let item = &v.items()[m];
+                            let key = std::sync::Arc::as_ptr(item) as usize;
+                            let (_, path) = paths.entry(key).or_insert_with(|| {
+                                let path = vector::RunPath::new(other.smoothed());
+                                (item.clone(), std::sync::Arc::new(path))
+                            });
                             vector::crossings_with(a, b, path, &mut found);
                         }
                         found
                     };
                     for &c in &spots {
-                        pieces = (pieces.iter())
-                            .flat_map(|p| match p.touches(c, radius) {
-                                true => p.cut_to_crossings_by(c, &mut crossing),
-                                false => vec![p.clone()],
+                        pieces = (pieces.into_iter())
+                            .flat_map(|(p, path)| {
+                                if !VectorStroke::path_touches(&path, c, radius) {
+                                    return vec![(p, path)];
+                                }
+                                (p.cut_path_to_crossings_by(path, c, &mut crossing)
+                                    .into_iter())
+                                .map(|q| {
+                                    let path = q.smoothed();
+                                    (q, path)
+                                })
+                                .collect()
                             })
                             .collect();
                     }
                 }
             }
+            let pieces: Vec<VectorStroke> = pieces.into_iter().map(|(p, _)| p).collect();
+            for p in &pieces {
+                p.reach(&mut changed);
+            }
             edits.push((n, pieces.into_iter().map(VectorItem::Line).collect()));
         }
-        let Some(region) = vector::union(changed) else {
+        if changed.is_empty() {
             return;
-        };
+        }
         self.edit_vector(idx, |v| v.splice(edits));
-        self.redraw_vector(idx, region);
+        self.redraw_vector_boxes(idx, &changed);
     }
 
     /// Change layer `idx`'s lines (no redraw).
@@ -470,6 +534,16 @@ impl PainterApp {
         if let Some(region) = self.on_canvas(region) {
             self.note_vector_change(region);
             self.request_vector_redraw(idx, region);
+        }
+    }
+
+    /// [`Self::redraw_vector`] over only the tiles `boxes` reach (see
+    /// [`VectorItem::reach`]).
+    pub(crate) fn redraw_vector_boxes(&mut self, idx: usize, boxes: &[[i32; 4]]) {
+        let boxes: Vec<[i32; 4]> = boxes.iter().filter_map(|&b| self.on_canvas(b)).collect();
+        if let Some(region) = vector::union(boxes.iter().copied()) {
+            self.note_vector_change(region);
+            self.request_vector_redraw_boxes(idx, &boxes);
         }
     }
 

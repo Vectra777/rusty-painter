@@ -55,7 +55,12 @@ struct Index {
     /// Lines too big for the grid, and those changed since it was built.
     wide: Vec<u32>,
     loose: Vec<u32>,
+    /// Grid entries of items taken out since it was built ([`GONE`]).
+    gone: usize,
 }
+
+/// An entry whose item was taken out.
+const GONE: u32 = u32::MAX;
 
 impl Index {
     fn new(items: &[Arc<VectorItem>]) -> Self {
@@ -71,6 +76,7 @@ impl Index {
     fn build_grid(&mut self) {
         self.loose.clear();
         self.wide.clear();
+        self.gone = 0;
         let cells = |b: &[i32; 4]| {
             [
                 b[0].div_euclid(CELL),
@@ -152,9 +158,37 @@ impl Index {
         }
     }
 
+    /// The items moved to `map[old]` (or taken out: [`GONE`]), `added`
+    /// new ones after them checked one by one: the grid kept rather than
+    /// built again, until enough has changed.
+    fn remap(&mut self, map: &[u32], bounds: Vec<[i32; 4]>, added: impl Iterator<Item = u32>) {
+        self.bounds = bounds;
+        let mut gone = 0;
+        for e in &mut self.entries {
+            if *e != GONE {
+                *e = map[*e as usize];
+                gone += usize::from(*e == GONE);
+            }
+        }
+        self.gone += gone;
+        for list in [&mut self.wide, &mut self.loose] {
+            list.retain_mut(|i| {
+                *i = map[*i as usize];
+                *i != GONE
+            });
+        }
+        self.loose.extend(added);
+        if self.loose.len() > LOOSE || self.gone > self.entries.len() / 4 + LOOSE {
+            self.build_grid();
+        }
+    }
+
     /// The lines whose box meets `rect`, bottom first.
     fn candidates(&self, rect: [i32; 4]) -> Vec<usize> {
         let meets = |i: u32| {
+            if i == GONE {
+                return false;
+            }
             let b = &self.bounds[i as usize];
             b[0] < rect[2] && rect[0] < b[2] && b[1] < rect[3] && rect[1] < b[3]
         };
@@ -343,37 +377,39 @@ impl VectorLayer {
             return;
         }
         let old = std::mem::take(&mut self.items);
-        let mut bounds = self.index.get().map(|ix| ix.bounds.as_slice());
+        let mut index = self.index.take();
+        let bounds = index.as_ref().map(|ix| ix.bounds.as_slice());
         let mut new_bounds = Vec::new();
+        // Where each item went (for the grid), and the pieces put in.
+        let mut map = vec![GONE; old.len()];
+        let mut added = Vec::new();
+        self.items.reserve(old.len());
         let mut edits = edits.into_iter().peekable();
         for (i, item) in old.into_iter().enumerate() {
             match edits.next_if(|(at, _)| *at == i) {
                 Some((_, pieces)) => {
                     for piece in pieces {
-                        new_bounds.push(piece.bounds());
+                        added.push(self.items.len() as u32);
+                        if bounds.is_some() {
+                            new_bounds.push(piece.bounds());
+                        }
                         self.items.push(Arc::new(piece));
                     }
                 }
                 None => {
-                    if let Some(b) = bounds.as_mut() {
+                    map[i] = self.items.len() as u32;
+                    if let Some(b) = bounds {
                         new_bounds.push(b[i]);
                     }
                     self.items.push(item);
                 }
             }
         }
-        // Built again from the boxes kept: the indices above moved.
-        self.index = match bounds {
-            Some(_) => {
-                let mut index = Index {
-                    bounds: new_bounds,
-                    ..Default::default()
-                };
-                index.build_grid();
-                OnceLock::from(Arc::new(index))
-            }
-            None => OnceLock::new(),
-        };
+        // The grid kept, its entries renumbered (the indices moved).
+        if let Some(ix) = index.as_mut() {
+            Arc::make_mut(ix).remap(&map, new_bounds, added.into_iter());
+        }
+        self.index = index.map_or_else(OnceLock::new, OnceLock::from);
     }
 
     /// Take out item `i`.
@@ -569,6 +605,33 @@ mod tests {
         for rect in rects(40, 3200) {
             assert_eq!(copy.candidates(rect), brute(&copy, rect));
             assert_eq!(layer.candidates(rect), brute(&layer, rect));
+        }
+    }
+
+    #[test]
+    fn many_items_taken_out_keep_the_index_right() {
+        let mut layer = VectorLayer::from_strokes(lines(2000, 3000.0, 3));
+        let _ = layer.candidates([0, 0, 1, 1]);
+        // Erasing: lines taken out and cut in two, step by step, until the
+        // entries left behind make the grid be built again.
+        for k in 0..1500 {
+            let i = (k * 7919) % layer.len();
+            let pieces = match k % 3 {
+                0 => Vec::new(),
+                _ => {
+                    let l = layer.line(i).unwrap().clone();
+                    let half = l.points.len() / 2;
+                    let mut a = l.clone();
+                    a.points.truncate(half.max(1));
+                    vec![VectorItem::Line(a)]
+                }
+            };
+            layer.splice(vec![(i, pieces)]);
+            if k % 25 == 0 {
+                for rect in rects(20, 3200) {
+                    assert_eq!(layer.candidates(rect), brute(&layer, rect), "after {k}");
+                }
+            }
         }
     }
 

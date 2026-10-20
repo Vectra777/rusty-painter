@@ -225,8 +225,12 @@ impl PainterApp {
         if changes.is_empty() {
             return;
         }
-        let old = vector::union(changes.iter().map(|(i, _)| v.bounds(*i)));
-        let new = vector::union(changes.iter().map(|(_, it)| it.bounds()));
+        // Drawn again where they were and are, piece by piece.
+        let mut boxes = Vec::new();
+        for (i, item) in &changes {
+            v.items()[*i].reach(&mut boxes);
+            item.reach(&mut boxes);
+        }
         self.workspace.vector.session = Some(VectorSession {
             layer: layer.id,
             before: layer.vector.clone().unwrap_or_default(),
@@ -239,9 +243,7 @@ impl PainterApp {
                 v.edit_item(i, |it| *it = item);
             }
         });
-        if let Some(region) = vector::union(old.into_iter().chain(new)) {
-            self.redraw_vector(idx, region);
-        }
+        self.redraw_vector_boxes(idx, &boxes);
         if let Some(session) = self.workspace.vector.session.take() {
             self.push_vector_step(session, label);
         }

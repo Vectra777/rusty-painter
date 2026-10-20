@@ -751,9 +751,165 @@ fn vectors(c: &mut Criterion) {
     g.finish();
 }
 
+/// Vector layers, the rest: Edit Vectors on many items at once (box pick,
+/// flip, align, spread, combine, snap), its correcting brushes, the
+/// Transform tool keeping lines lines, the sharp picture drawn zoomed in,
+/// and saving, opening and SVG export.
+fn vector_editing(c: &mut Criterion) {
+    let mut g = group(c, "vector_edit");
+    let mid = |a: f32, b: f32| (Vec2::splat(NF * a), Vec2::splat(NF * b));
+    for lines in [2000, 20000] {
+        let setup = move |a: &mut PainterApp| b::vector_layer(a, lines);
+        // A 1000 px box in the middle (about 1/16 of the lines touch it).
+        let (lo, hi) = mid(0.375, 0.625);
+        let mut a = b::painted_app(N);
+        setup(&mut a);
+        for (name, inside) in [("touching", false), ("inside", true)] {
+            let n = b::vector_box_pick(&mut a, lo, hi, inside);
+            g.bench_function(
+                format!("box_pick_{name}_{n}_picked/{lines}_lines"),
+                |bencher| bencher.iter(|| black_box(b::vector_box_pick(&mut a, lo, hi, inside))),
+            );
+        }
+        let points: Vec<Vec2> = (0..1000)
+            .map(|i| Vec2::new((i * 397 % N) as f32, (i * 691 % N) as f32))
+            .collect();
+        g.bench_function(format!("snap_1000_points_12px/{lines}_lines"), |bencher| {
+            bencher.iter(|| black_box(b::snap_points(&a, &points, 12.0)))
+        });
+        // The sharp picture: a 1920×1080 screen zoomed in on the middle,
+        // and a stroke's 256 px patch of it.
+        for scale in [2.0, 4.0] {
+            g.bench_function(
+                format!("sharp_screen_1080p_x{scale}/{lines}_lines"),
+                |bencher| {
+                    bencher.iter(|| black_box(b::sharp_picture(&mut a, lo, 1920, 1080, scale)))
+                },
+            );
+        }
+        g.bench_function(format!("sharp_patch_256px_x4/{lines}_lines"), |bencher| {
+            bencher.iter(|| black_box(b::sharp_picture(&mut a, lo, 256, 256, 4.0)))
+        });
+        g.bench_function(format!("svg_export/{lines}_lines"), |bencher| {
+            bencher.iter(|| black_box(b::vector_svg(&a).len()))
+        });
+        drop(a);
+        let picked = move |a: &mut PainterApp| {
+            setup(a);
+            b::vector_box_pick(a, lo, hi, false);
+        };
+        bench(
+            &mut g,
+            &format!("flip_picked_settled/{lines}_lines"),
+            picked,
+            b::flip_picked,
+        );
+        bench(
+            &mut g,
+            &format!("align_left_picked_settled/{lines}_lines"),
+            picked,
+            b::align_picked_left,
+        );
+        bench(
+            &mut g,
+            &format!("distribute_picked_settled/{lines}_lines"),
+            picked,
+            b::distribute_picked,
+        );
+        bench(
+            &mut g,
+            &format!("transform_rotate_settled/{lines}_lines"),
+            setup,
+            |a| {
+                b::transform_rotate(a, 0.3);
+                b::settle_vectors(a);
+            },
+        );
+        // Redraw: a line drawn again 1 px lower, end to end (a 4 px
+        // brush, so it's that line its ends are on).
+        bench(
+            &mut g,
+            &format!("correct_redraw_a_line_settled/{lines}_lines"),
+            setup,
+            |a| {
+                let along = b::along_line(a, 1.0);
+                b::correct(a, b::CorrectMode::Redraw, 4.0, &along)
+            },
+        );
+        // Correcting brushes: a 120-sample drag across the middle, 40 px.
+        let drag: Vec<Vec2> = b::wavy_path(NF, 120).into_iter().map(|(p, _)| p).collect();
+        for (name, mode) in [
+            ("simplify", b::CorrectMode::Simplify),
+            ("connect", b::CorrectMode::Connect),
+            ("pinch", b::CorrectMode::Pinch),
+            ("width", b::CorrectMode::Width),
+            ("pen_width", b::CorrectMode::PenWidth),
+        ] {
+            let drag = drag.clone();
+            bench(
+                &mut g,
+                &format!("correct_{name}_120_samples_40px_settled/{lines}_lines"),
+                setup,
+                move |a| b::correct(a, mode, 40.0, &drag),
+            );
+        }
+    }
+    // Combining overlapping squares picked all at once.
+    for n in [16, 100, 400] {
+        let setup = move |a: &mut PainterApp| {
+            b::vector_squares(a, n);
+            b::vector_box_pick(a, Vec2::ZERO, Vec2::splat(NF), false);
+        };
+        bench(
+            &mut g,
+            &format!("combine_union_settled/{n}_squares"),
+            setup,
+            |a| b::combine_picked(a, true),
+        );
+        bench(
+            &mut g,
+            &format!("combine_exclude_settled/{n}_squares"),
+            setup,
+            |a| b::combine_picked(a, false),
+        );
+    }
+    // Shapes: drawn sharp, exported, transformed.
+    let mut a = b::painted_app(N);
+    b::vector_shapes(&mut a, 2000);
+    let (lo, _) = mid(0.375, 0.625);
+    g.bench_function("sharp_screen_1080p_x4/2000_shapes", |bencher| {
+        bencher.iter(|| black_box(b::sharp_picture(&mut a, lo, 1920, 1080, 4.0)))
+    });
+    g.bench_function("svg_export/2000_shapes", |bencher| {
+        bencher.iter(|| black_box(b::vector_svg(&a).len()))
+    });
+    drop(a);
+    bench(
+        &mut g,
+        "transform_rotate_settled/2000_shapes",
+        |a| b::vector_shapes(a, 2000),
+        |a| {
+            b::transform_rotate(a, 0.3);
+            b::settle_vectors(a);
+        },
+    );
+    // Project files with a vector layer of 20000 lines.
+    let mut a = b::painted_app(N);
+    b::vector_layer(&mut a, 20000);
+    let bytes = b::save_project(&mut a);
+    g.bench_function("save_project/20000_lines", |bencher| {
+        bencher.iter(|| black_box(b::save_project(&mut a).len()))
+    });
+    g.bench_function("open_project/20000_lines", |bencher| {
+        bencher.iter(|| black_box(b::load_project(&bytes)))
+    });
+    g.finish();
+}
+
 criterion_group!(
     app_benches,
     vectors,
+    vector_editing,
     painting,
     selections,
     fills,

@@ -59,12 +59,24 @@ impl PainterApp {
     /// Draw vector layer `idx` again over `region` (canvas pixels), in the
     /// background.
     pub(crate) fn request_vector_redraw(&mut self, idx: usize, region: [i32; 4]) {
+        self.request_vector_redraw_boxes(idx, &[region]);
+    }
+
+    /// [`Self::request_vector_redraw`] over the tiles `boxes` reach (a
+    /// line's pieces: a long or diagonal one reaches far fewer tiles than
+    /// its box).
+    pub(crate) fn request_vector_redraw_boxes(&mut self, idx: usize, boxes: &[[i32; 4]]) {
+        let Some(region) = vector::union(boxes.iter().copied()) else {
+            return;
+        };
         self.sharp_damage(region);
         let Some(layer) = self.canvas.layers.get(idx) else {
             return;
         };
         let id = layer.id;
-        let tiles = self.vector_tiles(region);
+        let mut tiles: Vec<(i32, i32)> = boxes.iter().flat_map(|&b| self.vector_tiles(b)).collect();
+        tiles.sort_unstable();
+        tiles.dedup();
         let renders = &mut self.workspace.vector.renders;
         renders.epoch += 1;
         let epoch = renders.epoch;
@@ -325,29 +337,36 @@ fn tile_rects(tiles: FxHashSet<(i32, i32)>) -> Vec<[i32; 4]> {
     rects
 }
 
-/// Draw `work`, cut into tiles.
+/// Draw `work`, cut into tiles: the rects side by side on the pool (a
+/// long line's tiles make many small ones).
 fn draw(work: Work) -> Vec<Drawn> {
+    use rayon::prelude::*;
+    work.into_par_iter()
+        .flat_map_iter(|(rect, strokes)| draw_rect(rect, &strokes))
+        .collect()
+}
+
+/// One rect of [`draw`]'s, cut into tiles.
+fn draw_rect(rect: [i32; 4], strokes: &[Arc<VectorItem>]) -> Vec<Drawn> {
     let ts = crate::app::document::TILE_SIZE as i32;
+    let pixels = vector::render_region(strokes.iter().map(|s| &**s), rect);
+    let w = (rect[2] - rect[0]) as usize;
     let mut out = Vec::new();
-    for (rect, strokes) in work {
-        let pixels = vector::render_region(strokes.iter().map(|s| &**s), rect);
-        let w = (rect[2] - rect[0]) as usize;
-        for ty in rect[1] / ts..(rect[3] + ts - 1) / ts {
-            for tx in rect[0] / ts..(rect[2] + ts - 1) / ts {
-                let (ox, oy) = (tx * ts, ty * ts);
-                let mut tile = vec![Color32::TRANSPARENT; (ts * ts) as usize];
-                let mut any = false;
-                for y in oy.max(rect[1])..(oy + ts).min(rect[3]) {
-                    let x0 = ox.max(rect[0]);
-                    let x1 = (ox + ts).min(rect[2]);
-                    let src = (y - rect[1]) as usize * w + (x0 - rect[0]) as usize;
-                    let row = &pixels[src..src + (x1 - x0) as usize];
-                    any |= row.iter().any(|&p| p != Color32::TRANSPARENT);
-                    let dst = ((y - oy) * ts + x0 - ox) as usize;
-                    tile[dst..dst + row.len()].copy_from_slice(row);
-                }
-                out.push(((tx, ty), any.then_some(tile)));
+    for ty in rect[1] / ts..(rect[3] + ts - 1) / ts {
+        for tx in rect[0] / ts..(rect[2] + ts - 1) / ts {
+            let (ox, oy) = (tx * ts, ty * ts);
+            let mut tile = vec![Color32::TRANSPARENT; (ts * ts) as usize];
+            let mut any = false;
+            for y in oy.max(rect[1])..(oy + ts).min(rect[3]) {
+                let x0 = ox.max(rect[0]);
+                let x1 = (ox + ts).min(rect[2]);
+                let src = (y - rect[1]) as usize * w + (x0 - rect[0]) as usize;
+                let row = &pixels[src..src + (x1 - x0) as usize];
+                any |= row.iter().any(|&p| p != Color32::TRANSPARENT);
+                let dst = ((y - oy) * ts + x0 - ox) as usize;
+                tile[dst..dst + row.len()].copy_from_slice(row);
             }
+            out.push(((tx, ty), any.then_some(tile)));
         }
     }
     out

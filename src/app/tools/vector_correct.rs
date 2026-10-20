@@ -319,98 +319,178 @@ impl PainterApp {
         let Some(v) = self.canvas.layers[idx].vector.as_ref() else {
             return;
         };
-        let old = vector::union(which.iter().map(|&i| v.bounds(i)));
-        let mut new = None;
+        // Drawn again where they were and are, piece by piece.
+        let mut boxes = Vec::new();
+        for &i in which {
+            v.items()[i].reach(&mut boxes);
+        }
         self.edit_vector(idx, |v| {
             for &i in which {
                 if v.line(i).is_some() {
                     v.edit(i, |l| change(i, l));
+                    v.items()[i].reach(&mut boxes);
                 }
             }
-            new = vector::union(which.iter().map(|&i| v.bounds(i)));
         });
-        if let Some(region) = vector::union(old.into_iter().chain(new)) {
-            self.redraw_vector(idx, region);
-        }
+        self.redraw_vector_boxes(idx, &boxes);
     }
 
     /// Connect: the line ends the drag passed near join, nearest pairs
-    /// first (each end once).
+    /// first (each end once, never a line to itself), each chain of joins
+    /// becoming one line in the place and with the look of its lowest.
+    /// The ends are found once through the layer's index and the joins
+    /// made in one go.
     fn connect_lines(&mut self, idx: usize) {
         let r = self.correct_radius();
-        let path: Vec<Vec2> = self
-            .workspace
-            .vector
-            .correct
-            .path
-            .iter()
+        let path: Vec<Vec2> = (self.workspace.vector.correct.path.iter())
             .map(|p| p.0)
             .collect();
+        let Some(v) = self.canvas.layers[idx].vector.as_ref() else {
+            return;
+        };
         let near_path = |p: Vec2| {
             path.windows(2)
                 .any(|w| distance_to_segment(p, w[0], w[1]) <= r)
                 || path.first().is_some_and(|&q| (q - p).length() <= r)
         };
-        loop {
-            let Some(v) = self.canvas.layers[idx].vector.as_ref() else {
-                return;
-            };
-            // Every end near the drag: (line, at its start?, where).
-            let ends: Vec<(usize, bool, Vec2)> = (0..v.len())
-                .filter_map(|i| v.line(i).map(|l| (i, l)))
-                .flat_map(|(i, l)| {
-                    let first = l.points.first().map(|p| (i, true, Vec2::new(p[0], p[1])));
-                    let last = l.points.last().map(|p| (i, false, Vec2::new(p[0], p[1])));
-                    [first, last].into_iter().flatten()
-                })
-                .filter(|&(_, _, p)| near_path(p))
-                .collect();
-            // (How far apart, and the two ends: line, at its start?)
-            type End = (usize, bool);
-            let mut best: Option<(f32, End, End)> = None;
-            for (n, a) in ends.iter().enumerate() {
-                for b in &ends[n + 1..] {
-                    if a.0 == b.0 {
-                        continue;
-                    }
-                    let d = (a.2 - b.2).length();
-                    if best.is_none_or(|(bd, ..)| d < bd) {
-                        best = Some((d, (a.0, a.1), (b.0, b.1)));
-                    }
+        let ri = r.ceil() as i32 + 1;
+        let mut lines: Vec<usize> = path
+            .windows(2)
+            .chain(path.get(..1).filter(|_| path.len() == 1))
+            .flat_map(|w| {
+                let b = vector::segment_box(w[0], *w.last().unwrap());
+                v.candidates([b[0] - ri, b[1] - ri, b[2] + ri, b[3] + ri])
+            })
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        // Every end near the drag: (line, at its start?, where).
+        let ends: Vec<(usize, bool, Vec2)> = lines
+            .into_iter()
+            .filter_map(|i| v.line(i).map(|l| (i, l)))
+            .flat_map(|(i, l)| {
+                let first = l.points.first().map(|p| (i, true, Vec2::new(p[0], p[1])));
+                let last = l.points.last().map(|p| (i, false, Vec2::new(p[0], p[1])));
+                [first, last].into_iter().flatten()
+            })
+            .filter(|&(_, _, p)| near_path(p))
+            .collect();
+        // Pairs of ends of different lines, nearest first.
+        let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+        for (n, a) in ends.iter().enumerate() {
+            for (m, b) in ends.iter().enumerate().skip(n + 1) {
+                if a.0 != b.0 {
+                    pairs.push(((a.2 - b.2).length(), n, m));
                 }
             }
-            let Some((_, (ia, a_start), (ib, b_start))) = best else {
-                return;
-            };
-            let (Some(la), Some(lb)) = (v.line(ia), v.line(ib)) else {
-                return;
-            };
-            let mut a = la.points.clone();
-            let mut b = lb.points.clone();
-            if a_start {
-                a.reverse();
-            }
-            if !b_start {
-                b.reverse();
-            }
-            a.extend(b);
-            let region = vector::union([v.bounds(ia), v.bounds(ib)]);
-            let (keep, gone) = (ia.min(ib), ia.max(ib));
-            let joined = VectorStroke {
-                points: a,
-                ..(if keep == ia { la } else { lb }).clone()
-            };
-            self.edit_vector(idx, |v| {
-                v.splice(vec![
-                    (keep, vec![VectorItem::Line(joined)]),
-                    (gone, Vec::new()),
-                ]);
-            });
-            if let Some(region) = region {
-                self.redraw_vector(idx, region);
-            }
-            self.workspace.vector.line_edit = None;
         }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Which end each end is joined to; lines joined so far, as sets
+        // (a join within one would close it on itself).
+        let mut joined: Vec<Option<usize>> = vec![None; ends.len()];
+        let mut set: rustc_hash::FxHashMap<usize, usize> =
+            ends.iter().map(|e| (e.0, e.0)).collect();
+        fn root(set: &mut rustc_hash::FxHashMap<usize, usize>, mut i: usize) -> usize {
+            while set[&i] != i {
+                let up = set[&set[&i]];
+                set.insert(i, up);
+                i = up;
+            }
+            i
+        }
+        for (_, n, m) in pairs {
+            if joined[n].is_some() || joined[m].is_some() {
+                continue;
+            }
+            let (ra, rb) = (root(&mut set, ends[n].0), root(&mut set, ends[m].0));
+            if ra == rb {
+                continue;
+            }
+            set.insert(ra.max(rb), ra.min(rb));
+            joined[n] = Some(m);
+            joined[m] = Some(n);
+        }
+        // Each line's ends among `ends`: (its start's, its end's).
+        let mut of_line: rustc_hash::FxHashMap<usize, [Option<usize>; 2]> = Default::default();
+        for (k, e) in ends.iter().enumerate() {
+            of_line.entry(e.0).or_default()[usize::from(!e.1)] = Some(k);
+        }
+        let partner = |line: usize, start: bool| {
+            of_line[&line][usize::from(!start)]
+                .and_then(|k| joined[k])
+                .map(|k| (ends[k].0, ends[k].1))
+        };
+        // Each chain walked from a free end: (line, forwards?) in order.
+        let mut seen: rustc_hash::FxHashSet<usize> = Default::default();
+        let mut chains: Vec<Vec<(usize, bool)>> = Vec::new();
+        let mut starts: Vec<usize> = of_line.keys().copied().collect();
+        starts.sort_unstable();
+        for line in starts {
+            if seen.contains(&line) {
+                continue;
+            }
+            // Joined at both ends: in the middle of a chain, walked to later.
+            let (at_start, at_end) = (partner(line, true), partner(line, false));
+            if at_start.is_some() && at_end.is_some() {
+                continue;
+            }
+            if at_start.is_none() && at_end.is_none() {
+                continue;
+            }
+            // Out from the free end.
+            let mut chain = vec![(line, at_start.is_none())];
+            seen.insert(line);
+            let mut next = if at_start.is_none() { at_end } else { at_start };
+            while let Some((l, entered_at_start)) = next {
+                seen.insert(l);
+                chain.push((l, entered_at_start));
+                next = partner(l, !entered_at_start);
+            }
+            chains.push(chain);
+        }
+        if chains.is_empty() {
+            return;
+        }
+        let mut boxes = Vec::new();
+        let mut edits: Vec<(usize, Vec<VectorItem>)> = Vec::new();
+        for chain in chains {
+            let keep = chain.iter().map(|c| c.0).min().unwrap_or(0);
+            let mut points: Vec<[f32; 3]> = Vec::new();
+            for &(i, forwards) in &chain {
+                let Some(l) = v.line(i) else {
+                    continue;
+                };
+                v.items()[i].reach(&mut boxes);
+                if forwards {
+                    points.extend_from_slice(&l.points);
+                } else {
+                    points.extend(l.points.iter().rev());
+                }
+            }
+            // The way the kept line ran.
+            if chain.iter().any(|&(i, forwards)| i == keep && !forwards) {
+                points.reverse();
+            }
+            let Some(look) = v.line(keep) else {
+                continue;
+            };
+            let line = VectorStroke {
+                points,
+                ..look.clone()
+            };
+            line.reach(&mut boxes);
+            edits.push((keep, vec![VectorItem::Line(line)]));
+            edits.extend(
+                chain
+                    .iter()
+                    .filter(|c| c.0 != keep)
+                    .map(|c| (c.0, Vec::new())),
+            );
+        }
+        edits.sort_by_key(|e| e.0);
+        self.edit_vector(idx, |v| v.splice(edits));
+        self.redraw_vector_boxes(idx, &boxes);
+        self.workspace.vector.line_edit = None;
     }
 
     /// Redraw: the drag went from near one place on a line to near another

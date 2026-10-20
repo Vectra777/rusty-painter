@@ -44,6 +44,32 @@ impl VectorStroke {
         bounds_of_widths(&self.points, scale)
     }
 
+    /// Boxes together covering what the line draws, added to `out`: one
+    /// per stretch between points, around the smoothed curve there (each
+    /// stretch is a Bézier inside the hull of its control points) and its
+    /// width, with a pixel of anti-aliasing.
+    pub fn reach(&self, out: &mut Vec<[i32; 4]>) {
+        let p = &self.points;
+        if p.len() < 3 {
+            if !p.is_empty() {
+                out.push(self.bounds());
+            }
+            return;
+        }
+        for i in 0..p.len() - 1 {
+            let (a, b, c, d) = (
+                p[i.saturating_sub(1)],
+                p[i],
+                p[i + 1],
+                p[(i + 2).min(p.len() - 1)],
+            );
+            // Catmull-Rom's Bézier control points, width too.
+            let p1 = [0, 1, 2].map(|k| b[k] + (c[k] - a[k]) / 6.0);
+            let p2 = [0, 1, 2].map(|k| c[k] - (d[k] - b[k]) / 6.0);
+            out.push(bounds_of_widths(&[b, p1, p2, c], 1.0));
+        }
+    }
+
     /// The line as drawn (see `path`), for exporting it.
     pub fn smoothed(&self) -> Vec<[f32; 3]> {
         self.path()
@@ -87,27 +113,55 @@ impl VectorStroke {
 
     /// Whether a circle at `c` of radius `r` touches the line.
     pub fn touches(&self, c: Vec2, r: f32) -> bool {
-        let path = self.path();
+        Self::path_touches(&self.path(), c, r)
+    }
+
+    /// [`Self::touches`] for the line smoothed as `path` (see
+    /// [`Self::smoothed`]): made once for many circles.
+    pub fn path_touches(path: &[[f32; 3]], c: Vec2, r: f32) -> bool {
+        if path.is_empty() {
+            return false;
+        }
         if path.len() == 1 {
             let [x, y, w] = path[0];
-            return (Vec2::new(x, y) - c).length() <= r + w * 0.5;
+            return len(Vec2::new(x, y) - c) <= r + w * 0.5;
         }
+        // Squared distances, the segments far off skipped on their boxes.
         path.windows(2).any(|s| {
-            let (d, t) = segment_distance(c, s[0], s[1]);
-            let w = s[0][2] + (s[1][2] - s[0][2]) * t;
-            d <= r + w * 0.5
+            let reach = r + s[0][2].max(s[1][2]) * 0.5;
+            if c.x + reach < s[0][0].min(s[1][0])
+                || c.x - reach > s[0][0].max(s[1][0])
+                || c.y + reach < s[0][1].min(s[1][1])
+                || c.y - reach > s[0][1].max(s[1][1])
+            {
+                return false;
+            }
+            let (a, d) = (xy(s[0]), xy(s[1]) - xy(s[0]));
+            let len2 = d.x * d.x + d.y * d.y;
+            let t = if len2 > 1e-9 {
+                ((c - a).dot(d) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let e = a + d * t - c;
+            let near = r + (s[0][2] + (s[1][2] - s[0][2]) * t) * 0.5;
+            e.x * e.x + e.y * e.y <= near * near
         })
     }
 
     /// The line with what a circle at `c` of radius `r` covers taken out:
     /// the pieces left (none if it was all covered), each thinned out again.
     pub fn cut(&self, c: Vec2, r: f32) -> Vec<VectorStroke> {
-        if !self.touches(c, r) {
+        self.cut_path(&self.path(), c, r)
+    }
+
+    /// [`Self::cut`], the line smoothed as `path` (see [`Self::smoothed`]).
+    pub fn cut_path(&self, path: &[[f32; 3]], c: Vec2, r: f32) -> Vec<VectorStroke> {
+        if !Self::path_touches(path, c, r) {
             return vec![self.clone()];
         }
         // The line as drawn, in steps fine enough to cut cleanly.
         let step = (r * 0.25).clamp(0.25, 2.0);
-        let path = self.path();
         let mut dense = Vec::with_capacity(path.len() * 2);
         for pair in path.windows(2) {
             let (a, b) = (pair[0], pair[1]);
@@ -122,7 +176,7 @@ impl VectorStroke {
         let mut pieces = Vec::new();
         let mut current: Vec<[f32; 3]> = Vec::new();
         for &p in &dense {
-            let inside = (Vec2::new(p[0], p[1]) - c).length() <= r + p[2] * 0.25;
+            let inside = len(Vec2::new(p[0], p[1]) - c) <= r + p[2] * 0.25;
             if inside {
                 if !current.is_empty() {
                     pieces.push(std::mem::take(&mut current));
@@ -175,7 +229,18 @@ impl VectorStroke {
         c: Vec2,
         crossing: &mut dyn FnMut(Vec2, Vec2) -> Vec<f32>,
     ) -> Vec<VectorStroke> {
-        let own = RunPath::new(self.path());
+        self.cut_path_to_crossings_by(self.path(), c, crossing)
+    }
+
+    /// [`Self::cut_to_crossings_by`], the line smoothed as `path` (see
+    /// [`Self::smoothed`]).
+    pub fn cut_path_to_crossings_by(
+        &self,
+        path: Vec<[f32; 3]>,
+        c: Vec2,
+        crossing: &mut dyn FnMut(Vec2, Vec2) -> Vec<f32>,
+    ) -> Vec<VectorStroke> {
+        let own = RunPath::new(path);
         let path = &own.path;
         if path.len() < 2 {
             return Vec::new();
@@ -185,7 +250,7 @@ impl VectorStroke {
         let mut total = 0.0;
         along.push(0.0);
         for w in path.windows(2) {
-            total += (xy(w[1]) - xy(w[0])).length();
+            total += len(xy(w[1]) - xy(w[0]));
             along.push(total);
         }
         // Where along it the eraser is: its nearest point.
@@ -256,10 +321,10 @@ impl VectorStroke {
 /// `[x0, y0, x1, y1)` around a segment.
 pub fn segment_box(a: Vec2, b: Vec2) -> [i32; 4] {
     [
-        a.x.min(b.x).floor() as i32,
-        a.y.min(b.y).floor() as i32,
-        a.x.max(b.x).ceil() as i32 + 1,
-        a.y.max(b.y).ceil() as i32 + 1,
+        floor(a.x.min(b.x)),
+        floor(a.y.min(b.y)),
+        ceil(a.x.max(b.x)) + 1,
+        ceil(a.y.max(b.y)) + 1,
     ]
 }
 
@@ -286,10 +351,10 @@ impl RunPath {
                 let mut b = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
                 for p in &path[i..end] {
                     b = [
-                        b[0].min(p[0].floor() as i32),
-                        b[1].min(p[1].floor() as i32),
-                        b[2].max(p[0].ceil() as i32 + 1),
-                        b[3].max(p[1].ceil() as i32 + 1),
+                        b[0].min(floor(p[0])),
+                        b[1].min(floor(p[1])),
+                        b[2].max(ceil(p[0]) + 1),
+                        b[3].max(ceil(p[1]) + 1),
                     ];
                 }
                 b
@@ -366,6 +431,12 @@ fn xy(p: [f32; 3]) -> Vec2 {
     Vec2::new(p[0], p[1])
 }
 
+/// `v`'s length, without the `hypot` library call `Vec2::length` makes
+/// (it showed in profiles of erasing).
+fn len(v: Vec2) -> f32 {
+    (v.x * v.x + v.y * v.y).sqrt()
+}
+
 /// [`VectorStroke::bounds`] of `points` with their widths times `scale`,
 /// rounded once at the end (it runs over every point of a line).
 pub(super) fn bounds_of_widths(points: &[[f32; 3]], scale: f32) -> [i32; 4] {
@@ -380,12 +451,7 @@ pub(super) fn bounds_of_widths(points: &[[f32; 3]], scale: f32) -> [i32; 4] {
         b[2] = b[2].max(x + r);
         b[3] = b[3].max(y + r);
     }
-    [
-        b[0].floor() as i32,
-        b[1].floor() as i32,
-        b[2].ceil() as i32 + 1,
-        b[3].ceil() as i32 + 1,
-    ]
+    [floor(b[0]), floor(b[1]), ceil(b[2]) + 1, ceil(b[3]) + 1]
 }
 
 /// Distance from `p` to the segment `a`→`b` (x, y of each), and where along
@@ -399,7 +465,7 @@ fn segment_distance(p: Vec2, a: [f32; 3], b: [f32; 3]) -> (f32, f32) {
     } else {
         0.0
     };
-    ((a2 + d * t - p).length(), t)
+    (len(a2 + d * t - p), t)
 }
 
 /// Drop points closer than `min_gap` to the last one kept (the first and
@@ -460,7 +526,7 @@ pub fn bend(
     let to = handles.get(h + 1).copied().unwrap_or(at);
     let mut along = vec![0.0; points.len()];
     for k in 1..points.len() {
-        along[k] = along[k - 1] + (xy(points[k]) - xy(points[k - 1])).length();
+        along[k] = along[k - 1] + len(xy(points[k]) - xy(points[k - 1]));
     }
     let weight = |k: usize| -> f32 {
         let (near, far) = match k.cmp(&at) {
@@ -506,7 +572,7 @@ pub fn remove_handle(points: &[[f32; 3]], handles: &[usize], h: usize) -> Vec<[f
 /// A large region is drawn in bands of rows at once, on the rayon pool.
 /// `items` are those that may reach it (all of a layer's, or the ones its
 /// index finds near), bottom first: brush lines or a layer's items.
-pub fn render_region<'a, T: Drawable + 'a>(
+pub fn render_region<'a, T: Drawable + Sync + 'a>(
     items: impl IntoIterator<Item = &'a T>,
     region: [i32; 4],
 ) -> Vec<Color32> {
@@ -514,10 +580,13 @@ pub fn render_region<'a, T: Drawable + 'a>(
     let [x0, y0, x1, y1] = region;
     let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
     // What reaches the region, each made ready once for every band.
-    let items: Vec<Prepared> = items
-        .into_iter()
-        .filter_map(|i| i.prepare(region))
-        .collect();
+    // (On the pool too: smoothing thousands of lines is a lot of work.)
+    let items: Vec<&T> = items.into_iter().collect();
+    let items: Vec<Prepared> = if items.len() > 64 {
+        items.par_iter().filter_map(|i| i.prepare(region)).collect()
+    } else {
+        items.iter().filter_map(|i| i.prepare(region)).collect()
+    };
     let mut out = vec![Color32::TRANSPARENT; w * h];
     if w == 0 || items.is_empty() {
         return out;
@@ -635,20 +704,33 @@ pub enum Prepared {
 /// clipped to the region, and its paint.
 pub struct Line {
     segments: Vec<Segment>,
+    /// The box round each run of [`SEGMENT_RUN`] segments, so a band skips
+    /// the runs nowhere near it rather than looking at every segment.
+    runs: Vec<[f32; 4]>,
     clip: [i32; 4],
-    colour: [u8; 3],
+    /// See [`Line::paint`].
+    paint: Box<[[Color32; 2]; 256]>,
     opacity: f32,
 }
+
+/// Segments to a [`Line::runs`] box.
+const SEGMENT_RUN: usize = 16;
 
 /// One stretch of a smoothed path, with what every pixel near it needs.
 struct Segment {
     a: Vec2,
     ab: Vec2,
-    /// |ab|², or 0 for a dot.
-    len2: f32,
+    /// 1 / |ab|², or 0 for a dot.
+    inv_len2: f32,
     /// Width at `a`, and how it changes towards `b`.
     width: f32,
     dw: f32,
+    /// The square of how far from it a pixel's centre can be and still be
+    /// covered, and its normal that long: what bounds each row it covers.
+    radius2: f32,
+    normal: Vec2,
+    /// How x moves along it per row (0 if it runs flat).
+    dxdy: f32,
     /// Pixels it can cover, `[x0, y0, x1, y1]` before clipping.
     reach: [f32; 4],
 }
@@ -660,12 +742,22 @@ impl Line {
             let (pa, ab) = (Vec2::new(a[0], a[1]), Vec2::new(b[0] - a[0], b[1] - a[1]));
             let len2 = ab.length_sq();
             let r = a[2].max(b[2]) * 0.5 + 1.0;
+            // (Coverage reaches half the width, at least half a pixel, and
+            // half a pixel more for the anti-aliased edge.)
+            let reach = (a[2].max(b[2]) * 0.5).max(0.5) + 0.5;
             Segment {
                 a: pa,
                 ab,
-                len2: if len2 > 1e-9 { len2 } else { 0.0 },
+                inv_len2: if len2 > 1e-9 { 1.0 / len2 } else { 0.0 },
                 width: a[2],
                 dw: b[2] - a[2],
+                radius2: reach * reach,
+                normal: if len2 > 1e-9 {
+                    Vec2::new(-ab.y, ab.x) * (reach / len2.sqrt())
+                } else {
+                    Vec2::ZERO
+                },
+                dxdy: if ab.y.abs() > 1e-6 { ab.x / ab.y } else { 0.0 },
                 reach: [
                     a[0].min(b[0]) - r,
                     a[1].min(b[1]) - r,
@@ -679,13 +771,33 @@ impl Line {
         } else {
             path.windows(2).map(|s| segment(s[0], s[1])).collect()
         };
+        let runs = segments
+            .chunks(SEGMENT_RUN)
+            .map(|run| {
+                run.iter()
+                    .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, s| {
+                        [
+                            b[0].min(s.reach[0]),
+                            b[1].min(s.reach[1]),
+                            b[2].max(s.reach[2]),
+                            b[3].max(s.reach[3]),
+                        ]
+                    })
+            })
+            .collect();
         Line {
             segments,
+            runs,
             clip,
-            colour: stroke.colour,
+            paint: Line::paint(stroke.colour),
             opacity: stroke.opacity.clamp(0.0, 1.0),
         }
     }
+}
+
+/// The centre of pixel row `y`.
+fn cy_of(y: i32) -> f32 {
+    y as f32 + 0.5
 }
 
 /// `v` rounded down, without the library call `f32::floor` makes on
@@ -706,20 +818,20 @@ struct Scratch {
     /// A line's coverage, kept all zero between lines: each clears what it
     /// used.
     coverage: Vec<f32>,
-    /// Which `CHUNK`-wide pieces of each row the line touched, so a long
-    /// line only visits the pixels near it rather than its whole box.
-    touched: Vec<bool>,
+    /// The columns of each row the line touched, `[from, to)` (band
+    /// columns; empty: from past to), so only those are laid down.
+    spans: Vec<[i32; 2]>,
 }
 
-const CHUNK: i32 = 32;
+/// No columns touched.
+const NO_SPAN: [i32; 2] = [i32::MAX, i32::MIN];
 
 /// `items` drawn into `out`, the canvas pixels `[x0, y0, x1, y1)`.
 fn render_band(items: &[Prepared], band: [i32; 4], out: &mut [Color32]) {
     let (w, h) = ((band[2] - band[0]) as usize, (band[3] - band[1]) as usize);
-    let chunks = (w as i32 + CHUNK - 1) / CHUNK;
     let mut scratch = Scratch {
         coverage: vec![0.0; w * h],
-        touched: vec![false; chunks as usize * h],
+        spans: vec![NO_SPAN; h],
     };
     draw_items(items, band, out, &mut scratch);
 }
@@ -773,7 +885,7 @@ fn fade_over(layer: &[Color32], opacity: f32, out: &mut [Color32]) {
         if p.a() == 0 {
             continue;
         }
-        let f = |v: u8| (v as f32 * opacity).round() as u8;
+        let f = |v: u8| (v as f32 * opacity + 0.5) as u8;
         let src = Color32::from_rgba_premultiplied(f(p.r()), f(p.g()), f(p.b()), f(p.a()));
         *o = crate::canvas::storage::gamma_over(src, *o);
     }
@@ -819,8 +931,7 @@ fn draw_shape(
 fn draw_line(line: &Line, band: [i32; 4], out: &mut [Color32], scratch: &mut Scratch) {
     let [x0, y0, x1, y1] = band;
     let w = (x1 - x0) as usize;
-    let chunks = (w as i32 + CHUNK - 1) / CHUNK;
-    let Scratch { coverage, touched } = scratch;
+    let Scratch { coverage, spans } = scratch;
     let [bx0, by0, bx1, by1] = [
         line.clip[0].max(x0),
         line.clip[1].max(y0),
@@ -833,76 +944,131 @@ fn draw_line(line: &Line, band: [i32; 4], out: &mut [Color32], scratch: &mut Scr
     // The line's coverage of each pixel (the most any part of it gives,
     // so where it overlaps itself it doesn't darken).
     let (fx0, fy0, fx1, fy1) = (bx0 as f32, by0 as f32, bx1 as f32, by1 as f32);
-    for seg in &line.segments {
+    let meets =
+        |[rx0, ry0, rx1, ry1]: [f32; 4]| !(rx1 < fx0 || rx0 > fx1 || ry1 < fy0 || ry0 > fy1);
+    let near = (line.runs.iter().zip(line.segments.chunks(SEGMENT_RUN)))
+        .filter(|(run, _)| meets(**run))
+        .flat_map(|(_, segments)| segments);
+    for seg in near {
         let [rx0, ry0, rx1, ry1] = seg.reach;
         if rx1 < fx0 || rx0 > fx1 || ry1 < fy0 || ry0 > fy1 {
             continue;
         }
-        let sx0 = floor(rx0.max(fx0)).max(bx0);
         let sy0 = floor(ry0.max(fy0)).max(by0);
-        let sx1 = ceil(rx1.min(fx1)).min(bx1);
         let sy1 = ceil(ry1.min(fy1)).min(by1);
-        if sx0 >= sx1 {
-            continue;
-        }
         for y in sy0..sy1 {
-            let row = (y - y0) as usize * w;
-            let flags = (y - y0) as usize * chunks as usize;
-            for k in (sx0 - x0) / CHUNK..=(sx1 - 1 - x0) / CHUNK {
-                touched[flags + k as usize] = true;
-            }
-            // (In the same order of operations as the plain distance to
-            // the segment, so it gives the same pixels to the bit.)
-            let cy = y as f32 + 0.5;
-            for x in sx0..sx1 {
-                let cx = x as f32 + 0.5;
-                let t = if seg.len2 > 0.0 {
-                    (((cx - seg.a.x) * seg.ab.x + (cy - seg.a.y) * seg.ab.y) / seg.len2)
-                        .clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let (dx, dy) = (seg.a.x + seg.ab.x * t - cx, seg.a.y + seg.ab.y * t - cy);
-                let d2 = dx * dx + dy * dy;
-                let half = (seg.width + seg.dw * t) * 0.5;
-                // Thinner than a pixel: fainter rather than vanishing.
-                let (half, fade) = if half < 0.5 {
-                    (0.5, (half * 2.0).max(0.0))
-                } else {
-                    (half, 1.0)
-                };
-                let edge = half + 0.5;
-                if d2 >= edge * edge {
-                    continue;
-                }
-                let v = (edge - d2.sqrt()).min(1.0) * fade;
-                let slot = &mut coverage[row + (x - x0) as usize];
-                if v > *slot {
-                    *slot = v;
-                }
-            }
-        }
-    }
-    let [r, g, b] = line.colour;
-    for y in by0..by1 {
-        let row = (y - y0) as usize * w;
-        let flags = (y - y0) as usize * chunks as usize;
-        for k in (bx0 - x0) / CHUNK..=(bx1 - 1 - x0) / CHUNK {
-            if !std::mem::take(&mut touched[flags + k as usize]) {
+            let cy = cy_of(y);
+            // Only the pixels of the row it can reach.
+            let Some((lo, hi)) = row_span(seg, cy) else {
+                continue;
+            };
+            let sx0 = floor(lo - 0.5).max(bx0);
+            let sx1 = (ceil(hi - 0.5) + 1).min(bx1);
+            if sx0 >= sx1 {
                 continue;
             }
-            let from = (k * CHUNK) as usize;
-            let to = ((k + 1) * CHUNK).min(w as i32) as usize;
-            for i in row + from..row + to {
-                let a = std::mem::take(&mut coverage[i]) * line.opacity;
-                if a <= 0.0 {
-                    continue;
-                }
-                let src = Color32::from_rgba_unmultiplied(r, g, b, (a * 255.0).round() as u8);
-                out[i] = crate::canvas::storage::gamma_over(src, out[i]);
+            let span = &mut spans[(y - y0) as usize];
+            span[0] = span[0].min(sx0 - x0);
+            span[1] = span[1].max(sx1 - x0);
+            // Without branches or a division, so it runs several pixels at
+            // a time: a pixel the segment doesn't reach gets a coverage
+            // below zero, which the max leaves out.
+            let dy0 = cy - seg.a.y;
+            let along_y = dy0 * seg.ab.y;
+            let row = (y - y0) as usize * w;
+            let cov = &mut coverage[row + (sx0 - x0) as usize..row + (sx1 - x0) as usize];
+            let fx = sx0 as f32 + 0.5 - seg.a.x;
+            for (k, slot) in cov.iter_mut().enumerate() {
+                let v = seg.coverage(fx + k as f32, dy0, along_y);
+                *slot = if v > *slot { v } else { *slot };
             }
         }
     }
+    let paint = &line.paint;
+    for y in by0..by1 {
+        let [from, to] = std::mem::replace(&mut spans[(y - y0) as usize], NO_SPAN);
+        if from >= to {
+            continue;
+        }
+        let row = (y - y0) as usize * w;
+        for i in row + from as usize..row + to as usize {
+            let a = std::mem::take(&mut coverage[i]) * line.opacity;
+            let a8 = (a * 255.0 + 0.5) as u8;
+            if a <= 0.0 || a8 == 0 {
+                continue;
+            }
+            let [src, alone] = paint[a8 as usize];
+            out[i] = if out[i].a() == 0 {
+                alone
+            } else {
+                crate::canvas::storage::gamma_over(src, out[i])
+            };
+        }
+    }
+}
+
+impl Segment {
+    /// How much it covers the pixel whose centre is `dx0`, `dy0` from its
+    /// start (`along_y`: `dy0` times its height): below zero where it
+    /// doesn't reach.
+    #[inline(always)]
+    fn coverage(&self, dx0: f32, dy0: f32, along_y: f32) -> f32 {
+        let t = ((dx0 * self.ab.x + along_y) * self.inv_len2).clamp(0.0, 1.0);
+        let (dx, dy) = (self.ab.x * t - dx0, self.ab.y * t - dy0);
+        let d2 = dx * dx + dy * dy;
+        let half = (self.width + self.dw * t) * 0.5;
+        // Thinner than a pixel: fainter rather than vanishing.
+        let fade = (half * 2.0).clamp(0.0, 1.0);
+        let edge = half.max(0.5) + 0.5;
+        (edge - d2.sqrt()).min(1.0) * fade
+    }
+}
+
+impl Line {
+    /// For each alpha: the line's colour at it, and that laid over nothing
+    /// (most of a vector layer is empty under its lines).
+    fn paint(colour: [u8; 3]) -> Box<[[Color32; 2]; 256]> {
+        let [r, g, b] = colour;
+        let mut out = Box::new([[Color32::TRANSPARENT; 2]; 256]);
+        for (a, p) in out.iter_mut().enumerate() {
+            let src = Color32::from_rgba_unmultiplied(r, g, b, a as u8);
+            *p = [
+                src,
+                crate::canvas::storage::gamma_over(src, Color32::TRANSPARENT),
+            ];
+        }
+        out
+    }
+}
+
+/// Where row `cy` (a pixel centre's y) meets the pixels `seg` can cover:
+/// the x range within its radius of it. That's a capsule, so one range:
+/// the circles round its ends and the two sides between them.
+fn row_span(seg: &Segment, cy: f32) -> Option<(f32, f32)> {
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    let b = seg.a + seg.ab;
+    for c in [seg.a, b] {
+        let dy = cy - c.y;
+        let h = seg.radius2 - dy * dy;
+        if h >= 0.0 {
+            let half = h.sqrt();
+            lo = lo.min(c.x - half);
+            hi = hi.max(c.x + half);
+        }
+    }
+    // The sides: the segment moved its radius out each way. (Flat ones'
+    // sides lie within the ends' circles' ranges, or off the row.)
+    if seg.dxdy != 0.0 || seg.ab.x == 0.0 {
+        for n in [seg.normal, -seg.normal] {
+            let (p, q) = (seg.a + n, b + n);
+            if (p.y - cy) * (q.y - cy) <= 0.0 && p.y != q.y {
+                let x = p.x + (cy - p.y) * seg.dxdy;
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+        }
+    }
+    (lo <= hi).then_some((lo, hi))
 }
 
 /// The union of `[x0, y0, x1, y1)` boxes (`None` if there are none).
@@ -1006,8 +1172,7 @@ mod tests {
                         if a <= 0.0 {
                             continue;
                         }
-                        let src =
-                            Color32::from_rgba_unmultiplied(r, g, b, (a * 255.0).round() as u8);
+                        let src = Color32::from_rgba_unmultiplied(r, g, b, (a * 255.0 + 0.5) as u8);
                         out[i] = crate::canvas::storage::gamma_over(src, out[i]);
                     }
                 }
@@ -1053,6 +1218,52 @@ mod tests {
     }
 
     #[test]
+    fn a_rows_span_holds_every_pixel_the_segment_covers() {
+        let mut seed = 99u32;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        for _ in 0..20000 {
+            let a = [rand() * 40.0, rand() * 40.0, rand() * 12.0];
+            let b = [
+                a[0] + (rand() - 0.5) * 20.0,
+                a[1] + (rand() - 0.5) * 20.0,
+                rand() * 12.0,
+            ];
+            let st = line(&[a, b]);
+            let l = Line::new(&st, [-100, -100, 200, 200]);
+            for seg in &l.segments {
+                for y in -30..80 {
+                    let cy = y as f32 + 0.5;
+                    let span = row_span(seg, cy);
+                    for x in -30..80 {
+                        let cx = x as f32 + 0.5;
+                        let t = (((cx - seg.a.x) * seg.ab.x + (cy - seg.a.y) * seg.ab.y)
+                            * seg.inv_len2)
+                            .clamp(0.0, 1.0);
+                        let (dx, dy) = (seg.a.x + seg.ab.x * t - cx, seg.a.y + seg.ab.y * t - cy);
+                        let half = (seg.width + seg.dw * t) * 0.5;
+                        let edge = half.max(0.5) + 0.5;
+                        if (dx * dx + dy * dy).sqrt() < edge {
+                            let ok = span.is_some_and(|(lo, hi)| {
+                                x >= floor(lo - 0.5) && x < ceil(hi - 0.5) + 1
+                            });
+                            assert!(
+                                ok,
+                                "{a:?} {b:?} x {x} y {y} span {span:?} seg a {:?} ab {:?} r {}",
+                                seg.a, seg.ab, seg.radius2.sqrt()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_fast_renderer_draws_what_the_plain_one_does() {
         let strokes = scattered(400, 700.0);
         // Small (one band) and large (bands on the pool), off the origin.
@@ -1061,13 +1272,21 @@ mod tests {
                 render_region(&strokes, region),
                 reference_render(&strokes, region),
             );
-            let worst = fast
-                .iter()
-                .zip(&plain)
-                .flat_map(|(a, b)| a.to_array().into_iter().zip(b.to_array()))
-                .map(|(a, b)| a.abs_diff(b))
-                .max();
-            assert!(worst <= Some(1), "region {region:?}: off by {worst:?}");
+            // The same coverage but for the last bit (the fast one runs its
+            // sums in another order): alpha off by one at most, and where
+            // it's the same, the colour too. (One step of alpha moves a
+            // faint pixel's stored colour by more.)
+            for (i, (a, b)) in fast.iter().zip(&plain).enumerate() {
+                let (a, b) = (a.to_array(), b.to_array());
+                let off = |k: usize| a[k].abs_diff(b[k]);
+                assert!(off(3) <= 1, "region {region:?}, pixel {i}: {a:?} {b:?}");
+                if a[3] == b[3] {
+                    assert!(
+                        (0..3).all(|k| off(k) <= 1),
+                        "region {region:?}, pixel {i}: {a:?} {b:?}"
+                    );
+                }
+            }
         }
     }
 

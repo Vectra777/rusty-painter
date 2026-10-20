@@ -301,6 +301,16 @@ impl VectorItem {
         }
     }
 
+    /// Boxes together covering what it draws, `[x0, y0, x1, y1)`, added to
+    /// `out`: a line's piece by piece (a long or diagonal one covers far
+    /// less than its box), anything else its box.
+    pub fn reach(&self, out: &mut Vec<[i32; 4]>) {
+        match self {
+            VectorItem::Line(l) => l.reach(out),
+            _ => out.push(self.bounds()),
+        }
+    }
+
     /// Whether a circle at `c` of radius `r` touches what it draws.
     pub fn touches(&self, c: Vec2, r: f32) -> bool {
         match self {
@@ -424,7 +434,7 @@ impl Painter {
     pub(super) fn at(&self, x: i32, y: i32, coverage: f32) -> Color32 {
         match self {
             Painter::Colour([r, g, b, a]) => {
-                let a = (*a as f32 * coverage).round() as u8;
+                let a = (*a as f32 * coverage + 0.5) as u8;
                 Color32::from_rgba_unmultiplied(*r, *g, *b, a)
             }
             Painter::Gradient {

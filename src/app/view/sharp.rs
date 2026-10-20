@@ -455,6 +455,27 @@ impl PainterApp {
         }
     }
 
+    /// The top vector and text layers drawn as a `size` picture from canvas
+    /// point `origin` at `scale` (what a zoomed-in screen asks for), or a
+    /// patch of it, without a frame: for the benchmarks.
+    #[cfg(feature = "bench")]
+    pub(crate) fn sharp_picture(
+        &mut self,
+        origin: Vec2,
+        size: [usize; 2],
+        scale: f32,
+    ) -> Vec<Color32> {
+        let run = top_run(self);
+        let reach = [
+            origin.x.floor() as i32 - 2,
+            origin.y.floor() as i32 - 2,
+            (origin.x + size[0] as f32 / scale).ceil() as i32 + 2,
+            (origin.y + size[1] as f32 / scale).ceil() as i32 + 2,
+        ];
+        let request = self.sharp_request(&run, origin, size, scale, reach);
+        self.sharp_display(draw(&request))
+    }
+
     /// Pixels as the monitor shows them (the composite's colour management).
     fn sharp_display(&self, pixels: Vec<Color32>) -> Vec<Color32> {
         let Some(display) = &self.render_cache.display else {
