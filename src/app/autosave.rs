@@ -191,10 +191,11 @@ impl PainterApp {
             ctx.request_repaint_after(due - now);
             return;
         }
-        // Not before the strokes are painted, nor while a file is being
-        // opened or saved.
+        // Not before the strokes (and vector layers) are painted, nor while
+        // a file is being opened or saved.
         if self.brush_state.is_drawing
             || self.stroke_worker.is_busy()
+            || self.vector_busy()
             || self.session_running()
             || !self.workspace.jobs.is_idle()
         {

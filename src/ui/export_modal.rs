@@ -127,8 +127,10 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
 /// Copy the document as it is now and export the copy on another thread.
 fn start_export(app: &mut PainterApp, target: PathBuf, format: ExportFormat) {
-    // Shader layers export as their current frame.
+    // Shader layers export as their current frame, vector layers as
+    // they'll show once drawn.
     app.bake_shader_layers();
+    app.settle_vectors();
     let canvas = app.canvas.detached_copy();
     let color = crate::project::export::ExportColor {
         profile: app.canvas.profile.clone(),

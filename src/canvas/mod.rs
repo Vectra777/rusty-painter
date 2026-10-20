@@ -22,6 +22,7 @@ pub mod motion;
 pub mod palette;
 pub mod path;
 pub mod puppet;
+pub mod raster;
 pub mod rig;
 pub mod shader;
 pub mod storage;

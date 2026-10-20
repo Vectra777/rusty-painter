@@ -278,6 +278,10 @@ impl eframe::App for PainterApp {
                 if self.wet_tick() {
                     needs_repaint = true;
                 }
+                // Vector layers drawn in the background: what's done shows.
+                if self.vector_tick() {
+                    needs_repaint = true;
+                }
                 // Composite and paint after input, so this frame's dabs and any
                 // pan/zoom show up in this frame.
                 let (uploads, more_tiles) =
@@ -795,7 +799,13 @@ impl PainterApp {
         if !redo {
             self.stroke_worker.drop_queued_samples();
         }
-        self.release_canvas();
+        // A step that only puts vector lines back (drawn again from them)
+        // needn't wait for the drawing going on; any other may keep pixels.
+        if self.layer_state.history.next_redraws_lines(redo) {
+            self.release_canvas_for_lines();
+        } else {
+            self.release_canvas();
+        }
         {
             let history = &mut self.layer_state.history;
             let (affected, layer_action) = if redo {
@@ -847,6 +857,11 @@ impl PainterApp {
             }
 
             self.layer_state.thumbnails_dirty = true;
+        }
+        for (id, region) in self.layer_state.history.take_vector_redraws() {
+            if let Some(idx) = self.canvas.layer_index_of(id) {
+                self.request_vector_redraw(idx, region);
+            }
         }
     }
 }

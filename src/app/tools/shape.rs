@@ -352,6 +352,57 @@ impl ShapeSession {
         }
     }
 
+    /// The shape as a Bézier path, exactly: a rectangle's corners, an
+    /// ellipse's four arcs, a curve's handles (what a vector layer keeps).
+    pub fn path(&self, closed_polygon: bool) -> crate::canvas::path::Path {
+        use crate::canvas::path::{Knot, Path, Subpath};
+        let corner_path = |pts: &[Vec2], closed: bool| Subpath {
+            knots: pts.iter().map(|&p| Knot::corner(p)).collect(),
+            closed,
+        };
+        let sub = match self.kind {
+            ShapeKind::Line => corner_path(&self.points, false),
+            ShapeKind::Rectangle => corner_path(&corners(self.points[0], self.points[1]), true),
+            ShapeKind::Ellipse => {
+                let (min, max) = (
+                    self.points[0].min(self.points[1]),
+                    self.points[0].max(self.points[1]),
+                );
+                let (c, r) = ((min + max) * 0.5, (max - min) * 0.5);
+                // Four quarter arcs, each a cubic with handles this far
+                // along its tangents: within 0.03% of the ellipse.
+                const K: f32 = 0.552_284_8;
+                let at = |v: Vec2| self.to_canvas(c + v);
+                let knots = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)].map(|(x, y)| {
+                    let p = Vec2::new(x * r.x, y * r.y);
+                    // The tangent going round (x right, y down: clockwise).
+                    let t = Vec2::new(-y * r.x, x * r.y) * K;
+                    Knot {
+                        anchor: at(p),
+                        in_: at(p - t),
+                        out: at(p + t),
+                    }
+                });
+                Subpath {
+                    knots: knots.to_vec(),
+                    closed: true,
+                }
+            }
+            ShapeKind::Polygon => {
+                corner_path(&self.points, closed_polygon && self.points.len() > 2)
+            }
+            ShapeKind::Curve => Subpath {
+                knots: (self.nodes().into_iter())
+                    .map(|[anchor, in_, out]| Knot { anchor, in_, out })
+                    .collect(),
+                closed: self.closed_curve,
+            },
+        };
+        Path {
+            subpaths: vec![sub],
+        }
+    }
+
     /// Whether the shape has an inside to fill.
     fn has_area(&self, closed_polygon: bool) -> bool {
         match self.kind {
@@ -668,16 +719,17 @@ impl PainterApp {
         if layer.locked || layer.kind == LayerKind::Group {
             return;
         }
-        // On a vector layer a shape is one more line (its outline).
-        if self.is_vector_layer(layer_idx) {
-            let outline = session.outline(settings.closed);
-            self.add_vector_line(layer_idx, &outline);
-            return;
-        }
         let fill = matches!(settings.style, ShapeStyle::Fill | ShapeStyle::Both)
             && session.has_area(settings.closed);
         let outline = matches!(settings.style, ShapeStyle::Outline | ShapeStyle::Both)
             || !session.has_area(settings.closed);
+        // On a vector layer it's kept as a shape: its path, filled with the
+        // secondary colour and outlined with the brush's.
+        if self.is_vector_layer(layer_idx) {
+            let path = session.path(settings.closed);
+            self.add_vector_shape(layer_idx, path, fill, outline);
+            return;
+        }
         let fills = if fill {
             vec![session.outline(true)]
         } else {
@@ -1301,10 +1353,13 @@ mod tests {
     }
 
     #[test]
-    fn shapes_on_a_vector_layer_become_lines() {
+    fn shapes_on_a_vector_layer_are_kept_as_exact_shapes() {
+        use crate::canvas::vector::{Paint, VectorItem};
         let mut app = app();
         app.add_vector_layer();
         let idx = app.canvas.active_layer_idx;
+        app.brush_state.brush.brush_options.color = Color32::from_rgb(10, 20, 30);
+        app.brush_state.secondary_color = Color32::from_rgb(200, 100, 50);
         curve_point(&mut app, Vec2::new(20.0, 90.0), Vec2::new(20.0, 50.0));
         curve_point(&mut app, Vec2::new(100.0, 90.0), Vec2::new(100.0, 130.0));
         app.shape_finish_polygon();
@@ -1313,19 +1368,22 @@ mod tests {
             .vector
             .as_ref()
             .expect("still a vector layer");
-        assert_eq!(v.strokes.len(), 1);
-        assert!(
-            v.strokes[0].points.len() < 40,
-            "thinned: {}",
-            v.strokes[0].points.len()
-        );
-        let top = v.strokes[0]
-            .points
-            .iter()
-            .map(|p| p[1])
+        assert_eq!(v.len(), 1);
+        let VectorItem::Shape(curve) = &*v.items()[0] else {
+            panic!("a shape");
+        };
+        // Its two points and their handles, not a polyline through it.
+        assert_eq!(curve.path.subpaths[0].knots.len(), 2);
+        assert!(curve.fill.is_none(), "an outline (the default)");
+        let outline = curve.stroke.as_ref().unwrap();
+        assert_eq!(outline.paint, Paint::Colour([10, 20, 30, 255]));
+        let top = (curve.path.subpaths[0].flatten_tol(0.1).iter())
+            .map(|p| p.y)
             .fold(f32::MAX, f32::min);
         assert!((58.0..62.0).contains(&top), "{top}");
-        // A rectangle too.
+        // A rectangle filled and outlined: its corners exactly, the fill in
+        // the secondary colour.
+        app.workspace.shapes.settings.style = ShapeStyle::Both;
         drag(
             &mut app,
             ShapeKind::Rectangle,
@@ -1335,7 +1393,33 @@ mod tests {
         );
         app.shape_commit();
         let v = app.canvas.layers[idx].vector.as_ref().unwrap();
-        assert_eq!(v.strokes.len(), 2);
+        assert_eq!(v.len(), 2);
+        let VectorItem::Shape(rect) = &*v.items()[1] else {
+            panic!("a shape");
+        };
+        let corners: Vec<Vec2> = rect.path.subpaths[0]
+            .knots
+            .iter()
+            .map(|k| k.anchor)
+            .collect();
+        assert_eq!(
+            corners,
+            [
+                Vec2::new(10.0, 10.0),
+                Vec2::new(50.0, 10.0),
+                Vec2::new(50.0, 40.0),
+                Vec2::new(10.0, 40.0)
+            ]
+        );
+        assert!(rect.path.subpaths[0].closed);
+        assert_eq!(
+            rect.fill.as_ref().unwrap().paint,
+            Paint::Colour([200, 100, 50, 255])
+        );
+        assert_eq!(
+            rect.stroke.as_ref().unwrap().paint,
+            Paint::Colour([10, 20, 30, 255])
+        );
         assert_eq!(
             app.layer_state
                 .history
@@ -1345,5 +1429,13 @@ mod tests {
                 .map(String::as_str),
             Some("Vector shape")
         );
+        // Drawn: the fill inside, the outline on the edge.
+        app.settle_vectors();
+        let px = |x: i32, y: i32| {
+            let t = app.canvas.get_layer_tile_data(idx, x / 64, y / 64).unwrap();
+            t[((y % 64) * 64 + x % 64) as usize]
+        };
+        assert_eq!(px(30, 25), Color32::from_rgb(200, 100, 50));
+        assert_eq!(px(30, 10), Color32::from_rgb(10, 20, 30));
     }
 }

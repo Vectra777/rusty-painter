@@ -227,6 +227,8 @@ impl PainterApp {
         let Some(target) = self.fill_target() else {
             return;
         };
+        // (It finds its area in what vector layers will show.)
+        self.settle_vectors();
         let source = self.fill_source_layer();
         if source == SampleLayers::Reference && !self.canvas.has_reference_layer() {
             self.export_state.message =

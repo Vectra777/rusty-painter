@@ -353,6 +353,7 @@ impl PainterApp {
         );
         let text = source.text.clone();
         let shader = source.shader.clone();
+        let vector = source.vector.clone();
         let (position_locked, draft, reference) =
             (source.position_locked, source.draft, source.reference);
         let tiles: Vec<((i32, i32), Vec<Color32>)> = self
@@ -373,6 +374,7 @@ impl PainterApp {
             layer.blend = blend;
             layer.text = text;
             layer.shader = shader;
+            layer.vector = vector;
             layer.position_locked = position_locked;
             layer.draft = draft;
             layer.reference = reference;
@@ -393,6 +395,14 @@ impl PainterApp {
         for event in events {
             match event {
                 egui::Event::Copy => {
+                    // Picked shapes with Edit Vectors: as SVG text.
+                    if matches!(self.active_tool, crate::app::tools::Tool::VectorEdit)
+                        && let Some(svg) = self.picked_items_svg()
+                    {
+                        ctx.copy_text(svg);
+                        acted = true;
+                        continue;
+                    }
                     let merged = ctx.input(|i| i.modifiers.shift);
                     acted |= self.copy_selection(merged);
                 }
@@ -400,12 +410,19 @@ impl PainterApp {
                     self.cut_selection();
                     acted = true;
                 }
-                egui::Event::Paste(_) => {
+                egui::Event::Paste(text) => {
                     let state = &mut self.workspace.clipboard;
                     state.paste_key_down = true;
                     if !state.pasted_this_press {
                         state.pasted_this_press = true;
-                        self.paste();
+                        // SVG text (copied from a vector editor): shapes.
+                        if text.contains("<svg") {
+                            if let Err(err) = self.import_svg_text("Pasted shapes", &text, true) {
+                                self.report(err);
+                            }
+                        } else {
+                            self.paste();
+                        }
                         acted = true;
                     }
                 }

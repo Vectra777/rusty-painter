@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 pub use crate::app::tools::gradient::GradientColors;
 pub use crate::app::tools::shape::{ShapeKind, ShapeMods, ShapeStyle};
+pub use crate::app::tools::vector::VectorErase;
 pub use crate::brush_engine::symmetry::SymmetryMode;
 pub use crate::canvas::gradient::GradientShape;
 pub use crate::canvas::liquify::LiquifyMode;
@@ -520,4 +521,228 @@ pub fn dry(app: &mut PainterApp, steps: usize) -> bool {
     }
     app.wet_steps(&wet, steps);
     true
+}
+
+/// A vector layer over the painted one, active, holding `lines` lines like
+/// hand-drawn line art (wavy, 100–600 px long, 3–12 px wide, sampled every
+/// 3 px and thinned as the brush thins them), scattered over the canvas.
+pub fn vector_layer(app: &mut PainterApp, lines: usize) {
+    use crate::canvas::vector::{self, VectorLayer, VectorStroke};
+    app.add_vector_layer();
+    let size = app.canvas.width() as f32;
+    let mut seed = 0x2545_f491_u32;
+    let mut rand = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as f32 / u32::MAX as f32
+    };
+    let strokes: Vec<VectorStroke> = (0..lines)
+        .map(|_| {
+            let start = Vec2::new(rand(), rand()) * size * 0.9 + Vec2::splat(size * 0.05);
+            let (angle, len, width) = (
+                rand() * std::f32::consts::TAU,
+                100.0 + rand() * 500.0,
+                3.0 + rand() * 9.0,
+            );
+            let (dir, side) = (Vec2::angled(angle), Vec2::angled(angle).rot90());
+            let (wave, phase) = (10.0 + rand() * 30.0, rand() * 6.0);
+            let n = (len / 3.0) as usize;
+            let raw: Vec<[f32; 3]> = (0..=n)
+                .map(|i| {
+                    let t = i as f32 / n as f32;
+                    let p = start + dir * len * t + side * wave * (t * 5.0 + phase).sin();
+                    [
+                        p.x,
+                        p.y,
+                        width * (0.4 + 0.6 * (t * std::f32::consts::PI).sin()),
+                    ]
+                })
+                .collect();
+            VectorStroke {
+                points: vector::simplify(&raw, 0.3),
+                colour: [20, 20, 30],
+                opacity: 1.0,
+            }
+        })
+        .collect();
+    let idx = app.canvas.active_layer_idx;
+    app.change_vector_lines(idx, "Lines", |v| *v = VectorLayer::from_strokes(strokes));
+    // Drawn before anything's timed.
+    app.settle_vectors();
+}
+
+/// A vector layer over the painted one, active, holding `n` shapes:
+/// ellipses and rectangles filled and outlined, some dashed with arrows,
+/// some with gradients, scattered over the canvas.
+pub fn vector_shapes(app: &mut PainterApp, n: usize) {
+    use crate::canvas::gradient::GradientStops;
+    use crate::canvas::path::{Knot, Path, Subpath};
+    use crate::canvas::raster::marker::Marker;
+    use crate::canvas::vector::{
+        Fill, Paint, PaintGradient, PathShape, StrokeStyle, VectorItem, VectorLayer,
+    };
+    app.add_vector_layer();
+    let size = app.canvas.width() as f32;
+    let mut seed = 0x0dd5_eed5_u32;
+    let mut rand = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as f32 / u32::MAX as f32
+    };
+    let items: Vec<VectorItem> = (0..n)
+        .map(|i| {
+            let c = Vec2::new(rand(), rand()) * size * 0.9 + Vec2::splat(size * 0.05);
+            let r = Vec2::new(20.0 + rand() * 150.0, 20.0 + rand() * 150.0);
+            let knots = if i % 2 == 0 {
+                let k = 0.552_284_8;
+                [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)]
+                    .map(|(x, y): (f32, f32)| {
+                        let p = c + Vec2::new(x * r.x, y * r.y);
+                        let t = Vec2::new(-y * r.x, x * r.y) * k;
+                        Knot {
+                            anchor: p,
+                            in_: p - t,
+                            out: p + t,
+                        }
+                    })
+                    .to_vec()
+            } else {
+                [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                    .map(|(x, y)| Knot::corner(c + Vec2::new(x * r.x, y * r.y)))
+                    .to_vec()
+            };
+            let paint = if i % 5 == 0 {
+                Paint::Gradient(Box::new(PaintGradient {
+                    shape: crate::canvas::gradient::GradientShape::Linear,
+                    repeat: Default::default(),
+                    start: [c.x - r.x, c.y],
+                    end: [c.x + r.x, c.y],
+                    stops: GradientStops::from_colors(&[(0.0, [250, 200, 0]), (1.0, [0, 90, 220])]),
+                    transform: None,
+                }))
+            } else {
+                Paint::Colour([(i * 37 % 256) as u8, 120, 200, 255])
+            };
+            let mut stroke = StrokeStyle::solid([20, 20, 30, 255], 2.0 + rand() * 6.0);
+            if i % 3 == 0 {
+                stroke.dash = vec![12.0, 6.0];
+                stroke.end = Marker::Arrow;
+            }
+            VectorItem::Shape(PathShape {
+                path: Path {
+                    subpaths: vec![Subpath {
+                        knots,
+                        closed: i % 3 != 0,
+                    }],
+                },
+                fill: (i % 3 != 0).then(|| Fill {
+                    paint,
+                    rule: Default::default(),
+                }),
+                stroke: Some(stroke),
+                opacity: 1.0,
+            })
+        })
+        .collect();
+    let idx = app.canvas.active_layer_idx;
+    app.change_vector_lines(idx, "Shapes", |v| *v = VectorLayer::from_items(items));
+    app.settle_vectors();
+}
+
+/// The active vector layer drawn again over the whole canvas, waited for.
+pub fn redraw_vectors(app: &mut PainterApp) {
+    let idx = app.canvas.active_layer_idx;
+    let (w, h) = (app.canvas.width() as i32, app.canvas.height() as i32);
+    app.request_vector_redraw(idx, [0, 0, w, h]);
+    app.settle_vectors();
+}
+
+/// An SVG document of `n` paths (curves and polygons, filled and
+/// outlined), as a vector editor writes them.
+pub fn svg_document(n: usize, size: usize) -> String {
+    let mut s = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}">"#
+    );
+    for i in 0..n {
+        let (x, y) = ((i * 397) % size, (i * 691) % size);
+        s.push_str(&format!(
+            r##"<path d="M{x} {y} C{} {} {} {} {} {} L{} {} Z" fill="#{:02x}6699" stroke="#222" stroke-width="2"/>"##,
+            x + 30, y - 20, x + 60, y + 40, x + 90, y + 10, x + 40, y + 60, i % 256
+        ));
+    }
+    s.push_str("</svg>");
+    s
+}
+
+/// Import an SVG document as a vector layer.
+pub fn import_svg(app: &mut PainterApp, svg: &str) {
+    app.import_svg_text("Imported", svg, false).unwrap();
+}
+
+/// The points a vector layer's lines are kept as, all lines together.
+pub fn vector_points(app: &PainterApp) -> usize {
+    let layer = &app.canvas.layers[app.canvas.active_layer_idx];
+    layer
+        .vector
+        .as_ref()
+        .map_or(0, |v| v.lines().map(|s| s.points.len()).sum())
+}
+
+/// The topmost vector line near `p` (what Edit Lines picks with a press).
+pub fn vector_pick(app: &PainterApp, p: Vec2) -> Option<usize> {
+    let layer = &app.canvas.layers[app.canvas.active_layer_idx];
+    layer.vector.as_ref()?.pick(p, 12.0)
+}
+
+pub fn set_vector_erase(app: &mut PainterApp, mode: VectorErase) {
+    app.workspace.vector.erase = mode;
+}
+
+/// Pen down and through `path` on the active layer, still down: see
+/// [`finish`].
+pub fn stroke_held(app: &mut PainterApp, path: &[(Vec2, f32)], eraser: bool) {
+    app.set_brush_tool(eraser);
+    let Some(&(first, pressure)) = path.first() else {
+        return;
+    };
+    app.start_stroke_with_pressure(first, pressure);
+    for &(p, pressure) in &path[1..] {
+        app.add_stroke_point(p, pressure);
+    }
+}
+
+/// The pen lifts, nothing waited for (vector layers go on being drawn in
+/// the background): what the UI thread spends.
+pub fn pen_up(app: &mut PainterApp) {
+    app.finish_stroke();
+}
+
+/// A stroke through `path`, the pen lifted, nothing waited for.
+pub fn stroke_unsettled(app: &mut PainterApp, path: &[(Vec2, f32)], eraser: bool) {
+    stroke_held(app, path, eraser);
+    app.finish_stroke();
+}
+
+/// Wait for vector layers' drawing in the background.
+pub fn settle_vectors(app: &mut PainterApp) {
+    app.settle_vectors();
+}
+
+/// Layer → Vector → Recolour Lines with the brush colour.
+pub fn recolour_vector(app: &mut PainterApp) {
+    app.recolour_vector_lines(app.canvas.active_layer_idx);
+}
+
+/// Layer → Vector → Line Width: `scale` set and kept.
+pub fn vector_line_width(app: &mut PainterApp, scale: f32) {
+    app.line_width_open(app.canvas.active_layer_idx);
+    app.line_width_set(scale);
+    app.line_width_done(true);
+}
+
+/// Layer → Rasterise Vector Layer.
+pub fn rasterise_vector(app: &mut PainterApp) {
+    app.rasterise_vector_layer(app.canvas.active_layer_idx);
 }

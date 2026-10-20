@@ -284,13 +284,28 @@ pub(crate) fn downscale(src: &image::RgbaImage, w: u32, h: u32) -> image::RgbaIm
 
 #[cfg(not(mobile))]
 pub(crate) fn import_image_dialog(app: &mut PainterApp) {
-    let dialog = crate::app::settings::file_dialog()
-        .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "tif", "tiff"]);
+    let dialog = crate::app::settings::file_dialog().add_filter(
+        "Images",
+        &["png", "jpg", "jpeg", "bmp", "tif", "tiff", "svg"],
+    );
     app.file_dialog_job(dialog, crate::app::jobs::Pick::File, |app, paths| {
         let path = paths[0].clone();
         let name = path
             .file_stem()
             .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
+        // SVG comes in as shapes on a vector layer of its own.
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+        {
+            let result = std::fs::read_to_string(&path)
+                .map_err(|e| format!("Couldn't read the SVG: {e}"))
+                .and_then(|text| app.import_svg_text(&name, &text, false));
+            if let Err(err) = result {
+                app.report(err);
+            }
+            return;
+        }
         app.import_image_in_background(name, FileSource::Path(path));
     });
 }

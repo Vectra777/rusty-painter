@@ -11,7 +11,7 @@ use crate::canvas::blend::Unmultiply;
 use crate::canvas::blend_modes::LayerBlend;
 use crate::canvas::layer_style::LayerFill;
 use crate::canvas::storage::{LayerId, LayerKind};
-use crate::canvas::vector::VectorStroke;
+use crate::canvas::vector::{Paint, PathShape, VectorItem, VectorStroke};
 use eframe::egui::Color32;
 use std::fmt::Write;
 
@@ -84,9 +84,8 @@ fn children(
                 if let Some(fill) = &layer.style.fill {
                     fill_svg(canvas, i, fill, out, defs)?;
                 } else if let Some(v) = &layer.vector {
-                    for s in &v.strokes {
-                        out.push_str(&stroke_svg(s));
-                    }
+                    let mut ids = 0;
+                    items_svg(v.items().iter().map(|i| &**i), out, defs, &mut ids);
                 } else {
                     // The background shows its colour where it's unpainted.
                     if i == 0 {
@@ -252,6 +251,247 @@ fn fill_svg(
         r#"<rect width="{w}" height="{h}" fill="url(#{gid})"/>"#
     );
     Ok(())
+}
+
+/// A vector layer's items as SVG: shapes as paths (fill, outline, dashes,
+/// gradients), groups as groups, brush lines as filled outlines. What SVG
+/// doesn't hold as this app does is noted in `data-rp-` attributes, so an
+/// import gets it back: a line's points and widths, a shape's markers
+/// (drawn as paths of their own, which an import leaves out). `ids`
+/// numbers what needs an id.
+pub(crate) fn items_svg<'a>(
+    items: impl IntoIterator<Item = &'a VectorItem>,
+    out: &mut String,
+    defs: &mut String,
+    ids: &mut usize,
+) {
+    for item in items {
+        *ids += 1;
+        let n = *ids;
+        match item {
+            VectorItem::Line(l) => {
+                let points: Vec<String> = (l.points.iter())
+                    .map(|[x, y, w]| format!("{x:.2},{y:.2},{w:.2}"))
+                    .collect();
+                let path = stroke_svg(l);
+                if let Some(rest) = path.strip_prefix("<path ") {
+                    let _ = write!(
+                        out,
+                        r#"<path id="rpl-{n}" data-rp-points="{}" {rest}"#,
+                        points.join(" ")
+                    );
+                }
+            }
+            VectorItem::Shape(s) => shape_svg(s, n, out, defs),
+            VectorItem::Group(g) => {
+                let mut attrs = format!(r#" id="rpg-{n}""#);
+                if !g.name.is_empty() {
+                    let _ = write!(attrs, r#" data-name="{}""#, xml(&g.name));
+                }
+                if g.opacity < 1.0 {
+                    let _ = write!(attrs, r#" opacity="{:.3}""#, g.opacity);
+                }
+                if !g.visible {
+                    attrs.push_str(r#" display="none""#);
+                }
+                let _ = writeln!(out, "<g{attrs}>");
+                items_svg(&g.items, out, defs, ids);
+                out.push_str("</g>\n");
+            }
+        }
+    }
+}
+
+/// A path's outline in SVG's path syntax.
+pub(crate) fn path_d(path: &crate::canvas::path::Path) -> String {
+    let mut d = String::new();
+    for sub in &path.subpaths {
+        let Some(first) = sub.knots.first() else {
+            continue;
+        };
+        let _ = write!(d, "M{:.3} {:.3} ", first.anchor.x, first.anchor.y);
+        for [a, b, c, e] in sub.segments() {
+            if b == a && c == e {
+                let _ = write!(d, "L{:.3} {:.3} ", e.x, e.y);
+            } else {
+                let _ = write!(
+                    d,
+                    "C{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} ",
+                    b.x, b.y, c.x, c.y, e.x, e.y
+                );
+            }
+        }
+        if sub.closed {
+            d.push_str("Z ");
+        }
+    }
+    d.trim_end().to_string()
+}
+
+/// A paint as an SVG paint (a gradient put in `defs` as `id`): the value,
+/// and its opacity when it has one.
+fn paint_svg(paint: &Paint, id: &str, defs: &mut String) -> (String, Option<f32>) {
+    use crate::canvas::gradient::{GradientRepeat, GradientShape};
+    match paint {
+        Paint::Colour([r, g, b, a]) => (hex([*r, *g, *b]), (*a < 255).then(|| *a as f32 / 255.0)),
+        Paint::Gradient(g) => {
+            let stops: String = (g.stops.colors.iter())
+                .map(|s| {
+                    format!(
+                        r#"<stop offset="{:.4}" stop-color="{}"/>"#,
+                        s.pos,
+                        hex(s.color)
+                    )
+                })
+                .collect();
+            let spread = match g.repeat {
+                GradientRepeat::None => "",
+                GradientRepeat::Repeat => r#" spreadMethod="repeat""#,
+                GradientRepeat::Mirror => r#" spreadMethod="reflect""#,
+            };
+            let transform = g.transform.map_or(String::new(), |[a, b, c, d, e, f]| {
+                format!(r#" gradientTransform="matrix({a} {b} {c} {d} {e} {f})""#)
+            });
+            let ([x1, y1], [x2, y2]) = (g.start, g.end);
+            // SVG has no conic, diamond or mirrored-about-the-start
+            // gradient: the nearest it has.
+            if matches!(
+                g.shape,
+                GradientShape::Radial | GradientShape::Diamond | GradientShape::Angle
+            ) {
+                let r = ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
+                let _ = writeln!(
+                    defs,
+                    r#"<radialGradient id="{id}" gradientUnits="userSpaceOnUse" cx="{x1:.2}" cy="{y1:.2}" r="{r:.2}"{spread}{transform}>{stops}</radialGradient>"#
+                );
+            } else {
+                let _ = writeln!(
+                    defs,
+                    r#"<linearGradient id="{id}" gradientUnits="userSpaceOnUse" x1="{x1:.2}" y1="{y1:.2}" x2="{x2:.2}" y2="{y2:.2}"{spread}{transform}>{stops}</linearGradient>"#
+                );
+            }
+            (format!("url(#{id})"), None)
+        }
+    }
+}
+
+fn marker_name(m: crate::canvas::raster::marker::Marker) -> &'static str {
+    use crate::canvas::raster::marker::Marker;
+    match m {
+        Marker::None => "none",
+        Marker::Arrow => "arrow",
+        Marker::OpenArrow => "open-arrow",
+        Marker::Circle => "circle",
+        Marker::Square => "square",
+        Marker::Bar => "bar",
+    }
+}
+
+fn shape_svg(s: &PathShape, n: usize, out: &mut String, defs: &mut String) {
+    use crate::canvas::raster::marker::Marker;
+    use crate::canvas::raster::stroke::{Cap, Join};
+    let mut attrs = format!(r#" id="rps-{n}" d="{}""#, path_d(&s.path));
+    match &s.fill {
+        Some(f) => {
+            let (paint, opacity) = paint_svg(&f.paint, &format!("rpf-{n}"), defs);
+            let _ = write!(attrs, r#" fill="{paint}""#);
+            if let Some(o) = opacity {
+                let _ = write!(attrs, r#" fill-opacity="{o:.3}""#);
+            }
+            if f.rule == crate::canvas::raster::FillRule::EvenOdd {
+                attrs.push_str(r#" fill-rule="evenodd""#);
+            }
+        }
+        None => attrs.push_str(r#" fill="none""#),
+    }
+    if let Some(o) = &s.stroke {
+        let (paint, opacity) = paint_svg(&o.paint, &format!("rpo-{n}"), defs);
+        let _ = write!(attrs, r#" stroke="{paint}" stroke-width="{:.3}""#, o.width);
+        if let Some(op) = opacity {
+            let _ = write!(attrs, r#" stroke-opacity="{op:.3}""#);
+        }
+        let cap = match o.cap {
+            Cap::Butt => "butt",
+            Cap::Round => "round",
+            Cap::Square => "square",
+        };
+        let join = match o.join {
+            Join::Miter => "miter",
+            Join::Round => "round",
+            Join::Bevel => "bevel",
+        };
+        let _ = write!(
+            attrs,
+            r#" stroke-linecap="{cap}" stroke-linejoin="{join}" stroke-miterlimit="{:.3}""#,
+            o.miter_limit
+        );
+        if !o.dash.is_empty() {
+            let dash: Vec<String> = o.dash.iter().map(|d| format!("{d:.3}")).collect();
+            let _ = write!(attrs, r#" stroke-dasharray="{}""#, dash.join(" "));
+            if o.dash_offset != 0.0 {
+                let _ = write!(attrs, r#" stroke-dashoffset="{:.3}""#, o.dash_offset);
+            }
+        }
+        if o.start != Marker::None || o.end != Marker::None {
+            let _ = write!(
+                attrs,
+                r#" data-rp-markers="{} {}""#,
+                marker_name(o.start),
+                marker_name(o.end)
+            );
+        }
+    }
+    if s.opacity < 1.0 {
+        let _ = write!(attrs, r#" opacity="{:.3}""#, s.opacity);
+    }
+    let _ = writeln!(out, "<path{attrs}/>");
+    // The markers, as SVG viewers will show them: shapes of their own.
+    if let Some(o) = s
+        .stroke
+        .as_ref()
+        .filter(|o| o.start != Marker::None || o.end != Marker::None)
+    {
+        let mut polys: Vec<Vec<eframe::egui::Vec2>> = Vec::new();
+        for (pts, closed) in s.flattened() {
+            if closed || pts.len() < 2 {
+                continue;
+            }
+            let n = pts.len();
+            let (a, b) = (
+                (pts[1] - pts[0]).normalized(),
+                (pts[n - 1] - pts[n - 2]).normalized(),
+            );
+            let mut one = |m: Marker, at, dir| {
+                let mut e = crate::canvas::raster::Edges::recording();
+                m.add(&mut e, at, dir, o.width);
+                polys.extend(e.polygons().iter().cloned());
+            };
+            one(o.start, pts[0], -a);
+            one(o.end, pts[n - 1], b);
+        }
+        if !polys.is_empty() {
+            let mut d = String::new();
+            for p in polys {
+                for (i, q) in p.iter().enumerate() {
+                    let _ = write!(
+                        d,
+                        "{}{:.2} {:.2} ",
+                        if i == 0 { "M" } else { "L" },
+                        q.x,
+                        q.y
+                    );
+                }
+                d.push_str("Z ");
+            }
+            let (paint, opacity) = paint_svg(&o.paint, &format!("rpm-paint-{n}"), defs);
+            let op = opacity.map_or(String::new(), |o| format!(r#" fill-opacity="{o:.3}""#));
+            let _ = writeln!(
+                out,
+                r#"<path id="rpm-{n}" d="{}" fill="{paint}"{op}/>"#,
+                d.trim_end()
+            );
+        }
+    }
 }
 
 /// A vector line as a filled outline: its width at every point kept, round
@@ -456,13 +696,11 @@ mod tests {
         canvas.layers[1].name = "Ink & <paint>".into();
         let v = canvas.insert_new_layer(2, "Lines".into(), LayerKind::Paint, None);
         let vi = canvas.layer_index_of(v).unwrap();
-        canvas.layers[vi].vector = Some(Box::new(VectorLayer {
-            strokes: vec![VectorStroke {
-                points: vec![[5.0, 5.0, 2.0], [40.0, 20.0, 4.0]],
-                colour: [0, 128, 255],
-                opacity: 0.5,
-            }],
-        }));
+        canvas.layers[vi].vector = Some(Box::new(VectorLayer::from_strokes(vec![VectorStroke {
+            points: vec![[5.0, 5.0, 2.0], [40.0, 20.0, 4.0]],
+            colour: [0, 128, 255],
+            opacity: 0.5,
+        }])));
         canvas.layers[vi].opacity = 0.75;
         canvas.layers[vi].blend = LayerBlend::Multiply;
         let svg = document_svg(&canvas).unwrap();

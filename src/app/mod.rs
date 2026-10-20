@@ -54,6 +54,7 @@ pub(crate) mod timelapse;
 pub(crate) mod tools;
 #[cfg(test)]
 mod undo_tests;
+pub(crate) mod vector_render;
 pub(crate) mod view;
 
 pub use painter::PainterApp;

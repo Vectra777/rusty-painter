@@ -9,10 +9,14 @@
 
 use crate::app::PainterApp;
 use crate::app::stroke_ops::exclusive;
-use crate::canvas::history::{LayerHistoryOp, TileSnapshot, UndoAction};
+use crate::canvas::history::{LayerHistoryOp, UndoAction};
 use crate::canvas::storage::LayerId;
-use crate::canvas::vector::{self, VectorLayer, VectorStroke};
+use crate::canvas::vector::{self, VectorItem, VectorLayer, VectorStroke};
 use eframe::egui::{Color32, Vec2};
+
+/// A change made from the vector properties: the layer, its items, the
+/// change's name and the undo step it went into.
+pub(crate) type PropChange = (LayerId, Vec<usize>, &'static str, (u64, usize));
 
 /// How the eraser takes lines out of a vector layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -30,7 +34,7 @@ pub enum VectorErase {
 #[derive(Default)]
 pub struct VectorState {
     /// The line being drawn or the erasing going on.
-    session: Option<VectorSession>,
+    pub(super) session: Option<VectorSession>,
     /// Vector layers a pixel stroke has begun on, turned into plain pixel
     /// layers, their lines waiting for that stroke's undo step.
     pub stroke_rasterised: Vec<(LayerId, Box<VectorLayer>)>,
@@ -40,16 +44,41 @@ pub struct VectorState {
     pub width_editing: Option<(LayerId, Box<VectorLayer>, f32)>,
     /// Edit Lines: the line picked, and a drag of it going on.
     pub line_edit: Option<LineEdit>,
+    /// The last change made from the vector properties: one after another
+    /// with the same name, on the same items, they're one undo step.
+    pub(crate) last_change: Option<PropChange>,
+    /// Vector layers being drawn again in the background.
+    pub(crate) renders: crate::app::vector_render::VectorRenders,
 }
 
-/// The line Edit Lines has picked.
+impl LineEdit {
+    /// Item `line` of layer `layer` picked, nothing else going on.
+    pub(super) fn picking(layer: LayerId, line: usize) -> Self {
+        LineEdit {
+            layer,
+            line,
+            extra: Vec::new(),
+            point: None,
+            drag: None,
+            knot: None,
+            shape_drag: None,
+        }
+    }
+}
+
+/// The line (or shape, or group) Edit Vectors has picked.
 pub struct LineEdit {
-    layer: LayerId,
-    /// Which line (index in the layer's).
-    line: usize,
+    pub(super) layer: LayerId,
+    /// Which item (index in the layer's).
+    pub(super) line: usize,
+    /// Items picked along with it (Shift+click).
+    pub(super) extra: Vec<usize>,
     /// The point of the handle pressed last (Delete takes it out).
     point: Option<usize>,
     drag: Option<LineDrag>,
+    /// A shape's point pressed last (Delete takes it out).
+    pub(super) knot: Option<crate::canvas::path::KnotRef>,
+    pub(super) shape_drag: Option<super::vector_shapes::ShapeDrag>,
 }
 
 struct LineDrag {
@@ -75,15 +104,15 @@ const HANDLE_HIT: f32 = 12.0;
 /// Handle drawn radius (screen points).
 const HANDLE_RADIUS: f32 = 4.5;
 
-struct VectorSession {
-    layer: LayerId,
+pub(super) struct VectorSession {
+    pub(super) layer: LayerId,
     /// The lines before this step, for undo.
-    before: Box<VectorLayer>,
-    /// Where pixels changed (canvas pixels), for undo.
-    changed: Option<[i32; 4]>,
+    pub(super) before: Box<VectorLayer>,
+    /// Where pixels changed (canvas pixels): what undo draws again.
+    pub(super) changed: Option<[i32; 4]>,
     /// Drawing: the brush's colour and opacity; `None` when erasing.
-    drawing: Option<([u8; 3], f32)>,
-    last: Vec2,
+    pub(super) drawing: Option<([u8; 3], f32)>,
+    pub(super) last: Vec2,
 }
 
 impl PainterApp {
@@ -120,11 +149,12 @@ impl PainterApp {
 
     /// Add a line through `points` (a shape's outline) to vector layer
     /// `idx`, with the brush's width, colour and opacity, as one step.
+    #[cfg(test)]
     pub(crate) fn add_vector_line(&mut self, idx: usize, points: &[Vec2]) {
         if !self.is_vector_layer(idx) || points.len() < 2 || self.brush_state.eraser_active() {
             return;
         }
-        self.release_canvas();
+        self.release_canvas_for_lines();
         let width = self.vector_width(1.0);
         let o = &self.brush_state.brush.brush_options;
         let [r, g, b, _] = o.color.to_srgba_unmultiplied();
@@ -145,21 +175,58 @@ impl PainterApp {
             drawing: None,
             last: Vec2::ZERO,
         });
-        // What's there now is the undo step's picture: read it rather than
-        // drawing the old lines again.
-        let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
-        let region = [
-            bounds[0].max(0),
-            bounds[1].max(0),
-            bounds[2].min(w),
-            bounds[3].min(h),
-        ];
-        let before = (region[0] < region[2] && region[1] < region[3])
-            .then(|| read_region(&self.canvas, idx, region));
-        self.edit_vector(idx, |v| v.strokes.push(stroke));
+        self.edit_vector(idx, |v| v.push(stroke));
         self.redraw_vector(idx, bounds);
         if let Some(session) = self.workspace.vector.session.take() {
-            self.push_vector_step_from(session, "Vector shape", before);
+            self.push_vector_step(session, "Vector shape");
+        }
+    }
+
+    /// Add `path` to vector layer `idx` as a shape, as one step: `fill`ed
+    /// with the secondary colour, `outline`d with the brush's colour,
+    /// opacity and size.
+    pub(crate) fn add_vector_shape(
+        &mut self,
+        idx: usize,
+        path: crate::canvas::path::Path,
+        fill: bool,
+        outline: bool,
+    ) {
+        if !self.is_vector_layer(idx) || path.is_empty() || !(fill || outline) {
+            return;
+        }
+        self.release_canvas_for_lines();
+        let o = &self.brush_state.brush.brush_options;
+        let [r, g, b, _] = o.color.to_srgba_unmultiplied();
+        let alpha = (o.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let width = self.vector_width(1.0);
+        let [fr, fg, fb, _] = self.brush_state.secondary_color.to_srgba_unmultiplied();
+        let shape = vector::PathShape {
+            path,
+            fill: fill.then(|| vector::Fill {
+                paint: vector::Paint::Colour([fr, fg, fb, alpha]),
+                rule: Default::default(),
+            }),
+            stroke: outline.then(|| vector::StrokeStyle::solid([r, g, b, alpha], width)),
+            opacity: 1.0,
+        };
+        if outline {
+            self.brush_state.remember_color(Color32::from_rgb(r, g, b));
+        }
+        let layer = &self.canvas.layers[idx];
+        let item = VectorItem::Shape(shape);
+        let bounds = item.bounds();
+        self.workspace.vector.session = Some(VectorSession {
+            layer: layer.id,
+            before: layer.vector.clone().unwrap_or_default(),
+            changed: None,
+            drawing: None,
+            last: Vec2::ZERO,
+        });
+        self.edit_vector(idx, |v| v.push_item(item));
+        self.redraw_vector(idx, bounds);
+        if let Some(session) = self.workspace.vector.session.take() {
+            self.push_vector_step(session, "Vector shape");
         }
     }
 
@@ -171,7 +238,7 @@ impl PainterApp {
         if !self.is_vector_layer(idx) {
             return false;
         }
-        self.release_canvas();
+        self.release_canvas_for_lines();
         self.mark_action();
         let layer = &self.canvas.layers[idx];
         let before = layer.vector.clone().unwrap_or_default();
@@ -203,8 +270,8 @@ impl PainterApp {
                     opacity,
                 };
                 let bounds = stroke.bounds();
-                self.edit_vector(idx, |v| v.strokes.push(stroke));
-                self.redraw_vector(idx, bounds);
+                self.edit_vector(idx, |v| v.push(stroke));
+                self.redraw_vector_now(idx, bounds);
             }
             None => self.vector_erase_at(idx, pos, pos),
         }
@@ -233,17 +300,13 @@ impl PainterApp {
                 colour: [0; 3],
                 opacity: 1.0,
             };
-            self.edit_vector(idx, |v| {
-                if let Some(s) = v.strokes.last_mut() {
-                    s.points.push([pos.x, pos.y, width]);
-                }
-            });
+            self.edit_vector(idx, |v| v.append_point([pos.x, pos.y, width]));
             // The new stretch, and the last few points before it: the
             // smoothed curve through them bends to meet it.
             let bounds =
                 vector::union([segment.bounds(), span_bounds(&self.canvas.layers[idx], 4)])
                     .unwrap_or_else(|| segment.bounds());
-            self.redraw_vector(idx, bounds);
+            self.redraw_vector_now(idx, bounds);
         } else {
             self.vector_erase_at(idx, last, pos);
         }
@@ -264,8 +327,8 @@ impl PainterApp {
             // Fewer points, the same line: quicker to draw and edit.
             let old = span_bounds(&self.canvas.layers[idx], usize::MAX);
             self.edit_vector(idx, |v| {
-                if let Some(s) = v.strokes.last_mut() {
-                    s.points = vector::simplify(&s.points, 0.3);
+                if let Some(last) = v.len().checked_sub(1) {
+                    v.edit(last, |s| s.points = vector::simplify(&s.points, 0.3));
                 }
             });
             let new = span_bounds(&self.canvas.layers[idx], usize::MAX);
@@ -292,114 +355,140 @@ impl PainterApp {
         let Some(v) = self.canvas.layers[idx].vector.as_ref() else {
             return;
         };
+        // Only the lines near the eraser, found by the layer's index; the
+        // ones it changes are put back in place, the rest left as they are.
+        let reach = |c: Vec2| {
+            let (x, y) = (c.x.floor() as i32, c.y.floor() as i32);
+            let r = radius.ceil() as i32 + 1;
+            [x - r, y - r, x + r + 1, y + r + 1]
+        };
+        let near = v.candidates(vector::union(spots.iter().map(|&c| reach(c))).unwrap_or([0; 4]));
         let mut changed = Vec::new();
-        let mut kept = Vec::with_capacity(v.strokes.len());
-        for (n, s) in v.strokes.iter().enumerate() {
-            let b = s.bounds();
-            let near = spots.iter().any(|c| {
-                c.x + radius >= b[0] as f32
-                    && c.x - radius <= b[2] as f32
-                    && c.y + radius >= b[1] as f32
-                    && c.y - radius <= b[3] as f32
-            });
-            if !near || !spots.iter().any(|&c| s.touches(c, radius)) {
-                kept.push(s.clone());
+        let mut edits = Vec::new();
+        // Other lines' smoothed paths, made once for this move whichever
+        // lines need them.
+        let mut paths: rustc_hash::FxHashMap<usize, vector::RunPath> = Default::default();
+        for n in near {
+            let item = &v.items()[n];
+            if !spots.iter().any(|&c| item.touches(c, radius)) {
                 continue;
             }
-            changed.push(b);
+            changed.push(v.bounds(n));
+            // A shape (or group) goes whole; a line as the mode says.
+            let Some(s) = item.as_line() else {
+                edits.push((n, Vec::new()));
+                continue;
+            };
             let mut pieces = vec![s.clone()];
             match mode {
-                VectorErase::WholeLine => continue,
+                VectorErase::WholeLine => pieces.clear(),
                 VectorErase::Touched => {
                     for &c in &spots {
                         pieces = pieces.iter().flat_map(|p| p.cut(c, radius)).collect();
                     }
                 }
                 VectorErase::ToCrossing => {
-                    let others: Vec<&VectorStroke> = (v.strokes.iter().enumerate())
-                        .filter(|&(m, _)| m != n)
-                        .map(|(_, o)| o)
-                        .collect();
+                    // What crosses a segment: the lines the index finds
+                    // near it.
+                    let mut crossing = |a: Vec2, b: Vec2| {
+                        let mut found = Vec::new();
+                        for m in v.candidates(vector::segment_box(a, b)) {
+                            let Some(other) = v.line(m).filter(|_| m != n) else {
+                                continue;
+                            };
+                            let path = (paths.entry(m))
+                                .or_insert_with(|| vector::RunPath::new(other.smoothed()));
+                            vector::crossings_with(a, b, path, &mut found);
+                        }
+                        found
+                    };
                     for &c in &spots {
                         pieces = (pieces.iter())
                             .flat_map(|p| match p.touches(c, radius) {
-                                true => p.cut_to_crossings(c, &others),
+                                true => p.cut_to_crossings_by(c, &mut crossing),
                                 false => vec![p.clone()],
                             })
                             .collect();
                     }
                 }
             }
-            kept.extend(pieces);
+            edits.push((n, pieces.into_iter().map(VectorItem::Line).collect()));
         }
         let Some(region) = vector::union(changed) else {
             return;
         };
-        self.edit_vector(idx, |v| v.strokes = kept);
+        self.edit_vector(idx, |v| v.splice(edits));
         self.redraw_vector(idx, region);
     }
 
     /// Change layer `idx`'s lines (no redraw).
-    fn edit_vector(&mut self, idx: usize, edit: impl FnOnce(&mut VectorLayer)) {
+    pub(super) fn edit_vector(&mut self, idx: usize, edit: impl FnOnce(&mut VectorLayer)) {
         let canvas = exclusive(&mut self.canvas);
         if let Some(v) = canvas.layers[idx].vector.as_mut() {
             edit(v);
         }
     }
 
-    /// Draw layer `idx`'s lines again over `region` (canvas pixels), and
-    /// note it as changed in the step going on.
-    fn redraw_vector(&mut self, idx: usize, region: [i32; 4]) {
+    /// Draw layer `idx`'s lines again over `region` (canvas pixels), in the
+    /// background, and note it as changed in the step going on.
+    pub(crate) fn redraw_vector(&mut self, idx: usize, region: [i32; 4]) {
+        if let Some(region) = self.on_canvas(region) {
+            self.note_vector_change(region);
+            self.request_vector_redraw(idx, region);
+        }
+    }
+
+    /// [`Self::redraw_vector`] now: the pen's last stretch, small, shown
+    /// as it's drawn.
+    fn redraw_vector_now(&mut self, idx: usize, region: [i32; 4]) {
+        let Some(region) = self.on_canvas(region) else {
+            return;
+        };
+        self.note_vector_change(region);
+        let Some(v) = self.canvas.layers[idx].vector.as_ref() else {
+            return;
+        };
+        let near = v.candidates(region);
+        let pixels = vector::render_region(near.iter().map(|&i| &v.items()[i]), region);
+        write_region(&self.canvas, idx, region, &pixels);
+        self.mark_vector_drawn(idx, region);
+        self.vector_painted(idx, region);
+    }
+
+    /// `region` clipped to the canvas, if anything's left.
+    fn on_canvas(&self, region: [i32; 4]) -> Option<[i32; 4]> {
         let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
-        let region = [
+        let r = [
             region[0].max(0),
             region[1].max(0),
             region[2].min(w),
             region[3].min(h),
         ];
-        if region[0] >= region[2] || region[1] >= region[3] {
-            return;
-        }
+        (r[0] < r[2] && r[1] < r[3]).then_some(r)
+    }
+
+    fn note_vector_change(&mut self, region: [i32; 4]) {
         if let Some(s) = self.workspace.vector.session.as_mut() {
             s.changed = vector::union(s.changed.into_iter().chain([region]));
         }
-        let Some(v) = self.canvas.layers[idx].vector.as_ref() else {
-            return;
-        };
-        let pixels = vector::render_region(&v.strokes, region);
-        write_region(&self.canvas, idx, region, &pixels);
-        self.mark_rect_damage(region);
-        self.layer_state.thumbnails_dirty = true;
     }
 
-    /// File a vector step: the lines as they were, and the pixels over what
-    /// changed as they were drawn from them.
-    fn push_vector_step(&mut self, session: VectorSession, label: &str) {
-        self.push_vector_step_from(session, label, None);
-    }
-
-    /// [`Self::push_vector_step`], given the pixels over what changed as
-    /// they were (when they were read before the change).
-    fn push_vector_step_from(
-        &mut self,
-        session: VectorSession,
-        label: &str,
-        before: Option<Vec<Color32>>,
-    ) {
+    /// File a vector step: the lines as they were, and where they changed
+    /// (undo puts the lines back and draws them there again: no pixels are
+    /// kept).
+    pub(super) fn push_vector_step(&mut self, session: VectorSession, label: &str) {
         let Some(region) = session.changed else {
             return;
         };
-        let before =
-            before.unwrap_or_else(|| vector::render_region(&session.before.strokes, region));
-        let tiles = region_snapshots(&self.canvas, session.layer, region, &before);
         self.layer_state.history.label_next(label);
         self.layer_state.history.push_action(UndoAction {
-            tiles,
+            tiles: Vec::new(),
             selection: None,
             transform: None,
             layer_action: Some(LayerHistoryOp::Vector {
                 layers: vec![(session.layer, Some(session.before))],
                 inner: None,
+                redraw: Some(region),
             }),
         });
     }
@@ -415,13 +504,13 @@ impl PainterApp {
         if !self.is_vector_layer(idx) {
             return;
         }
-        self.release_canvas();
+        self.release_canvas_for_lines();
         let layer = &self.canvas.layers[idx];
         let before = layer.vector.clone().unwrap_or_default();
-        let old = vector::union(before.strokes.iter().map(|s| s.bounds()));
+        let old = before.union_bounds();
         self.edit_vector(idx, change);
         let after = self.canvas.layers[idx].vector.as_ref();
-        let new = after.and_then(|v| vector::union(v.strokes.iter().map(|s| s.bounds())));
+        let new = after.and_then(|v| v.union_bounds());
         let Some(region) = vector::union(old.into_iter().chain(new)) else {
             return;
         };
@@ -441,7 +530,7 @@ impl PainterApp {
 
     /// Layer → Vector → Line Width: open the dialog for layer `idx`.
     pub(crate) fn line_width_open(&mut self, idx: usize) {
-        self.release_canvas();
+        self.release_canvas_for_lines();
         let Some(layer) = self.canvas.layers.get(idx) else {
             return;
         };
@@ -462,7 +551,7 @@ impl PainterApp {
             self.workspace.vector.width_editing = None;
             return;
         };
-        self.release_canvas();
+        self.release_canvas_for_lines();
         let region = scaled_bounds(&original, previous.max(scale).max(1.0));
         let mut scaled = *original;
         scale_widths(&mut scaled, scale);
@@ -514,9 +603,7 @@ impl PainterApp {
             .color
             .to_srgba_unmultiplied();
         self.change_vector_lines(idx, "Recolour lines", |v| {
-            for s in &mut v.strokes {
-                s.colour = [r, g, b];
-            }
+            v.edit_all(|s| s.colour = [r, g, b]);
         });
     }
 
@@ -538,6 +625,8 @@ impl PainterApp {
             layer_action: Some(LayerHistoryOp::Vector {
                 layers: vec![(id, old)],
                 inner: None,
+                // (The pixels stay as they are either way.)
+                redraw: None,
             }),
         });
         self.layer_state.thumbnails_dirty = true;
@@ -553,7 +642,7 @@ impl PainterApp {
         let mut op = action.layer_action.as_ref();
         while let Some(o) = op {
             match o {
-                LayerHistoryOp::Vector { layers, inner } => {
+                LayerHistoryOp::Vector { layers, inner, .. } => {
                     covered.extend(layers.iter().map(|(id, _)| *id));
                     op = inner.as_deref();
                 }
@@ -592,6 +681,7 @@ impl PainterApp {
         action.layer_action = Some(LayerHistoryOp::Vector {
             layers: taken,
             inner: action.layer_action.take().map(Box::new),
+            redraw: None,
         });
         self.layer_state.thumbnails_dirty = true;
     }
@@ -624,6 +714,7 @@ impl PainterApp {
         undo.layer_action = Some(LayerHistoryOp::Vector {
             layers: vec![(id, Some(v))],
             inner,
+            redraw: None,
         });
     }
 
@@ -647,34 +738,34 @@ impl PainterApp {
         let layer = &mut self.canvas_mut().layers[idx];
         let old = layer.vector.clone()?;
         if let Some(v) = layer.vector.as_mut() {
-            for s in &mut v.strokes {
-                for p in &mut s.points {
-                    p[0] += offset.x;
-                    p[1] += offset.y;
-                }
-            }
+            v.edit_all_items(|item| item.map_points(&|p| p + offset, 1.0));
         }
         Some(LayerHistoryOp::Vector {
             layers: vec![(id, Some(old))],
             inner: None,
+            redraw: None,
         })
     }
 }
 
-/// Every line's width times `scale`.
+/// Every line's and outline's width times `scale`.
 fn scale_widths(v: &mut VectorLayer, scale: f32) {
-    for s in &mut v.strokes {
-        for p in &mut s.points {
-            p[2] = (p[2] * scale).clamp(0.0, vector::MAX_WIDTH);
-        }
-    }
+    v.edit_all_items(|item| item.map_points(&|p| p, scale));
 }
 
 /// Where `v`'s lines reach with their widths times `scale`.
 fn scaled_bounds(v: &VectorLayer, scale: f32) -> Option<[i32; 4]> {
-    let mut scaled = v.clone();
-    scale_widths(&mut scaled, scale);
-    vector::union(scaled.strokes.iter().map(|s| s.bounds()))
+    if scale == 1.0 {
+        return v.union_bounds();
+    }
+    vector::union(v.items().iter().map(|item| match item.as_line() {
+        Some(l) => l.bounds_scaled(scale),
+        None => {
+            let mut scaled = VectorItem::clone(item);
+            scaled.map_points(&|p| p, scale);
+            scaled.bounds()
+        }
+    }))
 }
 
 /// The bounds of the last `n` points of layer's newest line (all of it for
@@ -683,40 +774,8 @@ fn span_bounds(layer: &crate::canvas::storage::Layer, n: usize) -> [i32; 4] {
     layer
         .vector
         .as_ref()
-        .and_then(|v| v.strokes.last())
-        .map_or([0; 4], |s| {
-            let start = s.points.len().saturating_sub(n);
-            VectorStroke {
-                points: s.points[start..].to_vec(),
-                colour: s.colour,
-                opacity: s.opacity,
-            }
-            .bounds()
-        })
-}
-
-/// Layer `idx`'s pixels over `region`, row-major.
-fn read_region(canvas: &crate::canvas::Canvas, idx: usize, region: [i32; 4]) -> Vec<Color32> {
-    let ts = canvas.tile_size() as i32;
-    let [x0, y0, x1, y1] = region;
-    let w = (x1 - x0) as usize;
-    let mut out = vec![Color32::TRANSPARENT; w * (y1 - y0) as usize];
-    for ty in y0.div_euclid(ts)..=(y1 - 1).div_euclid(ts) {
-        for tx in x0.div_euclid(ts)..=(x1 - 1).div_euclid(ts) {
-            let Some(data) = canvas.get_layer_tile_data(idx, tx, ty) else {
-                continue;
-            };
-            let (ox, oy) = (tx * ts, ty * ts);
-            let (sx0, sx1) = (x0.max(ox), x1.min(ox + ts));
-            for y in y0.max(oy)..y1.min(oy + ts) {
-                let src = ((y - oy) * ts + sx0 - ox) as usize;
-                let dst = (y - y0) as usize * w + (sx0 - x0) as usize;
-                out[dst..dst + (sx1 - sx0) as usize]
-                    .copy_from_slice(&data[src..src + (sx1 - sx0) as usize]);
-            }
-        }
-    }
-    out
+        .and_then(|v| v.items().last().and_then(|i| i.as_line()))
+        .map_or([0; 4], |s| s.bounds_of_tail(n))
 }
 
 /// Put `pixels` (`region`, row-major) into layer `idx`'s tiles.
@@ -742,61 +801,19 @@ fn write_region(canvas: &crate::canvas::Canvas, idx: usize, region: [i32; 4], pi
     }
 }
 
-/// Undo snapshots of `region` of layer `id`, holding `pixels` (the region,
-/// row-major) rather than what the tiles hold now.
-fn region_snapshots(
-    canvas: &crate::canvas::Canvas,
-    id: LayerId,
-    region: [i32; 4],
-    pixels: &[Color32],
-) -> Vec<TileSnapshot> {
-    let ts = canvas.tile_size() as i32;
-    let [x0, y0, x1, y1] = region;
-    let w = (x1 - x0) as usize;
-    let mut out = Vec::new();
-    for ty in y0.div_euclid(ts)..=(y1 - 1).div_euclid(ts) {
-        for tx in x0.div_euclid(ts)..=(x1 - 1).div_euclid(ts) {
-            let (ox, oy) = (tx * ts, ty * ts);
-            let (sx0, sy0, sx1, sy1) = (x0.max(ox), y0.max(oy), x1.min(ox + ts), y1.min(oy + ts));
-            let mut data = Vec::with_capacity(((sx1 - sx0) * (sy1 - sy0)) as usize);
-            for y in sy0..sy1 {
-                let row = (y - y0) as usize * w;
-                data.extend_from_slice(
-                    &pixels[row + (sx0 - x0) as usize..row + (sx1 - x0) as usize],
-                );
-            }
-            out.push(TileSnapshot {
-                tx,
-                ty,
-                layer_id: id,
-                x0: (sx0 - ox) as usize,
-                y0: (sy0 - oy) as usize,
-                width: (sx1 - sx0) as usize,
-                height: (sy1 - sy0) as usize,
-                data: data.into(),
-            });
-        }
-    }
-    out
-}
-
 impl PainterApp {
-    /// The line Edit Lines has picked, if it's still there: its layer index
+    /// The line Edit Lines has picked, if it's still there (and a line): its layer index
     /// and the line.
-    fn picked_line(&self) -> Option<(usize, &VectorStroke)> {
+    pub(crate) fn picked_line(&self) -> Option<(usize, &VectorStroke)> {
         let edit = self.workspace.vector.line_edit.as_ref()?;
         let idx = self.canvas.layer_index_of(edit.layer)?;
-        let line = self.canvas.layers[idx]
-            .vector
-            .as_ref()?
-            .strokes
-            .get(edit.line)?;
+        let line = self.canvas.layers[idx].vector.as_ref()?.line(edit.line)?;
         Some((idx, line))
     }
 
     /// Where a line's handles are at this zoom: its points that keep its
     /// shape to within a pixel and a half on screen.
-    fn line_handles(&self, line: &VectorStroke) -> Vec<usize> {
+    pub(super) fn line_handles(&self, line: &VectorStroke) -> Vec<usize> {
         vector::simplify_indices(&line.points, 1.5 / self.viewport.zoom.max(0.01))
     }
 
@@ -810,6 +827,10 @@ impl PainterApp {
             return;
         }
         let hit = HANDLE_HIT / self.viewport.zoom.max(0.01);
+        // Shapes and groups, and Shift picking more.
+        if self.shape_edit_press(idx, pos, shift, alt, hit) {
+            return;
+        }
         let picked = self
             .picked_line()
             .filter(|(i, _)| *i == idx)
@@ -833,7 +854,7 @@ impl PainterApp {
             };
             if let Some(mode) = mode {
                 // (Before the session: finishing a stroke would take it.)
-                self.release_canvas();
+                self.release_canvas_for_lines();
                 self.mark_action();
                 let layer = &self.canvas.layers[idx];
                 self.workspace.vector.session = Some(VectorSession {
@@ -858,17 +879,23 @@ impl PainterApp {
             }
         }
         let layer = &self.canvas.layers[idx];
-        let strokes = layer.vector.as_ref().map_or(&[][..], |v| &v.strokes[..]);
-        self.workspace.vector.line_edit = vector::pick(strokes, pos, hit).map(|line| LineEdit {
+        let picked = layer.vector.as_ref().and_then(|v| v.pick(pos, hit));
+        self.workspace.vector.line_edit = picked.map(|line| LineEdit {
             layer: layer.id,
             line,
+            extra: Vec::new(),
             point: None,
             drag: None,
+            knot: None,
+            shape_drag: None,
         });
     }
 
     /// The Edit Lines drag went on to `pos`.
     pub(crate) fn line_edit_drag(&mut self, pos: Vec2) {
+        if self.shape_edit_drag(pos) {
+            return;
+        }
         let Some(edit) = self.workspace.vector.line_edit.as_ref() else {
             return;
         };
@@ -896,9 +923,9 @@ impl PainterApp {
         };
         let mut new = None;
         self.edit_vector(idx, |v| {
-            if let Some(s) = v.strokes.get_mut(line) {
-                s.points = points;
-                new = Some(s.bounds());
+            if line < v.len() {
+                v.edit(line, |s| s.points = points);
+                new = Some(v.bounds(line));
             }
         });
         if let Some(region) = vector::union([old].into_iter().chain(new)) {
@@ -910,6 +937,7 @@ impl PainterApp {
     pub(crate) fn line_edit_release(&mut self) {
         if let Some(edit) = self.workspace.vector.line_edit.as_mut() {
             edit.drag = None;
+            edit.shape_drag = None;
         }
         if let Some(session) = self.workspace.vector.session.take() {
             self.push_vector_step(session, "Edit line");
@@ -919,6 +947,9 @@ impl PainterApp {
     /// Delete with Edit Lines: the handle pressed last goes, the line
     /// running straight past it. Returns whether there was one.
     pub(crate) fn line_edit_delete(&mut self) -> bool {
+        if let Some(done) = self.shape_edit_delete() {
+            return done;
+        }
         let Some((idx, line)) = self.picked_line() else {
             return false;
         };
@@ -937,7 +968,7 @@ impl PainterApp {
         };
         let points = vector::remove_handle(&line.points, &handles, h);
         let old = line.bounds();
-        self.release_canvas();
+        self.release_canvas_for_lines();
         self.mark_action();
         let layer = &self.canvas.layers[idx];
         self.workspace.vector.session = Some(VectorSession {
@@ -956,10 +987,10 @@ impl PainterApp {
         self.edit_vector(idx, |v| {
             // Too few points left to be a line: it goes.
             if points.len() < 2 {
-                v.strokes.remove(n);
+                v.remove(n);
             } else {
-                v.strokes[n].points = points;
-                new = Some(v.strokes[n].bounds());
+                v.edit(n, |s| s.points = points);
+                new = Some(v.bounds(n));
             }
         });
         if new.is_none() {
@@ -985,6 +1016,7 @@ pub(crate) fn draw_line_edit(
     if !matches!(app.active_tool, crate::app::tools::Tool::VectorEdit) {
         return;
     }
+    super::vector_shapes::draw_shape_edit(app, painter, map);
     let Some((_, line)) = app.picked_line() else {
         return;
     };
@@ -1044,7 +1076,9 @@ mod tests {
         app.finish_stroke();
     }
 
-    fn px(app: &PainterApp, x: i32, y: i32) -> Color32 {
+    /// The layer's pixel at (`x`, `y`), once the lines are drawn.
+    fn px(app: &mut PainterApp, x: i32, y: i32) -> Color32 {
+        app.settle_vectors();
         let idx = app.canvas.active_layer_idx;
         let ts = app.canvas.tile_size() as i32;
         app.canvas
@@ -1058,7 +1092,7 @@ mod tests {
         app.canvas.layers[app.canvas.active_layer_idx]
             .vector
             .as_ref()
-            .map_or(0, |v| v.strokes.len())
+            .map_or(0, |v| v.len())
     }
 
     #[test]
@@ -1067,8 +1101,12 @@ mod tests {
         let pushes = app.layer_state.history.push_count();
         line(&mut app, Vec2::new(10.0, 20.0), Vec2::new(110.0, 20.0));
         assert_eq!(strokes(&app), 1);
-        assert_eq!(px(&app, 70, 20), Color32::BLACK, "across the tile edge too");
-        assert_eq!(px(&app, 70, 30), Color32::TRANSPARENT);
+        assert_eq!(
+            px(&mut app, 70, 20),
+            Color32::BLACK,
+            "across the tile edge too"
+        );
+        assert_eq!(px(&mut app, 70, 30), Color32::TRANSPARENT);
         assert_eq!(app.layer_state.history.push_count(), pushes + 1, "one step");
         assert_eq!(
             app.layer_state
@@ -1084,16 +1122,17 @@ mod tests {
             .vector
             .as_ref()
             .unwrap()
-            .strokes[0]
+            .line(0)
+            .unwrap()
             .points
             .len();
         assert!(points <= 3, "{points} points");
         app.apply_history(false);
         assert_eq!(strokes(&app), 0);
-        assert_eq!(px(&app, 70, 20), Color32::TRANSPARENT, "undone");
+        assert_eq!(px(&mut app, 70, 20), Color32::TRANSPARENT, "undone");
         app.apply_history(true);
         assert_eq!(strokes(&app), 1);
-        assert_eq!(px(&app, 70, 20), Color32::BLACK, "redone");
+        assert_eq!(px(&mut app, 70, 20), Color32::BLACK, "redone");
     }
 
     #[test]
@@ -1101,23 +1140,321 @@ mod tests {
         let mut app = app();
         line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
         let idx = app.canvas.active_layer_idx;
-        let snapshot = |app: &PainterApp| -> Vec<Color32> {
+        let snapshot = |app: &mut PainterApp| -> Vec<Color32> {
             (0..96)
                 .flat_map(|y| (0..128).map(move |x| (x, y)))
                 .map(|(x, y)| px(app, x, y))
                 .collect()
         };
-        let before = snapshot(&app);
+        let before = snapshot(&mut app);
         app.brush_state.brush.brush_options.color = Color32::RED;
         app.add_vector_line(idx, &[Vec2::new(60.0, 10.0), Vec2::new(70.0, 90.0)]);
-        let after = snapshot(&app);
+        let after = snapshot(&mut app);
         assert_ne!(before, after);
         assert_eq!(strokes(&app), 2);
         app.apply_history(false);
-        assert_eq!(snapshot(&app), before, "undone exactly");
+        assert_eq!(snapshot(&mut app), before, "undone exactly");
         assert_eq!(strokes(&app), 1);
         app.apply_history(true);
-        assert_eq!(snapshot(&app), after, "redone exactly");
+        assert_eq!(snapshot(&mut app), after, "redone exactly");
+    }
+
+    /// Undo comes from the tiles as each step found them: every kind of
+    /// step undoes to exactly the pixels before it, and redoes exactly.
+    #[test]
+    fn every_kind_of_step_undoes_and_redoes_to_the_pixel() {
+        let mut app = app();
+        let idx = app.canvas.active_layer_idx;
+        let snapshot = |app: &mut PainterApp| -> Vec<Color32> {
+            (0..96)
+                .flat_map(|y| (0..128).map(move |x| (x, y)))
+                .map(|(x, y)| px(app, x, y))
+                .collect()
+        };
+        line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
+        line(&mut app, Vec2::new(30.0, 5.0), Vec2::new(40.0, 90.0));
+        type Step = (&'static str, fn(&mut PainterApp));
+        let steps: [Step; 5] = [
+            ("line", |a| {
+                line(a, Vec2::new(5.0, 80.0), Vec2::new(125.0, 10.0))
+            }),
+            ("erase touched", |a| {
+                a.workspace.vector.erase = VectorErase::Touched;
+                a.set_brush_tool(true);
+                line(a, Vec2::new(60.0, 0.0), Vec2::new(60.0, 95.0));
+                a.set_brush_tool(false);
+            }),
+            ("erase whole", |a| {
+                a.workspace.vector.erase = VectorErase::WholeLine;
+                a.set_brush_tool(true);
+                line(a, Vec2::new(0.0, 40.0), Vec2::new(20.0, 40.0));
+                a.set_brush_tool(false);
+            }),
+            ("recolour", |a| {
+                a.brush_state.brush.brush_options.color = Color32::RED;
+                a.recolour_vector_lines(a.canvas.active_layer_idx);
+            }),
+            ("line width", |a| {
+                a.line_width_open(a.canvas.active_layer_idx);
+                a.line_width_set(2.5);
+                a.line_width_done(true);
+            }),
+        ];
+        for (name, step) in steps {
+            let before = snapshot(&mut app);
+            step(&mut app);
+            let after = snapshot(&mut app);
+            assert_ne!(before, after, "{name} changed nothing");
+            app.apply_history(false);
+            assert_eq!(snapshot(&mut app), before, "{name} undone exactly");
+            app.apply_history(true);
+            assert_eq!(snapshot(&mut app), after, "{name} redone exactly");
+        }
+        assert_eq!(app.canvas.active_layer_idx, idx);
+    }
+
+    /// The eraser as it was before the layer had an index: every line
+    /// looked at, the ones it touches cut, in place.
+    fn erased_by_scanning(
+        lines: &[VectorStroke],
+        spots: &[Vec2],
+        radius: f32,
+        mode: VectorErase,
+    ) -> Vec<VectorStroke> {
+        let mut kept = Vec::new();
+        for (n, s) in lines.iter().enumerate() {
+            if !spots.iter().any(|&c| s.touches(c, radius)) {
+                kept.push(s.clone());
+                continue;
+            }
+            let mut pieces = vec![s.clone()];
+            match mode {
+                VectorErase::WholeLine => pieces.clear(),
+                VectorErase::Touched => {
+                    for &c in spots {
+                        pieces = pieces.iter().flat_map(|p| p.cut(c, radius)).collect();
+                    }
+                }
+                VectorErase::ToCrossing => {
+                    let others: Vec<&VectorStroke> = (lines.iter().enumerate())
+                        .filter(|&(m, _)| m != n)
+                        .map(|(_, o)| o)
+                        .collect();
+                    for &c in spots {
+                        pieces = (pieces.iter())
+                            .flat_map(|p| match p.touches(c, radius) {
+                                true => p.cut_to_crossings(c, &others),
+                                false => vec![p.clone()],
+                            })
+                            .collect();
+                    }
+                }
+            }
+            kept.extend(pieces);
+        }
+        kept
+    }
+
+    #[test]
+    fn erasing_through_the_index_does_what_scanning_every_line_did() {
+        let mut seed = 0x1234_5679_u32;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        let lines: Vec<VectorStroke> = (0..600)
+            .map(|_| {
+                let a = Vec2::new(rand(), rand()) * 900.0;
+                let d = Vec2::angled(rand() * 6.3) * (20.0 + rand() * 400.0);
+                VectorStroke {
+                    points: (0..=8)
+                        .map(|k| {
+                            let p = a + d * (k as f32 / 8.0);
+                            [p.x, p.y + (k as f32).sin() * 6.0, 2.0 + rand() * 6.0]
+                        })
+                        .collect(),
+                    colour: [0; 3],
+                    opacity: 1.0,
+                }
+            })
+            .collect();
+        for mode in [
+            VectorErase::WholeLine,
+            VectorErase::Touched,
+            VectorErase::ToCrossing,
+        ] {
+            let mut app =
+                crate::project::tests::test_app_pub(Canvas::new(900, 900, Color32::WHITE, 64));
+            app.canvas_mut().active_layer_idx = 1;
+            app.add_vector_layer();
+            let idx = app.canvas.active_layer_idx;
+            let layer = vector::VectorLayer::from_strokes(lines.clone());
+            app.edit_vector(idx, |v| *v = layer);
+            app.workspace.vector.erase = mode;
+            let (from, to) = (Vec2::new(100.0, 450.0), Vec2::new(800.0, 470.0));
+            let mut expected = lines.clone();
+            let (mut last, radius) = (from, 15.0);
+            // (The eraser has a size of its own: set once it's picked.)
+            app.set_brush_tool(true);
+            app.brush_state.brush.brush_options.diameter = 30.0;
+            app.start_stroke_with_pressure(from, 1.0);
+            // The spots the eraser covers from `a` to `b`, as it steps them.
+            let spots = |a: Vec2, b: Vec2| -> Vec<Vec2> {
+                let steps = ((b - a).length() / (radius * 0.5)).ceil().max(1.0) as usize;
+                (0..=steps)
+                    .map(|k| a + (b - a) * (k as f32 / steps as f32))
+                    .collect()
+            };
+            expected = erased_by_scanning(&expected, &spots(from, from), radius, mode);
+            for i in 1..=40 {
+                let p = from + (to - from) * (i as f32 / 40.0);
+                app.add_stroke_point(p, 1.0);
+                expected = erased_by_scanning(&expected, &spots(last, p), radius, mode);
+                last = p;
+            }
+            app.finish_stroke();
+            let got: Vec<VectorStroke> = app.canvas.layers[idx]
+                .vector
+                .as_ref()
+                .unwrap()
+                .lines()
+                .cloned()
+                .collect();
+            assert!(
+                got.len() != lines.len() || got != lines,
+                "{mode:?} erased nothing"
+            );
+            assert_eq!(got, expected, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn duplicating_a_vector_layer_keeps_its_lines() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
+        app.duplicate_layer();
+        let copy = &app.canvas.layers[app.canvas.active_layer_idx];
+        assert!(copy.name.ends_with("copy"));
+        assert_eq!(copy.vector.as_ref().map(|v| v.len()), Some(1));
+    }
+
+    /// The layer's pixels over the canvas, read as they are (not waiting).
+    fn tiles_now(app: &PainterApp) -> Vec<Color32> {
+        let idx = app.canvas.active_layer_idx;
+        let ts = app.canvas.tile_size() as i32;
+        (0..96)
+            .flat_map(|y| (0..128).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                app.canvas
+                    .get_layer_tile_data(idx, x / ts, y / ts)
+                    .map_or(Color32::TRANSPARENT, |t| {
+                        t[((y % ts) * ts + x % ts) as usize]
+                    })
+            })
+            .collect()
+    }
+
+    /// The layer's lines drawn afresh over the canvas.
+    fn drawn_from_lines(app: &PainterApp) -> Vec<Color32> {
+        let v = app.canvas.layers[app.canvas.active_layer_idx]
+            .vector
+            .as_ref()
+            .unwrap();
+        vector::render_region(v.items(), [0, 0, 128, 96])
+    }
+
+    #[test]
+    fn a_recolour_shows_once_drawn_in_the_background() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
+        app.settle_vectors();
+        let black = tiles_now(&app);
+        app.brush_state.brush.brush_options.color = Color32::RED;
+        app.recolour_vector_lines(app.canvas.active_layer_idx);
+        // Asked for, not drawn: the old pixels show meanwhile.
+        assert_eq!(tiles_now(&app), black);
+        assert!(app.vector_busy());
+        // Started on a frame, done by the next ones.
+        while app.vector_tick() {
+            std::thread::yield_now();
+        }
+        assert_eq!(tiles_now(&app), drawn_from_lines(&app));
+        assert_ne!(tiles_now(&app), black);
+    }
+
+    #[test]
+    fn a_job_doesnt_overwrite_what_was_drawn_after_it_began() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
+        app.brush_state.brush.brush_options.color = Color32::RED;
+        app.recolour_vector_lines(app.canvas.active_layer_idx);
+        // The job starts with the line red; then a blue line is drawn over
+        // the same tiles (now, as a pen does) before the job comes back.
+        app.vector_tick();
+        app.brush_state.brush.brush_options.color = Color32::BLUE;
+        let (from, to) = (Vec2::new(10.0, 44.0), Vec2::new(120.0, 44.0));
+        app.start_stroke_with_pressure(from, 1.0);
+        for i in 1..=20 {
+            app.add_stroke_point(from + (to - from) * (i as f32 / 20.0), 1.0);
+        }
+        // The job comes back with the pen still down: the line drawn so far
+        // stays.
+        while app.vector_tick() {
+            std::thread::yield_now();
+        }
+        assert_eq!(tiles_now(&app), drawn_from_lines(&app));
+        app.finish_stroke();
+        app.settle_vectors();
+        assert_eq!(tiles_now(&app), drawn_from_lines(&app));
+    }
+
+    #[test]
+    fn undo_straight_after_a_recolour_ends_with_the_lines_drawn() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
+        line(&mut app, Vec2::new(60.0, 5.0), Vec2::new(60.0, 90.0));
+        app.settle_vectors();
+        let before = tiles_now(&app);
+        app.brush_state.brush.brush_options.color = Color32::RED;
+        app.recolour_vector_lines(app.canvas.active_layer_idx);
+        app.vector_tick();
+        // Not waited for: undo puts the lines back and draws them again.
+        app.apply_history(false);
+        app.settle_vectors();
+        assert_eq!(tiles_now(&app), before);
+        app.apply_history(true);
+        app.apply_history(false);
+        app.apply_history(true);
+        app.settle_vectors();
+        assert_eq!(tiles_now(&app), drawn_from_lines(&app));
+        assert_ne!(tiles_now(&app), before);
+    }
+
+    #[test]
+    fn a_layer_deleted_while_its_lines_are_drawn_is_left_alone() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
+        app.brush_state.brush.brush_options.color = Color32::RED;
+        let idx = app.canvas.active_layer_idx;
+        app.recolour_vector_lines(idx);
+        app.vector_tick();
+        app.remove_layer(idx);
+        app.settle_vectors();
+        assert!(!app.vector_busy());
+        while app.vector_tick() {}
+    }
+
+    #[test]
+    fn saving_waits_for_the_lines_to_be_drawn() {
+        let mut app = app();
+        line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(120.0, 40.0));
+        app.brush_state.brush.brush_options.color = Color32::RED;
+        app.recolour_vector_lines(app.canvas.active_layer_idx);
+        app.encode_document().unwrap();
+        assert!(!app.vector_busy());
+        assert_eq!(tiles_now(&app), drawn_from_lines(&app));
     }
 
     /// A mouse drag, frame by frame, through the app's input handling.
@@ -1171,7 +1508,8 @@ mod tests {
             .vector
             .as_ref()
             .unwrap()
-            .strokes[0]
+            .line(0)
+            .unwrap()
             .points;
         let length = points.last().unwrap()[0] - points[0][0];
         assert!(length > 60.0, "the whole drag: {length}");
@@ -1188,8 +1526,8 @@ mod tests {
         // Whole line: a dab on the first line takes all of it.
         line(&mut app, Vec2::new(60.0, 17.0), Vec2::new(60.0, 23.0));
         assert_eq!(strokes(&app), 1);
-        assert_eq!(px(&app, 20, 20), Color32::TRANSPARENT);
-        assert_eq!(px(&app, 20, 60), Color32::BLACK, "the other stays");
+        assert_eq!(px(&mut app, 20, 20), Color32::TRANSPARENT);
+        assert_eq!(px(&mut app, 20, 60), Color32::BLACK, "the other stays");
         assert_eq!(
             app.layer_state
                 .history
@@ -1203,15 +1541,15 @@ mod tests {
         app.workspace.vector.erase = VectorErase::Touched;
         line(&mut app, Vec2::new(60.0, 55.0), Vec2::new(60.0, 65.0));
         assert_eq!(strokes(&app), 2);
-        assert_eq!(px(&app, 60, 60), Color32::TRANSPARENT);
-        assert_eq!(px(&app, 20, 60), Color32::BLACK);
-        assert_eq!(px(&app, 100, 60), Color32::BLACK);
+        assert_eq!(px(&mut app, 60, 60), Color32::TRANSPARENT);
+        assert_eq!(px(&mut app, 20, 60), Color32::BLACK);
+        assert_eq!(px(&mut app, 100, 60), Color32::BLACK);
         // Undo brings both back.
         app.apply_history(false);
         app.apply_history(false);
         assert_eq!(strokes(&app), 2);
-        assert_eq!(px(&app, 60, 20), Color32::BLACK);
-        assert_eq!(px(&app, 60, 60), Color32::BLACK);
+        assert_eq!(px(&mut app, 60, 20), Color32::BLACK);
+        assert_eq!(px(&mut app, 60, 60), Color32::BLACK);
     }
 
     #[test]
@@ -1220,36 +1558,40 @@ mod tests {
         line(&mut app, Vec2::new(10.0, 50.0), Vec2::new(118.0, 50.0));
         line(&mut app, Vec2::new(40.0, 10.0), Vec2::new(40.0, 90.0));
         line(&mut app, Vec2::new(80.0, 10.0), Vec2::new(80.0, 90.0));
-        let all = |app: &PainterApp| -> Vec<Color32> {
+        let all = |app: &mut PainterApp| -> Vec<Color32> {
             (0..96)
                 .flat_map(|y| (0..128).map(move |x| (x, y)))
                 .map(|(x, y)| px(app, x, y))
                 .collect()
         };
-        let before = all(&app);
+        let before = all(&mut app);
         app.set_brush_tool(true);
         app.brush_state.brush.brush_options.diameter = 6.0;
         app.workspace.vector.erase = VectorErase::ToCrossing;
         line(&mut app, Vec2::new(60.0, 48.0), Vec2::new(60.0, 52.0));
         assert_eq!(strokes(&app), 4, "the line in two, and both crossing ones");
         assert_eq!(
-            px(&app, 60, 50),
+            px(&mut app, 60, 50),
             Color32::TRANSPARENT,
             "between the crossings"
         );
-        assert_eq!(px(&app, 50, 50), Color32::TRANSPARENT);
+        assert_eq!(px(&mut app, 50, 50), Color32::TRANSPARENT);
         assert_eq!(
-            px(&app, 20, 50),
+            px(&mut app, 20, 50),
             Color32::BLACK,
             "before the first crossing"
         );
-        assert_eq!(px(&app, 100, 50), Color32::BLACK, "after the second");
-        assert_eq!(px(&app, 40, 50), Color32::BLACK, "the crossing lines stay");
-        assert_eq!(px(&app, 80, 30), Color32::BLACK);
+        assert_eq!(px(&mut app, 100, 50), Color32::BLACK, "after the second");
+        assert_eq!(
+            px(&mut app, 40, 50),
+            Color32::BLACK,
+            "the crossing lines stay"
+        );
+        assert_eq!(px(&mut app, 80, 30), Color32::BLACK);
         // One undo step brings back exactly what was there.
         app.apply_history(false);
         assert_eq!(strokes(&app), 3);
-        assert!(all(&app) == before);
+        assert!(all(&mut app) == before);
     }
 
     #[test]
@@ -1260,18 +1602,20 @@ mod tests {
         // A straight line keeps just its ends as points: add one to bend at.
         let idx = app.canvas.active_layer_idx;
         app.edit_vector(idx, |v| {
-            v.strokes[0].points = (0..=10)
-                .map(|i| [10.0 + i as f32 * 10.0, 30.0, 6.0])
-                .collect();
+            v.edit(0, |s| {
+                s.points = (0..=10)
+                    .map(|i| [10.0 + i as f32 * 10.0, 30.0, 6.0])
+                    .collect()
+            });
         });
         app.redraw_vector(idx, [0, 0, 128, 96]);
-        let all = |app: &PainterApp| -> Vec<Color32> {
+        let all = |app: &mut PainterApp| -> Vec<Color32> {
             (0..96)
                 .flat_map(|y| (0..128).map(move |x| (x, y)))
                 .map(|(x, y)| px(app, x, y))
                 .collect()
         };
-        let before = all(&app);
+        let before = all(&mut app);
         let pushes = app.layer_state.history.push_count();
         app.active_tool = crate::app::tools::Tool::VectorEdit;
         app.viewport.zoom = 1.0;
@@ -1288,21 +1632,21 @@ mod tests {
         app.line_edit_drag(at + Vec2::new(0.0, 20.0));
         app.line_edit_release();
         assert_eq!(
-            px(&app, at.x as i32, 50),
+            px(&mut app, at.x as i32, 50),
             Color32::BLACK,
             "bent down to there"
         );
-        assert_eq!(px(&app, at.x as i32, 30), Color32::TRANSPARENT);
-        assert_eq!(px(&app, 60, 80), Color32::BLACK, "the other line stays");
+        assert_eq!(px(&mut app, at.x as i32, 30), Color32::TRANSPARENT);
+        assert_eq!(px(&mut app, 60, 80), Color32::BLACK, "the other line stays");
         assert_eq!(app.layer_state.history.push_count(), pushes + 1);
         // Alt-drag moves it all; undo twice is exactly as it was.
         app.line_edit_press(Vec2::new(12.0, 30.0), false, true);
         app.line_edit_drag(Vec2::new(12.0, 40.0));
         app.line_edit_release();
-        assert_eq!(px(&app, 12, 40), Color32::BLACK);
+        assert_eq!(px(&mut app, 12, 40), Color32::BLACK);
         app.apply_history(false);
         app.apply_history(false);
-        assert!(all(&app) == before);
+        assert!(all(&mut app) == before);
     }
 
     #[test]
@@ -1311,9 +1655,11 @@ mod tests {
         line(&mut app, Vec2::new(10.0, 30.0), Vec2::new(110.0, 30.0));
         let idx = app.canvas.active_layer_idx;
         app.edit_vector(idx, |v| {
-            v.strokes[0].points = (0..=10)
-                .map(|i| [10.0 + i as f32 * 10.0, 30.0 + (i % 2) as f32 * 8.0, 4.0])
-                .collect();
+            v.edit(0, |s| {
+                s.points = (0..=10)
+                    .map(|i| [10.0 + i as f32 * 10.0, 30.0 + (i % 2) as f32 * 8.0, 4.0])
+                    .collect()
+            });
         });
         app.redraw_vector(idx, [0, 0, 128, 96]);
         app.active_tool = crate::app::tools::Tool::VectorEdit;
@@ -1344,28 +1690,28 @@ mod tests {
     fn line_width_scales_every_line_as_one_step() {
         let mut app = app();
         line(&mut app, Vec2::new(10.0, 40.0), Vec2::new(110.0, 40.0));
-        assert_eq!(px(&app, 60, 45), Color32::TRANSPARENT);
+        assert_eq!(px(&mut app, 60, 45), Color32::TRANSPARENT);
         let idx = app.canvas.active_layer_idx;
         app.line_width_open(idx);
         app.line_width_set(4.0);
         app.line_width_set(3.0);
         assert_eq!(
-            px(&app, 60, 45),
+            px(&mut app, 60, 45),
             Color32::BLACK,
             "9 px from the middle of an 18 px line"
         );
-        assert_eq!(px(&app, 60, 52), Color32::TRANSPARENT);
+        assert_eq!(px(&mut app, 60, 52), Color32::TRANSPARENT);
         let pushes = app.layer_state.history.push_count();
         app.line_width_done(true);
         assert_eq!(app.layer_state.history.push_count(), pushes + 1);
         app.apply_history(false);
-        assert_eq!(px(&app, 60, 45), Color32::TRANSPARENT, "undone");
-        assert_eq!(px(&app, 60, 40), Color32::BLACK);
+        assert_eq!(px(&mut app, 60, 45), Color32::TRANSPARENT, "undone");
+        assert_eq!(px(&mut app, 60, 40), Color32::BLACK);
         // Cancelled, nothing changes.
         app.line_width_open(idx);
         app.line_width_set(0.2);
         app.line_width_done(false);
-        assert_eq!(px(&app, 60, 42), Color32::BLACK);
+        assert_eq!(px(&mut app, 60, 42), Color32::BLACK);
     }
 
     #[test]
@@ -1376,10 +1722,10 @@ mod tests {
         app.filter_commit();
         let idx = app.canvas.active_layer_idx;
         assert!(!app.is_vector_layer(idx));
-        assert_eq!(px(&app, 60, 40), Color32::WHITE, "inverted");
+        assert_eq!(px(&mut app, 60, 40), Color32::WHITE, "inverted");
         app.apply_history(false);
         assert!(app.is_vector_layer(idx));
-        assert_eq!(px(&app, 60, 40), Color32::BLACK);
+        assert_eq!(px(&mut app, 60, 40), Color32::BLACK);
         // Its lines still erase.
         app.set_brush_tool(true);
         line(&mut app, Vec2::new(60.0, 37.0), Vec2::new(60.0, 43.0));
@@ -1400,7 +1746,7 @@ mod tests {
             .iter()
             .find(|l| l.vector.is_some())
             .expect("a vector layer");
-        assert_eq!(layer.vector.as_ref().unwrap().strokes.len(), 1);
+        assert_eq!(layer.vector.as_ref().unwrap().len(), 1);
         let (undo, redo) = loaded.history.stacks();
         assert!(
             !undo.is_empty() && redo.len() == 1,
@@ -1420,7 +1766,7 @@ mod tests {
         });
         let idx = app.canvas.active_layer_idx;
         let v = app.canvas.layers[idx].vector.as_ref().expect("still lines");
-        assert_eq!(v.strokes[0].points[0][1], 30.0);
-        assert_eq!(px(&app, 50, 30), Color32::BLACK);
+        assert_eq!(v.line(0).unwrap().points[0][1], 30.0);
+        assert_eq!(px(&mut app, 50, 30), Color32::BLACK);
     }
 }

@@ -33,6 +33,7 @@ pub(crate) mod kra;
 mod preview;
 pub(crate) mod psd;
 pub(crate) mod svg;
+pub(crate) mod svg_import;
 pub(crate) mod video;
 pub(crate) mod zip;
 
@@ -46,7 +47,9 @@ const MAGIC: &[u8; 8] = b"RPNTV001";
 const PROJECT_ENTRY: &str = "rusty-painter/project.rpnt";
 const PROJECT_FORMAT: &str = "rusty-painter-project";
 /// 3: one undo history for the document (2 kept one per layer).
-const PROJECT_VERSION: u32 = 3;
+/// 4: vector layers hold shapes and groups besides brush lines (a build
+/// reading 3 would drop them).
+const PROJECT_VERSION: u32 = 4;
 /// The oldest version still read.
 const OLDEST_PROJECT_VERSION: u32 = 2;
 
@@ -181,6 +184,7 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> 
 pub(crate) const FOREIGN_EXTENSIONS: &[&str] = &[
     "psd",
     "kra",
+    "svg",
     #[cfg(feature = "sut-import")]
     "clip",
 ];
@@ -192,6 +196,7 @@ fn foreign_decoder(extension: &str) -> Option<Decoder> {
     Some(match extension {
         "psd" => psd::decode_psd,
         "kra" => kra::decode_kra,
+        "svg" => svg_import::decode_svg,
         #[cfg(feature = "sut-import")]
         "clip" => clip::decode_clip,
         _ => return None,
@@ -227,6 +232,7 @@ impl PainterApp {
     /// layers at their current frame. The stroke worker must be idle.
     fn project_snapshot(&mut self) -> ProjectSnapshot {
         self.sync_stroke_worker();
+        self.settle_vectors();
         // The mask layer isn't part of the document.
         self.quick_mask_leave();
         // Shader layers are saved with their current frame.
@@ -510,9 +516,10 @@ impl ProjectFile {
     }
 
     fn into_loaded_project(self, blobs: &[u8]) -> Result<LoadedProject, String> {
-        if self.format != PROJECT_FORMAT
-            || !(OLDEST_PROJECT_VERSION..=PROJECT_VERSION).contains(&self.version)
-        {
+        if self.format == PROJECT_FORMAT && self.version > PROJECT_VERSION {
+            return Err("Saved by a newer version of the app: update it to open this file".into());
+        }
+        if self.format != PROJECT_FORMAT || self.version < OLDEST_PROJECT_VERSION {
             return Err("Unsupported project file".to_string());
         }
         validate_canvas_size(self.width, self.height)?;

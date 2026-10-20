@@ -40,5 +40,6 @@ pub(crate) mod theme;
 pub(crate) mod timeline;
 pub(crate) mod tool_options;
 pub(crate) mod toolbar;
+pub(crate) mod vector_props;
 pub(crate) mod view_aids_menu;
 pub(crate) mod widgets;

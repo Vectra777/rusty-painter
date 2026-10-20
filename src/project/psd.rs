@@ -66,6 +66,8 @@ pub struct PsdLayer {
     /// Photoshop's "lock position" (the `lspf` protection flags).
     pub position_locked: bool,
     pub mask: Option<PsdMask>,
+    /// A vector layer's lines and shapes (its pixels drawn from them).
+    pub vector: Option<Box<crate::canvas::vector::VectorLayer>>,
 }
 
 /// A layer mask: grey levels (255 shows) over `rect`, `default` elsewhere.
@@ -248,7 +250,7 @@ impl PsdDocument {
                 adjustment: None,
                 style: Default::default(),
                 text: None,
-                vector: None,
+                vector: layer.vector.filter(|_| !is_group),
                 height: None,
                 shader: None,
                 position_locked: layer.position_locked,
@@ -327,6 +329,7 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
             alpha_locked: layer.alpha_locked,
             position_locked: layer.position_locked,
             mask: None,
+            vector: None,
         };
         if layer.kind == LayerKind::Group {
             out.push(PsdLayer {
@@ -339,6 +342,7 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
                 clipped: false,
                 visible: true,
                 opacity: 1.0,
+                vector: None,
                 ..base
             });
             push_children(canvas, Some(layer.id), out, depth + 1);
@@ -1127,6 +1131,7 @@ pub fn decode_psd(bytes: &[u8]) -> Result<PsdDocument, String> {
             alpha_locked: false,
             position_locked: false,
             mask: None,
+            vector: None,
         });
     }
     Ok(PsdDocument {
@@ -1266,6 +1271,7 @@ fn read_layers(r: &mut In<'_>, gray: bool, bytes: usize) -> Result<Vec<PsdLayer>
                 alpha_locked: flags & 1 != 0 || protection & 1 != 0,
                 position_locked: protection & 4 != 0,
                 mask,
+                vector: None,
             },
             channels,
         });

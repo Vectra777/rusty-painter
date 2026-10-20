@@ -216,6 +216,7 @@ fn pixel_layer(name: &str, rect: [i32; 4], pixels: Vec<Color32>) -> PsdLayer {
         alpha_locked: false,
         position_locked: false,
         mask: None,
+        vector: None,
     }
 }
 

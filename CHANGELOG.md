@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Vector layers: shapes, SVG, and drawn in the background
+- Vector layers hold shapes besides brush lines: Bézier paths filled and outlined, the outline with flat, round or square ends, sharp, round or cut corners, dashes and markers (arrow, open arrow, dot, square, bar), fill and outline each a colour or a gradient, a fill's even-odd rule, an opacity; and groups of them. The Shape tool on a vector layer keeps its shape exactly (a rectangle's corners, an ellipse's arcs, a curve's handles; filled with the secondary colour, outlined with the brush's), and so do the Pen's Fill and Stroke.
+- Edit Lines is Edit Vectors: a shape's points and handles are dragged as the Pen's are (Alt: a handle alone; Alt+click the outline adds a point, Alt+click a point turns it smooth or back), a shape or the items Shift+clicked move together, and Delete takes out the point or the items. Its options set the picked shapes' fill, outline, width, ends, corners, dashes, markers and opacity (a slider dragged is one undo step), group and ungroup them, and move them up or down the stack.
+- SVG: opened as a document (one vector layer), imported onto a layer of its own (File → Import), pasted as text from a vector editor, and Krita documents' vector layers come in editable. Exported SVG keeps shapes as paths with their look, and brush lines come back exactly when it's read in again; Ctrl+C with Edit Vectors copies the picked items as SVG. What has no form here (text, pictures, clipping, masks, filters) is left out, and said so.
+- Vector layers are drawn in the background: lifting the pen, recolouring, changing the line width, erasing and undoing take the window well under a millisecond, and the pixels follow a moment later (asked for areas gathered, one job a layer at a time). Saving, exporting, sampling and anything that needs the pixels waits for them.
+- Undo on a vector layer puts the lines back and draws them again rather than keeping their pixels: much less memory, and an undo straight after a big change is right however far its drawing had got.
+- A vector layer keeps an index of where its lines are: drawing, erasing and picking look at the lines near, not every line on the page. The eraser no longer copies every line on each move, and "up to crossing" follows the line from the eraser to the nearest crossings instead of gathering every line near it: about 0.4 ms a pen move on a page of 2,000 lines (5.8 before), 9 ms on 20,000.
+- The line renderer skips pixels far from a line without a square root and draws large areas across all cores: pen-up on a dense page 9× faster, recolour and line width about 10×.
+- Duplicating a vector layer keeps its lines (it made a pixel copy).
+- Projects are format 4 (vector layers can hold shapes): older versions of the app won't open them, and from now on a file from a newer version says so.
+- Symbols missing from the interface font (arrows, triangles, the clip marker, the adjustment layer's half circle) show instead of empty boxes, and the close buttons use ×.
+- The layer panel: dropped at the bottom of an open folder, a layer goes into it (or, with the pointer at the left, after it), and a drag that starts just off a layer's opacity slider no longer moves the layer.
+
 ### A window that never stops answering
 - Liquify keeps up with a pen: its dabs are spaced along the stroke however finely the tablet reports it (a pen's many short moves did the full work each, and twirl, pinch and bloat came out stronger than with a mouse), and the layer is drawn once a frame.
 - File dialogs no longer hold up the window while they're open.

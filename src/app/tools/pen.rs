@@ -466,6 +466,12 @@ impl PainterApp {
         if !self.pen_paintable(layer) {
             return;
         }
+        // On a vector layer the path is kept, as a filled shape.
+        if self.is_vector_layer(layer) {
+            let path = self.workspace.pen.path.clone();
+            self.add_vector_shape(layer, path, true, false);
+            return;
+        }
         let fills: Vec<_> = self
             .pen_polygons()
             .into_iter()
@@ -475,7 +481,7 @@ impl PainterApp {
     }
 
     /// The path drawn with the brush on the selected layer (on a vector
-    /// layer, as lines); one undo step.
+    /// layer, kept as an outlined shape); one undo step.
     pub(crate) fn pen_stroke(&mut self) {
         self.pen_finish();
         let layer = self.canvas.active_layer_idx;
@@ -484,9 +490,8 @@ impl PainterApp {
             return;
         }
         if self.is_vector_layer(layer) {
-            for line in &lines {
-                self.add_vector_line(layer, line);
-            }
+            let path = self.workspace.pen.path.clone();
+            self.add_vector_shape(layer, path, false, true);
             return;
         }
         if !self.pen_paintable(layer) {

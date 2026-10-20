@@ -277,10 +277,13 @@ pub enum LayerHistoryOp {
     /// Vector layers' lines ([`crate::canvas::storage::Layer::vector`]) as
     /// they are on the other side of this step: a line drawn, erased or
     /// changed, or a vector layer painted on with a pixel tool (which makes
-    /// it plain pixels). `inner` as for `Text`.
+    /// it plain pixels). `inner` as for `Text`. `redraw`: where the lines
+    /// changed, drawn again from them both ways (such a step keeps no
+    /// pixels); `None` when the step's tiles hold them.
     Vector {
         layers: Vec<(LayerId, Option<Box<crate::canvas::vector::VectorLayer>>)>,
         inner: Option<Box<LayerHistoryOp>>,
+        redraw: Option<[i32; 4]>,
     },
     /// Impasto heights ([`crate::canvas::storage::Layer::height`]) of the
     /// tiles a step changed, as they are on the other side of it (`None`:
@@ -404,12 +407,13 @@ fn snapshot_bytes(action: &UndoAction) -> usize {
                     .sum::<usize>();
                 None
             }
-            LayerHistoryOp::Vector { layers, inner } => {
+            LayerHistoryOp::Vector { layers, inner, .. } => {
                 kept += layers
                     .iter()
                     .filter_map(|(_, v)| v.as_ref())
-                    .flat_map(|v| &v.strokes)
-                    .map(|s| std::mem::size_of_val(s.points.as_slice()))
+                    // (Lines a later step shares count again there.)
+                    .flat_map(|v| v.items())
+                    .map(|item| item.size_bytes())
                     .sum::<usize>();
                 inner.as_deref()
             }
@@ -523,6 +527,9 @@ pub struct History {
     /// Actions pushed so far, so callers can tell whether a given action was
     /// recorded (the stack itself drops its oldest entries).
     pushed: u64,
+    /// Vector layers an undo or redo put lines back on, and where they're
+    /// to be drawn again (see [`Self::take_vector_redraws`]).
+    vector_redraws: Vec<(LayerId, [i32; 4])>,
 }
 
 impl History {
@@ -536,7 +543,37 @@ impl History {
             next_label: None,
             tool_label: "Edit",
             pushed: 0,
+            vector_redraws: Vec::new(),
         }
+    }
+
+    /// The vector layers the last undos and redos put lines back on, and
+    /// where they're to be drawn again from them.
+    pub fn take_vector_redraws(&mut self) -> Vec<(LayerId, [i32; 4])> {
+        std::mem::take(&mut self.vector_redraws)
+    }
+
+    /// Whether the next undo (or redo) only puts back vector lines that are
+    /// drawn again from them: it keeps no pixels, so drawing still to come
+    /// needn't be waited for.
+    pub fn next_redraws_lines(&self, redo: bool) -> bool {
+        let step = if redo {
+            self.redo_stack.last()
+        } else {
+            self.undo_stack.last()
+        };
+        step.is_some_and(|a| {
+            a.tiles.is_empty()
+                && a.selection.is_none()
+                && matches!(
+                    a.layer_action,
+                    Some(LayerHistoryOp::Vector {
+                        inner: None,
+                        redraw: Some(_),
+                        ..
+                    })
+                )
+        })
     }
 
     /// Name the next step pushed (it does what the command says, whatever
@@ -685,7 +722,11 @@ impl History {
             let op = LayerHistoryOp::structural(action.layer_action.as_ref());
             Self::prepare_for_undo(canvas, op);
             let tiles = self.swap_state(canvas, selection_manager, active_tool, &mut action);
-            Self::swap_text(canvas, action.layer_action.as_mut());
+            Self::swap_text(
+                canvas,
+                action.layer_action.as_mut(),
+                &mut self.vector_redraws,
+            );
             let op = LayerHistoryOp::structural(action.layer_action.as_ref());
             let layer_action = Self::finalize_after_undo(canvas, op);
             self.redo_stack.push(action);
@@ -708,7 +749,11 @@ impl History {
             let op = LayerHistoryOp::structural(action.layer_action.as_ref());
             Self::prepare_for_redo(canvas, op);
             let tiles = self.swap_state(canvas, selection_manager, active_tool, &mut action);
-            Self::swap_text(canvas, action.layer_action.as_mut());
+            Self::swap_text(
+                canvas,
+                action.layer_action.as_mut(),
+                &mut self.vector_redraws,
+            );
             let op = LayerHistoryOp::structural(action.layer_action.as_ref());
             let layer_action = Self::finalize_after_redo(canvas, op);
             self.undo_stack.push(action);
@@ -724,7 +769,13 @@ impl History {
     /// Done while the same layers exist either way: after a removal is
     /// undone or an add redone, before an add is undone or a removal redone.
     /// Vector layers' lines likewise, wherever they're nested.
-    fn swap_text(canvas: &mut Canvas, layer_action: Option<&mut LayerHistoryOp>) {
+    /// Vector layers whose step keeps no pixels go into `redraws`, with
+    /// where to draw them again.
+    fn swap_text(
+        canvas: &mut Canvas,
+        layer_action: Option<&mut LayerHistoryOp>,
+        redraws: &mut Vec<(LayerId, [i32; 4])>,
+    ) {
         let mut op = layer_action;
         loop {
             match op {
@@ -736,10 +787,17 @@ impl History {
                     }
                     op = inner.as_deref_mut();
                 }
-                Some(LayerHistoryOp::Vector { layers, inner }) => {
+                Some(LayerHistoryOp::Vector {
+                    layers,
+                    inner,
+                    redraw,
+                }) => {
                     for (id, vector) in layers {
                         if let Some(idx) = canvas.layer_index_of(*id) {
                             std::mem::swap(&mut canvas.layers[idx].vector, vector);
+                            if let Some(region) = redraw {
+                                redraws.push((*id, *region));
+                            }
                         }
                     }
                     op = inner.as_deref_mut();

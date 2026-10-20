@@ -99,6 +99,31 @@ impl Subpath {
         }
         out
     }
+
+    /// The curve as a polyline within `tol` of it everywhere: each curved
+    /// segment in as many equal steps as its bend needs (Wang's bound), a
+    /// straight one as its end. A closed one doesn't repeat its start.
+    pub fn flatten_tol(&self, tol: f32) -> Vec<Vec2> {
+        let Some(first) = self.knots.first() else {
+            return Vec::new();
+        };
+        let mut out = vec![first.anchor];
+        for [a, b, c, d] in self.segments() {
+            if b == a && c == d {
+                out.push(d);
+                continue;
+            }
+            let bend = (a - b * 2.0 + c).length().max((b - c * 2.0 + d).length());
+            let n = ((0.75 * bend / tol.max(1e-3)).sqrt().ceil() as usize).clamp(1, 1024);
+            for i in 1..=n {
+                out.push(bezier([a, b, c, d], i as f32 / n as f32));
+            }
+        }
+        if self.closed && out.len() > 1 && (out[0] - out[out.len() - 1]).length_sq() < 1e-8 {
+            out.pop();
+        }
+        out
+    }
 }
 
 /// The point at `t` (0..=1) along a cubic Bézier.

@@ -585,9 +585,20 @@ impl PainterApp {
     }
 
     /// End any in-progress stroke and let the worker go idle, which releases
-    /// its share of the canvas. Use [`exclusive`] afterwards at call sites that
-    /// also borrow other fields; otherwise prefer [`Self::canvas_mut`].
+    /// its share of the canvas, and let vector layers' drawing finish (the
+    /// pixels are then what they'll be). Use [`exclusive`] afterwards at
+    /// call sites that also borrow other fields; otherwise prefer
+    /// [`Self::canvas_mut`].
     pub(crate) fn release_canvas(&mut self) {
+        self.release_canvas_for_lines();
+        if self.vector_busy() {
+            self.settle_vectors();
+        }
+    }
+
+    /// [`Self::release_canvas`], vector layers' drawing left going on: for
+    /// the vector tools, which change the lines, not the pixels.
+    pub(crate) fn release_canvas_for_lines(&mut self) {
         self.finish_stroke();
         self.settle_strokes();
     }

@@ -596,8 +596,164 @@ fn new_features(c: &mut Criterion) {
     g.finish();
 }
 
+/// Vector layers: drawing and erasing lines over line art already there,
+/// and changing every line at once. `lines` is how much is on the layer.
+fn vectors(c: &mut Criterion) {
+    let mut g = group(c, "vector");
+    let path = b::wavy_path(NF, 120);
+    let short: Vec<(Vec2, f32)> = path[50..70].to_vec();
+    // `ui`: what the UI thread spends (vector layers are drawn again in the
+    // background); `settled`: until the pixels are drawn too.
+    for lines in [0, 500, 2000, 20000] {
+        let setup = move |a: &mut PainterApp| {
+            b::vector_layer(a, lines);
+            b::set_brush(a, 8.0);
+        };
+        bench(
+            &mut g,
+            &format!("line_120_samples_settled/{lines}_lines"),
+            setup,
+            |a| b::stroke(a, &path, false),
+        );
+        // The same line, the pen lifting only: thinning its points, drawing
+        // it again over its whole box and filing the undo step.
+        bench(
+            &mut g,
+            &format!("line_120_samples_pen_up_ui/{lines}_lines"),
+            |a| {
+                setup(a);
+                b::stroke_held(a, &path, false);
+            },
+            b::pen_up,
+        );
+        bench(
+            &mut g,
+            &format!("line_120_samples_pen_up_settled/{lines}_lines"),
+            |a| {
+                setup(a);
+                b::stroke_held(a, &path, false);
+            },
+            b::finish,
+        );
+        bench(
+            &mut g,
+            &format!("short_line_20_samples_settled/{lines}_lines"),
+            setup,
+            |a| b::stroke(a, &short, false),
+        );
+    }
+    for lines in [2000, 20000] {
+        for (name, mode) in [
+            ("whole_line", b::VectorErase::WholeLine),
+            ("touched", b::VectorErase::Touched),
+            ("to_crossing", b::VectorErase::ToCrossing),
+        ] {
+            let setup = move |a: &mut PainterApp| {
+                b::vector_layer(a, lines);
+                b::set_brush(a, 40.0);
+                b::set_vector_erase(a, mode);
+            };
+            bench(
+                &mut g,
+                &format!("erase_{name}_120_samples_40px_ui/{lines}_lines"),
+                setup,
+                |a| b::stroke_unsettled(a, &path, true),
+            );
+            bench(
+                &mut g,
+                &format!("erase_{name}_120_samples_40px_settled/{lines}_lines"),
+                setup,
+                |a| b::stroke(a, &path, true),
+            );
+        }
+        // A press with Edit Lines anywhere on the page: 100 of them.
+        let mut a = b::painted_app(N);
+        b::vector_layer(&mut a, lines);
+        let presses: Vec<Vec2> = (0..100)
+            .map(|i| Vec2::new((i * 397 % N) as f32, (i * 691 % N) as f32))
+            .collect();
+        g.bench_function(format!("pick_100_presses/{lines}_lines"), |bencher| {
+            bencher.iter(|| {
+                presses
+                    .iter()
+                    .filter_map(|&p| b::vector_pick(&a, p))
+                    .count()
+            })
+        });
+        drop(a);
+        let full = move |a: &mut PainterApp| b::vector_layer(a, lines);
+        bench(
+            &mut g,
+            &format!("recolour_ui/{lines}_lines"),
+            full,
+            b::recolour_vector,
+        );
+        bench(
+            &mut g,
+            &format!("recolour_settled/{lines}_lines"),
+            full,
+            |a| {
+                b::recolour_vector(a);
+                b::settle_vectors(a);
+            },
+        );
+        bench(
+            &mut g,
+            &format!("line_width_x1.5_ui/{lines}_lines"),
+            full,
+            |a| b::vector_line_width(a, 1.5),
+        );
+        bench(
+            &mut g,
+            &format!("line_width_x1.5_settled/{lines}_lines"),
+            full,
+            |a| {
+                b::vector_line_width(a, 1.5);
+                b::settle_vectors(a);
+            },
+        );
+        bench(
+            &mut g,
+            &format!("undo_recolour_ui/{lines}_lines"),
+            move |a| {
+                full(a);
+                b::recolour_vector(a);
+                b::settle_vectors(a);
+            },
+            b::undo,
+        );
+        bench(
+            &mut g,
+            &format!("rasterise/{lines}_lines"),
+            full,
+            b::rasterise_vector,
+        );
+    }
+    // Shapes: filled, outlined, dashed with arrowheads, gradients.
+    let shapes = |a: &mut PainterApp| b::vector_shapes(a, 2000);
+    bench(
+        &mut g,
+        "draw_whole_canvas/2000_shapes",
+        shapes,
+        b::redraw_vectors,
+    );
+    bench(&mut g, "line_width_x1.5_settled/2000_shapes", shapes, |a| {
+        b::vector_line_width(a, 1.5);
+        b::settle_vectors(a);
+    });
+    let svg = b::svg_document(10_000, N);
+    bench(
+        &mut g,
+        "import_svg/10000_paths",
+        |_| {},
+        |a| b::import_svg(a, &svg),
+    );
+    g.finish();
+}
+
 criterion_group!(
     app_benches,
+    vectors,
     painting,
     selections,
     fills,

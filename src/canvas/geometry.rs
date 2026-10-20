@@ -301,12 +301,8 @@ impl Canvas {
             // frame too.
             shell.vector = match op {
                 ImageOp::Reframe { x, y, .. } => shell.vector.take().map(|mut v| {
-                    for s in &mut v.strokes {
-                        for p in &mut s.points {
-                            p[0] -= x as f32;
-                            p[1] -= y as f32;
-                        }
-                    }
+                    let by = eframe::egui::Vec2::new(x as f32, y as f32);
+                    v.edit_all_items(|item| item.map_points(&|p| p - by, 1.0));
                     v
                 }),
                 _ => None,

@@ -560,6 +560,9 @@ pub(super) enum StoredLayerHistoryOp {
         layers: Vec<(u64, Option<crate::canvas::vector::VectorLayer>)>,
         #[serde(default)]
         inner: Option<Box<StoredLayerHistoryOp>>,
+        /// Where the lines are drawn again (a step that keeps no pixels).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redraw: Option<[i32; 4]>,
     },
     /// Impasto heights on the other side of the step (tiles, and the whole
     /// map when the step added or took it away), then its layer change.
@@ -682,12 +685,17 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                     .collect(),
                 inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
             },
-            LayerHistoryOp::Vector { layers, inner } => Self::Vector {
+            LayerHistoryOp::Vector {
+                layers,
+                inner,
+                redraw,
+            } => Self::Vector {
                 layers: layers
                     .iter()
                     .map(|(id, v)| (id.0, v.as_deref().cloned()))
                     .collect(),
                 inner: inner.as_deref().map(|op| Box::new(Self::from(op))),
+                redraw: *redraw,
             },
             // Wet paint isn't saved (it's as it shows, dry): what it carries,
             // or nothing.
@@ -696,6 +704,7 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                 None => Self::Vector {
                     layers: Vec::new(),
                     inner: None,
+                    redraw: None,
                 },
             },
             LayerHistoryOp::Height {
@@ -775,12 +784,17 @@ impl StoredLayerHistoryOp {
                     .collect(),
                 inner: inner.map(|op| Box::new(op.into_op())),
             },
-            Self::Vector { layers, inner } => LayerHistoryOp::Vector {
+            Self::Vector {
+                layers,
+                inner,
+                redraw,
+            } => LayerHistoryOp::Vector {
                 layers: layers
                     .into_iter()
                     .map(|(id, v)| (LayerId(id), v.map(Box::new)))
                     .collect(),
                 inner: inner.map(|op| Box::new(op.into_op())),
+                redraw,
             },
             Self::Height {
                 layer,

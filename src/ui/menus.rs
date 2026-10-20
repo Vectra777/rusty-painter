@@ -427,7 +427,7 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     let active = app.canvas.active_layer_idx;
     ui.add_enabled_ui(app.is_vector_layer(active), |ui| {
         ui.menu_button("Vector", |ui| {
-            if menu_item(ui, "Edit Lines", None) {
+            if menu_item(ui, "Edit Vectors", None) {
                 app.active_tool = crate::app::tools::Tool::VectorEdit;
             }
             if menu_item(ui, "Line Width…", None) {

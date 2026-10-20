@@ -143,6 +143,10 @@ impl PainterApp {
     /// Set the brush color to the composited canvas color at `pos`, keeping
     /// the brush's own alpha.
     pub(crate) fn pick_color(&mut self, pos: Vec2) {
+        // What vector layers will show, not their old pixels.
+        if self.vector_busy() {
+            self.settle_vectors();
+        }
         let x = (pos.x.max(0.0) as usize).min(self.canvas.width().saturating_sub(1));
         let y = (pos.y.max(0.0) as usize).min(self.canvas.height().saturating_sub(1));
         let mut image = egui::ColorImage::new([1, 1], egui::Color32::TRANSPARENT);

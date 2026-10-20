@@ -88,6 +88,7 @@ fn pixel_layer(name: &str, rect: [i32; 4], pixels: Vec<Color32>) -> PsdLayer {
         alpha_locked: false,
         position_locked: false,
         mask: None,
+        vector: None,
     }
 }
 
@@ -218,10 +219,40 @@ impl Reader<'_> {
                     l.mask = self.mask(layer);
                     out.push(l);
                 }
+                // A vector layer: SVG, in points.
+                Some("shapelayer") => {
+                    let l = common(PsdKind::Pixels);
+                    match self.shape_layer(layer) {
+                        Some(vector) => {
+                            let (w, h) = self.size;
+                            let full = [0, 0, w as i32, h as i32];
+                            let pixels = crate::canvas::vector::render_region(vector.items(), full);
+                            let mut v = crate::project::svg_import::vector_layer(
+                                &l.name, full, pixels, vector,
+                            );
+                            (v.opacity, v.visible, v.blend) = (l.opacity, l.visible, l.blend);
+                            out.push(v);
+                        }
+                        None => self.skipped = true,
+                    }
+                }
                 _ => self.skipped = true,
             }
         }
         Ok(())
+    }
+
+    /// A vector layer's shapes, drawn at the document's size (Krita keeps
+    /// them in points, its SVG's viewBox in them).
+    fn shape_layer(&self, layer: &Node) -> Option<crate::canvas::vector::VectorLayer> {
+        let filename = layer.attr("filename")?;
+        let svg = self.file(&format!("{filename}.shapelayer/content.svg"))?;
+        let text = String::from_utf8_lossy(svg);
+        let (w, h) = self.size;
+        let sized = crate::project::svg_import::with_size(&text, w, h);
+        crate::project::svg_import::import_svg(&sized)
+            .ok()
+            .map(|(layer, ..)| layer)
     }
 
     fn file(&self, name: &str) -> Option<&Vec<u8>> {
