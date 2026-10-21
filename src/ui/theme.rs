@@ -91,11 +91,18 @@ pub fn apply_style(ctx: &egui::Context, touch: bool) {
         (TextStyle::Monospace, FontId::monospace(12.0)),
     ]
     .into();
-    style.spacing.item_spacing = egui::vec2(6.0, 5.0);
-    style.spacing.button_padding = egui::vec2(8.0, 3.0);
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.button_padding = egui::vec2(8.0, 2.0);
     style.spacing.interact_size = egui::vec2(36.0, 22.0);
     style.spacing.slider_rail_height = 4.0;
-    style.spacing.window_margin = Margin::same(10.0);
+    // Slim title bars: egui puts the top margin above a window's title and
+    // the top and bottom margins together between it and the contents.
+    style.spacing.window_margin = Margin {
+        left: 8.0,
+        right: 8.0,
+        top: 3.0,
+        bottom: 6.0,
+    };
     style.spacing.menu_margin = Margin::same(4.0);
     style.spacing.indent = 12.0;
     style.spacing.icon_width = 13.0;
@@ -126,6 +133,7 @@ pub fn apply_style(ctx: &egui::Context, touch: bool) {
         style.spacing.icon_width = 20.0;
         style.spacing.icon_width_inner = 11.0;
         style.spacing.menu_margin = Margin::same(6.0);
+        style.spacing.window_margin = Margin::same(10.0);
         style.spacing.scroll = egui::style::ScrollStyle::solid();
         style.spacing.scroll.bar_width = 10.0;
         // No hover on touch screens: show tooltips only on long press.

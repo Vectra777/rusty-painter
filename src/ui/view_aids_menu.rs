@@ -1,5 +1,6 @@
 //! The View menu's viewing aids: the grid and its settings, guides,
-//! snapping, the reference image and the navigator; and the Guides window.
+//! snapping, the reference image and the navigator; the check view; and the
+//! Guides window.
 
 use crate::PainterApp;
 use crate::ui::bar_slider::BarSlider;
@@ -65,6 +66,47 @@ pub(crate) fn view_aids_items(
         .on_hover_text("A picture to paint from, in its own window; click it to pick a colour");
     ui.checkbox(&mut aids.navigator.open, "Navigator")
         .on_hover_text("The whole picture small; click or drag in it to move the view");
+}
+
+/// View → Check View: how the canvas view shows the picture, and the steps
+/// of value. `keys` is the toggle's shortcut, for the hint.
+pub(crate) fn check_view_controls(app: &mut PainterApp, ui: &mut egui::Ui, keys: Option<String>) {
+    use crate::app::view::check::CheckMode;
+    ui.set_min_width(220.0);
+    for mode in CheckMode::ALL {
+        let on = app.workspace.view_aids.check == mode;
+        if ui
+            .radio(on, mode.label())
+            .on_hover_text(mode.hint())
+            .clicked()
+        {
+            app.set_check_view(mode);
+        }
+    }
+    let aids = &mut app.workspace.view_aids;
+    if aids.check == CheckMode::Values || aids.check_toggle == CheckMode::Values {
+        values_slider(ui, &mut aids.check_values);
+    }
+    let toggle = aids.check_toggle.label().to_lowercase();
+    let keys = keys.map_or(String::new(), |k| format!(" ({k})"));
+    ui.label(
+        RichText::new(format!(
+            "The key{keys} switches between colour and {toggle}. Only the view changes: \
+             painting, saving and export use the colours."
+        ))
+        .small()
+        .color(TEXT_DIM),
+    );
+}
+
+/// The steps of value the Values check view shows.
+pub(crate) fn values_slider(ui: &mut egui::Ui, values: &mut u32) {
+    slider_row(
+        ui,
+        "Steps",
+        BarSlider::new(values, crate::app::view::check::VALUES),
+    )
+    .on_hover_text("How many steps of lightness, black and white included");
 }
 
 /// Grid spacing, subdivisions, colour, isometric, and the pixel grid.

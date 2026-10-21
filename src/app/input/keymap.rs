@@ -45,6 +45,7 @@ pub enum Action {
     FitView,
     ActualPixels,
     FlipView,
+    CheckView,
     Grid,
     Guides,
     // Animation
@@ -452,6 +453,13 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Flip the view horizontally",
         "View",
         &[b!(NONE, H)],
+    ),
+    info(
+        Action::CheckView,
+        "check_view",
+        "Check view on / off (grey, values or saturation)",
+        "View",
+        &[b!(SHIFT, H)],
     ),
     info(
         Action::Grid,

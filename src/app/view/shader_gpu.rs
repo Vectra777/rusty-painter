@@ -146,7 +146,7 @@ fn dither_interleaved(rgb: vec3<f32>, levels: f32, frag_coord: vec4<f32>) -> vec
 }
 
 fn screen(stored: vec3<f32>, a: f32, position: vec4<f32>) -> vec4<f32> {
-    let rgb = dither_interleaved(stored, 256.0, position);
+    let rgb = dither_interleaved(check_view(stored, a), 256.0, position);
     if (FRAMEBUFFER_LINEAR) {
         return vec4<f32>(linear_from_gamma_rgb(rgb), a);
     }
@@ -536,6 +536,7 @@ impl ShaderGpu {
     pub fn new(
         device: &wgpu::Device,
         atlas_layout: &wgpu::BindGroupLayout,
+        check_layout: &wgpu::BindGroupLayout,
         quad_layout: wgpu::VertexBufferLayout<'static>,
         target_format: wgpu::TextureFormat,
     ) -> Self {
@@ -543,8 +544,9 @@ impl ShaderGpu {
             label: Some("shader layers compose"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "const FRAMEBUFFER_LINEAR: bool = {};\n{COMPOSE_SHADER}",
-                    target_format.is_srgb()
+                    "const FRAMEBUFFER_LINEAR: bool = {};\n{COMPOSE_SHADER}{}",
+                    target_format.is_srgb(),
+                    super::check::WGSL
                 )
                 .into(),
             ),
@@ -570,7 +572,7 @@ impl ShaderGpu {
         let screen_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("shader layers screen"),
-                bind_group_layouts: &[&screen_layout],
+                bind_group_layouts: &[&screen_layout, check_layout],
                 push_constant_ranges: &[],
             });
         let blend_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1037,7 +1039,8 @@ impl ShaderGpu {
     }
 
     /// Draw the composite over the canvas area.
-    pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'static>) {
+    /// The composite on screen, through the check view `check`.
+    pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'static>, check: &wgpu::BindGroup) {
         let Some(group) = &self.result else {
             return;
         };
@@ -1048,6 +1051,7 @@ impl ShaderGpu {
             &self.screen_linear
         });
         render_pass.set_bind_group(0, group, &[]);
+        render_pass.set_bind_group(1, check, &[]);
         render_pass.draw(0..3, 0..1);
     }
 

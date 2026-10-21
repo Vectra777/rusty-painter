@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Navigator and check view
+- The Navigator is a second view for painting zoomed in. It's drawn from the canvas view's GPU textures, so it follows each stroke as it's painted, and the parts of the canvas off screen are brought up to date for it. Its window can be made any size. It can be mirrored, and has its own check view.
+- Check view (View → Check View, `Shift+H`): the canvas shown in grey of the same lightness, in 2 to 8 flat steps of lightness, or as how saturated its colours are. Only the view changes. The key switches between colour and the mode last chosen.
+
+### Interface
+- Slimmer floating windows: their title bars are about a third shorter, with less room between the title and the contents, and rows are a little tighter. Touch mode keeps its larger spacing.
+
 ### Palettes
 - Several named palettes instead of one list of swatches, chosen in the colour panel. Each is a grid with a set number of columns that can have gaps, and named groups below its first rows; swatches can be named. The swatches of older versions become the first palette.
 - In the colour panel a swatch is dragged to move it (onto a gap or another swatch), right-clicked or long-pressed to name, replace or remove it, and a click on a gap puts the brush colour there.
@@ -135,6 +142,7 @@
 - Bristle: hairs from an image tip's pixels, shear, density, random offset, light pressure lifting hairs off, and colour fading as the hairs run dry; Krita bristle presets bring their settings.
 
 ### Fixed
+- The colour wheel no longer flickers between two sizes at some panel heights (the scroll bar under it came and went each frame).
 - A brush with a time-based stabiliser no longer draws straight segments when the app falls behind: the mouse's moves (and a frame late pen's samples) kept no time of their own, so a slow frame's all came at one instant and the stabiliser jumped straight to the last one.
 - A Photoshop brush file with a tip whose bounds are far apart is refused instead of crashing a debug build (or reading a wrong size in a release one).
 

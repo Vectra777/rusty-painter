@@ -860,3 +860,63 @@ fn liquify_frame_timing_4k() {
         }
     }
 }
+
+/// One frame of the screen update with the view as `app` has it: the
+/// uploads' levels, and how many tiles are left dirty.
+fn frame_levels(app: &mut PainterApp, ctx: &egui::Context) -> (Vec<u32>, usize) {
+    let mut levels = Vec::new();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1200.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let _ = ctx.run(input, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let view = draw_canvas(app, ui);
+            let (uploads, _) = update_dirty_textures(app, &view, view.rect);
+            levels = uploads.iter().map(|u| u.level).collect();
+        });
+    });
+    let dirty = app.render_cache.tiles.iter().filter(|t| t.dirty).count();
+    (levels, dirty)
+}
+
+#[test]
+fn the_navigator_gets_off_screen_tiles_at_its_level_and_the_screen_at_full() {
+    let canvas = crate::canvas::Canvas::new(2048, 2048, Color32::WHITE, TILE_SIZE);
+    let mut app = crate::project::tests::test_app_pub(canvas);
+    app.recreate_render_cache(2048, 2048);
+    app.viewport.zoom = 4.0;
+    app.viewport.offset = egui::Vec2::ZERO;
+    app.workspace.auto_fit = false;
+    app.mark_all_tiles_dirty();
+    let ctx = egui::Context::default();
+    // No navigator: what's off screen waits.
+    let (levels, dirty) = frame_levels(&mut app, &ctx);
+    assert!(levels.iter().all(|&l| l == 0));
+    let total = app.render_cache.tiles.len();
+    assert!(dirty > total / 2, "{dirty} of {total}");
+    // The navigator open: the rest comes, at its level, a share a frame.
+    let n = &mut app.workspace.view_aids.navigator;
+    n.open = true;
+    n.level = Some(3);
+    let mut frames = 0;
+    loop {
+        let (levels, dirty) = frame_levels(&mut app, &ctx);
+        assert!(levels.iter().all(|&l| l == 3), "{levels:?}");
+        frames += 1;
+        if dirty == 0 {
+            break;
+        }
+        assert!(frames < 50, "never settled");
+    }
+    assert!(frames > 1, "spread over frames");
+    // Scrolled to: the tiles come again at full resolution, once.
+    app.viewport.offset = egui::vec2(-4000.0, -4000.0);
+    let (levels, _) = frame_levels(&mut app, &ctx);
+    assert!(!levels.is_empty() && levels.iter().all(|&l| l == 0));
+    let (levels, dirty) = frame_levels(&mut app, &ctx);
+    assert!(levels.is_empty() && dirty == 0, "{levels:?} {dirty}");
+}

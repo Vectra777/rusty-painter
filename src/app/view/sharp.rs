@@ -142,9 +142,11 @@ fn top_run(app: &PainterApp) -> Vec<usize> {
 }
 
 /// Whether anything going on draws the canvas some other way (a live
-/// preview, a transform, wrap-around): then nothing is drawn sharp.
+/// preview, a transform, wrap-around, a check view, which the picture
+/// wouldn't go through): then nothing is drawn sharp.
 fn busy(app: &PainterApp) -> bool {
     app.workspace.wrap_around
+        || app.workspace.view_aids.check != crate::app::view::check::CheckMode::Colour
         || app.render_cache.live.is_some()
         || app.layer_state.floating_layer_idx.is_some()
         || app.layer_state.in_place.is_some()

@@ -225,6 +225,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let quick_mask = on(Action::QuickMask);
     let wand = on(Action::Wand);
     let flip = on(Action::FlipView);
+    let check_view = on(Action::CheckView);
     let content_fill = on(Action::ContentFill);
     let gradient = on(Action::Gradient);
     let pen = on(Action::Pen);
@@ -372,6 +373,10 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     }
     if flip {
         app.viewport.flip_x = !app.viewport.flip_x;
+        repaint = true;
+    }
+    if check_view {
+        app.toggle_check_view();
         repaint = true;
     }
     if grid {

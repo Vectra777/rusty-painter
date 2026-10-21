@@ -245,6 +245,12 @@ fn barycentric(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> (f32, f32, f32) {
 /// The smallest the wheel gets to make room for the rest.
 const MIN_WHEEL: f32 = 120.0;
 
+#[cfg(test)]
+thread_local! {
+    /// The wheel's side as last drawn.
+    static WHEEL_SIDE: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
 /// Hue ring with a saturation/value triangle inside, at most `max_side`
 /// across. The triangle rotates so its pure-hue corner points at the
 /// selected hue on the ring.
@@ -253,6 +259,8 @@ fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState, max_side: f32) -> bool 
         .available_width()
         .min(metrics(ui.ctx()).wheel_max)
         .min(max_side);
+    #[cfg(test)]
+    WHEEL_SIDE.with(|s| s.set(side));
     let (outer_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), side), Sense::hover());
     let rect = egui::Rect::from_center_size(outer_rect.center(), egui::vec2(side, side));
@@ -589,7 +597,11 @@ pub fn color_picker_panel(
     // scrolls rather than the wheel shrinking to a thumbnail.
     let wheel_cap = (ui.available_height() - rest)
         .max(MIN_WHEEL)
-        .max((ui.available_width() * 0.8).min(ui.available_height() * 0.55));
+        .max((ui.available_width() * 0.8).min(ui.available_height() * 0.55))
+        // As wide as the panel less the scroll bar, shown or not: the bar
+        // coming and going would otherwise change the wheel, which changes
+        // whether it's needed, and the wheel flickers between two sizes.
+        .min(ui.available_width() - ui.spacing().scroll.allocated_width());
     let mut wheel_side = 0.0;
     // Wide and short (a phone held sideways): the wheel on the left, as
     // tall as the panel, the rest beside it.
@@ -806,5 +818,59 @@ mod tests {
         let mut s = state(0.3, 0.8, 0.9);
         sync_state_from_color(&mut s, Color32::BLACK);
         assert_eq!((s.hue, s.sat, s.val), (0.3, 0.8, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    /// The wheel's side over 40 frames of the panel at `size` (with the
+    /// touch layout's style if `touch`).
+    fn sides(size: egui::Vec2, touch: bool) -> Vec<f32> {
+        let mut app = crate::project::tests::test_app_pub(crate::canvas::Canvas::new(
+            64,
+            64,
+            Color32::WHITE,
+            64,
+        ));
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_style(&ctx, touch);
+        (0..40)
+            .map(|_| {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        color_picker_panel(ui, &mut app.brush_state, ColorModel::Rgba);
+                    });
+                });
+                WHEEL_SIDE.with(|s| s.get())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_wheel_settles_at_any_panel_size() {
+        let mut bad = Vec::new();
+        for touch in [false, true] {
+            for w in (200..=420).step_by(9) {
+                for h in (250..=900).step_by(11) {
+                    let sides = sides(egui::vec2(w as f32, h as f32), touch);
+                    let tail = &sides[30..];
+                    if tail.windows(2).any(|p| (p[0] - p[1]).abs() > 0.5) {
+                        bad.push((touch, w, h, tail[0], tail[1]));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} sizes flicker, e.g. {:?}",
+            bad.len(),
+            &bad[..bad.len().min(6)]
+        );
     }
 }

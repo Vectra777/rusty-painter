@@ -28,6 +28,7 @@ The defaults, with QWERTY names:
 | Wheel | Zoom |
 | `Ctrl+0` / `Ctrl+1` | Fit / actual pixels |
 | `H` | Flip |
+| `Shift+H` | Check view on / off (grey, values or saturation) |
 | `Ctrl+'` / `Ctrl+;` | Grid / guides |
 | `Tab` | Hide or show the panels |
 
