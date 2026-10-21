@@ -508,7 +508,7 @@ fn draw(r: &Request) -> Vec<Color32> {
                     .iter()
                     .map(|i| {
                         let mut i = VectorItem::clone(i);
-                        i.map_points(&to_picture, s);
+                        i.map_points_for_view(&to_picture, s);
                         i
                     })
                     .collect();

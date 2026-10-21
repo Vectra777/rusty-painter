@@ -183,6 +183,24 @@ impl PainterApp {
         );
     }
 
+    /// The width the line being drawn on layer `idx` goes on with at
+    /// `pressure`, `moved` on from its last point: the pressure's width
+    /// eased towards over a distance that grows with the width, so a pen's
+    /// small jitter in pressure doesn't show as bumps along a thick line's
+    /// edge.
+    fn smoothed_width(&self, idx: usize, pressure: f32, moved: f32) -> f32 {
+        let width = self.vector_width(pressure);
+        let last = self.canvas.layers[idx]
+            .vector
+            .as_ref()
+            .and_then(|v| v.items().last()?.as_line()?.points.last().copied());
+        let Some([_, _, before]) = last else {
+            return width;
+        };
+        let over = (before * 0.25).max(1.0);
+        before + (width - before) * (1.0 - (-moved / over).exp())
+    }
+
     /// The width a line has at `pressure`, as the brush's size would be.
     fn vector_width(&self, pressure: f32) -> f32 {
         let brush = &self.brush_state.brush;
@@ -338,7 +356,7 @@ impl PainterApp {
             s.last = pos;
         }
         if drawing {
-            let width = self.vector_width(pressure);
+            let width = self.smoothed_width(idx, pressure, (pos - last).length());
             let segment = VectorStroke {
                 points: vec![[last.x, last.y, width], [pos.x, pos.y, width]],
                 colour: [0; 3],
@@ -1301,6 +1319,48 @@ mod tests {
             .vector
             .as_ref()
             .map_or(0, |v| v.len())
+    }
+
+    #[test]
+    fn a_pens_jitter_in_pressure_is_eased_along_a_thick_line() {
+        let mut app = app();
+        let b = &mut app.brush_state.brush.brush_options;
+        b.diameter = 300.0;
+        b.pressure_size = true;
+        app.brush_state.brush.is_changed = true;
+        let jitter = |i: usize| if i.is_multiple_of(2) { 0.9 } else { 1.0 };
+        let raw = (app.vector_width(1.0) - app.vector_width(0.9)).abs();
+        assert!(raw > 10.0, "the pressures alone are {raw} px apart");
+        app.start_stroke_with_pressure(Vec2::new(4.0, 50.0), 0.95);
+        for i in 1..=60 {
+            app.add_stroke_point(Vec2::new(4.0 + i as f32 * 2.0, 50.0), jitter(i));
+        }
+        let v = app.canvas.layers[app.canvas.active_layer_idx]
+            .vector
+            .as_ref()
+            .unwrap();
+        let widths: Vec<f32> = v.items()[0].as_line().unwrap().points[10..]
+            .iter()
+            .map(|p| p[2])
+            .collect();
+        let spread = widths.iter().cloned().fold(f32::MIN, f32::max)
+            - widths.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(spread < raw * 0.2, "widths {spread} px apart");
+        app.finish_stroke();
+    }
+
+    #[test]
+    fn a_line_zoomed_in_on_is_as_wide_as_it_comes_out() {
+        let mut item = VectorItem::Line(VectorStroke {
+            points: vec![[0.0, 0.0, 200.0], [10.0, 0.0, 200.0]],
+            colour: [0; 3],
+            opacity: 1.0,
+        });
+        let mut capped = item.clone();
+        item.map_points_for_view(&|p| p * 4.0, 4.0);
+        capped.map_points(&|p| p * 4.0, 4.0);
+        assert_eq!(item.as_line().unwrap().points[0][2], 800.0);
+        assert_eq!(capped.as_line().unwrap().points[0][2], vector::MAX_WIDTH);
     }
 
     #[test]

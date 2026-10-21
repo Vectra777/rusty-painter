@@ -328,13 +328,24 @@ impl VectorItem {
     }
 
     /// Every point moved through `f` and every width scaled by `scale`
-    /// (a move, a crop or an affine transform's size change).
+    /// (a move, a crop or an affine transform's size change), lines no
+    /// wider than [`super::MAX_WIDTH`].
     pub fn map_points(&mut self, f: &impl Fn(Vec2) -> Vec2, scale: f32) {
+        self.map_points_within(f, scale, super::MAX_WIDTH);
+    }
+
+    /// [`Self::map_points`] for a picture of it zoomed in: lines as wide
+    /// as they come out.
+    pub fn map_points_for_view(&mut self, f: &impl Fn(Vec2) -> Vec2, scale: f32) {
+        self.map_points_within(f, scale, f32::INFINITY);
+    }
+
+    fn map_points_within(&mut self, f: &impl Fn(Vec2) -> Vec2, scale: f32, max_width: f32) {
         match self {
             VectorItem::Line(l) => {
                 for p in &mut l.points {
                     let q = f(Vec2::new(p[0], p[1]));
-                    *p = [q.x, q.y, (p[2] * scale).clamp(0.0, super::MAX_WIDTH)];
+                    *p = [q.x, q.y, (p[2] * scale).clamp(0.0, max_width)];
                 }
             }
             VectorItem::Shape(s) => {
@@ -359,7 +370,7 @@ impl VectorItem {
             }
             VectorItem::Group(g) => {
                 for i in &mut g.items {
-                    i.map_points(f, scale);
+                    i.map_points_within(f, scale, max_width);
                 }
             }
         }

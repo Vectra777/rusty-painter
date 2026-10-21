@@ -729,10 +729,36 @@ struct Segment {
     /// covered, and its normal that long: what bounds each row it covers.
     radius2: f32,
     normal: Vec2,
+    /// The same for how far a pixel's centre is surely covered whole (the
+    /// square of a negative radius where nowhere is).
+    solid2: f32,
+    solid_normal: Vec2,
     /// How x moves along it per row (0 if it runs flat).
     dxdy: f32,
     /// Pixels it can cover, `[x0, y0, x1, y1]` before clipping.
     reach: [f32; 4],
+    /// Its ends' widths differ: it's drawn as the shape round both ends'
+    /// circles (see [`Cone`]) rather than straight sides between them.
+    /// (Worked out as it's drawn: the segments stay small.)
+    cone: bool,
+}
+
+/// A segment whose width changes, as the shape its two end circles span
+/// (their tangents and arcs, so the edges of a line whose width keeps
+/// changing meet smoothly at its points): what each pixel's distance to
+/// it needs.
+#[derive(Clone, Copy)]
+struct Cone {
+    /// |ab|², and that less the radii's difference squared (times 1/|ab|²).
+    len2: f32,
+    a2: f32,
+    a2_inv_len2: f32,
+    /// The end circles' radii (half a pixel at least), their difference,
+    /// and that squared with its sign.
+    ra: f32,
+    rb: f32,
+    rr: f32,
+    krr: f32,
 }
 
 impl Line {
@@ -745,6 +771,17 @@ impl Line {
             // (Coverage reaches half the width, at least half a pixel, and
             // half a pixel more for the anti-aliased edge.)
             let reach = (a[2].max(b[2]) * 0.5).max(0.5) + 0.5;
+            // (Whole where coverage's edge is a pixel or more off: half the
+            // narrower end's width less half a pixel, a little less to be
+            // sure.)
+            let solid = a[2].min(b[2]) * 0.5 - 0.51;
+            let normal = |r: f32| {
+                if len2 > 1e-9 {
+                    Vec2::new(-ab.y, ab.x) * (r / len2.sqrt())
+                } else {
+                    Vec2::ZERO
+                }
+            };
             Segment {
                 a: pa,
                 ab,
@@ -752,11 +789,9 @@ impl Line {
                 width: a[2],
                 dw: b[2] - a[2],
                 radius2: reach * reach,
-                normal: if len2 > 1e-9 {
-                    Vec2::new(-ab.y, ab.x) * (reach / len2.sqrt())
-                } else {
-                    Vec2::ZERO
-                },
+                normal: normal(reach),
+                solid2: if solid > 0.0 { solid * solid } else { -1.0 },
+                solid_normal: normal(solid.max(0.0)),
                 dxdy: if ab.y.abs() > 1e-6 { ab.x / ab.y } else { 0.0 },
                 reach: [
                     a[0].min(b[0]) - r,
@@ -764,6 +799,7 @@ impl Line {
                     a[0].max(b[0]) + r + 1.0,
                     a[1].max(b[1]) + r + 1.0,
                 ],
+                cone: Cone::new(len2, a[2], b[2]).is_some(),
             }
         };
         let segments = if path.len() == 1 {
@@ -821,6 +857,9 @@ struct Scratch {
     /// The columns of each row the line touched, `[from, to)` (band
     /// columns; empty: from past to), so only those are laid down.
     spans: Vec<[i32; 2]>,
+    /// The columns of each row the line surely covers whole so far,
+    /// `[from, to)`, which its other segments needn't look at.
+    solid: Vec<[i32; 2]>,
 }
 
 /// No columns touched.
@@ -832,6 +871,7 @@ fn render_band(items: &[Prepared], band: [i32; 4], out: &mut [Color32]) {
     let mut scratch = Scratch {
         coverage: vec![0.0; w * h],
         spans: vec![NO_SPAN; h],
+        solid: vec![NO_SPAN; h],
     };
     draw_items(items, band, out, &mut scratch);
 }
@@ -931,7 +971,11 @@ fn draw_shape(
 fn draw_line(line: &Line, band: [i32; 4], out: &mut [Color32], scratch: &mut Scratch) {
     let [x0, y0, x1, y1] = band;
     let w = (x1 - x0) as usize;
-    let Scratch { coverage, spans } = scratch;
+    let Scratch {
+        coverage,
+        spans,
+        solid,
+    } = scratch;
     let [bx0, by0, bx1, by1] = [
         line.clip[0].max(x0),
         line.clip[1].max(y0),
@@ -956,10 +1000,11 @@ fn draw_line(line: &Line, band: [i32; 4], out: &mut [Color32], scratch: &mut Scr
         }
         let sy0 = floor(ry0.max(fy0)).max(by0);
         let sy1 = ceil(ry1.min(fy1)).min(by1);
+        let cone = seg.cone();
         for y in sy0..sy1 {
             let cy = cy_of(y);
             // Only the pixels of the row it can reach.
-            let Some((lo, hi)) = row_span(seg, cy) else {
+            let Some((lo, hi)) = row_span(seg, cy, seg.radius2, seg.normal) else {
                 continue;
             };
             let sx0 = floor(lo - 0.5).max(bx0);
@@ -976,16 +1021,58 @@ fn draw_line(line: &Line, band: [i32; 4], out: &mut [Color32], scratch: &mut Scr
             let dy0 = cy - seg.a.y;
             let along_y = dy0 * seg.ab.y;
             let row = (y - y0) as usize * w;
-            let cov = &mut coverage[row + (sx0 - x0) as usize..row + (sx1 - x0) as usize];
-            let fx = sx0 as f32 + 0.5 - seg.a.x;
-            for (k, slot) in cov.iter_mut().enumerate() {
-                let v = seg.coverage(fx + k as f32, dy0, along_y);
-                *slot = if v > *slot { v } else { *slot };
+            // Less what's covered whole already: a thick line's segments
+            // overlap a lot, and only their edges are left to work out.
+            let whole = &mut solid[(y - y0) as usize];
+            let [f0, f1] = *whole;
+            let pieces = if f0 < f1 {
+                [(sx0, sx1.min(f0)), (sx0.max(f1), sx1)]
+            } else {
+                [(sx0, sx1), (0, 0)]
+            };
+            for (p0, p1) in pieces {
+                if p0 >= p1 {
+                    continue;
+                }
+                let cov = &mut coverage[row + (p0 - x0) as usize..row + (p1 - x0) as usize];
+                let fx = p0 as f32 + 0.5 - seg.a.x;
+                match &cone {
+                    Some(cone) => {
+                        for (k, slot) in cov.iter_mut().enumerate() {
+                            let v = seg.cone_coverage(cone, fx + k as f32, dy0, along_y);
+                            *slot = if v > *slot { v } else { *slot };
+                        }
+                    }
+                    None => {
+                        for (k, slot) in cov.iter_mut().enumerate() {
+                            let v = seg.plain_coverage(fx + k as f32, dy0, along_y);
+                            *slot = if v > *slot { v } else { *slot };
+                        }
+                    }
+                }
+            }
+            // What this one covers whole, kept if it meets what's kept (so
+            // it stays one range) or is wider.
+            if seg.solid2 > 0.0
+                && let Some((lo, hi)) = row_span(seg, cy, seg.solid2, seg.solid_normal)
+            {
+                let g0 = ceil(lo - 0.5).max(sx0);
+                let g1 = (floor(hi - 0.5) + 1).min(sx1);
+                if g0 < g1 {
+                    *whole = if f0 < f1 && g0 <= f1 && f0 <= g1 {
+                        [f0.min(g0), f1.max(g1)]
+                    } else if f0 >= f1 || g1 - g0 > f1 - f0 {
+                        [g0, g1]
+                    } else {
+                        [f0, f1]
+                    };
+                }
             }
         }
     }
     let paint = &line.paint;
     for y in by0..by1 {
+        solid[(y - y0) as usize] = NO_SPAN;
         let [from, to] = std::mem::replace(&mut spans[(y - y0) as usize], NO_SPAN);
         if from >= to {
             continue;
@@ -1007,12 +1094,115 @@ fn draw_line(line: &Line, band: [i32; 4], out: &mut [Color32], scratch: &mut Scr
     }
 }
 
+impl Cone {
+    /// For a segment `len2` long squared whose ends are `wa` and `wb` wide,
+    /// if they differ enough to show (and neither end's circle holds the
+    /// other's).
+    fn new(len2: f32, wa: f32, wb: f32) -> Option<Cone> {
+        let (ra, rb) = ((wa * 0.5).max(0.5), (wb * 0.5).max(0.5));
+        let rr = ra - rb;
+        let a2 = len2 - rr * rr;
+        // Straight sides between the circles miss their tangents by about
+        // r·rr²/2|ab|²: a twentieth of a pixel or less doesn't show (and a
+        // thin line is quicker drawn so).
+        let off = ra.max(rb) * rr * rr * 0.5;
+        (off > 0.05 * len2 && a2 > 1e-6 * len2).then(|| Cone {
+            len2,
+            a2,
+            a2_inv_len2: a2 / len2,
+            ra,
+            rb,
+            rr,
+            krr: rr.signum() * rr * rr,
+        })
+    }
+}
+
+/// How far `p` is outside the shape circles of radius `ra` round `a` and
+/// `rb` round `b` span (below zero inside): the plain sum, for checking
+/// the renderer against.
+#[cfg(test)]
+fn cone_distance(p: Vec2, a: Vec2, ra: f32, b: Vec2, rb: f32) -> f32 {
+    let ba = b - a;
+    let l2 = ba.length_sq();
+    let rr = ra - rb;
+    let a2 = l2 - rr * rr;
+    if l2 <= 1e-9 || a2 <= 0.0 {
+        return ((p - a).length() - ra).min((p - b).length() - rb);
+    }
+    let pa = p - a;
+    let y = pa.dot(ba);
+    let z = y - l2;
+    let x2 = (pa * l2 - ba * y).length_sq();
+    let (y2, z2) = (y * y * l2, z * z * l2);
+    let k = rr.signum() * rr * rr * x2;
+    if z.signum() * a2 * z2 > k {
+        (x2 + z2).sqrt() / l2 - rb
+    } else if y.signum() * a2 * y2 < k {
+        (x2 + y2).sqrt() / l2 - ra
+    } else {
+        ((x2 * a2 / l2).sqrt() + y * rr) / l2 - ra
+    }
+}
+
 impl Segment {
     /// How much it covers the pixel whose centre is `dx0`, `dy0` from its
     /// start (`along_y`: `dy0` times its height): below zero where it
     /// doesn't reach.
-    #[inline(always)]
+    #[cfg(test)]
     fn coverage(&self, dx0: f32, dy0: f32, along_y: f32) -> f32 {
+        match self.cone() {
+            Some(cone) => self.cone_coverage(&cone, dx0, dy0, along_y),
+            None => self.plain_coverage(dx0, dy0, along_y),
+        }
+    }
+
+    /// Its [`Cone`], if it's drawn as one.
+    fn cone(&self) -> Option<Cone> {
+        if !self.cone {
+            return None;
+        }
+        Cone::new(self.ab.length_sq(), self.width, self.width + self.dw)
+    }
+
+    /// [`Self::coverage`] of a width-changing one: without branches (each
+    /// case worked out and one picked), so it too runs several pixels at a
+    /// time.
+    #[inline(always)]
+    fn cone_coverage(&self, c: &Cone, dx0: f32, dy0: f32, along_y: f32) -> f32 {
+        let y = dx0 * self.ab.x + along_y;
+        let t = (y * self.inv_len2).clamp(0.0, 1.0);
+        let half = (self.width + self.dw * t) * 0.5;
+        let fade = (half * 2.0).clamp(0.0, 1.0);
+        let z = y - c.len2;
+        let (qx, qy) = (dx0 * c.len2 - self.ab.x * y, dy0 * c.len2 - self.ab.y * y);
+        let x2 = qx * qx + qy * qy;
+        let (y2, z2) = (y * y * c.len2, z * z * c.len2);
+        let k = c.krr * x2;
+        // Past b's circle, before a's, or along the sides.
+        let past = (if z > 0.0 { c.a2 * z2 } else { -c.a2 * z2 }) > k;
+        let before = !past && (if y > 0.0 { c.a2 * y2 } else { -c.a2 * y2 }) < k;
+        let arg = if past {
+            x2 + z2
+        } else if before {
+            x2 + y2
+        } else {
+            x2 * c.a2_inv_len2
+        };
+        let root = arg.sqrt();
+        let outside = if past {
+            root * self.inv_len2 - c.rb
+        } else if before {
+            root * self.inv_len2 - c.ra
+        } else {
+            (root + y * c.rr) * self.inv_len2 - c.ra
+        };
+        (0.5 - outside).min(1.0) * fade
+    }
+
+    /// [`Self::coverage`] of one as wide all along.
+    #[inline(always)]
+    fn plain_coverage(&self, dx0: f32, dy0: f32, along_y: f32) -> f32 {
         let t = ((dx0 * self.ab.x + along_y) * self.inv_len2).clamp(0.0, 1.0);
         let (dx, dy) = (self.ab.x * t - dx0, self.ab.y * t - dy0);
         let d2 = dx * dx + dy * dy;
@@ -1041,15 +1231,16 @@ impl Line {
     }
 }
 
-/// Where row `cy` (a pixel centre's y) meets the pixels `seg` can cover:
-/// the x range within its radius of it. That's a capsule, so one range:
+/// Where row `cy` (a pixel centre's y) meets the points within a radius of
+/// `seg` (its square `radius2`, `normal` its normal that long): the pixels
+/// it can cover for [`Segment::radius2`]. That's a capsule, so one range:
 /// the circles round its ends and the two sides between them.
-fn row_span(seg: &Segment, cy: f32) -> Option<(f32, f32)> {
+fn row_span(seg: &Segment, cy: f32, radius2: f32, normal: Vec2) -> Option<(f32, f32)> {
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
     let b = seg.a + seg.ab;
     for c in [seg.a, b] {
         let dy = cy - c.y;
-        let h = seg.radius2 - dy * dy;
+        let h = radius2 - dy * dy;
         if h >= 0.0 {
             let half = h.sqrt();
             lo = lo.min(c.x - half);
@@ -1059,7 +1250,7 @@ fn row_span(seg: &Segment, cy: f32) -> Option<(f32, f32)> {
     // The sides: the segment moved its radius out each way. (Flat ones'
     // sides lie within the ends' circles' ranges, or off the row.)
     if seg.dxdy != 0.0 || seg.ab.x == 0.0 {
-        for n in [seg.normal, -seg.normal] {
+        for n in [normal, -normal] {
             let (p, q) = (seg.a + n, b + n);
             if (p.y - cy) * (q.y - cy) <= 0.0 && p.y != q.y {
                 let x = p.x + (cy - p.y) * seg.dxdy;
@@ -1140,15 +1331,20 @@ mod tests {
                     }
                     for x in sx0..sx1 {
                         let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-                        let (d, t) = segment_distance(p, a, c);
+                        let (plain, t) = segment_distance(p, a, c);
                         let half = (a[2] + (c[2] - a[2]) * t) * 0.5;
                         // Thinner than a pixel: fainter rather than vanishing.
-                        let (half, fade) = if half < 0.5 {
-                            (0.5, (half * 2.0).max(0.0))
-                        } else {
-                            (half, 1.0)
+                        let fade = (half * 2.0).clamp(0.0, 1.0);
+                        // The shape the ends' circles span (straight sides
+                        // when they're alike, or one holds the other).
+                        let r = |w: f32| (w * 0.5).max(0.5);
+                        let xy = |q: [f32; 3]| Vec2::new(q[0], q[1]);
+                        let len2 = (xy(c) - xy(a)).length_sq();
+                        let d = match Cone::new(len2, a[2], c[2]) {
+                            Some(_) => cone_distance(p, xy(a), r(a[2]), xy(c), r(c[2])),
+                            None => plain - r(a[2] + (c[2] - a[2]) * t),
                         };
-                        let v = (half + 0.5 - d).clamp(0.0, 1.0) * fade;
+                        let v = (0.5 - d).clamp(0.0, 1.0) * fade;
                         let slot = &mut coverage[row + (x - x0) as usize];
                         if v > *slot {
                             *slot = v;
@@ -1238,7 +1434,10 @@ mod tests {
             for seg in &l.segments {
                 for y in -30..80 {
                     let cy = y as f32 + 0.5;
-                    let span = row_span(seg, cy);
+                    let span = row_span(seg, cy, seg.radius2, seg.normal);
+                    let whole = (seg.solid2 > 0.0)
+                        .then(|| row_span(seg, cy, seg.solid2, seg.solid_normal))
+                        .flatten();
                     for x in -30..80 {
                         let cx = x as f32 + 0.5;
                         let t = (((cx - seg.a.x) * seg.ab.x + (cy - seg.a.y) * seg.ab.y)
@@ -1247,6 +1446,14 @@ mod tests {
                         let (dx, dy) = (seg.a.x + seg.ab.x * t - cx, seg.a.y + seg.ab.y * t - cy);
                         let half = (seg.width + seg.dw * t) * 0.5;
                         let edge = half.max(0.5) + 0.5;
+                        // What's taken as covered whole is.
+                        if whole
+                            .is_some_and(|(lo, hi)| x >= ceil(lo - 0.5) && x < floor(hi - 0.5) + 1)
+                        {
+                            let v =
+                                seg.coverage(cx - seg.a.x, cy - seg.a.y, (cy - seg.a.y) * seg.ab.y);
+                            assert!(v >= 1.0, "{a:?} {b:?} x {x} y {y} covers {v}");
+                        }
                         if (dx * dx + dy * dy).sqrt() < edge {
                             let ok = span.is_some_and(|(lo, hi)| {
                                 x >= floor(lo - 0.5) && x < ceil(hi - 0.5) + 1
@@ -1254,7 +1461,9 @@ mod tests {
                             assert!(
                                 ok,
                                 "{a:?} {b:?} x {x} y {y} span {span:?} seg a {:?} ab {:?} r {}",
-                                seg.a, seg.ab, seg.radius2.sqrt()
+                                seg.a,
+                                seg.ab,
+                                seg.radius2.sqrt()
                             );
                         }
                     }
@@ -1265,12 +1474,22 @@ mod tests {
 
     #[test]
     fn the_fast_renderer_draws_what_the_plain_one_does() {
-        let strokes = scattered(400, 700.0);
+        let thin = scattered(400, 700.0);
+        // Thick ones too: their segments overlap, most pixels whole.
+        let mut thick = scattered(40, 700.0);
+        for s in &mut thick {
+            s.points.iter_mut().for_each(|p| p[2] *= 20.0);
+        }
         // Small (one band) and large (bands on the pool), off the origin.
-        for region in [[100, 150, 260, 300], [-20, -10, 720, 690]] {
+        for (strokes, region) in [
+            (&thin, [100, 150, 260, 300]),
+            (&thin, [-20, -10, 720, 690]),
+            (&thick, [100, 150, 260, 300]),
+            (&thick, [-20, -10, 720, 690]),
+        ] {
             let (fast, plain) = (
-                render_region(&strokes, region),
-                reference_render(&strokes, region),
+                render_region(strokes, region),
+                reference_render(strokes, region),
             );
             // The same coverage but for the last bit (the fast one runs its
             // sums in another order): alpha off by one at most, and where
