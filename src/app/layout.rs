@@ -562,6 +562,9 @@ fn brush_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
                 &app.brush_state.loaded_brush_tips,
                 &app.brush_state.loaded_textures,
             );
+            if ui::brush_settings::take_add_textures(ui.ctx()) {
+                app.pick_open(crate::app::files::OpenFor::Textures);
+            }
         }
     }
 }

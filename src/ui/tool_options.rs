@@ -46,12 +46,18 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Gradient => gradient_options(app, ui, true),
         Tool::Pen => pen_options(app, ui),
         Tool::VectorEdit => {
+            use crate::app::tools::vector_correct::CorrectMode;
             tool_title(ui, "Edit Vectors");
             if ui.button("Back to brush").clicked() {
                 app.active_tool = Tool::Brush;
             }
-            let shapes = crate::ui::vector_props::vector_edit_options(app, ui);
-            if app.picked_line().is_some() {
+            let mode = crate::ui::vector_props::vector_mode_options(app, ui);
+            let shapes = if mode == CorrectMode::Edit {
+                crate::ui::vector_props::vector_edit_options(app, ui)
+            } else {
+                mode.hint()
+            };
+            if mode == CorrectMode::Edit && app.picked_line().is_some() {
                 "Line: drag a handle to bend it, Shift+drag to widen, Alt+drag to move it, Delete removes a handle"
             } else {
                 shapes

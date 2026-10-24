@@ -1,6 +1,6 @@
 //! Screenshots for checking the layout at a given window size, without
 //! clicking around: `RP_SIZE=873x393 RP_SHOT=out.png RP_OPEN=brush,layers`
-//! opens those panels, saves the window after a few frames and quits.
+//! opens those panels (and `palette`, the Palette window), saves the window after a few frames and quits.
 //! `RUSTY_PAINTER_TOUCH=1` gives the touch layout (Android, iPad).
 //! `RP_DEMO=dir` paints a small scene with a few presets, a stroke at a
 //! time as a pen would, and saves the window every other frame into `dir`
@@ -60,6 +60,7 @@ fn open_panels(app: &mut PainterApp) {
     app.modal_state.menu_sheet_open = open.contains("sheet");
     app.modal_state.show_new_canvas_modal = open.contains("newcanvas");
     app.export_state.show_modal = open.contains("export");
+    app.workspace.palette.open = open.contains("palette");
 }
 
 /// One stroke of the demo: a preset, its colour, its size and path (in

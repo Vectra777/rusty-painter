@@ -6,7 +6,8 @@ use crate::PainterApp;
 use crate::app::document::{ATLAS_SIZE, CanvasTile, TILE_SIZE};
 use crate::app::state::{BelowCache, RenderCache};
 use crate::app::view::gpu_canvas::{
-    ATLAS_BORDER, ATLAS_TEXTURE_SIZE, AtlasQuad, CanvasPaint, MIP_LEVELS, TileUpload,
+    ATLAS_BORDER, ATLAS_TEXTURE_SIZE, AtlasQuad, CanvasPaint, MIP_LEVELS, OverlayPaint, Surface,
+    TileUpload,
 };
 use crate::app::view::shader_gpu::ComposePlan;
 use crate::canvas::storage::BelowComposite;
@@ -73,7 +74,7 @@ fn refresh_below_cache(app: &mut PainterApp, visible: &impl Fn(&CanvasTile) -> b
 /// be included: at 1.5x a 0.5 zoom shows ~0.75 texels per pixel, i.e. level 0,
 /// and uploading level 1 would leave the (stale) finer level visible. Half a
 /// level of margin keeps rounding in the hardware's LOD estimate safe.
-fn preview_level(drawing: bool, zoom: f32, pixels_per_point: f32) -> u32 {
+pub(crate) fn preview_level(drawing: bool, zoom: f32, pixels_per_point: f32) -> u32 {
     if !drawing {
         return 0;
     }
@@ -317,11 +318,15 @@ fn visible_tile_range(
 /// so a full refresh of a huge canvas fills in over a few frames instead of
 /// stalling one.
 const MAX_TILES_PER_FRAME: usize = 1024;
+/// Off-screen tiles composited a frame for the navigator (at its level).
+const NAVIGATOR_TILES_PER_FRAME: usize = 256;
 
 /// Composite the dirty tiles visible in `clip` (off-screen ones stay dirty
 /// until scrolled into view), at most [`MAX_TILES_PER_FRAME`] of them, and hand
 /// them back as atlas uploads: at full resolution normally, or at
-/// [`preview_level`] mid-stroke when zoomed out. Also returns whether visible
+/// [`preview_level`] mid-stroke when zoomed out. While the navigator shows
+/// the whole canvas, off-screen tiles go too, after those, at the navigator's
+/// level ([`NAVIGATOR_TILES_PER_FRAME`] a frame). Also returns whether visible
 /// dirty tiles remain for the next frame.
 pub fn update_dirty_textures(
     app: &mut PainterApp,
@@ -340,13 +345,22 @@ pub fn update_dirty_textures(
     let level = preview_level(app.brush_state.is_drawing || live, app.viewport.zoom, ppp);
     let screen = preview_view(app, view, clip);
     let live_block = live.then_some(screen.block);
-    // Tiles last uploaded at a coarser level than we now need go again
-    // (and live previews, once the drag is over).
+    // The navigator shows every tile, at its own level (not during a live
+    // preview: that's for the screen alone, until it's let go).
+    let navigator = app
+        .workspace
+        .view_aids
+        .navigator
+        .gpu_level()
+        .filter(|_| !live);
+    // Tiles on screen last uploaded at a coarser level than we now need go
+    // again (and live previews, once the drag is over).
     if !live {
         let stale: Vec<(usize, usize)> = app
             .render_cache
             .preview_tiles
             .iter()
+            .filter(|&(&(tx, ty), _)| screen.contains(tx, ty))
             .filter(|&(_, &uploaded)| uploaded > level)
             .map(|(&tile, _)| tile)
             .collect();
@@ -379,7 +393,31 @@ pub fn update_dirty_textures(
     let liquify = (app.layer_state.liquify.as_ref())
         .filter(|s| s.previewing())
         .filter(|_| !posed);
-    let more = candidates.next().is_some();
+    let more_on_screen = candidates.next().is_some();
+    // Off screen, for the navigator: what's left of the budget.
+    let budget = NAVIGATOR_TILES_PER_FRAME.min(max_tiles - chosen.len());
+    let mut off_screen: Vec<usize> = match navigator {
+        Some(_) => cache
+            .tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.dirty && !visible(t))
+            .map(|(idx, _)| idx)
+            .take(budget + 1)
+            .collect(),
+        None => Vec::new(),
+    };
+    // (Not counted as more to come: that's for the screen.)
+    if off_screen.len() > budget {
+        view.response.ctx.request_repaint();
+    }
+    off_screen.truncate(budget);
+    let navigator_level = navigator.unwrap_or(0);
+    let chosen: Vec<(usize, u32)> = chosen
+        .into_iter()
+        .map(|idx| (idx, level))
+        .chain(off_screen.into_iter().map(|idx| (idx, navigator_level)))
+        .collect();
     // Shader layers showing live: each run of layers between them is
     // composited on its own (the others hidden), into its own atlases.
     let shader_live = cache.live.as_deref();
@@ -390,7 +428,18 @@ pub fn update_dirty_textures(
             .map(|shown| Some(crate::canvas::shader::run_view(canvas, shown)))
             .collect(),
         Some(_) => Vec::new(),
-        None => vec![None],
+        // Layers drawn sharp over the composite are left out of it.
+        None => {
+            let hidden = &app.workspace.vector.sharp.hidden;
+            vec![(!hidden.is_empty()).then(|| {
+                let shown: Vec<bool> = canvas
+                    .layers
+                    .iter()
+                    .map(|l| !hidden.contains(&l.id))
+                    .collect();
+                crate::canvas::shader::run_view(canvas, &shown)
+            })]
+        }
     };
     let per_run = cache.atlases_x * cache.atlases_y;
     // The below-cache holds everything under the active layer: only the
@@ -404,10 +453,10 @@ pub fn update_dirty_textures(
                 && (0..active).all(|i| run[i] || !canvas.layers[i].visible)
         })
     });
-    let uploads: Vec<(usize, Vec<TileUpload>)> = app.workspace.pool.install(|| {
+    let uploads: Vec<(usize, u32, Vec<TileUpload>)> = app.workspace.pool.install(|| {
         chosen
             .par_iter()
-            .map(|&idx| {
+            .map(|&(idx, level)| {
                 let tile = &cache.tiles[idx];
                 let mut uploads = Vec::new();
                 for (run, view) in views.iter().enumerate() {
@@ -427,14 +476,14 @@ pub fn update_dirty_textures(
                         upload.atlas += run * per_run;
                     }
                 }
-                (idx, uploads)
+                (idx, level, uploads)
             })
             .collect()
     });
 
     let cache = &mut app.render_cache;
-    for (idx, _) in &uploads {
-        let tile = &mut cache.tiles[*idx];
+    for &(idx, level, _) in &uploads {
+        let tile = &mut cache.tiles[idx];
         tile.clear();
         if live {
             // Approximate: redrawn exactly once the drag is over.
@@ -445,7 +494,10 @@ pub fn update_dirty_textures(
             cache.preview_tiles.remove(&(tile.tx, tile.ty));
         }
     }
-    (uploads.into_iter().flat_map(|(_, u)| u).collect(), more)
+    (
+        uploads.into_iter().flat_map(|(_, _, u)| u).collect(),
+        more_on_screen,
+    )
 }
 
 /// One tile of `canvas` (the whole stack, or one run's view of it)
@@ -717,17 +769,90 @@ pub fn paint_canvas(app: &PainterApp, ui: &egui::Ui, view: &CanvasView, uploads:
             frame: shader_frame(app, view, target, ppp),
         }
     });
+    let aids = &app.workspace.view_aids;
     let paint = CanvasPaint {
         generation: cache.texture_generation,
         atlas_count: per_run * runs,
         uploads: std::sync::Mutex::new(uploads),
         quads,
         compose,
+        surface: Surface::View,
+        check: aids.check.uniform(aids.check_values),
+        overlay: None,
     };
     ui.painter().set(
         view.slot,
         egui_wgpu::Callback::new_paint_callback(target, paint),
     );
+}
+
+/// The whole canvas drawn from the atlases into `picture` (on screen,
+/// clipped to `clip`), maybe mirrored, through `check`, with `overlay` (its
+/// pixels, size and version) over it. Only while no shader layer shows live:
+/// the atlases then hold runs of layers, not the composite.
+pub fn paint_navigator(
+    app: &PainterApp,
+    painter: &egui::Painter,
+    picture: egui::Rect,
+    flip: bool,
+    check: [u8; 16],
+    overlay: Option<([u32; 2], u64, std::sync::Arc<Vec<u8>>)>,
+) {
+    let target = painter.clip_rect().intersect(picture);
+    let cache = &app.render_cache;
+    if !target.is_positive() || cache.live.is_some() {
+        return;
+    }
+    let canvas_size = egui::vec2(app.canvas.width() as f32, app.canvas.height() as f32);
+    let placement = Placement {
+        canvas_size,
+        zoom: picture.width() / canvas_size.x.max(1.0),
+        origin: picture.min,
+        center: picture.center(),
+        rotation: 0.0,
+        flip,
+        target,
+        wrap: false,
+    };
+    let quads = atlas_quads(&placement, cache.atlases_x, cache.atlases_y);
+    let ndc = |p: egui::Pos2| {
+        [
+            2.0 * (p.x - target.min.x) / target.width() - 1.0,
+            1.0 - 2.0 * (p.y - target.min.y) / target.height(),
+        ]
+    };
+    let corners = if flip {
+        [
+            picture.right_top(),
+            picture.left_top(),
+            picture.left_bottom(),
+            picture.right_bottom(),
+        ]
+    } else {
+        [
+            picture.left_top(),
+            picture.right_top(),
+            picture.right_bottom(),
+            picture.left_bottom(),
+        ]
+    }
+    .map(ndc);
+    let paint = CanvasPaint {
+        generation: cache.texture_generation,
+        atlas_count: cache.atlases_x * cache.atlases_y,
+        uploads: std::sync::Mutex::new(Vec::new()),
+        quads,
+        compose: None,
+        surface: Surface::Navigator,
+        check,
+        overlay: overlay.map(|(size, version, pixels)| OverlayPaint {
+            corners,
+            size,
+            version,
+            pixels,
+        }),
+    };
+    painter.add(egui_wgpu::Callback::new_paint_callback(target, paint));
 }
 
 /// The live shaders' uniforms for this frame: the render target (the

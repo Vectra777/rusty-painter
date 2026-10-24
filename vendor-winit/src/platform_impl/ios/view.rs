@@ -168,6 +168,13 @@ declare_class!(
             self.handle_touches(touches, event)
         }
 
+        // rusty-painter patch: the Pencil's measured pressure and angles
+        // for samples first sent with estimates.
+        #[method(touchesEstimatedPropertiesUpdated:)]
+        fn touches_estimated_properties_updated(&self, touches: &NSSet<UITouch>) {
+            super::pen::queue_pencil_updates(touches)
+        }
+
         #[method(pinchGesture:)]
         fn pinch_gesture(&self, recognizer: &UIPinchGestureRecognizer) {
             let window = self.window().unwrap();

@@ -296,6 +296,8 @@ pub fn eyedropper(app: &mut PainterApp, pos: Vec2) {
 pub fn transform_rotate(app: &mut PainterApp, rotation: f32) {
     use crate::app::tools::transform;
     app.active_tool = Tool::Transform(Default::default());
+    // The active layer, not whichever one is under the press.
+    app.workspace.transform_pick_layer = false;
     transform::transform_press(app, Vec2::new(10.0, 10.0));
     transform::transform_release(app);
     if let Tool::Transform(ref mut info) = app.active_tool {
@@ -745,4 +747,164 @@ pub fn vector_line_width(app: &mut PainterApp, scale: f32) {
 /// Layer → Rasterise Vector Layer.
 pub fn rasterise_vector(app: &mut PainterApp) {
     app.rasterise_vector_layer(app.canvas.active_layer_idx);
+}
+
+/// The vector layer's top-left `size`×`size` corner turned into a cloud of
+/// small shapes: `n` squares on a grid, each overlapping the next, for the
+/// shape operations.
+pub fn vector_squares(app: &mut PainterApp, n: usize) {
+    use crate::canvas::path::{Knot, Path, Subpath};
+    use crate::canvas::vector::{Fill, Paint, PathShape, StrokeStyle, VectorItem, VectorLayer};
+    app.add_vector_layer();
+    let side = (n as f32).sqrt().ceil() as usize;
+    let items: Vec<VectorItem> = (0..n)
+        .map(|i| {
+            let (x, y) = (
+                100.0 + (i % side) as f32 * 30.0,
+                100.0 + (i / side) as f32 * 30.0,
+            );
+            let s = 40.0;
+            VectorItem::Shape(PathShape {
+                path: Path {
+                    subpaths: vec![Subpath {
+                        knots: [(x, y), (x + s, y), (x + s, y + s), (x, y + s)]
+                            .map(|(x, y)| Knot::corner(Vec2::new(x, y)))
+                            .to_vec(),
+                        closed: true,
+                    }],
+                },
+                fill: Some(Fill {
+                    paint: Paint::Colour([60, 120, 200, 255]),
+                    rule: Default::default(),
+                }),
+                stroke: Some(StrokeStyle::solid([20, 20, 30, 255], 2.0)),
+                opacity: 1.0,
+            })
+        })
+        .collect();
+    let idx = app.canvas.active_layer_idx;
+    app.change_vector_lines(idx, "Shapes", |v| *v = VectorLayer::from_items(items));
+    app.settle_vectors();
+}
+
+/// Edit Vectors' box dragged from `a` to `b` and let go (touching, or only
+/// inside with `inside`): how many items it picked.
+pub fn vector_box_pick(app: &mut PainterApp, a: Vec2, b: Vec2, inside: bool) -> usize {
+    use crate::app::tools::vector_arrange::BoxPick;
+    app.active_tool = Tool::VectorEdit;
+    app.workspace.vector.box_pick = if inside {
+        BoxPick::Inside
+    } else {
+        BoxPick::Touching
+    };
+    app.vector_box_start(a);
+    app.vector_box_drag(b);
+    app.vector_box_end(false);
+    app.picked_items().map_or(0, |(_, all)| all.len())
+}
+
+/// The picked items flipped across, settled.
+pub fn flip_picked(app: &mut PainterApp) {
+    app.flip_vector_items(true);
+    app.settle_vectors();
+}
+
+/// The picked items lined up on the left, settled.
+pub fn align_picked_left(app: &mut PainterApp) {
+    app.align_vector_items(crate::app::tools::vector_arrange::Align::Left);
+    app.settle_vectors();
+}
+
+/// The picked items spread out across, settled.
+pub fn distribute_picked(app: &mut PainterApp) {
+    app.distribute_vector_items(true);
+    app.settle_vectors();
+}
+
+/// The picked shapes combined, settled.
+pub fn combine_picked(app: &mut PainterApp, union: bool) {
+    use crate::app::tools::vector_arrange::Combine;
+    app.combine_vector_shapes(if union {
+        Combine::Union
+    } else {
+        Combine::Exclude
+    });
+    app.settle_vectors();
+}
+
+/// Each of `points` snapped to the nearest item's point within `reach`:
+/// how many moved.
+pub fn snap_points(app: &PainterApp, points: &[Vec2], reach: f32) -> usize {
+    let idx = app.canvas.active_layer_idx;
+    points
+        .iter()
+        .filter(|&&p| app.snap_to_vector_points(idx, p, usize::MAX, reach) != p)
+        .count()
+}
+
+/// The correcting brushes of Edit Vectors.
+pub use crate::app::tools::vector_correct::CorrectMode;
+
+/// An Edit Vectors drag of `mode` along `path` with a `size` brush, let go
+/// and settled.
+pub fn correct(app: &mut PainterApp, mode: CorrectMode, size: f32, path: &[Vec2]) {
+    app.active_tool = Tool::VectorEdit;
+    app.workspace.vector.mode = mode;
+    app.workspace.vector.correct.size = size;
+    let Some(&first) = path.first() else {
+        return;
+    };
+    app.line_edit_press(first, false, false);
+    for &p in &path[1..] {
+        app.line_edit_drag(p);
+    }
+    app.line_edit_release();
+    app.settle_vectors();
+}
+
+/// The top vector layers drawn sharp, as a `w`×`h` screen zoomed to
+/// `scale` (screen pixels per canvas pixel) with canvas point `origin` at
+/// its top-left asks for.
+pub fn sharp_picture(app: &mut PainterApp, origin: Vec2, w: usize, h: usize, scale: f32) -> usize {
+    app.sharp_picture(origin, [w, h], scale).len()
+}
+
+/// The active vector layer's items as SVG (as Export SVG writes them).
+pub fn vector_svg(app: &PainterApp) -> String {
+    let v = app.canvas.layers[app.canvas.active_layer_idx]
+        .vector
+        .as_ref()
+        .expect("a vector layer");
+    let (mut body, mut defs, mut ids) = (String::new(), String::new(), 0);
+    crate::project::svg::items_svg(
+        v.items().iter().map(|i| &**i),
+        &mut body,
+        &mut defs,
+        &mut ids,
+    );
+    body.push_str(&defs);
+    body
+}
+
+/// The first line of the active vector layer whose ends no other line is
+/// over, `offset` px to its side: a drag that draws it again (Redraw) from
+/// end to end.
+pub fn along_line(app: &PainterApp, offset: f32) -> Vec<Vec2> {
+    let v = app.canvas.layers[app.canvas.active_layer_idx]
+        .vector
+        .as_ref()
+        .expect("a vector layer");
+    let alone = |i: usize, p: &[f32; 3]| v.pick(Vec2::new(p[0], p[1] + offset), 6.0) == Some(i);
+    (0..v.len())
+        .filter_map(|i| v.line(i).map(|l| (i, l)))
+        .find(|(i, l)| {
+            l.points.len() > 2 && alone(*i, &l.points[0]) && alone(*i, l.points.last().unwrap())
+        })
+        .map(|(_, l)| {
+            l.points
+                .iter()
+                .map(|p| Vec2::new(p[0], p[1] + offset))
+                .collect()
+        })
+        .unwrap_or_default()
 }

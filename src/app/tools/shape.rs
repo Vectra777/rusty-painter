@@ -802,7 +802,16 @@ impl PainterApp {
                 pool.install(|| {
                     for outline in strokes {
                         let mut stroke = StrokeState::new();
-                        for &p in outline {
+                        // In steps of a couple of pixels: samples far apart
+                        // are joined by a curve (a fast stroke's), which
+                        // would bow a straight side at a gentle corner.
+                        let steps = outline.first().into_iter().copied().chain(
+                            outline.windows(2).flat_map(|w| {
+                                let n = ((w[1] - w[0]).length() / 2.0).ceil().max(1.0) as usize;
+                                (1..=n).map(move |i| w[0] + (w[1] - w[0]) * (i as f32 / n as f32))
+                            }),
+                        );
+                        for p in steps {
                             stroke.add_point(&mut brush, p, 1.0, &mut context);
                         }
                         stroke.finish(&mut brush, &mut context);
@@ -987,6 +996,39 @@ mod tests {
         app.shape_press(kind, a);
         app.shape_move(b, mods);
         app.shape_release();
+    }
+
+    /// A polygon's sides stay straight however gently it turns at its
+    /// corners (a fast stroke's sparse samples are joined by curves; a
+    /// shape's corners mustn't be).
+    #[test]
+    fn a_polygons_sides_are_straight_at_gentle_corners() {
+        let mut app = app();
+        app.workspace.shapes.settings.style = ShapeStyle::Outline;
+        app.workspace.shapes.settings.closed = true;
+        // A regular octagon: 45° at every corner.
+        let (c, r) = (Vec2::new(64.0, 64.0), 55.0);
+        let corner = |i: usize| {
+            let a = std::f32::consts::TAU * i as f32 / 8.0;
+            c + Vec2::new(a.cos(), a.sin()) * r
+        };
+        app.active_tool = crate::app::tools::Tool::Shape(ShapeKind::Polygon);
+        app.workspace
+            .shapes
+            .start_editing(ShapeKind::Polygon, (0..8).map(corner).collect(), 0.0);
+        app.shape_commit();
+        for i in 0..8 {
+            let mid = (corner(i) + corner(i + 1)) * 0.5;
+            let out = c + (mid - c).normalized() * 55.0;
+            assert!(
+                painted(&app, mid.x.round() as i32, mid.y.round() as i32),
+                "side {i}"
+            );
+            assert!(
+                !painted(&app, out.x.round() as i32, out.y.round() as i32),
+                "side {i} bows out"
+            );
+        }
     }
 
     #[test]

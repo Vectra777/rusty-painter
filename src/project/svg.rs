@@ -270,16 +270,21 @@ pub(crate) fn items_svg<'a>(
         let n = *ids;
         match item {
             VectorItem::Line(l) => {
-                let points: Vec<String> = (l.points.iter())
-                    .map(|[x, y, w]| format!("{x:.2},{y:.2},{w:.2}"))
-                    .collect();
                 let path = stroke_svg(l);
                 if let Some(rest) = path.strip_prefix("<path ") {
-                    let _ = write!(
-                        out,
-                        r#"<path id="rpl-{n}" data-rp-points="{}" {rest}"#,
-                        points.join(" ")
-                    );
+                    let _ = write!(out, r#"<path id="rpl-{n}" data-rp-points=""#);
+                    for (i, &[x, y, w]) in l.points.iter().enumerate() {
+                        if i > 0 {
+                            out.push(' ');
+                        }
+                        fixed(out, x, 2);
+                        out.push(',');
+                        fixed(out, y, 2);
+                        out.push(',');
+                        fixed(out, w, 2);
+                    }
+                    out.push_str("\" ");
+                    out.push_str(rest);
                 }
             }
             VectorItem::Shape(s) => shape_svg(s, n, out, defs),
@@ -309,16 +314,23 @@ pub(crate) fn path_d(path: &crate::canvas::path::Path) -> String {
         let Some(first) = sub.knots.first() else {
             continue;
         };
-        let _ = write!(d, "M{:.3} {:.3} ", first.anchor.x, first.anchor.y);
+        let point = |d: &mut String, p: eframe::egui::Vec2| {
+            fixed(d, p.x, 3);
+            d.push(' ');
+            fixed(d, p.y, 3);
+            d.push(' ');
+        };
+        d.push('M');
+        point(&mut d, first.anchor);
         for [a, b, c, e] in sub.segments() {
             if b == a && c == e {
-                let _ = write!(d, "L{:.3} {:.3} ", e.x, e.y);
+                d.push('L');
+                point(&mut d, e);
             } else {
-                let _ = write!(
-                    d,
-                    "C{:.3} {:.3} {:.3} {:.3} {:.3} {:.3} ",
-                    b.x, b.y, c.x, c.y, e.x, e.y
-                );
+                d.push('C');
+                point(&mut d, b);
+                point(&mut d, c);
+                point(&mut d, e);
             }
         }
         if sub.closed {
@@ -494,6 +506,29 @@ fn shape_svg(s: &PathShape, n: usize, out: &mut String, defs: &mut String) {
     }
 }
 
+/// `v` written to `places` decimals (as `{:.places$}` writes it, but
+/// without the formatter's exact float printing, which made most of an
+/// export's time): rounded once, the integer then written out.
+fn fixed(out: &mut String, v: f32, places: u32) {
+    let scale = 10i64.pow(places);
+    // Exact (an f32 times 10³ fits an f64), so this rounds as `{:.3}` does.
+    let scaled = (v as f64 * scale as f64).round_ties_even();
+    if !scaled.is_finite() || scaled.abs() >= 1e15 {
+        let _ = write!(out, "{v:.*}", places as usize);
+        return;
+    }
+    let n = scaled as i64;
+    if n < 0 {
+        out.push('-');
+    }
+    let n = n.unsigned_abs();
+    let (int, frac) = (n / scale as u64, n % scale as u64);
+    let _ = match places {
+        0 => write!(out, "{int}"),
+        _ => write!(out, "{int}.{frac:0width$}", width = places as usize),
+    };
+}
+
 /// A vector line as a filled outline: its width at every point kept, round
 /// at the ends.
 pub(crate) fn stroke_svg(stroke: &VectorStroke) -> String {
@@ -501,9 +536,13 @@ pub(crate) fn stroke_svg(stroke: &VectorStroke) -> String {
     if outline.is_empty() {
         return String::new();
     }
-    let mut d = String::new();
-    for (i, [x, y]) in outline.iter().enumerate() {
-        let _ = write!(d, "{}{x:.2} {y:.2} ", if i == 0 { "M" } else { "L" });
+    let mut d = String::with_capacity(outline.len() * 16);
+    for (i, &[x, y]) in outline.iter().enumerate() {
+        d.push(if i == 0 { 'M' } else { 'L' });
+        fixed(&mut d, x, 2);
+        d.push(' ');
+        fixed(&mut d, y, 2);
+        d.push(' ');
     }
     d.push('Z');
     let opacity = if stroke.opacity < 1.0 {
@@ -650,6 +689,21 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_are_written_as_the_formatter_writes_them() {
+        for v in [
+            0.0f32, 1.0, -1.0, 0.125, 2.345_678, -2.345_678, 1234.5, 3999.996, -0.7, 0.004,
+            123_456.79,
+        ] {
+            for places in [2u32, 3] {
+                let mut s = String::new();
+                fixed(&mut s, v, places);
+                let p = places as usize;
+                assert_eq!(s, format!("{v:.p$}"), "{v} {places}");
+            }
+        }
+    }
 
     #[test]
     fn base64_matches_the_standard() {

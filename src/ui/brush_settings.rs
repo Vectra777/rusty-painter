@@ -1016,6 +1016,7 @@ fn brush_settings_contents(
                 StabilizerAlgorithm::String => "Pulled string",
                 StabilizerAlgorithm::PostCorrection => "Post-correction",
                 StabilizerAlgorithm::MotionFilter => "Motion filter",
+                StabilizerAlgorithm::StreamLine => "StreamLine",
             };
             egui::ComboBox::from_id_salt("stabilizer_algorithm")
                 .selected_text(label(brush.stabilizer_algorithm))
@@ -1027,6 +1028,7 @@ fn brush_settings_contents(
                         StabilizerAlgorithm::String,
                         StabilizerAlgorithm::PostCorrection,
                         StabilizerAlgorithm::MotionFilter,
+                        StabilizerAlgorithm::StreamLine,
                     ] {
                         changed |= ui
                             .selectable_value(&mut brush.stabilizer_algorithm, a, label(a))
@@ -1075,6 +1077,21 @@ fn brush_settings_contents(
                          as you go on. The same line as smoothing at the end.",
                     )
                     .changed();
+            }
+            StabilizerAlgorithm::StreamLine => {
+                changed |= slider_row(
+                    ui,
+                    "Amount",
+                    crate::ui::widgets::reset(&mut modes.streamline, |v| {
+                        percent_of_unit(BarSlider::new(v, 0.0..=1.0))
+                    }),
+                )
+                .on_hover_text(
+                    "The line behind the pen is smoothed as you draw, the more the \
+                     further back: it follows the pen closely and settles smooth \
+                     behind it.",
+                )
+                .changed();
             }
             StabilizerAlgorithm::MotionFilter => {
                 changed |= slider_row(
@@ -2255,6 +2272,16 @@ fn color_source_section(
     changed
 }
 
+fn add_textures_id() -> egui::Id {
+    egui::Id::new("add_textures")
+}
+
+/// Whether "Add textures…" was clicked since the last call.
+pub(crate) fn take_add_textures(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(add_textures_id()))
+        .unwrap_or(false)
+}
+
 fn texture_section(
     ui: &mut egui::Ui,
     texture: &mut Option<crate::brush_engine::texture::BrushTexture>,
@@ -2287,9 +2314,14 @@ fn texture_section(
                             changed = true;
                         }
                     }
+                    ui.separator();
+                    if ui.button("Add textures…").clicked() {
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp(add_textures_id(), true));
+                    }
                 })
                 .response
-                .on_hover_text("Add your own: greyscale pictures in brushes/textures/.");
+                .on_hover_text("Add your own: any picture, its light parts the paper's peaks.");
         });
         let Some(t) = texture else {
             return;

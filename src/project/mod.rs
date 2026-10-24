@@ -30,7 +30,9 @@ pub(crate) mod clip;
 mod convert;
 pub(crate) mod export;
 pub(crate) mod kra;
+pub(crate) mod palette_files;
 mod preview;
+pub(crate) mod procreate;
 pub(crate) mod psd;
 pub(crate) mod svg;
 pub(crate) mod svg_import;
@@ -60,6 +62,7 @@ pub(crate) struct LoadedProject {
     pub guides: Option<crate::app::tools::guides::StoredGuides>,
     pub saved_selections: Vec<crate::app::tools::select::SavedSelection>,
     pub work_path: crate::canvas::path::Path,
+    pub palettes: Vec<crate::app::tools::palettes::Palette>,
 }
 
 /// Everything a project file holds, copied off the app: it's encoded and
@@ -71,6 +74,7 @@ pub(crate) struct ProjectSnapshot {
     guides: crate::app::tools::guides::StoredGuides,
     saved_selections: Vec<crate::app::tools::select::SavedSelection>,
     work_path: crate::canvas::path::Path,
+    palettes: Vec<crate::app::tools::palettes::Palette>,
 }
 
 impl ProjectSnapshot {
@@ -84,6 +88,7 @@ impl ProjectSnapshot {
             guides: crate::app::tools::guides::StoredGuides::from_app(app),
             saved_selections: app.workspace.select.saved.clone(),
             work_path: app.workspace.pen.path.clone(),
+            palettes: app.brush_state.palettes.document.clone(),
         }
     }
 
@@ -184,6 +189,7 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> 
 pub(crate) const FOREIGN_EXTENSIONS: &[&str] = &[
     "psd",
     "kra",
+    "procreate",
     "svg",
     #[cfg(feature = "sut-import")]
     "clip",
@@ -196,6 +202,7 @@ fn foreign_decoder(extension: &str) -> Option<Decoder> {
     Some(match extension {
         "psd" => psd::decode_psd,
         "kra" => kra::decode_kra,
+        "procreate" => procreate::decode_procreate,
         "svg" => svg_import::decode_svg,
         #[cfg(feature = "sut-import")]
         "clip" => clip::decode_clip,
@@ -302,6 +309,7 @@ impl PainterApp {
                 }
                 self.workspace.select.saved = loaded.saved_selections;
                 self.workspace.pen.path = loaded.work_path;
+                self.brush_state.palettes.document = loaded.palettes;
             }
         }
         self.set_brush_tool(self.brush_state.eraser_active());
@@ -362,6 +370,26 @@ fn checked_layer_tree(
             None => return Ok(layers),
         }
     }
+}
+
+/// The document as painting together sends it: the project data alone (no
+/// flattened picture, no undo history: that's each painter's own), with
+/// its pixels or, `pixels` false, just its layer list.
+pub(crate) fn encode_shared(app: &PainterApp, pixels: bool) -> Result<Vec<u8>, String> {
+    let canvas = if pixels {
+        app.canvas.detached_copy()
+    } else {
+        app.canvas.layers_only()
+    };
+    encode_project_data(&ProjectSnapshot {
+        canvas,
+        color_model: app.workspace.color_model,
+        history: History::new(),
+        guides: crate::app::tools::guides::StoredGuides::from_app(app),
+        saved_selections: Vec::new(),
+        work_path: Default::default(),
+        palettes: Vec::new(),
+    })
 }
 
 pub(crate) fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
@@ -480,6 +508,9 @@ struct ProjectFile {
     /// The Pen's path; absent in older files.
     #[serde(default, skip_serializing_if = "crate::canvas::path::Path::is_empty")]
     work_path: crate::canvas::path::Path,
+    /// The document's own palettes; absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    palettes: Vec<crate::app::tools::palettes::Palette>,
 }
 
 impl ProjectFile {
@@ -512,6 +543,7 @@ impl ProjectFile {
             guides: Some(snapshot.guides.clone()),
             saved_selections: StoredSavedSelection::from_saved(&snapshot.saved_selections, blobs)?,
             work_path: snapshot.work_path.clone(),
+            palettes: snapshot.palettes.clone(),
         })
     }
 
@@ -575,6 +607,14 @@ impl ProjectFile {
             guides: self.guides,
             saved_selections,
             work_path: self.work_path,
+            palettes: self
+                .palettes
+                .into_iter()
+                .map(|mut p| {
+                    p.tidy();
+                    p
+                })
+                .collect(),
         })
     }
 }

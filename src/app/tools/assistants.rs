@@ -257,6 +257,30 @@ pub enum Lock {
     /// It will follow whichever of these lines (all through `start`) is
     /// closest to the way it goes, once it has moved far enough to tell.
     Choosing { start: Vec2, dirs: Vec<Vec2> },
+    /// It runs along this polyline (the curve ruler).
+    Curve(std::sync::Arc<Vec<Vec2>>),
+}
+
+/// The point of polyline `points` nearest `p`, and how far it is.
+pub fn nearest_on_polyline(points: &[Vec2], p: Vec2) -> (Vec2, f32) {
+    let mut best = (points.first().copied().unwrap_or(p), f32::MAX);
+    for w in points.windows(2) {
+        let (a, d) = (w[0], w[1] - w[0]);
+        let t = if d.length_sq() < 1e-9 {
+            0.0
+        } else {
+            ((p - a).dot(d) / d.length_sq()).clamp(0.0, 1.0)
+        };
+        let q = a + d * t;
+        let dist = (q - p).length();
+        if dist < best.1 {
+            best = (q, dist);
+        }
+    }
+    if points.len() == 1 {
+        best.1 = (best.0 - p).length();
+    }
+    best
 }
 
 /// How far (screen points) the pen moves before a stroke picks its
@@ -269,6 +293,7 @@ impl Lock {
     pub fn snap(&mut self, p: Vec2, far: f32) -> Vec2 {
         match self {
             Lock::Fixed(c) => c.project(p),
+            Lock::Curve(points) => nearest_on_polyline(points, p).0,
             Lock::Choosing { start, dirs } => {
                 let (start, off) = (*start, p - *start);
                 if off.length() < far || dirs.is_empty() {

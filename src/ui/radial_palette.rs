@@ -290,7 +290,16 @@ mod tests {
                 let response =
                     ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
                 let rect = response.rect;
-                crate::app::input::handle_input(app, ctx, &response, rect.min, rect.center(), &[]);
+                crate::app::input::handle_input(
+                    app,
+                    ctx,
+                    &response,
+                    rect.min,
+                    rect.center(),
+                    &[],
+                    &[],
+                    &[],
+                );
             });
             crate::ui::brush_list::presets_window(app, ctx);
             super::radial_palette(app, ctx);

@@ -177,6 +177,12 @@ impl PainterApp {
                     source,
                     Some(project.to_path_buf()),
                 );
+            } else if crate::project::palette_files::EXTENSIONS
+                .iter()
+                .any(|e| extension(e))
+            {
+                // Palette files become palettes.
+                self.import_palette_in_background(file.name.clone(), source);
             } else if extension("grd") {
                 // Photoshop gradients join the gradient tool's.
                 self.import_gradients_in_background(file.name.clone(), source);

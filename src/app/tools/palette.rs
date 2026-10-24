@@ -1,11 +1,15 @@
-//! Palette window actions: extract a palette from the picture, keep it as
-//! swatches, and recolour a layer to it.
+//! Palette window actions: extract a palette from the picture, keep it in
+//! a palette, make ramps, open and save other apps' palette files, and
+//! recolour a layer to a palette.
 
 use crate::PainterApp;
 use crate::app::stroke_ops::exclusive;
+use crate::app::tools::gradient_colors::GradientColors;
+use crate::app::tools::palettes::Palette;
 use crate::canvas::history::UndoAction;
-use crate::canvas::palette::{Recolor, extract_palette};
+use crate::canvas::palette::{Recolor, extract_palette, grid, ramp, shades, variations};
 use crate::canvas::storage::LayerKind;
+use crate::project::palette_files::Format;
 use eframe::egui::Color32;
 
 pub struct PaletteToolState {
@@ -21,6 +25,61 @@ pub struct PaletteToolState {
     /// Where the window was last frame: a file dropped on it gives the
     /// palette instead of a new layer.
     pub window_rect: Option<eframe::egui::Rect>,
+    /// What the ramp maker makes, how many steps, and how far its shades
+    /// turn the hue (degrees).
+    pub ramp_kind: RampKind,
+    pub ramp_steps: usize,
+    pub hue_shift: f32,
+    /// The grid's corners (top-left, top-right, bottom-left,
+    /// bottom-right), and its size (also the variations').
+    pub grid_corners: [Color32; 4],
+    pub grid_cols: usize,
+    pub grid_rows: usize,
+    /// How far the variations turn the hue (degrees) and change the
+    /// lightness (Oklab, 0..1) either way.
+    pub vary_hue: f32,
+    pub vary_light: f32,
+    /// The gradient colours are taken along.
+    pub gradient: GradientColors,
+    /// The palette's name being typed, while renaming it.
+    pub renaming: Option<String>,
+    /// A new group's name being typed.
+    pub new_group: Option<String>,
+}
+
+/// What the ramp maker makes from the brush colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RampKind {
+    /// The primary colour's shades, near black to near white.
+    Shades,
+    /// The primary colour to the secondary.
+    Blend,
+    /// A grid mixing four corner colours.
+    Grid,
+    /// The primary colour's neighbours: hues across, lightness down.
+    Variations,
+    /// Evenly spaced along a gradient.
+    Gradient,
+}
+
+impl RampKind {
+    pub const ALL: [RampKind; 5] = [
+        RampKind::Shades,
+        RampKind::Blend,
+        RampKind::Grid,
+        RampKind::Variations,
+        RampKind::Gradient,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RampKind::Shades => "Shades",
+            RampKind::Blend => "Primary to secondary",
+            RampKind::Grid => "Grid between colours",
+            RampKind::Variations => "Variations of the colour",
+            RampKind::Gradient => "Along a gradient",
+        }
+    }
 }
 
 impl Default for PaletteToolState {
@@ -33,6 +92,22 @@ impl Default for PaletteToolState {
             extracted: Vec::new(),
             source_image: None,
             window_rect: None,
+            ramp_kind: RampKind::Shades,
+            ramp_steps: 7,
+            hue_shift: 20.0,
+            grid_corners: [
+                Color32::from_rgb(230, 70, 60),
+                Color32::from_rgb(250, 210, 80),
+                Color32::from_rgb(40, 60, 140),
+                Color32::from_rgb(240, 240, 235),
+            ],
+            grid_cols: 6,
+            grid_rows: 5,
+            vary_hue: 30.0,
+            vary_light: 0.25,
+            gradient: GradientColors::Preset(0),
+            renaming: None,
+            new_group: None,
         }
     }
 }
@@ -154,15 +229,110 @@ impl PainterApp {
             })
     }
 
-    /// Add colours to the swatches, skipping ones already there.
-    pub(crate) fn add_swatches(&mut self, colors: &[Color32]) {
-        let swatches = &mut self.brush_state.swatches;
-        for &c in colors {
-            if !swatches.contains(&c) {
-                swatches.push(c);
-            }
+    /// Add colours to the palette shown, as new rows, leaving out ones
+    /// already there.
+    pub(crate) fn add_to_palette(&mut self, colors: &[Color32]) {
+        let palette = self.brush_state.palettes.edit_active();
+        let new: Vec<Color32> = colors
+            .iter()
+            .copied()
+            .filter(|&c| !palette.contains(c))
+            .collect();
+        palette.add_rows(0, &new);
+    }
+
+    /// A new palette of `colors` in rows of a hue each, shown.
+    pub(crate) fn new_palette_from(&mut self, name: &str, colors: &[Color32]) {
+        let mut palette = Palette::new(name, colors);
+        palette.arrange_by_hue();
+        self.brush_state.palettes.add(palette, false);
+    }
+
+    /// The colours the Palette window's maker offers, and how many to a
+    /// row.
+    pub(crate) fn palette_ramp(&self) -> (Vec<Color32>, usize) {
+        let p = &self.workspace.palette;
+        let primary = self.brush_state.brush.brush_options.color;
+        let secondary = self.brush_state.secondary_color;
+        let n = p.ramp_steps;
+        match p.ramp_kind {
+            RampKind::Shades => (shades(primary, n, p.hue_shift.to_radians()), n),
+            RampKind::Blend => (ramp(primary, secondary, n), n),
+            RampKind::Grid => (grid(p.grid_corners, p.grid_cols, p.grid_rows), p.grid_cols),
+            RampKind::Variations => (
+                variations(
+                    primary,
+                    p.grid_cols,
+                    p.grid_rows,
+                    p.vary_hue.to_radians(),
+                    p.vary_light,
+                ),
+                p.grid_cols,
+            ),
+            RampKind::Gradient => (gradient_steps(&self.gradient_stops(p.gradient), n), n),
         }
-        self.save_swatches();
+    }
+
+    /// The colours of gradient `colors` (the brush colours where it uses
+    /// them).
+    pub(crate) fn gradient_stops(
+        &self,
+        colors: GradientColors,
+    ) -> crate::canvas::gradient::GradientStops {
+        self.workspace.gradient.library.stops(
+            colors,
+            self.brush_state.brush.brush_options.color,
+            self.brush_state.secondary_color,
+        )
+    }
+
+    /// `colors` (rows of `cols`) as new rows of the palette shown.
+    pub(crate) fn add_rows_to_palette(&mut self, colors: &[Color32], cols: usize) {
+        let palette = self.brush_state.palettes.edit_active();
+        for row in colors.chunks(cols.max(1)) {
+            palette.add_rows(0, row);
+        }
+    }
+
+    /// A new palette called `name` of `colors`, `cols` to a row, shown.
+    pub(crate) fn new_palette_of_rows(&mut self, name: &str, colors: &[Color32], cols: usize) {
+        let mut palette = Palette::new(name, colors);
+        palette.columns = cols.clamp(1, crate::app::tools::palettes::MAX_COLUMNS);
+        self.brush_state.palettes.add(palette, false);
+    }
+
+    /// Open the palette file `name` (from `source`) as a new palette of
+    /// the user's, shown.
+    pub(crate) fn import_palette_in_background(
+        &mut self,
+        name: String,
+        source: crate::app::import::FileSource,
+    ) {
+        self.spawn_job(None, move || {
+            let result = source
+                .read()
+                .and_then(|bytes| crate::project::palette_files::read(&name, &bytes));
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok(palette) => {
+                    let message = format!("{} colours from {name}", palette.len());
+                    app.brush_state.palettes.add(palette, false);
+                    app.export_state.message = Some(message);
+                }
+                Err(err) => app.report(format!("{name}: {err}")),
+            })
+        });
+    }
+
+    /// Ask where to save the palette shown as `format`.
+    pub(crate) fn export_palette(&mut self, format: Format) {
+        let palette = self.brush_state.palettes.active();
+        match crate::project::palette_files::write(palette, format) {
+            Ok(bytes) => {
+                let name = format!("{}.{}", palette.name, format.extension());
+                self.pick_save(&name, format.extension(), format.mime(), bytes);
+            }
+            Err(err) => self.report(err),
+        }
     }
 
     /// Recolour the selected layer (inside the selection) to `palette`.
@@ -203,6 +373,24 @@ impl PainterApp {
     }
 }
 
+/// `n` colours evenly spaced along `stops`, ends included, opaque (a
+/// palette's colours have no transparency).
+pub(crate) fn gradient_steps(
+    stops: &crate::canvas::gradient::GradientStops,
+    n: usize,
+) -> Vec<Color32> {
+    let last = n.saturating_sub(1).max(1) as f32;
+    (0..n)
+        .map(|i| {
+            let [r, g, b, _] = stops.eval(
+                i as f32 / last,
+                crate::canvas::blend_modes::BlendSpace::Linear,
+            );
+            Color32::from_rgb(r.round() as u8, g.round() as u8, b.round() as u8)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +426,36 @@ mod tests {
             app.extract_palette_from_image("bad", b"not an image")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_documents_palettes_are_saved_in_it_and_editing_them_is_a_change() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(
+            64,
+            64,
+            Color32::WHITE,
+            crate::app::document::TILE_SIZE,
+        ));
+        app.mark_saved();
+        let which = app.brush_state.palettes.add(
+            Palette::new("Skin", &[Color32::from_rgb(200, 150, 120)]),
+            true,
+        );
+        assert!(app.has_unsaved_work());
+        app.mark_saved();
+        app.brush_state
+            .palettes
+            .edit(which)
+            .unwrap()
+            .push(Color32::BLACK);
+        assert!(app.has_unsaved_work());
+
+        let bytes = crate::project::encode_project(&app).unwrap();
+        let loaded = crate::project::decode_project(&bytes).unwrap();
+        assert_eq!(loaded.palettes, app.brush_state.palettes.document);
+        // A new document has none of its own.
+        app.replace_document(Canvas::new(32, 32, Color32::WHITE, 64), Default::default());
+        assert!(app.brush_state.palettes.document.is_empty());
+        assert!(!app.has_unsaved_work());
     }
 }

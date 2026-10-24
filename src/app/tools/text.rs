@@ -101,6 +101,10 @@ enum TextDrag {
     Width,
 }
 
+/// What the preview was drawn from: the text, its place, style, font,
+/// colour and transform.
+type Shown = (String, Vec2, TextStyle, usize, Color32, Option<[f64; 9]>);
+
 /// Text being typed.
 pub struct TextSession {
     pub text: String,
@@ -132,11 +136,22 @@ pub struct TextSession {
     /// The last edit was typing (more typing joins its undo step).
     typing: bool,
     /// What the preview shows, to repaint when anything changes.
-    shown: Option<(String, Vec2, TextStyle, usize, Color32)>,
+    shown: Option<Shown>,
     /// What the canvas draws over the text, worked out each frame.
     pub view: Option<TextView>,
     /// Editing an existing text layer: how it was.
     editing: Option<EditedLayer>,
+    /// The Transform tool's map of the text being edited
+    /// ([`TextLayer::transform`]); the session works in the text's own
+    /// untransformed space.
+    pub transform: Option<[f64; 9]>,
+}
+
+impl TextSession {
+    /// The layer the text shows on.
+    pub(crate) fn layer_id(&self) -> LayerId {
+        self.layer
+    }
 }
 
 /// The text's box, caret and selection, from its top-left, for drawing.
@@ -327,7 +342,7 @@ impl TextToolState {
     }
 
     /// The fonts a text layer uses (the first font if its own isn't here).
-    fn fonts_of(&mut self, layer: &TextLayer) -> Option<Vec<FontArc>> {
+    pub(crate) fn fonts_of(&mut self, layer: &TextLayer) -> Option<Vec<FontArc>> {
         let index = self.font_index(&layer.font).unwrap_or(0);
         let main = self
             .fonts
@@ -391,6 +406,18 @@ const TEXT_HANDLE: f32 = 10.0;
 
 impl PainterApp {
     /// The session's layout, from its top-left.
+    /// Canvas point `pos` in the text being typed's own space (where it is
+    /// before the Transform tool's map).
+    fn text_local(&self, pos: Vec2) -> Vec2 {
+        let transform = self
+            .workspace
+            .text
+            .session
+            .as_ref()
+            .and_then(|s| s.transform);
+        untransform(transform.as_ref(), pos)
+    }
+
     fn text_layout(&mut self) -> Option<text::Layout> {
         let state = &mut self.workspace.text;
         let session = state.session.as_ref()?;
@@ -422,7 +449,8 @@ impl PainterApp {
     /// it's moved; on a box's right edge, the box widens. Elsewhere it's
     /// kept, and a press with no text being typed starts some (on a text
     /// layer, edits it).
-    pub(crate) fn text_press(&mut self, pos: Vec2, shift: bool, command: bool) {
+    pub(crate) fn text_press(&mut self, canvas_pos: Vec2, shift: bool, command: bool) {
+        let pos = self.text_local(canvas_pos);
         let zoom = self.viewport.zoom.max(0.01);
         let handle = TEXT_HANDLE / zoom;
         if self.workspace.text.session.is_some()
@@ -487,9 +515,9 @@ impl PainterApp {
             self.text_commit();
             return;
         }
-        match self.text_layer_at(pos) {
+        match self.text_layer_at(canvas_pos) {
             Some(idx) => self.text_edit_layer(idx),
-            None => self.text_start(pos),
+            None => self.text_start(canvas_pos),
         }
     }
 
@@ -511,6 +539,7 @@ impl PainterApp {
                 continue;
             };
             let size = text::measure(&fonts, &t.text, &t.style);
+            let pos = untransform(t.transform.as_ref(), pos);
             if egui::Rect::from_min_size(egui::pos2(t.pos.x, t.pos.y), egui::vec2(size.x, size.y))
                 .expand(margin)
                 .contains(egui::pos2(pos.x, pos.y))
@@ -550,6 +579,7 @@ impl PainterApp {
             shown: None,
             view: None,
             editing,
+            transform: None,
         });
     }
 
@@ -606,6 +636,7 @@ impl PainterApp {
         self.active_tool = crate::app::tools::Tool::Text;
         self.canvas_mut().active_layer_idx = idx;
         let (text, pos, color) = (source.text.clone(), source.pos, source.color);
+        let transform = source.transform;
         self.new_session(
             text,
             pos,
@@ -617,9 +648,13 @@ impl PainterApp {
                 tiles,
             }),
         );
+        if let Some(s) = self.workspace.text.session.as_mut() {
+            s.transform = transform;
+        }
     }
 
     pub(crate) fn text_drag(&mut self, pos: Vec2) {
+        let pos = self.text_local(pos);
         let Some(drag) = self.workspace.text.session.as_ref().and_then(|s| s.drag) else {
             return;
         };
@@ -902,7 +937,14 @@ impl PainterApp {
         }
         let mut shown = session.text.clone();
         shown.insert_str(byte_at(&shown, session.caret), &session.preedit);
-        let now = (shown, session.pos, style, font_index, session.color);
+        let now = (
+            shown,
+            session.pos,
+            style,
+            font_index,
+            session.color,
+            session.transform,
+        );
         if session.shown.as_ref() == Some(&now) {
             return;
         }
@@ -915,7 +957,7 @@ impl PainterApp {
         };
         self.release_canvas();
         self.clear_layer_tiles(idx);
-        if let Some(mask) = text::render(&fonts, &now.0, &style, now.1) {
+        if let Some(mask) = text::render(&fonts, &now.0, &style, now.1, now.5.as_ref()) {
             let mut scratch = UndoAction {
                 tiles: Vec::new(),
                 selection: None,
@@ -953,6 +995,7 @@ impl PainterApp {
             style: self.workspace.text.style,
             color: session.color,
             pos: session.pos,
+            transform: session.transform,
         }
     }
 
@@ -1206,31 +1249,114 @@ impl PainterApp {
         });
     }
 
-    /// Text layer `id` was moved by `info` as a whole: when that's only a
-    /// move, it stays text at its new place, and this is the undo record.
-    /// Anything else leaves it to become pixels.
+    /// Text layer `id` was transformed by `info` as a whole: it stays
+    /// text, the transform kept with it ([`TextLayer::transform`]) and the
+    /// text drawn again through it, sharp; `tiles` (the step's) gain what
+    /// that drawing changes. A warp, which no such map describes, leaves
+    /// it to become pixels.
     pub(crate) fn text_layer_moved(
         &mut self,
         id: LayerId,
         info: &TransformInfo,
+        tiles: &mut Vec<TileSnapshot>,
     ) -> Option<LayerHistoryOp> {
+        let idx = self.canvas.layer_index_of(id)?;
+        if !self.is_text_layer(idx) {
+            return None;
+        }
         let only_moved = info.warp.is_none()
             && info.corners.is_none()
             && info.rotation == 0.0
             && info.scale == Vec2::new(1.0, 1.0);
-        let idx = self.canvas.layer_index_of(id)?;
-        if !only_moved || !self.is_text_layer(idx) {
-            return None;
+        let old = self.canvas.layers[idx].text.clone()?;
+        let mut new = (*old).clone();
+        if only_moved && new.transform.is_none() {
+            new.pos += info.offset;
+        } else {
+            let m = info.bounds.and_then(|b| info.params().as_homography(b))?;
+            new.transform = Some(match &new.transform {
+                Some(h) => crate::canvas::storage::mul3(&m, h),
+                None => m,
+            });
         }
-        let layer = &mut self.canvas_mut().layers[idx];
-        let old = layer.text.clone()?;
-        if let Some(t) = layer.text.as_mut() {
-            t.pos += info.offset;
-        }
+        self.canvas_mut().layers[idx].text = Some(Box::new(new));
+        self.text_redraw_layer(idx, tiles);
         Some(LayerHistoryOp::Text {
             layers: vec![(id, Some(old))],
             inner: None,
         })
+    }
+
+    /// Draw text layer `idx` again from its text, `tiles` gaining how each
+    /// tile it changes was (those it doesn't have yet: untouched till now).
+    fn text_redraw_layer(&mut self, idx: usize, tiles: &mut Vec<TileSnapshot>) {
+        let Some(source) = self.canvas.layers[idx].text.clone() else {
+            return;
+        };
+        let Some(fonts) = self.workspace.text.fonts_of(&source) else {
+            return;
+        };
+        let id = self.canvas.layers[idx].id;
+        let ts = self.canvas.tile_size();
+        let has = |tiles: &Vec<TileSnapshot>, key: (i32, i32)| {
+            tiles
+                .iter()
+                .any(|t| t.layer_id == id && (t.tx, t.ty) == key)
+        };
+        let snapshot = |key: (i32, i32), data: Vec<Color32>| TileSnapshot {
+            tx: key.0,
+            ty: key.1,
+            layer_id: id,
+            x0: 0,
+            y0: 0,
+            width: ts,
+            height: ts,
+            data: data.into(),
+        };
+        self.release_canvas();
+        for key in self.canvas.layer_tile_keys(idx) {
+            if !has(tiles, key)
+                && let Some(data) = self.canvas.get_layer_tile_data(idx, key.0, key.1)
+            {
+                tiles.push(snapshot(key, data));
+            }
+        }
+        self.clear_layer_tiles(idx);
+        let mask = text::render(
+            &fonts,
+            &source.text,
+            &source.style,
+            source.pos,
+            source.transform.as_ref(),
+        );
+        if let Some(mask) = mask {
+            let mut scratch = UndoAction {
+                tiles: Vec::new(),
+                selection: None,
+                transform: None,
+                layer_action: None,
+            };
+            if let Some(rect) = self
+                .canvas
+                .paint_mask(idx, &mask, source.color, &mut scratch)
+            {
+                self.mark_tiles_in_bounds_dirty(rect);
+            }
+            for t in scratch.tiles {
+                if !has(tiles, (t.tx, t.ty)) {
+                    tiles.push(snapshot((t.tx, t.ty), vec![Color32::TRANSPARENT; ts * ts]));
+                }
+            }
+        }
+        self.layer_state.thumbnails_dirty = true;
+    }
+}
+
+/// `pos` taken back through the projective map `transform` (as it is).
+fn untransform(transform: Option<&[f64; 9]>, pos: Vec2) -> Vec2 {
+    match transform.and_then(crate::canvas::storage::invert3) {
+        Some(inv) => crate::canvas::storage::apply_homography(&inv, pos),
+        None => pos,
     }
 }
 
@@ -1249,7 +1375,11 @@ pub(crate) fn draw_text(
     let Some(view) = &session.view else {
         return;
     };
-    let at = |p: Vec2| to_screen(session.pos + p);
+    let map = |p: Vec2| match &session.transform {
+        Some(h) => crate::canvas::storage::apply_homography(h, p),
+        None => p,
+    };
+    let at = |p: Vec2| to_screen(map(session.pos + p));
     let frame = [
         at(Vec2::ZERO),
         at(Vec2::new(view.size.x, 0.0)),
@@ -1283,15 +1413,22 @@ pub(crate) fn draw_text(
         let (a, b) = (at(r.min.to_vec2()), at(r.max.to_vec2()));
         if composing {
             painter.line_segment(
-                [egui::pos2(a.x, b.y), b],
+                [at(egui::vec2(r.min.x, r.max.y)), b],
                 egui::Stroke::new(2.0_f32, accent()),
             );
         } else {
-            painter.rect_filled(
-                egui::Rect::from_two_pos(a, b),
-                0.0,
+            // Through the text's transform a box is any four-sided shape.
+            let quad = vec![
+                a,
+                at(egui::vec2(r.max.x, r.min.y)),
+                b,
+                at(egui::vec2(r.min.x, r.max.y)),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                quad,
                 accent().gamma_multiply(0.35),
-            );
+                egui::Stroke::NONE,
+            ));
         }
     }
     // Blinking, steady for a moment after it moves.
@@ -1620,8 +1757,11 @@ mod tests {
         app.workspace.text.session.as_mut().unwrap().text = "Hey\nyou".into();
         app.workspace.text.style.align = crate::canvas::text::TextAlign::Center;
         app.workspace.text.style.letter_spacing = 3.0;
+        app.workspace.text.session.as_mut().unwrap().transform =
+            Some([1.2, 0.1, 5.0, -0.1, 1.2, 7.0, 0.0, 0.0, 1.0]);
         app.text_commit();
         let text = app.canvas.layers[idx].text.clone().unwrap();
+        assert!(text.transform.is_some());
         let edited = pixels(&app, idx);
 
         let bytes = crate::project::encode_project(&app).unwrap();
@@ -1657,30 +1797,24 @@ mod tests {
     }
 
     #[test]
-    fn painting_on_text_makes_it_pixels_in_the_same_undo_step() {
+    fn painting_on_text_goes_on_a_new_layer_above_it() {
         let mut app = app();
         let idx = type_text(&mut app, Vec2::new(20.0, 20.0), "Hi");
-        let depth = undo_depth(&app);
         let before = pixels(&app, idx);
+        let layers = app.canvas.layers.len();
         app.brush_state.brush.brush_options.color = Color32::from_rgb(0, 0, 255);
         app.start_stroke_with_pressure(Vec2::new(10.0, 90.0), 1.0);
         app.add_stroke_point(Vec2::new(200.0, 90.0), 1.0);
         app.finish_stroke();
         app.release_canvas();
-        assert!(app.canvas.layers[idx].text.is_none(), "rasterised");
-        assert_eq!(undo_depth(&app), depth + 1, "one step");
-        app.apply_history(false);
-        assert_eq!(pixels(&app, idx), before);
-        assert_eq!(
-            app.canvas.layers[idx]
-                .text
-                .as_ref()
-                .map(|t| t.text.as_str()),
-            Some("Hi"),
-            "undo brings the text layer back"
+        assert_eq!(app.canvas.layers.len(), layers + 1, "a new layer");
+        assert_eq!(app.canvas.active_layer_idx, idx + 1, "above the text");
+        assert!(app.is_text_layer(idx), "the text stays text");
+        assert_eq!(pixels(&app, idx), before, "untouched");
+        assert!(
+            !pixels(&app, idx + 1).is_empty(),
+            "the stroke is on the new layer"
         );
-        app.apply_history(true);
-        assert!(app.canvas.layers[idx].text.is_none());
     }
 
     #[test]
@@ -1741,6 +1875,59 @@ mod tests {
         assert_eq!(
             app.canvas.layers[idx].text.as_ref().unwrap().pos,
             Vec2::new(20.0, 20.0)
+        );
+    }
+
+    #[test]
+    fn turning_and_scaling_a_text_layer_keeps_it_text_and_sharp() {
+        use crate::app::tools::Tool;
+        let mut app = app();
+        let idx = type_text(&mut app, Vec2::new(20.0, 20.0), "Hi");
+        let before = pixels(&app, idx);
+        let ink_before = ink(&app, idx);
+        app.active_tool = Tool::Transform(Default::default());
+        crate::app::tools::transform::create_floating_layer(&mut app);
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            info.rotation = 0.3;
+            info.scale = Vec2::new(1.5, 1.5);
+        }
+        crate::app::tools::transform::commit_floating_layer(&mut app);
+        let text = app.canvas.layers[idx].text.as_ref().expect("still text");
+        assert!(text.transform.is_some(), "the transform is kept");
+        // Drawn from the outlines: about 1.5² times the ink, and edges as
+        // crisp as text drawn straight (few half-covered pixels).
+        let ink_after = ink(&app, idx) as f32;
+        let ratio = ink_after / ink_before as f32;
+        assert!((1.8..2.7).contains(&ratio), "{ratio}");
+        // Clicking the turned text edits it.
+        let centre = {
+            let t = app.canvas.layers[idx].text.as_ref().unwrap();
+            let h = t.transform.unwrap();
+            crate::canvas::storage::apply_homography(&h, t.pos + Vec2::new(20.0, 20.0))
+        };
+        app.active_tool = Tool::Text;
+        app.text_press(centre, false, false);
+        let s = app.workspace.text.session.as_ref().expect("editing");
+        assert!(s.editing.is_some() && s.transform.is_some());
+        app.text_cancel();
+        app.apply_history(false);
+        assert_eq!(pixels(&app, idx), before, "undo puts the pixels back");
+        assert!(
+            app.canvas.layers[idx]
+                .text
+                .as_ref()
+                .unwrap()
+                .transform
+                .is_none()
+        );
+        app.apply_history(true);
+        assert!(
+            app.canvas.layers[idx]
+                .text
+                .as_ref()
+                .unwrap()
+                .transform
+                .is_some()
         );
     }
 }

@@ -1,6 +1,7 @@
 //! Importing other apps' brushes as presets: GIMP (`.gbr`, `.gih`),
 //! Photoshop (`.abr`), `.kpp` presets and `.bundle` sets, MyPaint
-//! (`.myb`) and Clip Studio Paint (`.sut`).
+//! (`.myb`), Clip Studio Paint (`.sut`) and Procreate (`.brushset`,
+//! `.brush`).
 //!
 //! None of these formats has an official specification (GIMP's excepted),
 //! and each app's brushes can do things this engine doesn't, so imports are
@@ -15,6 +16,7 @@ pub(crate) mod grd;
 pub(crate) mod ibis;
 pub(crate) mod krita;
 mod mypaint;
+pub(crate) mod procreate;
 #[cfg(feature = "sut-import")]
 pub(crate) mod sut;
 
@@ -32,6 +34,8 @@ pub const EXTENSIONS: &[&str] = &[
     "kpp",
     "bundle",
     "myb",
+    "brushset",
+    "brush",
     #[cfg(feature = "sut-import")]
     "sut",
 ];
@@ -63,6 +67,7 @@ pub fn import(file_name: &str, bytes: &[u8]) -> Result<Imported, String> {
         "kpp" => krita::import_kpp(bytes, &stem),
         "bundle" => krita::import_bundle(bytes),
         "myb" => mypaint::import(bytes, &stem),
+        "brushset" | "brush" => procreate::import(bytes),
         e if ibis::IMAGE_EXTENSIONS.contains(&e) => ibis::import(bytes, &stem),
         #[cfg(feature = "sut-import")]
         "sut" => sut::import(bytes, &stem),

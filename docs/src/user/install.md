@@ -47,7 +47,7 @@ See [Building](../dev/building.md) for the other platforms.
 
 ## Where your data is kept
 
-Presets, settings, swatches, gradients, the autosave and any brush tips you add live in one folder per user, whichever folder the app is started from:
+Presets, settings, palettes (`palettes.json`; an older version's `swatches.json` becomes the first one), gradients, the autosave and any brush tips you add live in one folder per user, whichever folder the app is started from:
 
 | System | Folder |
 |---|---|

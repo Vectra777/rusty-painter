@@ -24,8 +24,9 @@ pub use merge::LayerSwap;
 pub use pixels::Region;
 pub(crate) use pixels::mix;
 pub(crate) use posed::transformed_rect;
-pub(crate) use transform::rect_corners;
+pub use transform::length_scale;
 pub use transform::{Distort, DistortKind, InverseMap, TransformParams, is_convex_quad};
+pub(crate) use transform::{apply_homography, invert3, mul3, rect_corners};
 
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex};
@@ -865,6 +866,101 @@ impl Canvas {
         copy.blend_space = self.blend_space;
         copy.next_layer_id = copy.next_layer_id.max(self.next_layer_id);
         copy
+    }
+
+    /// A copy with the layers' settings and sources (text, vector lines,
+    /// impasto) but none of their pixels: painting together sends the
+    /// layer list this way.
+    pub fn layers_only(&self) -> Canvas {
+        let mut copy = Canvas::new(self.width, self.height, self.clear_color, self.tile_size);
+        copy.depth = self.depth;
+        copy.profile = self.profile.clone();
+        copy.time = self.time;
+        copy.timeline = self.timeline;
+        copy.layers = self.layers.iter().map(Layer::shell).collect();
+        copy.active_layer_idx = self.active_layer_idx;
+        copy.blend_space = self.blend_space;
+        copy.next_layer_id = self.next_layer_id;
+        copy
+    }
+
+    /// Take `incoming`'s layer list (order, settings, sources), keeping
+    /// this canvas's pixels and wet paint for the layers it has (by id);
+    /// the others come empty. Layers only this canvas has stay (added here
+    /// meanwhile), after the layer they followed, unless `removed` names
+    /// them. The active layer stays the same one if it's still there, and
+    /// new ids go on from this canvas's own.
+    pub(crate) fn adopt_layers(&mut self, incoming: Canvas, removed: &[LayerId]) {
+        let active = self.layer_id_at(self.active_layer_idx);
+        let order: Vec<LayerId> = self.layers.iter().map(|l| l.id).collect();
+        let mut mine: FxHashMap<LayerId, Layer> =
+            self.layers.drain(..).map(|l| (l.id, l)).collect();
+        let mut layers: Vec<Layer> = incoming
+            .layers
+            .into_iter()
+            .map(|mut layer| {
+                if let Some(old) = mine.remove(&layer.id) {
+                    layer.tiles = old.tiles;
+                    layer.wet = old.wet;
+                }
+                layer
+            })
+            .collect();
+        for (i, id) in order.iter().enumerate() {
+            let Some(layer) = mine.remove(id).filter(|_| !removed.contains(id)) else {
+                continue;
+            };
+            let after = order[..i]
+                .iter()
+                .rev()
+                .find_map(|p| layers.iter().position(|l| l.id == *p));
+            layers.insert(after.map_or(0, |p| p + 1), layer);
+        }
+        // Kept layers whose folder or owner went: at the top level, or
+        // (a mask) gone with it.
+        let ids: std::collections::HashSet<LayerId> = layers.iter().map(|l| l.id).collect();
+        layers.retain(|l| !matches!(l.kind, LayerKind::Mask { owner } if !ids.contains(&owner)));
+        for l in &mut layers {
+            if l.parent.is_some_and(|p| !ids.contains(&p)) {
+                l.parent = None;
+            }
+        }
+        self.layers = layers;
+        self.active_layer_idx = active
+            .and_then(|id| self.layer_index_of(id))
+            .unwrap_or(incoming.active_layer_idx)
+            .min(self.layers.len().saturating_sub(1));
+    }
+
+    /// A canvas of layer `idx`'s settings alone (none of its pixels), as
+    /// its active layer: painting together paints another painter's
+    /// stroke on it, with the tiles it reaches copied in, then copies what
+    /// changed onto the layer.
+    pub(crate) fn scratch_for(&self, idx: usize) -> Option<Canvas> {
+        let layer = self.layers.get(idx)?.shell();
+        let mut scratch = Canvas::new(
+            self.width,
+            self.height,
+            Color32::TRANSPARENT,
+            self.tile_size,
+        );
+        scratch.depth = self.depth;
+        scratch.profile = self.profile.clone();
+        scratch.blend_space = self.blend_space;
+        scratch.layers = vec![layer];
+        scratch.active_layer_idx = 0;
+        Some(scratch)
+    }
+
+    /// The id the next new layer gets.
+    pub(crate) fn next_layer_id(&self) -> u64 {
+        self.next_layer_id
+    }
+
+    /// New layers' ids from `next` on (painting together gives each
+    /// painter their own range).
+    pub(crate) fn set_next_layer_id(&mut self, next: u64) {
+        self.next_layer_id = next;
     }
 
     pub fn replace_layers_from_snapshots(

@@ -120,8 +120,11 @@ impl PainterApp {
     pub(crate) fn doc_version(&self) -> Version {
         let history = &self.layer_state.history;
         let (undo, redo) = history.stacks();
-        // Shader edits aren't undo steps but are changes to keep.
-        let edits = self.workspace.shaders.edits;
+        // Shader and palette edits aren't undo steps but are changes to
+        // keep.
+        let edits = (self.workspace.shaders.edits)
+            .wrapping_add(self.brush_state.palettes.document_edits)
+            .wrapping_add(self.layer_state.remote_edits);
         (
             history.push_count().wrapping_add(edits),
             undo.len(),

@@ -31,7 +31,6 @@ pub enum VectorErase {
     ToCrossing,
 }
 
-#[derive(Default)]
 pub struct VectorState {
     /// The line being drawn or the erasing going on.
     pub(super) session: Option<VectorSession>,
@@ -49,6 +48,50 @@ pub struct VectorState {
     pub(crate) last_change: Option<PropChange>,
     /// Vector layers being drawn again in the background.
     pub(crate) renders: crate::app::vector_render::VectorRenders,
+    /// Edit Vectors: the box being dragged out to pick items, whether it
+    /// adds to those picked, and what it picks.
+    pub(crate) marquee: Option<[Vec2; 2]>,
+    pub(crate) marquee_add: bool,
+    pub box_pick: super::vector_arrange::BoxPick,
+    /// Dragged points snap to other items' points.
+    pub snap_points: bool,
+    /// Every line's path (and its points) shown over a vector layer.
+    pub show_paths: bool,
+    /// What Edit Vectors' drags do: edit, or one of the correcting brushes.
+    pub mode: super::vector_correct::CorrectMode,
+    pub correct: super::vector_correct::CorrectState,
+    /// Vector and text layers drawn sharp when zoomed in.
+    pub(crate) sharp: crate::app::view::sharp::SharpState,
+    /// Erasing up to crossings: the other lines' smoothed paths, made once
+    /// for the stroke. Keyed by the item, which they hold: an item changed
+    /// meanwhile is a new one (a shared one is copied to change).
+    pub(super) crossing_paths: rustc_hash::FxHashMap<usize, CrossingPath>,
+}
+
+/// An item and its smoothed path, for finding what it crosses.
+pub(super) type CrossingPath = (std::sync::Arc<VectorItem>, std::sync::Arc<vector::RunPath>);
+
+impl Default for VectorState {
+    fn default() -> Self {
+        Self {
+            session: None,
+            stroke_rasterised: Vec::new(),
+            erase: VectorErase::default(),
+            width_editing: None,
+            line_edit: None,
+            last_change: None,
+            renders: Default::default(),
+            marquee: None,
+            marquee_add: false,
+            box_pick: Default::default(),
+            snap_points: true,
+            show_paths: false,
+            mode: Default::default(),
+            correct: Default::default(),
+            sharp: Default::default(),
+            crossing_paths: Default::default(),
+        }
+    }
 }
 
 impl LineEdit {
@@ -138,6 +181,24 @@ impl PainterApp {
             true,
             |l| l.vector = Some(Box::default()),
         );
+    }
+
+    /// The width the line being drawn on layer `idx` goes on with at
+    /// `pressure`, `moved` on from its last point: the pressure's width
+    /// eased towards over a distance that grows with the width, so a pen's
+    /// small jitter in pressure doesn't show as bumps along a thick line's
+    /// edge.
+    fn smoothed_width(&self, idx: usize, pressure: f32, moved: f32) -> f32 {
+        let width = self.vector_width(pressure);
+        let last = self.canvas.layers[idx]
+            .vector
+            .as_ref()
+            .and_then(|v| v.items().last()?.as_line()?.points.last().copied());
+        let Some([_, _, before]) = last else {
+            return width;
+        };
+        let over = (before * 0.25).max(1.0);
+        before + (width - before) * (1.0 - (-moved / over).exp())
     }
 
     /// The width a line has at `pressure`, as the brush's size would be.
@@ -240,6 +301,7 @@ impl PainterApp {
         }
         self.release_canvas_for_lines();
         self.mark_action();
+        self.workspace.vector.crossing_paths.clear();
         let layer = &self.canvas.layers[idx];
         let before = layer.vector.clone().unwrap_or_default();
         let erasing = self.brush_state.eraser_active();
@@ -294,7 +356,7 @@ impl PainterApp {
             s.last = pos;
         }
         if drawing {
-            let width = self.vector_width(pressure);
+            let width = self.smoothed_width(idx, pressure, (pos - last).length());
             let segment = VectorStroke {
                 points: vec![[last.x, last.y, width], [pos.x, pos.y, width]],
                 colour: [0; 3],
@@ -319,23 +381,32 @@ impl PainterApp {
         let Some(session) = self.workspace.vector.session.take() else {
             return;
         };
+        self.workspace.vector.crossing_paths.clear();
         self.brush_state.is_drawing = false;
         let Some(idx) = self.canvas.layer_index_of(session.layer) else {
             return;
         };
         if session.drawing.is_some() {
-            // Fewer points, the same line: quicker to draw and edit.
-            let old = span_bounds(&self.canvas.layers[idx], usize::MAX);
+            // Fewer points, the same line: quicker to draw and edit. Drawn
+            // again where it was and is, piece by piece.
+            let mut boxes = Vec::new();
+            let last_line = |l: &crate::canvas::storage::Layer| {
+                l.vector.as_ref().and_then(|v| v.items().last().cloned())
+            };
+            if let Some(item) = last_line(&self.canvas.layers[idx]) {
+                item.reach(&mut boxes);
+            }
             self.edit_vector(idx, |v| {
                 if let Some(last) = v.len().checked_sub(1) {
                     v.edit(last, |s| s.points = vector::simplify(&s.points, 0.3));
                 }
             });
-            let new = span_bounds(&self.canvas.layers[idx], usize::MAX);
-            let region = vector::union([old, new]).unwrap_or(old);
+            if let Some(item) = last_line(&self.canvas.layers[idx]) {
+                item.reach(&mut boxes);
+            }
             // The redraw notes the region in the step, so it's filed after.
             self.workspace.vector.session = Some(session);
-            self.redraw_vector(idx, region);
+            self.redraw_vector_boxes(idx, &boxes);
             if let Some(session) = self.workspace.vector.session.take() {
                 self.push_vector_step(session, "Vector line");
             }
@@ -363,28 +434,58 @@ impl PainterApp {
             [x - r, y - r, x + r + 1, y + r + 1]
         };
         let near = v.candidates(vector::union(spots.iter().map(|&c| reach(c))).unwrap_or([0; 4]));
+        // Where the lines changed, piece by piece.
         let mut changed = Vec::new();
         let mut edits = Vec::new();
-        // Other lines' smoothed paths, made once for this move whichever
+        // Other lines' smoothed paths, made once for the stroke whichever
         // lines need them.
-        let mut paths: rustc_hash::FxHashMap<usize, vector::RunPath> = Default::default();
+        let paths = &mut self.workspace.vector.crossing_paths;
         for n in near {
             let item = &v.items()[n];
-            if !spots.iter().any(|&c| item.touches(c, radius)) {
+            // A line's smoothed path made once for every spot.
+            let path = item.as_line().map(|s| s.smoothed());
+            let touched = match &path {
+                Some(path) => spots
+                    .iter()
+                    .any(|&c| VectorStroke::path_touches(path, c, radius)),
+                None => spots.iter().any(|&c| item.touches(c, radius)),
+            };
+            if !touched {
                 continue;
             }
-            changed.push(v.bounds(n));
+            item.reach(&mut changed);
             // A shape (or group) goes whole; a line as the mode says.
             let Some(s) = item.as_line() else {
                 edits.push((n, Vec::new()));
                 continue;
             };
-            let mut pieces = vec![s.clone()];
+            let path = path.unwrap_or_default();
+            // The pieces, with their smoothed paths (the line's own until
+            // it's cut).
+            let mut pieces = vec![(s.clone(), path)];
             match mode {
                 VectorErase::WholeLine => pieces.clear(),
                 VectorErase::Touched => {
                     for &c in &spots {
-                        pieces = pieces.iter().flat_map(|p| p.cut(c, radius)).collect();
+                        if !pieces
+                            .iter()
+                            .any(|(_, path)| VectorStroke::path_touches(path, c, radius))
+                        {
+                            continue;
+                        }
+                        pieces = (pieces.into_iter())
+                            .flat_map(|(p, path)| {
+                                if !VectorStroke::path_touches(&path, c, radius) {
+                                    return vec![(p, path)];
+                                }
+                                (p.cut_path(&path, c, radius).into_iter())
+                                    .map(|q| {
+                                        let path = q.smoothed();
+                                        (q, path)
+                                    })
+                                    .collect()
+                            })
+                            .collect();
                     }
                 }
                 VectorErase::ToCrossing => {
@@ -396,29 +497,45 @@ impl PainterApp {
                             let Some(other) = v.line(m).filter(|_| m != n) else {
                                 continue;
                             };
-                            let path = (paths.entry(m))
-                                .or_insert_with(|| vector::RunPath::new(other.smoothed()));
+                            let item = &v.items()[m];
+                            let key = std::sync::Arc::as_ptr(item) as usize;
+                            let (_, path) = paths.entry(key).or_insert_with(|| {
+                                let path = vector::RunPath::new(other.smoothed());
+                                (item.clone(), std::sync::Arc::new(path))
+                            });
                             vector::crossings_with(a, b, path, &mut found);
                         }
                         found
                     };
                     for &c in &spots {
-                        pieces = (pieces.iter())
-                            .flat_map(|p| match p.touches(c, radius) {
-                                true => p.cut_to_crossings_by(c, &mut crossing),
-                                false => vec![p.clone()],
+                        pieces = (pieces.into_iter())
+                            .flat_map(|(p, path)| {
+                                if !VectorStroke::path_touches(&path, c, radius) {
+                                    return vec![(p, path)];
+                                }
+                                (p.cut_path_to_crossings_by(path, c, &mut crossing)
+                                    .into_iter())
+                                .map(|q| {
+                                    let path = q.smoothed();
+                                    (q, path)
+                                })
+                                .collect()
                             })
                             .collect();
                     }
                 }
             }
+            let pieces: Vec<VectorStroke> = pieces.into_iter().map(|(p, _)| p).collect();
+            for p in &pieces {
+                p.reach(&mut changed);
+            }
             edits.push((n, pieces.into_iter().map(VectorItem::Line).collect()));
         }
-        let Some(region) = vector::union(changed) else {
+        if changed.is_empty() {
             return;
-        };
+        }
         self.edit_vector(idx, |v| v.splice(edits));
-        self.redraw_vector(idx, region);
+        self.redraw_vector_boxes(idx, &changed);
     }
 
     /// Change layer `idx`'s lines (no redraw).
@@ -435,6 +552,16 @@ impl PainterApp {
         if let Some(region) = self.on_canvas(region) {
             self.note_vector_change(region);
             self.request_vector_redraw(idx, region);
+        }
+    }
+
+    /// [`Self::redraw_vector`] over only the tiles `boxes` reach (see
+    /// [`VectorItem::reach`]).
+    pub(crate) fn redraw_vector_boxes(&mut self, idx: usize, boxes: &[[i32; 4]]) {
+        let boxes: Vec<[i32; 4]> = boxes.iter().filter_map(|&b| self.on_canvas(b)).collect();
+        if let Some(region) = vector::union(boxes.iter().copied()) {
+            self.note_vector_change(region);
+            self.request_vector_redraw_boxes(idx, &boxes);
         }
     }
 
@@ -718,32 +845,45 @@ impl PainterApp {
         });
     }
 
-    /// Vector layer `id` was moved by `info` as a whole: when that's only a
-    /// move, its lines move with it, and this is the undo record. Anything
-    /// else (turned, scaled, bent) leaves it to become pixels.
+    /// Vector layer `id` was transformed by `info` as a whole: its lines
+    /// and shapes go through the same transform (widths scaled with it),
+    /// and are drawn again from their points, so they stay sharp; this is
+    /// the undo record.
     pub(crate) fn vector_layer_moved(
         &mut self,
         id: LayerId,
         info: &crate::selection::transform::TransformInfo,
     ) -> Option<LayerHistoryOp> {
-        let only_moved = info.warp.is_none()
-            && info.corners.is_none()
-            && info.rotation == 0.0
-            && info.scale == Vec2::new(1.0, 1.0);
         let idx = self.canvas.layer_index_of(id)?;
-        if !only_moved || !self.is_vector_layer(idx) {
+        if !self.is_vector_layer(idx) {
             return None;
         }
-        let offset = info.offset;
-        let layer = &mut self.canvas_mut().layers[idx];
-        let old = layer.vector.clone()?;
-        if let Some(v) = layer.vector.as_mut() {
-            v.edit_all_items(|item| item.map_points(&|p| p + offset, 1.0));
+        let params = info.params();
+        let homography = info.bounds.and_then(|b| params.as_homography(b));
+        let scale = info.bounds.map_or(1.0, |b| {
+            let src = crate::canvas::storage::rect_corners(b);
+            crate::canvas::storage::length_scale(src, src.map(|p| params.forward(p)))
+        });
+        let map = |p: Vec2| match &homography {
+            Some(h) => crate::canvas::storage::apply_homography(h, p),
+            None => params.forward(p),
+        };
+        let old = self.canvas.layers[idx].vector.clone()?;
+        let before = old.union_bounds();
+        self.edit_vector(idx, |v| {
+            v.edit_all_items(|item| item.map_points(&map, scale))
+        });
+        let after = self.canvas.layers[idx].vector.as_ref()?.union_bounds();
+        // Drawn again where the lines were and are: the transform left
+        // resampled pixels there.
+        let region = vector::union(before.into_iter().chain(after));
+        if let Some(region) = region.and_then(|r| self.on_canvas(r)) {
+            self.request_vector_redraw(idx, region);
         }
         Some(LayerHistoryOp::Vector {
             layers: vec![(id, Some(old))],
             inner: None,
-            redraw: None,
+            redraw: region.and_then(|r| self.on_canvas(r)),
         })
     }
 }
@@ -826,6 +966,10 @@ impl PainterApp {
             self.workspace.vector.line_edit = None;
             return;
         }
+        if self.workspace.vector.mode != super::vector_correct::CorrectMode::Edit {
+            self.correct_press(idx, pos, shift);
+            return;
+        }
         let hit = HANDLE_HIT / self.viewport.zoom.max(0.01);
         // Shapes and groups, and Shift picking more.
         if self.shape_edit_press(idx, pos, shift, alt, hit) {
@@ -880,6 +1024,12 @@ impl PainterApp {
         }
         let layer = &self.canvas.layers[idx];
         let picked = layer.vector.as_ref().and_then(|v| v.pick(pos, hit));
+        if picked.is_none() {
+            // On nothing: a box to pick with (Shift: adding to the picked).
+            self.workspace.vector.marquee_add = shift;
+            self.vector_box_start(pos);
+            return;
+        }
         self.workspace.vector.line_edit = picked.map(|line| LineEdit {
             layer: layer.id,
             line,
@@ -893,7 +1043,11 @@ impl PainterApp {
 
     /// The Edit Lines drag went on to `pos`.
     pub(crate) fn line_edit_drag(&mut self, pos: Vec2) {
-        if self.shape_edit_drag(pos) {
+        if self.workspace.vector.mode != super::vector_correct::CorrectMode::Edit {
+            self.correct_drag(pos);
+            return;
+        }
+        if self.vector_box_drag(pos) || self.shape_edit_drag(pos) {
             return;
         }
         let Some(edit) = self.workspace.vector.line_edit.as_ref() else {
@@ -905,8 +1059,18 @@ impl PainterApp {
         let Some(idx) = self.canvas.layer_index_of(edit.layer) else {
             return;
         };
-        let delta = pos - drag.start;
+        let mut delta = pos - drag.start;
         let original = &drag.original;
+        // A line's end snaps to other items' points.
+        if let DragMode::Bend(n) = drag.mode {
+            let k = drag.handles[n];
+            if k == 0 || k + 1 == original.points.len() {
+                let [x, y, _] = original.points[k];
+                let at = Vec2::new(x, y) + delta;
+                let reach = HANDLE_HIT / self.viewport.zoom.max(0.01);
+                delta = self.snap_to_vector_points(idx, at, edit.line, reach) - Vec2::new(x, y);
+            }
+        }
         let points = match drag.mode {
             DragMode::Bend(n) => vector::bend(&original.points, &drag.handles, n, delta, 0.0),
             // Up widens, down thins.
@@ -935,6 +1099,14 @@ impl PainterApp {
 
     /// The Edit Lines drag ended: one undo step.
     pub(crate) fn line_edit_release(&mut self) {
+        if self.workspace.vector.mode != super::vector_correct::CorrectMode::Edit {
+            self.correct_release();
+            return;
+        }
+        let add = self.workspace.vector.marquee_add;
+        if self.vector_box_end(add) {
+            return;
+        }
         if let Some(edit) = self.workspace.vector.line_edit.as_mut() {
             edit.drag = None;
             edit.shape_drag = None;
@@ -1013,14 +1185,68 @@ pub(crate) fn draw_line_edit(
     map: &crate::app::view::render::ScreenMap,
 ) {
     use eframe::egui::Stroke;
+    let accent = crate::ui::style::accent();
+    let idx = app.canvas.active_layer_idx;
+    if app.workspace.vector.show_paths
+        && let Some(v) = app.canvas.layers.get(idx).and_then(|l| l.vector.as_ref())
+    {
+        // Every line's centre, its points, and every shape's outline.
+        let faint = Stroke::new(1.0_f32, accent.gamma_multiply(0.7));
+        for item in v.items() {
+            match &**item {
+                VectorItem::Line(l) => {
+                    let path: Vec<_> = (l.smoothed().iter())
+                        .map(|&[x, y, _]| map.to_screen(Vec2::new(x, y)))
+                        .collect();
+                    painter.add(eframe::egui::Shape::line(path, faint));
+                    for &k in &app.line_handles(l) {
+                        let [x, y, _] = l.points[k];
+                        painter.circle_filled(map.to_screen(Vec2::new(x, y)), 2.0, accent);
+                    }
+                }
+                VectorItem::Shape(sh) => {
+                    for (pts, closed) in sh.flattened() {
+                        let pts: Vec<_> = pts.iter().map(|&p| map.to_screen(p)).collect();
+                        let shape = if closed {
+                            eframe::egui::Shape::closed_line(pts, faint)
+                        } else {
+                            eframe::egui::Shape::line(pts, faint)
+                        };
+                        painter.add(shape);
+                    }
+                }
+                VectorItem::Group(_) => {}
+            }
+        }
+    }
     if !matches!(app.active_tool, crate::app::tools::Tool::VectorEdit) {
         return;
+    }
+    if let Some([a, b]) = app.vector_box() {
+        let r = eframe::egui::Rect::from_two_pos(map.to_screen(a), map.to_screen(b));
+        painter.rect_filled(r, 0.0, accent.gamma_multiply(0.12));
+        painter.rect_stroke(r, 0.0, Stroke::new(1.0_f32, accent));
+    }
+    let correct = &app.workspace.vector.correct;
+    if app.workspace.vector.mode != super::vector_correct::CorrectMode::Edit
+        && let Some(&(last, _)) = correct.path.last()
+    {
+        let path: Vec<_> = correct
+            .path
+            .iter()
+            .map(|&(p, _)| map.to_screen(p))
+            .collect();
+        painter.add(eframe::egui::Shape::line(
+            path,
+            Stroke::new(1.5_f32, accent),
+        ));
+        let radius = correct.size * app.viewport.zoom;
+        painter.circle_stroke(map.to_screen(last), radius, Stroke::new(1.0_f32, accent));
     }
     super::vector_shapes::draw_shape_edit(app, painter, map);
     let Some((_, line)) = app.picked_line() else {
         return;
     };
-    let accent = crate::ui::style::accent();
     let path: Vec<_> = (line.smoothed().iter())
         .map(|&[x, y, _]| map.to_screen(Vec2::new(x, y)))
         .collect();
@@ -1093,6 +1319,48 @@ mod tests {
             .vector
             .as_ref()
             .map_or(0, |v| v.len())
+    }
+
+    #[test]
+    fn a_pens_jitter_in_pressure_is_eased_along_a_thick_line() {
+        let mut app = app();
+        let b = &mut app.brush_state.brush.brush_options;
+        b.diameter = 300.0;
+        b.pressure_size = true;
+        app.brush_state.brush.is_changed = true;
+        let jitter = |i: usize| if i.is_multiple_of(2) { 0.9 } else { 1.0 };
+        let raw = (app.vector_width(1.0) - app.vector_width(0.9)).abs();
+        assert!(raw > 10.0, "the pressures alone are {raw} px apart");
+        app.start_stroke_with_pressure(Vec2::new(4.0, 50.0), 0.95);
+        for i in 1..=60 {
+            app.add_stroke_point(Vec2::new(4.0 + i as f32 * 2.0, 50.0), jitter(i));
+        }
+        let v = app.canvas.layers[app.canvas.active_layer_idx]
+            .vector
+            .as_ref()
+            .unwrap();
+        let widths: Vec<f32> = v.items()[0].as_line().unwrap().points[10..]
+            .iter()
+            .map(|p| p[2])
+            .collect();
+        let spread = widths.iter().cloned().fold(f32::MIN, f32::max)
+            - widths.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(spread < raw * 0.2, "widths {spread} px apart");
+        app.finish_stroke();
+    }
+
+    #[test]
+    fn a_line_zoomed_in_on_is_as_wide_as_it_comes_out() {
+        let mut item = VectorItem::Line(VectorStroke {
+            points: vec![[0.0, 0.0, 200.0], [10.0, 0.0, 200.0]],
+            colour: [0; 3],
+            opacity: 1.0,
+        });
+        let mut capped = item.clone();
+        item.map_points_for_view(&|p| p * 4.0, 4.0);
+        capped.map_points(&|p| p * 4.0, 4.0);
+        assert_eq!(item.as_line().unwrap().points[0][2], 800.0);
+        assert_eq!(capped.as_line().unwrap().points[0][2], vector::MAX_WIDTH);
     }
 
     #[test]
@@ -1485,6 +1753,8 @@ mod tests {
                         rect.min,
                         rect.center(),
                         &[],
+                        &[],
+                        &[],
                     );
                 });
             });
@@ -1730,6 +2000,47 @@ mod tests {
         app.set_brush_tool(true);
         line(&mut app, Vec2::new(60.0, 37.0), Vec2::new(60.0, 43.0));
         assert_eq!(strokes(&app), 0);
+    }
+
+    #[test]
+    fn the_transform_tool_keeps_lines_and_draws_them_again_sharp() {
+        use crate::app::tools::Tool;
+        let mut app = app();
+        line(&mut app, Vec2::new(20.0, 40.0), Vec2::new(60.0, 40.0));
+        let idx = app.canvas.active_layer_idx;
+        let width = |app: &PainterApp| {
+            app.canvas.layers[idx]
+                .vector
+                .as_ref()
+                .unwrap()
+                .line(0)
+                .unwrap()
+                .points[0][2]
+        };
+        let w0 = width(&app);
+        assert_eq!(px(&mut app, 40, 40), Color32::BLACK);
+        app.active_tool = Tool::Transform(Default::default());
+        crate::app::tools::transform::create_floating_layer(&mut app);
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            info.scale = Vec2::new(2.0, 2.0);
+            info.rotation = std::f32::consts::FRAC_PI_2;
+        }
+        crate::app::tools::transform::commit_floating_layer(&mut app);
+        assert!(app.is_vector_layer(idx), "still lines");
+        assert!((width(&app) - 2.0 * w0).abs() < 1e-3, "twice as wide");
+        // Turned upright about the middle (40, 40), twice as long: fully
+        // covered (drawn from the line, not resampled) along it.
+        for y in [5, 20, 60, 75] {
+            assert_eq!(px(&mut app, 40, y), Color32::BLACK, "at y {y}");
+        }
+        assert_eq!(px(&mut app, 25, 40), Color32::TRANSPARENT);
+        app.apply_history(false);
+        assert!((width(&app) - w0).abs() < 1e-3);
+        assert_eq!(px(&mut app, 25, 40), Color32::BLACK);
+        assert_eq!(px(&mut app, 40, 10), Color32::TRANSPARENT);
+        app.apply_history(true);
+        assert_eq!(px(&mut app, 40, 10), Color32::BLACK);
+        assert_eq!(px(&mut app, 25, 40), Color32::TRANSPARENT);
     }
 
     #[test]

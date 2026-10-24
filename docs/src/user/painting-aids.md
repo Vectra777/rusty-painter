@@ -39,3 +39,15 @@ View → Wrap Around paints across the canvas's edges and shows it repeated, for
 ## Reference and navigator
 
 A Reference Image window to pick colours from, and a Navigator showing the whole canvas.
+
+The Navigator is a second view to judge the picture by while you paint zoomed in. It shows every stroke as it's painted. Make the window bigger to see more, and click or drag in it to move the view. Its own buttons mirror it and show it in grey, values or saturation (see below), without changing the canvas view.
+
+## Check view
+
+View → Check View shows the canvas a different way, to judge the picture. Painting, saving and export still use the colours.
+
+- **Grey**: grey of the same lightness. Are the values right?
+- **Values**: a few flat steps of lightness (2 to 8, set under the modes), light to dark. Does it read as big shapes?
+- **Saturation**: white where the colour is strongest, black where it's grey.
+
+`Shift+H` switches between colour and the mode last chosen. Vector and text layers aren't redrawn sharp while a check view is on.

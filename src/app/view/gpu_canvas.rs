@@ -8,7 +8,12 @@
 //!
 //! The display shader mirrors egui's own (egui-wgpu `egui.wgsl`) so the canvas
 //! blends exactly like an egui image did before: sample in linear light,
-//! convert to gamma, dither, premultiplied-alpha blend.
+//! convert to gamma, dither, premultiplied-alpha blend; a check view
+//! ([`super::check`]) greys it on the way.
+//!
+//! The navigator draws the same atlases small ([`Surface::Navigator`]), with
+//! its own quads and check view, and a picture of the layers left out of the
+//! composite over them.
 
 use eframe::egui_wgpu::{self, wgpu};
 use wgpu::util::DeviceExt;
@@ -73,7 +78,8 @@ fn gamma_from_linear_rgb(rgb: vec3<f32>) -> vec3<f32> {
 
 fn display_gamma(in: VertexOut) -> vec4<f32> {
     let tex_linear = textureSample(tex, samp, in.uv);
-    let rgb = dither_interleaved(gamma_from_linear_rgb(tex_linear.rgb), 256.0, in.position);
+    let stored = check_view(gamma_from_linear_rgb(tex_linear.rgb), tex_linear.a);
+    let rgb = dither_interleaved(stored, 256.0, in.position);
     return vec4<f32>(rgb, tex_linear.a);
 }
 
@@ -118,6 +124,40 @@ pub struct AtlasQuad {
     pub atlas: usize,
     pub corners: [[f32; 2]; 4],
     pub uvs: [[f32; 2]; 4],
+}
+
+/// Where the canvas is drawn: its own view, or the navigator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    View,
+    Navigator,
+}
+
+/// A picture drawn over the atlases on the navigator (the layers drawn
+/// sharp, which the composite leaves out), premultiplied sRGB RGBA8.
+/// `version` changes with the pixels: they're uploaded again then.
+pub struct OverlayPaint {
+    pub corners: [[f32; 2]; 4],
+    pub size: [u32; 2],
+    pub version: u64,
+    pub pixels: std::sync::Arc<Vec<u8>>,
+}
+
+/// One surface's quads and check view for this frame.
+struct SurfaceDraw {
+    quad_buffer: Option<wgpu::Buffer>,
+    draws: Vec<(usize, std::ops::Range<u32>)>,
+    check: wgpu::Buffer,
+    check_group: wgpu::BindGroup,
+}
+
+/// The navigator's overlay on the GPU, and the version of it uploaded.
+struct Overlay {
+    texture: wgpu::Texture,
+    group: wgpu::BindGroup,
+    size: [u32; 2],
+    version: u64,
+    quad: wgpu::Buffer,
 }
 
 /// Two triangles for a quad, as interleaved `pos.xy, uv.xy` floats.
@@ -234,9 +274,10 @@ pub struct GpuCanvas {
     downsample_sampler: wgpu::Sampler,
     atlases: Vec<Atlas>,
     generation: Option<u64>,
-    /// This frame's display quads, and each draw's atlas and vertex range.
-    quad_buffer: Option<wgpu::Buffer>,
-    draws: Vec<(usize, std::ops::Range<u32>)>,
+    /// Each [`Surface`]'s display quads (each draw's atlas and vertex
+    /// range) and check view.
+    surfaces: [SurfaceDraw; 2],
+    overlay: Option<Overlay>,
     /// Shader layers: the live composite and baking.
     shaders: super::shader_gpu::ShaderGpu,
 }
@@ -251,7 +292,7 @@ impl GpuCanvas {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("canvas shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{SHADER}{}", super::check::WGSL).into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("canvas texture layout"),
@@ -274,15 +315,33 @@ impl GpuCanvas {
                 },
             ],
         });
+        let check_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("canvas check view"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("canvas pipeline layout"),
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
-        let pipeline = |label, entry_point, format, blend| {
+        let display_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("canvas display layout"),
+            bind_group_layouts: &[&layout, &check_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = |label, layout, entry_point, format, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&pipeline_layout),
+                layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: &module,
                     entry_point: "vs_main",
@@ -326,11 +385,18 @@ impl GpuCanvas {
         };
         let display = pipeline(
             "canvas display",
+            &display_layout,
             display_entry,
             target_format,
             Some(egui_blend),
         );
-        let downsample = pipeline("canvas downsample", "fs_downsample", ATLAS_FORMAT, None);
+        let downsample = pipeline(
+            "canvas downsample",
+            &pipeline_layout,
+            "fs_downsample",
+            ATLAS_FORMAT,
+            None,
+        );
 
         let sampler = |label, mag_filter, mipmap_filter| {
             device.create_sampler(&wgpu::SamplerDescriptor {
@@ -343,8 +409,34 @@ impl GpuCanvas {
                 ..Default::default()
             })
         };
-        let shaders =
-            super::shader_gpu::ShaderGpu::new(device, &layout, VERTEX_LAYOUT, target_format);
+        let shaders = super::shader_gpu::ShaderGpu::new(
+            device,
+            &layout,
+            &check_layout,
+            VERTEX_LAYOUT,
+            target_format,
+        );
+        let surface = || {
+            let check = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("canvas check view"),
+                contents: &super::check::CheckMode::Colour.uniform(0),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let check_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("canvas check view"),
+                layout: &check_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: check.as_entire_binding(),
+                }],
+            });
+            SurfaceDraw {
+                quad_buffer: None,
+                draws: Vec::new(),
+                check,
+                check_group,
+            }
+        };
         Self {
             display,
             downsample,
@@ -362,8 +454,8 @@ impl GpuCanvas {
             ),
             atlases: Vec::new(),
             generation: None,
-            quad_buffer: None,
-            draws: Vec::new(),
+            surfaces: [surface(), surface()],
+            overlay: None,
             shaders,
         }
     }
@@ -387,13 +479,14 @@ impl GpuCanvas {
         plan: Option<&super::shader_gpu::ComposePlan>,
     ) {
         let groups: Vec<&wgpu::BindGroup> = self.atlases.iter().map(|a| &a.display_group).collect();
+        let view = &self.surfaces[Surface::View as usize];
         match plan {
             Some(plan) => self.shaders.compose(
                 device,
                 encoder,
                 plan,
-                self.quad_buffer.as_ref(),
-                &self.draws,
+                view.quad_buffer.as_ref(),
+                &view.draws,
                 &groups,
             ),
             None => self.shaders.clear_result(),
@@ -641,15 +734,22 @@ impl GpuCanvas {
         }
     }
 
+    #[cfg(test)]
     fn prepare_quads(&mut self, device: &wgpu::Device, quads: &[AtlasQuad]) {
+        self.prepare_surface(device, Surface::View, quads);
+    }
+
+    fn prepare_surface(&mut self, device: &wgpu::Device, surface: Surface, quads: &[AtlasQuad]) {
         let mut vertices = Vec::with_capacity(quads.len() * 24);
-        self.draws.clear();
-        for quad in quads.iter().filter(|q| q.atlas < self.atlases.len()) {
+        let atlases = self.atlases.len();
+        let draw = &mut self.surfaces[surface as usize];
+        draw.draws.clear();
+        for quad in quads.iter().filter(|q| q.atlas < atlases) {
             let start = (vertices.len() / 4) as u32;
             quad_vertices(&quad.corners, &quad.uvs, &mut vertices);
-            self.draws.push((quad.atlas, start..start + 6));
+            draw.draws.push((quad.atlas, start..start + 6));
         }
-        self.quad_buffer = (!vertices.is_empty()).then(|| {
+        draw.quad_buffer = (!vertices.is_empty()).then(|| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("canvas quads"),
                 contents: &float_bytes(&vertices),
@@ -658,15 +758,108 @@ impl GpuCanvas {
         });
     }
 
-    fn paint(&self, render_pass: &mut wgpu::RenderPass<'static>) {
-        let Some(buffer) = &self.quad_buffer else {
+    /// The navigator's overlay: placed, and uploaded again if it changed.
+    fn prepare_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        paint: &OverlayPaint,
+    ) {
+        let [width, height] = paint.size;
+        if width == 0 || height == 0 || paint.pixels.len() != (width * height * 4) as usize {
+            self.overlay = None;
+            return;
+        }
+        let mut vertices = Vec::with_capacity(24);
+        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        quad_vertices(&paint.corners, &uvs, &mut vertices);
+        let quad = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("navigator overlay quad"),
+            contents: &float_bytes(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        if let Some(overlay) = &mut self.overlay
+            && overlay.size == paint.size
+        {
+            overlay.quad = quad;
+            if overlay.version == paint.version {
+                return;
+            }
+        } else {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("navigator overlay"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: ATLAS_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let group = self.bind_group(device, &view, &self.downsample_sampler);
+            self.overlay = Some(Overlay {
+                texture,
+                group,
+                size: paint.size,
+                version: paint.version.wrapping_add(1),
+                quad,
+            });
+        }
+        let Some(overlay) = &mut self.overlay else {
             return;
         };
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &overlay.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &paint.pixels,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        overlay.version = paint.version;
+    }
+
+    #[cfg(test)]
+    fn paint(&self, render_pass: &mut wgpu::RenderPass<'static>) {
+        self.paint_surface(render_pass, Surface::View, false);
+    }
+
+    fn paint_surface(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        surface: Surface,
+        overlay: bool,
+    ) {
+        let draw = &self.surfaces[surface as usize];
         render_pass.set_pipeline(&self.display);
-        render_pass.set_vertex_buffer(0, buffer.slice(..));
-        for (atlas, range) in &self.draws {
-            render_pass.set_bind_group(0, &self.atlases[*atlas].display_group, &[]);
-            render_pass.draw(range.clone(), 0..1);
+        render_pass.set_bind_group(1, &draw.check_group, &[]);
+        if let Some(buffer) = &draw.quad_buffer {
+            render_pass.set_vertex_buffer(0, buffer.slice(..));
+            for (atlas, range) in &draw.draws {
+                render_pass.set_bind_group(0, &self.atlases[*atlas].display_group, &[]);
+                render_pass.draw(range.clone(), 0..1);
+            }
+        }
+        if overlay && let Some(overlay) = &self.overlay {
+            render_pass.set_vertex_buffer(0, overlay.quad.slice(..));
+            render_pass.set_bind_group(0, &overlay.group, &[]);
+            render_pass.draw(0..6, 0..1);
         }
     }
 }
@@ -681,13 +874,18 @@ pub struct CanvasPaint {
     /// Shader layers showing live: the quads aren't drawn directly but
     /// composited with them offscreen.
     pub compose: Option<super::shader_gpu::ComposePlan>,
+    pub surface: Surface,
+    /// The check view's uniform ([`super::check::CheckMode::uniform`]).
+    pub check: [u8; 16],
+    /// Drawn over the atlases (the navigator only).
+    pub overlay: Option<OverlayPaint>,
 }
 
 impl egui_wgpu::CallbackTrait for CanvasPaint {
     fn prepare(
         &self,
         device: &wgpu::Device,
-        _queue: &wgpu::Queue,
+        queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
         egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
@@ -706,8 +904,14 @@ impl egui_wgpu::CallbackTrait for CanvasPaint {
             if bytes >= BIG_UPLOAD_BYTES {
                 crate::app::release_freed_memory();
             }
-            gpu.prepare_quads(device, &self.quads);
-            gpu.compose(device, egui_encoder, self.compose.as_ref());
+            gpu.prepare_surface(device, self.surface, &self.quads);
+            queue.write_buffer(&gpu.surfaces[self.surface as usize].check, 0, &self.check);
+            if let Some(overlay) = &self.overlay {
+                gpu.prepare_overlay(device, queue, overlay);
+            }
+            if self.surface == Surface::View {
+                gpu.compose(device, egui_encoder, self.compose.as_ref());
+            }
         }
         Vec::new()
     }
@@ -719,10 +923,11 @@ impl egui_wgpu::CallbackTrait for CanvasPaint {
         resources: &egui_wgpu::CallbackResources,
     ) {
         if let Some(gpu) = resources.get::<GpuCanvas>() {
-            if gpu.shaders.has_result() {
-                gpu.shaders.paint(render_pass);
+            let check = &gpu.surfaces[self.surface as usize].check_group;
+            if self.surface == Surface::View && gpu.shaders.has_result() {
+                gpu.shaders.paint(render_pass, check);
             } else {
-                gpu.paint(render_pass);
+                gpu.paint_surface(render_pass, self.surface, self.overlay.is_some());
             }
         }
     }
@@ -933,6 +1138,119 @@ mod tests {
         queue.submit([encoder.finish()]);
         let shown = read_texture(device, queue, &target, 0, size, size);
         assert_close(&shown, &pixels, "1:1 display");
+    }
+
+    #[test]
+    fn check_views_on_the_gpu_match_the_cpu() {
+        use crate::app::view::check::CheckMode;
+        let Some(lock) = gpu() else {
+            eprintln!("no GPU adapter available; skipping");
+            return;
+        };
+        let (device, queue) = &*lock;
+        let mut canvas = GpuCanvas::new(device, wgpu::TextureFormat::Rgba8Unorm);
+        canvas.ensure_atlases(device, 0, 1);
+        let size = TILE_SIZE as u32;
+        // Premultiplied colours of every sort, some see-through.
+        let pixels: Vec<u8> = (0..size * size)
+            .flat_map(|i| {
+                let (x, y) = (i % size, i / size);
+                let a = if y % 4 == 0 { 255 } else { 60 + (y * 3) as u8 };
+                let c = [(x * 4) as u8, (y * 4) as u8, ((x * 7 + y * 3) % 256) as u8];
+                let c = c.map(|v| (v as u32 * a as u32 / 255) as u8);
+                [c[0], c[1], c[2], a]
+            })
+            .collect();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        canvas.upload(
+            device,
+            &mut encoder,
+            &[TileUpload {
+                atlas: 0,
+                level: 0,
+                x: 0,
+                y: 0,
+                width: size,
+                height: size,
+                pixels: pixels.clone(),
+            }],
+        );
+        queue.submit([encoder.finish()]);
+        let uv = size as f32 / ATLAS_TEXTURE_SIZE as f32;
+        canvas.prepare_quads(
+            device,
+            &[AtlasQuad {
+                atlas: 0,
+                corners: [[-1.0, 1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]],
+                uvs: [[0.0, 0.0], [uv, 0.0], [uv, uv], [0.0, uv]],
+            }],
+        );
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        for (mode, values) in [
+            (CheckMode::Colour, 3),
+            (CheckMode::Grey, 3),
+            (CheckMode::Values, 3),
+            (CheckMode::Values, 6),
+            (CheckMode::Saturation, 3),
+        ] {
+            let check = &canvas.surfaces[Surface::View as usize].check;
+            queue.write_buffer(check, 0, &mode.uniform(values));
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    })
+                    .forget_lifetime();
+                canvas.paint(&mut pass);
+            }
+            queue.submit([encoder.finish()]);
+            let shown = read_texture(device, queue, &target, 0, size, size);
+            let mut off_step = 0;
+            for (i, (got, px)) in shown.chunks(4).zip(pixels.chunks(4)).enumerate() {
+                let want = mode.apply([px[0], px[1], px[2], px[3]], values);
+                let close = got
+                    .iter()
+                    .zip(want)
+                    .all(|(&g, w)| (g as i16 - w as i16).abs() <= 2);
+                if mode == CheckMode::Values {
+                    // A value right on a step's edge may land on either.
+                    assert!(got[0] == got[1] && got[1] == got[2], "not grey: {got:?}");
+                    off_step += usize::from(!close);
+                } else {
+                    assert!(close, "{mode:?} pixel {i} {px:?}: {got:?} vs {want:?}");
+                }
+            }
+            assert!(
+                off_step * 100 < pixels.len() / 4,
+                "{off_step} pixels off a step"
+            );
+        }
     }
 
     #[test]

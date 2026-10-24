@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Painting together
+- File → Paint Together (also on the Projects screen): host the open canvas and share its invite code, or join someone's. Everyone paints on the same canvas at once and sees the others' cursors with their names.
+- Others' strokes are painted as they paint them, with their own brush; when they lift the pen, their exact pixels replace it, so every canvas stays the same. Smudge, blur, mixing, wet and impasto brushes, vector strokes, fills and filters show when they're done.
+- Two people painting in the same place both keep their paint; only the very same pixel goes to whoever was last. Every few seconds the host checks the canvases match and puts right any that drifted.
+- Undo takes back only your own work: what someone painted over it since stays. Layer changes (added, removed, moved, their settings, text and vector edits) keep everyone's undo. Resizing, cropping, turning and merging can't be undone while painting together.
+- The session belongs to its document: on another tab, what the others do waits for coming back to it. Joining keeps what was open in its own tab; the joined canvas is a new document of your own, to save or export, and what the others paint counts as unsaved work (and is autosaved).
+- On the same network the invite works as is (the host's firewall must let port 7878 in). Over the internet: a VPN such as Tailscale, a forwarded port, or a relay (`cargo run --release --bin relay`, port 7879) when neither side can open one.
+- Connections are encrypted end to end (TLS; the invite pins the host's certificate, so even a relay sees nothing), with an optional password.
+
+### Navigator and check view
+- The Navigator is a second view for painting zoomed in. It's drawn from the canvas view's GPU textures, so it follows each stroke as it's painted, and the parts of the canvas off screen are brought up to date for it. Its window can be made any size. It can be mirrored, and has its own check view.
+- Check view (View → Check View, `Shift+H`): the canvas shown in grey of the same lightness, in 2 to 8 flat steps of lightness, or as how saturated its colours are. Only the view changes. The key switches between colour and the mode last chosen.
+
+### Interface
+- Slimmer floating windows: their title bars are about a third shorter, with less room between the title and the contents, and rows are a little tighter. Touch mode keeps its larger spacing.
+
+### Palettes
+- Several named palettes instead of one list of swatches, chosen in the colour panel. Each is a grid with a set number of columns that can have gaps, and named groups below its first rows; swatches can be named. The swatches of older versions become the first palette.
+- In the colour panel a swatch is dragged to move it (onto a gap or another swatch), right-clicked or long-pressed to name, replace or remove it, and a click on a gap puts the brush colour there.
+- A palette can be kept in the document: it's saved in the project file and goes with it from tab to tab.
+- Sort a palette by value, hue or saturation, or arrange it in rows of a hue each, dark to light; hues and lightness in Oklab.
+- Open GIMP (`.gpl`), Adobe (`.ase`, `.aco`) and Krita (`.kpl`) palettes, from the Palette window or dropped on the app; save `.gpl`, `.ase` and `.kpl`.
+- Ramps from the brush colours: the brush colour's shades with an optional hue shift (cooler shadows, warmer lights), or even steps from the primary colour to the secondary; added to the palette as a row.
+- Colours taken from the picture go into the palette shown as new rows, or become a new palette arranged by hue.
+
 ### Vector layers: shapes, SVG, and drawn in the background
 - Vector layers hold shapes besides brush lines: Bézier paths filled and outlined, the outline with flat, round or square ends, sharp, round or cut corners, dashes and markers (arrow, open arrow, dot, square, bar), fill and outline each a colour or a gradient, a fill's even-odd rule, an opacity; and groups of them. The Shape tool on a vector layer keeps its shape exactly (a rectangle's corners, an ellipse's arcs, a curve's handles; filled with the secondary colour, outlined with the brush's), and so do the Pen's Fill and Stroke.
 - Edit Lines is Edit Vectors: a shape's points and handles are dragged as the Pen's are (Alt: a handle alone; Alt+click the outline adds a point, Alt+click a point turns it smooth or back), a shape or the items Shift+clicked move together, and Delete takes out the point or the items. Its options set the picked shapes' fill, outline, width, ends, corners, dashes, markers and opacity (a slider dragged is one undo step), group and ungroup them, and move them up or down the stack.
@@ -126,6 +151,7 @@
 - Bristle: hairs from an image tip's pixels, shear, density, random offset, light pressure lifting hairs off, and colour fading as the hairs run dry; Krita bristle presets bring their settings.
 
 ### Fixed
+- The colour wheel no longer flickers between two sizes at some panel heights (the scroll bar under it came and went each frame).
 - A brush with a time-based stabiliser no longer draws straight segments when the app falls behind: the mouse's moves (and a frame late pen's samples) kept no time of their own, so a slow frame's all came at one instant and the stabiliser jumped straight to the last one.
 - A Photoshop brush file with a tip whose bounds are far apart is refused instead of crashing a debug build (or reading a wrong size in a release one).
 

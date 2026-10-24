@@ -48,6 +48,22 @@ pub struct TabletSample {
     /// the platform says: samples batched into one frame keep their own
     /// times rather than all getting the frame's.
     pub time: Option<f64>,
+    /// Where the platform predicts the pen will be (iOS): drawn ahead of
+    /// the real samples and taken back, never kept.
+    pub predicted: bool,
+    /// The pressure or tilt is an estimate; the measured values follow as
+    /// a [`TabletUpdate`] with this index (iOS).
+    pub awaiting: Option<u64>,
+}
+
+/// The measured pressure of a sample sent with an estimate
+/// ([`TabletSample::awaiting`]). (Its tilt is measured too, but the
+/// estimate is close enough to keep.)
+#[derive(Copy, Clone, Debug)]
+pub struct TabletUpdate {
+    pub index: u64,
+    /// Raw pressure, 0..=1.
+    pub pressure: f32,
 }
 
 /// A lean vector from angles from perpendicular along x and y (radians).
@@ -127,6 +143,8 @@ impl ToolState {
                     is_eraser,
                     phase,
                     time: None,
+                    predicted: false,
+                    awaiting: None,
                 });
             }
         };
@@ -268,6 +286,8 @@ fn winit_sample(s: WinitPose, scale: f32, phase: TabletPhase) -> TabletSample {
         is_eraser: s.is_eraser,
         phase,
         time: s.time,
+        predicted: false,
+        awaiting: None,
     }
 }
 
@@ -342,6 +362,11 @@ impl TabletInput {
             state.apply(&event, scale, is_eraser, &mut out);
         }
         out
+    }
+
+    /// Measured values for samples sent with estimates (iOS only).
+    pub fn poll_updates(&mut self, _ctx: &eframe::egui::Context) -> Vec<TabletUpdate> {
+        Vec::new()
     }
 
     /// Whether a pen is near or on the tablet. Its input may then also
@@ -422,6 +447,8 @@ impl TabletInput {
                     self.pressure
                 },
                 time: Some(s.time),
+                predicted: false,
+                awaiting: None,
                 // Android: angle from perpendicular, and the direction the
                 // pen points (0 up, clockwise).
                 tilt: Some({
@@ -443,6 +470,11 @@ impl TabletInput {
             self.down = matches!(last.phase, TabletPhase::Down | TabletPhase::Move);
         }
         samples
+    }
+
+    /// Measured values for samples sent with estimates (iOS only).
+    pub fn poll_updates(&mut self, _ctx: &eframe::egui::Context) -> Vec<TabletUpdate> {
+        Vec::new()
     }
 
     /// Whether the pen is touching: its mouse events are then the pen's, and
@@ -496,12 +528,33 @@ impl TabletInput {
                     PenPhase::Cancel => TabletPhase::Cancel,
                 },
                 time: Some(s.time),
+                predicted: s.predicted,
+                awaiting: s.awaiting,
             })
+            .collect();
+        // Only the newest predictions count: older ones are already past.
+        let newest = samples.iter().rposition(|s| !s.predicted);
+        let samples: Vec<TabletSample> = samples
+            .into_iter()
+            .enumerate()
+            .filter(|(i, s)| !s.predicted || newest.is_none_or(|n| *i > n))
+            .map(|(_, s)| s)
             .collect();
         if let Some(last) = samples.last() {
             self.down = matches!(last.phase, TabletPhase::Down | TabletPhase::Move);
         }
         samples
+    }
+
+    /// Measured values for samples sent with estimates, oldest first.
+    pub fn poll_updates(&mut self, _ctx: &eframe::egui::Context) -> Vec<TabletUpdate> {
+        winit::platform::ios::take_pen_updates()
+            .into_iter()
+            .map(|u| TabletUpdate {
+                index: u.index,
+                pressure: u.pressure,
+            })
+            .collect()
     }
 
     /// Whether the Pencil is touching: any finger on the screen is then the

@@ -123,7 +123,10 @@ impl eframe::App for PainterApp {
             ui::library::library_screen(self, ctx);
             ui::canvas_creation::canvas_creation_modal(self, ctx);
             ui::library::library_dialogs(self, ctx);
+            ui::collab_window::collab_window(self, ctx);
             crate::app::autosave::recovery_dialog(self, ctx);
+            // (A document joined from here opens once it's come.)
+            self.collab_tick();
             self.autosave_tick(ctx);
             self.save_settings(false);
             // The pen's samples are the canvas's: taps on the library (the
@@ -172,10 +175,17 @@ impl eframe::App for PainterApp {
                 self.viewport.canvas_area = Some(view.response.rect);
                 // Pen samples first: touch handling needs to know the pen is
                 // down to tell a resting palm from a finger.
-                let pen = self
+                let (pen, predicted): (Vec<_>, Vec<_>) = self
                     .tablet
                     .as_mut()
                     .map(|t| t.poll(ctx))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .partition(|s| !s.predicted);
+                let pen_updates = self
+                    .tablet
+                    .as_mut()
+                    .map(|t| t.poll_updates(ctx))
                     .unwrap_or_default();
                 if let Some(calibration) = &mut self.workspace.calibration {
                     calibration.record(&pen);
@@ -216,6 +226,8 @@ impl eframe::App for PainterApp {
                         view.origin,
                         view.canvas_center,
                         &pen,
+                        &predicted,
+                        &pen_updates,
                     );
                 }
                 // Overlay first: on a drag's first frame it takes over at once,
@@ -282,6 +294,10 @@ impl eframe::App for PainterApp {
                 if self.vector_tick() {
                     needs_repaint = true;
                 }
+                // Vector and text layers drawn sharp when zoomed in.
+                if self.sharp_tick(ctx, &view, ui.clip_rect()) {
+                    needs_repaint = true;
+                }
                 // Composite and paint after input, so this frame's dabs and any
                 // pan/zoom show up in this frame.
                 let (uploads, more_tiles) =
@@ -310,9 +326,7 @@ impl eframe::App for PainterApp {
         self.show_windows(ctx);
         self.show_job_progress(ctx);
         self.workspace.frame_stats.mark(Stage::Windows);
-        if std::mem::take(&mut self.brush_state.swatches_dirty) {
-            self.save_swatches();
-        }
+        self.brush_state.palettes.save_if_changed();
         self.save_view_settings(ctx);
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.save_active_preset(pointer_down);
@@ -322,6 +336,7 @@ impl eframe::App for PainterApp {
         }
         self.autosave_tick(ctx);
         self.timelapse_tick();
+        self.collab_tick();
 
         // Single consolidated repaint request
         if needs_repaint {
@@ -537,6 +552,7 @@ impl PainterApp {
         // Overlays follow the canvas exactly (zoom, pan and rotation).
         let map = render::screen_map(self, view);
         let panel = view.response.rect;
+        crate::app::view::sharp::draw_sharp(self, ui.painter(), &map);
         crate::app::playback::draw_cached_frame(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::view::grid::draw_grid(self, ui.painter(), &map, panel);
         crate::app::view::guide_lines::draw_guide_lines(self, ctx, ui.painter(), &map, panel);
@@ -556,6 +572,7 @@ impl PainterApp {
         crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
         crate::app::stroke_ops::draw_string(self, ui.painter(), &map);
+        crate::app::collab::draw_others(self, ui.painter(), &map);
         // (On a moved layer, shapes and gradients are on its own pixels.)
         crate::app::tools::shape::draw_shape(self, ui.painter(), &|p| {
             map.to_screen(self.to_canvas_space(p))
@@ -653,6 +670,7 @@ impl PainterApp {
         ui::reference_window::reference_window(self, ctx);
         ui::navigator::navigator_window(self, ctx);
         ui::shader_editor::shader_editors(self, ctx);
+        ui::collab_window::collab_window(self, ctx);
     }
 }
 
@@ -806,6 +824,17 @@ impl PainterApp {
         } else {
             self.release_canvas();
         }
+        // Painting together: the steps just done are seen (and sent) first,
+        // so undo takes each back as itself.
+        self.collab_flush();
+        if self.collab_blocks_history(redo) {
+            self.report(
+                "Resizing, cropping, turning and merging can't be undone while painting together"
+                    .into(),
+            );
+            return;
+        }
+        let steps = self.layer_state.history.stacks().0.len();
         {
             let history = &mut self.layer_state.history;
             let (affected, layer_action) = if redo {
@@ -857,6 +886,10 @@ impl PainterApp {
             }
 
             self.layer_state.thumbnails_dirty = true;
+        }
+        // Painting together: others' paint over this step stays.
+        if self.layer_state.history.stacks().0.len() != steps {
+            self.collab_after_history(redo);
         }
         for (id, region) in self.layer_state.history.take_vector_redraws() {
             if let Some(idx) = self.canvas.layer_index_of(id) {

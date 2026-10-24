@@ -98,6 +98,27 @@ impl PainterApp {
         self.brush_state.loaded_textures = textures;
     }
 
+    /// Copy picture `name` (`bytes`) into `brushes/textures/`, where it's a
+    /// paper texture from now on.
+    pub(crate) fn add_texture(&mut self, name: &str, bytes: &[u8]) {
+        if let Err(err) = image::load_from_memory(bytes) {
+            self.report(format!("{name} isn't a picture this app can read: {err}"));
+            return;
+        }
+        let dir = self.brush_state.brushes_path.join("textures");
+        // The name alone: a picker's name could hold a path.
+        let file = std::path::Path::new(name)
+            .file_name()
+            .map_or_else(|| "Texture.png".into(), |n| n.to_os_string());
+        if let Err(err) =
+            std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&file), bytes))
+        {
+            self.report(format!("Can't add the texture {name}: {err}"));
+            return;
+        }
+        self.load_textures();
+    }
+
     fn ensure_brushes_directory_exists(&self) {
         if !self.brush_state.brushes_path.exists()
             && let Err(err) = std::fs::create_dir_all(&self.brush_state.brushes_path)
@@ -781,77 +802,32 @@ fn write_preset_file(
     Ok(path)
 }
 
-impl PainterApp {
-    /// Where the swatches are kept: next to the brushes folder.
-    fn swatches_path(&self) -> std::path::PathBuf {
-        self.brush_state
-            .brushes_path
-            .with_file_name("swatches.json")
-    }
-
-    /// The swatches saved last time (the defaults if there are none).
-    pub(crate) fn load_swatches(&mut self) {
-        let Ok(bytes) = std::fs::read(self.swatches_path()) else {
-            return;
-        };
-        match serde_json::from_slice::<Vec<String>>(&bytes) {
-            Ok(hex) => {
-                self.brush_state.swatches = hex.iter().filter_map(|h| parse_hex(h)).collect();
-            }
-            Err(err) => log::warn!("Ignoring swatches.json: {err}"),
-        }
-    }
-
-    /// Keep the swatches for next time. Errors are logged: a read-only
-    /// folder shouldn't get in the way of painting.
-    pub(crate) fn save_swatches(&self) {
-        let hex: Vec<String> = self
-            .brush_state
-            .swatches
-            .iter()
-            .map(|c| {
-                let [r, g, b, a] = c.to_srgba_unmultiplied();
-                format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
-            })
-            .collect();
-        match serde_json::to_vec_pretty(&hex) {
-            Ok(bytes) => {
-                crate::app::jobs::write_later(self.swatches_path(), "swatches", move || Ok(bytes))
-            }
-            Err(err) => log::warn!("Couldn't save swatches: {err}"),
-        }
-    }
-}
-
-/// `#RRGGBB` or `#RRGGBBAA`.
-fn parse_hex(hex: &str) -> Option<Color32> {
-    let h = hex.strip_prefix('#')?;
-    if h.len() != 6 && h.len() != 8 {
-        return None;
-    }
-    let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
-    let a = if h.len() == 8 { byte(6)? } else { 255 };
-    Some(Color32::from_rgba_unmultiplied(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        a,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn swatch_colours_read_back_as_written() {
-        assert_eq!(parse_hex("#FF8000"), Some(Color32::from_rgb(255, 128, 0)));
-        assert_eq!(
-            parse_hex("#10203080"),
-            Some(Color32::from_rgba_unmultiplied(16, 32, 48, 128))
-        );
-        assert_eq!(parse_hex("FF8000"), None);
-        assert_eq!(parse_hex("#GG0000"), None);
+    fn an_added_picture_is_a_paper_texture_and_a_bad_one_is_reported() {
+        use crate::canvas::Canvas;
+        let dir = std::env::temp_dir().join(format!("rp-texture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.brush_state.brushes_path = dir.join("brushes");
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(32, 32, |x, _| {
+            image::Luma([(x * 8) as u8])
+        }))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+        app.add_texture("../Cold press.png", &png);
+        let names: Vec<_> = (app.brush_state.loaded_textures.iter())
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["Cold press"]);
+        assert!(dir.join("brushes/textures/Cold press.png").is_file());
+        app.add_texture("notes.png", b"not a picture");
+        assert_eq!(app.brush_state.loaded_textures.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

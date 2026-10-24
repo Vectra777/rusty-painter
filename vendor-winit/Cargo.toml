@@ -429,6 +429,7 @@ features = [
     "NSProcessInfo",
     "NSThread",
     "NSSet",
+    "NSValue",
 ]
 
 [target.'cfg(target_os = "ios")'.dependencies.objc2-ui-kit]

@@ -118,11 +118,33 @@ pub struct PenSample {
     /// When the Pencil was there, in seconds (UIKit's clock): coalesced
     /// samples keep their own times.
     pub time: f64,
+    /// Where UIKit predicts the Pencil will be soon (after the event's
+    /// real samples): to draw ahead and take back, never to keep.
+    pub predicted: bool,
+    /// The pressure or angles are UIKit's estimate, and the measured ones
+    /// will follow as a [`PenUpdate`] with this index.
+    pub awaiting: Option<u64>,
+}
+
+/// The measured pressure and angles of a sample sent with an estimate
+/// (rusty-painter patch): `index` is that sample's [`PenSample::awaiting`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenUpdate {
+    pub index: u64,
+    pub pressure: f32,
+    pub tilt: f32,
+    pub orientation: f32,
 }
 
 /// Take the Pencil samples queued since the last call, oldest first.
 pub fn take_pen_samples() -> Vec<PenSample> {
     crate::platform_impl::take_pen_samples()
+}
+
+/// Take the measured values that arrived since the last call for samples
+/// sent with estimates, oldest first.
+pub fn take_pen_updates() -> Vec<PenUpdate> {
+    crate::platform_impl::take_pen_updates()
 }
 
 use crate::event_loop::EventLoop;

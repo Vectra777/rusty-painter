@@ -1,11 +1,77 @@
 //! The New Canvas dialog.
 
+use crate::app::document::Paper;
 use crate::app::document::{MAX_CANVAS_DIMENSION, MAX_CANVAS_DPI};
+use crate::app::files::OpenFor;
 use crate::canvas::blend_modes::BlendSpace;
 use crate::ui::style::TEXT_DIM;
 use crate::ui::widgets::FitScreen;
 use crate::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation, PainterApp};
 use eframe::egui::{self, RichText};
+
+/// The Background layer's paper: none, a texture (built in or the
+/// user's) or a picture. Returns a picker to open, if one was asked for.
+fn paper_row(
+    ui: &mut egui::Ui,
+    paper: &mut Paper,
+    loaded: &[std::sync::Arc<crate::brush_engine::texture::Pattern>],
+) -> Option<OpenFor> {
+    let mut pick = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Paper");
+        egui::ComboBox::from_id_salt("canvas_paper")
+            .selected_text(paper.label().to_string())
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(matches!(paper, Paper::None), "None")
+                    .clicked()
+                {
+                    *paper = Paper::None;
+                }
+                for pattern in crate::brush_engine::texture::builtin().iter().chain(loaded) {
+                    let selected = matches!(paper, Paper::Texture { pattern: p, .. }
+                        if std::sync::Arc::ptr_eq(p, pattern));
+                    if ui.selectable_label(selected, &pattern.name).clicked() && !selected {
+                        let (strength, scale) = match paper {
+                            Paper::Texture {
+                                strength, scale, ..
+                            } => (*strength, *scale),
+                            _ => (0.3, 1.0),
+                        };
+                        *paper = Paper::Texture {
+                            pattern: pattern.clone(),
+                            strength,
+                            scale,
+                        };
+                    }
+                }
+                ui.separator();
+                if ui.button("Picture…").clicked() {
+                    pick = Some(OpenFor::Paper);
+                }
+                if ui.button("Add textures…").clicked() {
+                    pick = Some(OpenFor::Textures);
+                }
+            })
+            .response
+            .on_hover_text(
+                "What the Background layer shows: a paper texture on the background colour, \
+                 or a picture covering the canvas.",
+            );
+        if let Paper::Texture {
+            strength, scale, ..
+        } = paper
+        {
+            ui.add(egui::Slider::new(strength, 0.0..=1.0).text("Strength"));
+            ui.add(
+                egui::Slider::new(scale, 0.25..=4.0)
+                    .logarithmic(true)
+                    .text("Scale"),
+            );
+        }
+    });
+    pick
+}
 
 /// Modal dialog to configure and create a new canvas.
 pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
@@ -14,6 +80,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
     }
 
     let mut open = app.modal_state.show_new_canvas_modal;
+    let mut pick = None;
     egui::Window::new("New Canvas")
         .fit_screen(ctx)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -114,6 +181,7 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
                     ui.color_edit_button_srgba(&mut settings.custom_bg);
                 }
             });
+            pick = paper_row(ui, &mut settings.paper, &app.brush_state.loaded_textures);
 
             ui.horizontal_wrapped(|ui| {
                 ui.label("Color Model");
@@ -180,6 +248,9 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     // Create and Cancel close it too.
     app.modal_state.show_new_canvas_modal &= open;
+    if let Some(purpose) = pick {
+        app.pick_open(purpose);
+    }
 }
 
 /// 8-bit / 16-bit / 32-bit float choice for a document.

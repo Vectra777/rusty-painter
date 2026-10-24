@@ -2,14 +2,17 @@
 //! which tiles to re-composite and upload each frame ([`render`]), and the
 //! canvas <-> screen mapping (zoom, pan, rotation, flip; [`viewport`]).
 //! Shader layers showing live are composited on the GPU ([`shader_gpu`]).
-//! Viewing aids over it: the grid, guide lines and snapping ([`aids`]).
+//! Viewing aids over it: the grid, guide lines and snapping ([`aids`]);
+//! the canvas shown in grey or in values to judge it ([`check`]).
 pub(crate) mod aids;
 pub(crate) mod brush_cursor;
+pub(crate) mod check;
 pub(crate) mod gpu_canvas;
 pub(crate) mod grid;
 pub(crate) mod guide_lines;
 pub(crate) mod render;
 pub(crate) mod shader_gpu;
+pub(crate) mod sharp;
 pub(crate) mod viewport;
 
 /// The GPU tests' device, made once (making one takes about a second) and

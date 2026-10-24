@@ -215,8 +215,15 @@ impl PainterApp {
         let Some(idx) = self.canvas.layer_index_of(edit.layer) else {
             return true;
         };
-        let delta = pos - drag.start;
+        let mut delta = pos - drag.start;
         let grab = drag.grab;
+        // A shape's point snaps to other items' points.
+        if let (Grab::Knot(r), Some((i, VectorItem::Shape(s)))) = (grab, drag.originals.first())
+            && let Some(k) = s.path.knot(r)
+        {
+            let reach = 12.0 / self.viewport.zoom.max(0.01);
+            delta = self.snap_to_vector_points(idx, k.anchor + delta, *i, reach) - k.anchor;
+        }
         let moved: Vec<(usize, VectorItem)> = (drag.originals.iter())
             .map(|(i, original)| {
                 let mut item = original.clone();

@@ -1,10 +1,11 @@
 //! Viewing aids: the grid, guide lines and snapping to them, the
-//! reference image and the navigator (all under View). Their settings are
+//! reference image, the navigator and the check view (all under View). Their settings are
 //! kept between sessions in `view.json`, next to the brushes folder; the
 //! guides themselves are saved with the project.
 
 use crate::app::PainterApp;
 use crate::app::tools::Tool;
+use crate::app::view::check::CheckMode;
 use crate::app::view::grid::{self, GridSettings};
 use crate::app::view::guide_lines::{self, GuideLine, GuideLines};
 use crate::selection::SelectionType;
@@ -14,7 +15,6 @@ use eframe::egui::{self, Vec2};
 /// points.
 pub(crate) const SNAP_DISTANCE: f32 = 8.0;
 
-#[derive(Default)]
 pub struct ViewAids {
     pub grid: GridSettings,
     pub guides: GuideLines,
@@ -22,9 +22,33 @@ pub struct ViewAids {
     pub snap_to_grid: bool,
     pub reference: crate::ui::reference_window::ReferenceState,
     pub navigator: crate::ui::navigator::NavigatorState,
+    /// How the canvas view shows the picture (not kept: it starts in
+    /// colour).
+    pub check: CheckMode,
+    /// What the check view key turns on.
+    pub check_toggle: CheckMode,
+    /// Steps of value in [`CheckMode::Values`] (the navigator's too).
+    pub check_values: u32,
     /// The settings as last read or written; `None` until they're loaded
     /// (nothing is written before then).
     saved: Option<ViewSettings>,
+}
+
+impl Default for ViewAids {
+    fn default() -> Self {
+        Self {
+            grid: GridSettings::default(),
+            guides: GuideLines::default(),
+            snap_to_guides: false,
+            snap_to_grid: false,
+            reference: Default::default(),
+            navigator: Default::default(),
+            check: CheckMode::Colour,
+            check_toggle: CheckMode::Grey,
+            check_values: 3,
+            saved: None,
+        }
+    }
 }
 
 /// What `view.json` keeps.
@@ -37,6 +61,10 @@ struct ViewSettings {
     snap_to_grid: bool,
     /// The reference image last opened, loaded again next time.
     reference_image: Option<std::path::PathBuf>,
+    check_toggle: CheckMode,
+    check_values: u32,
+    navigator_mirror: bool,
+    navigator_check: CheckMode,
 }
 
 impl Default for ViewSettings {
@@ -47,6 +75,10 @@ impl Default for ViewSettings {
             snap_to_guides: false,
             snap_to_grid: false,
             reference_image: None,
+            check_toggle: CheckMode::Grey,
+            check_values: 3,
+            navigator_mirror: false,
+            navigator_check: CheckMode::Colour,
         }
     }
 }
@@ -59,6 +91,10 @@ impl ViewSettings {
             snap_to_guides: aids.snap_to_guides,
             snap_to_grid: aids.snap_to_grid,
             reference_image: aids.reference.path.clone(),
+            check_toggle: aids.check_toggle,
+            check_values: aids.check_values,
+            navigator_mirror: aids.navigator.mirror,
+            navigator_check: aids.navigator.check,
         }
     }
 
@@ -68,6 +104,13 @@ impl ViewSettings {
         aids.snap_to_guides = self.snap_to_guides;
         aids.snap_to_grid = self.snap_to_grid;
         aids.reference.path = self.reference_image.clone();
+        aids.check_toggle = match self.check_toggle {
+            CheckMode::Colour => CheckMode::Grey,
+            mode => mode,
+        };
+        aids.check_values = crate::app::view::check::clamp_values(self.check_values);
+        aids.navigator.mirror = self.navigator_mirror;
+        aids.navigator.check = self.navigator_check;
     }
 }
 
@@ -94,6 +137,26 @@ pub(crate) fn snap(
 }
 
 impl PainterApp {
+    /// The check view key: the canvas in colour, or as last checked.
+    pub(crate) fn toggle_check_view(&mut self) {
+        let aids = &mut self.workspace.view_aids;
+        aids.check = if aids.check == CheckMode::Colour {
+            aids.check_toggle
+        } else {
+            CheckMode::Colour
+        };
+    }
+
+    /// Show the canvas view as `mode` (remembered for the key, unless it's
+    /// colour).
+    pub(crate) fn set_check_view(&mut self, mode: CheckMode) {
+        let aids = &mut self.workspace.view_aids;
+        aids.check = mode;
+        if mode != CheckMode::Colour {
+            aids.check_toggle = mode;
+        }
+    }
+
     fn snap_threshold(&self) -> f32 {
         SNAP_DISTANCE / self.viewport.zoom.max(0.01)
     }

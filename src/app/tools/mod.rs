@@ -13,6 +13,7 @@ pub(crate) mod guides;
 pub(crate) mod liquify;
 pub(crate) mod mixer;
 pub(crate) mod palette;
+pub(crate) mod palettes;
 pub(crate) mod patch;
 pub(crate) mod pen;
 pub(crate) mod puppet;
@@ -24,6 +25,8 @@ pub(crate) mod shape;
 pub(crate) mod text;
 pub(crate) mod transform;
 pub(crate) mod vector;
+pub(crate) mod vector_arrange;
+pub(crate) mod vector_correct;
 pub(crate) mod vector_shapes;
 
 use crate::selection::SelectionType;

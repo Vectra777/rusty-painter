@@ -32,3 +32,10 @@ makes itself (it isn't among the app's pictures); and **Watercolor Brush**
 `ibis/small-screenshot.png`: a 240-pixel screenshot of a brush QR code
 (**SCALES DALLIE**, in circled letters), too small and soft for the QR
 detector until it's enlarged.
+
+- `procreate-tiny.procreate`: a 300×60 Procreate document made by
+  `scripts/make_procreate_fixture.py` (no Procreate needed; tiles are
+  literal-only LZO streams), top to bottom: **Top** (red, (20, 10), 100×20),
+  **Folder** holding **Inside** (blue at alpha 128, (150, 35), 130×20,
+  multiply, across the edge tile), white background; with its composite and
+  thumbnail. Opened by `src/project/procreate.rs`.

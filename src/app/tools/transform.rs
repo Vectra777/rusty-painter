@@ -354,11 +354,12 @@ fn commit_in_place(app: &mut PainterApp) {
                 &layer.orig_deep,
             ));
         }
-        let whole = session.selection.is_none();
-        let layer_action = whole.then_some(info).and_then(|i| {
-            app.text_layer_moved(session.source_id, &i)
-                .or_else(|| app.vector_layer_moved(session.source_id, &i))
-        });
+        let layer_action = if session.selection.is_none() {
+            app.text_layer_moved(session.source_id, &info, &mut tiles)
+                .or_else(|| app.vector_layer_moved(session.source_id, &info))
+        } else {
+            None
+        };
         app.push_undo(UndoAction {
             tiles,
             selection: Some(session.selection.clone()),
@@ -609,8 +610,9 @@ pub(crate) fn commit_floating_layer(app: &mut PainterApp) {
         if moved && app.canvas.layer_index_of(session.source_id).is_some() {
             // A whole text or vector layer only moved stays text or lines
             // (at its new place).
+            let mut tiles = tiles;
             let layer_action = info.filter(|_| session.selection.is_none()).and_then(|i| {
-                app.text_layer_moved(session.source_id, &i)
+                app.text_layer_moved(session.source_id, &i, &mut tiles)
                     .or_else(|| app.vector_layer_moved(session.source_id, &i))
             });
             let action = UndoAction {

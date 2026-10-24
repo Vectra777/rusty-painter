@@ -113,6 +113,17 @@ pub(crate) fn ruler_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
         ui.checkbox(&mut app.workspace.guides.ruler.parallel, "Parallel lines")
             .on_hover_text("Strokes started away from the ruler run parallel to it");
     }
+    let guides = &mut app.workspace.guides;
+    if guides.curve_ruler.is_some() {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut guides.curve_enabled, "Curve ruler")
+                .on_hover_text("Strokes started near it run along it (made from a vector line: Edit Vectors → Make ruler)");
+            if ui.small_button("Remove").clicked() {
+                guides.curve_ruler = None;
+                guides.curve_enabled = false;
+            }
+        });
+    }
 }
 
 /// The menu sliding out from the toolbar's Shape button (`anchor`).

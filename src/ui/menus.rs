@@ -235,6 +235,9 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Open…", keys(app, ctx, Action::Open)) {
         open_project(app);
     }
+    if menu_item(ui, "Paint Together…", None) {
+        app.workspace.collab_form.open = true;
+    }
     if menu_item(ui, "Save", keys(app, ctx, Action::Save)) {
         save_project(app);
     }
@@ -676,9 +679,16 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Reset Rotation", None) {
         app.viewport.rotation = 0.0;
     }
-    if menu_item(ui, "Flip Canvas Horizontally", Some("H".into())) {
+    if menu_item(
+        ui,
+        "Flip Canvas Horizontally",
+        keys(app, ctx, Action::FlipView),
+    ) {
         app.viewport.flip_x = !app.viewport.flip_x;
     }
+    ui.menu_button("Check View", |ui| {
+        crate::ui::view_aids_menu::check_view_controls(app, ui, keys(app, ctx, Action::CheckView));
+    });
     ui.separator();
     ui.menu_button("Mirror Painting", |ui| {
         crate::ui::symmetry_menu::symmetry_controls(app, ui);

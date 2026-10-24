@@ -41,6 +41,8 @@ pub struct StabilizerModes {
     /// Motion filter: how quickly the smoothing lets go as the pen speeds
     /// up (0..=1).
     pub filter_speed: f32,
+    /// StreamLine: how much the line behind the pen is smoothed (0..=1).
+    pub streamline: f32,
 }
 
 impl Default for StabilizerModes {
@@ -52,6 +54,7 @@ impl Default for StabilizerModes {
             correction_live: false,
             filter_strength: 0.5,
             filter_speed: 0.5,
+            streamline: 0.5,
         }
     }
 }
@@ -147,8 +150,9 @@ impl Stabilizer {
                 pos
             }
             StabilizerAlgorithm::String => pull_string(prev, raw, settings.string_length()),
-            // The path is smoothed afterwards, when the pen lifts.
-            StabilizerAlgorithm::PostCorrection => raw,
+            // The path is smoothed afterwards (StreamLine: behind the pen
+            // as it goes).
+            StabilizerAlgorithm::PostCorrection | StabilizerAlgorithm::StreamLine => raw,
             StabilizerAlgorithm::MotionFilter => {
                 self.motion_filter(settings, prev, raw, dt.unwrap_or(STEP))
             }
@@ -171,7 +175,9 @@ impl Stabilizer {
             return (pos, 1.0);
         };
         let share = match settings.algorithm {
-            StabilizerAlgorithm::None | StabilizerAlgorithm::PostCorrection => 1.0,
+            StabilizerAlgorithm::None
+            | StabilizerAlgorithm::PostCorrection
+            | StabilizerAlgorithm::StreamLine => 1.0,
             // Its own share, also with the pen held still.
             StabilizerAlgorithm::Simple if settings.strength > 0.0 => {
                 let steps = dt.map_or(1.0, |dt| dt.max(0.0) / STEP);
@@ -299,6 +305,71 @@ pub fn smooth_path_settled(points: &[Vec2], strength: f32, view_scale: f32) -> u
     along.partition_point(|&s| total - s > sigma * 3.0)
 }
 
+/// StreamLine (Procreate's feel): `points` from index `from` on, each
+/// smoothed over its neighbours along the path by as much as it's behind
+/// the pen. The newest is where the pen is, and the smoothing grows to its
+/// full `strength` over [`streamline_reach`], so the line trails the pen
+/// by a little, smooth behind it, and ends where the pen lifts.
+pub fn streamline_path_from(
+    points: &[Vec2],
+    strength: f32,
+    view_scale: f32,
+    from: usize,
+) -> Vec<Vec2> {
+    let full = correction_sigma(strength, view_scale);
+    if points.len() < 3 || full <= 0.0 {
+        return points[from.min(points.len())..].to_vec();
+    }
+    let (along, total) = distances(points);
+    let reach = streamline_reach(full);
+    (from..points.len())
+        .map(|i| {
+            let s = along[i];
+            let t = ((total - s) / reach).clamp(0.0, 1.0);
+            // Eased in, and no wider than the path before it allows.
+            let sigma = (full * t * t * (3.0 - 2.0 * t)).min(s / 3.0);
+            if sigma <= 1e-3 {
+                return points[i];
+            }
+            let k = -0.5 / (sigma * sigma);
+            let (mut sum, mut weight) = (Vec2::ZERO, 0.0);
+            let mut add = |j: usize| {
+                let d = along[j] - s;
+                let w = (d * d * k).exp();
+                sum += points[j] * w;
+                weight += w;
+            };
+            add(i);
+            for j in (0..i).rev().take_while(|&j| s - along[j] <= sigma * 3.0) {
+                add(j);
+            }
+            for j in (i + 1..points.len()).take_while(|&j| along[j] - s <= sigma * 3.0) {
+                add(j);
+            }
+            sum / weight
+        })
+        .collect()
+}
+
+/// How many of `points` (from the first) [`streamline_path_from`] puts
+/// where it will whatever comes after them: those further behind the pen
+/// than [`streamline_reach`].
+pub fn streamline_settled(points: &[Vec2], strength: f32, view_scale: f32) -> usize {
+    let full = correction_sigma(strength, view_scale);
+    if full <= 0.0 {
+        return points.len();
+    }
+    let (along, total) = distances(points);
+    let reach = streamline_reach(full);
+    along.partition_point(|&s| total - s > reach)
+}
+
+/// How far behind the pen StreamLine reaches its full smoothing: past
+/// where its widest average looks ahead.
+fn streamline_reach(sigma: f32) -> f32 {
+    sigma * 4.0
+}
+
 fn correction_sigma(strength: f32, view_scale: f32) -> f32 {
     strength.clamp(0.0, 1.0) * MAX_CORRECTION / view_scale.max(1e-6)
 }
@@ -319,6 +390,28 @@ fn distances(points: &[Vec2]) -> (Vec<f32>, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamline_ends_at_the_pen_smooths_behind_it_and_settles() {
+        let path: Vec<Vec2> = (0..300)
+            .map(|i| Vec2::new(i as f32 * 2.0, (i as f32 * 1.7).sin() * 6.0))
+            .collect();
+        let full = streamline_path_from(&path, 0.8, 1.0, 0);
+        // The newest point is the pen's.
+        assert_eq!(full[full.len() - 1], path[path.len() - 1]);
+        // Well behind it, the zigzag is smoothed away.
+        let wobble = |p: &[Vec2]| p[50..150].iter().map(|v| v.y.abs()).sum::<f32>();
+        assert!(wobble(&full) < wobble(&path) * 0.2);
+        // Settled points don't move whatever comes after.
+        for n in [10, 80, 200, 299] {
+            let part = &path[..n];
+            let settled = streamline_settled(part, 0.8, 1.0);
+            let now = streamline_path_from(part, 0.8, 1.0, 0);
+            for i in 0..settled {
+                assert!((now[i] - full[i]).length() < 1e-3, "{n}: {i}");
+            }
+        }
+    }
 
     #[test]
     fn settled_points_are_smoothed_the_same_whatever_follows() {

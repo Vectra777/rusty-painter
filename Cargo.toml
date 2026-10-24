@@ -8,6 +8,8 @@ description = "Native tiled painting playground built with egui."
 readme = "README.md"
 license = "GPL-3.0-only"
 publish = false
+# src/bin/relay.rs is the second binary.
+default-run = "rusty-painter"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -60,6 +62,15 @@ resvg = { version = "0.48", default-features = false }
 spade = "2.15"
 # ibisPaint brushes: the QR codes it exports them as (binary payloads).
 rqrr = { version = "0.11", default-features = false }
+# Edit Vectors' Combine (union, intersect, subtract, exclude): robust
+# polygon booleans.
+i_overlay = "=8.1.2"
+# Painting together (app/collab.rs): TLS between the host and each guest,
+# a self-signed certificate the invite pins by its SHA-256. The `ring`
+# backend: aws-lc doesn't build for Android and iOS.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
+ring = "0.17"
 
 [dev-dependencies]
 pollster = "0.4"

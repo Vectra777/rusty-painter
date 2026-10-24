@@ -6,8 +6,10 @@
 //!   computed round tip (size, hardness, roundness, angle) or a sampled
 //!   picture.
 //! - Version 6 and later: `8BIM` blocks: `samp` holds the pictures (each
-//!   named by an id), `desc` the presets (name, tip, size, spacing and the
-//!   shape, scatter and transfer dynamics).
+//!   named by an id), `patt` the textures' patterns, `desc` the presets
+//!   (name, tip, size, spacing, the shape, scatter, transfer and colour
+//!   dynamics, texture, dual brush, wet edges and the tool's flow, opacity
+//!   and mode).
 
 use super::{Imported, Reader, unpack_bits};
 use crate::brush_engine::brush::{Brush, BrushPreset};
@@ -129,10 +131,171 @@ fn read_sample(r: &mut Reader<'_>) -> Result<Arc<TipMask>, String> {
     Ok(TipMask::from_mask(w, h, pixels))
 }
 
+/// The textures made so far for a file's presets: each pattern (by its
+/// index), lightened or darkened and its contrast changed.
+type Textures = Vec<(
+    (usize, i32, i32),
+    Arc<crate::brush_engine::texture::Pattern>,
+)>;
+
+/// A texture's pattern from the `patt` block: its id, name and grey.
+struct AbrPattern {
+    id: String,
+    name: String,
+    grey: image::GrayImage,
+}
+
+/// The patterns of a `patt` block (Photoshop's pattern format, each with
+/// its length before it and padded to 4 bytes); a pattern that can't be
+/// read is left out with a note.
+fn read_patterns(block: &[u8], notes: &mut Vec<String>) -> Vec<AbrPattern> {
+    let mut r = Reader::new(block);
+    let mut out = Vec::new();
+    while r.pos() + 4 <= r.len() {
+        let Ok(len) = r.u32_be().map(|l| l as usize) else {
+            break;
+        };
+        let Ok(body) = r.take(len) else {
+            break;
+        };
+        match read_pattern(&mut Reader::new(body)) {
+            Ok(p) => out.push(p),
+            Err(err) => notes.push(err),
+        }
+        if r.seek(((r.pos() + 3) & !3).min(r.len())).is_err() {
+            break;
+        }
+    }
+    out
+}
+
+/// One pattern: version, colour mode, size, name, id, (a palette), then
+/// its channels in a "virtual memory array list".
+fn read_pattern(r: &mut Reader<'_>) -> Result<AbrPattern, String> {
+    if r.u32_be()? != 1 {
+        return Err("A Photoshop pattern of an unknown version was skipped".into());
+    }
+    let mode = r.u32_be()?;
+    r.skip(4)?; // height, width (the array list has them)
+    let name = unicode(r)?;
+    let id_len = r.u8()? as usize;
+    let id = String::from_utf8_lossy(r.take(id_len)?).into_owned();
+    // Indexed colour: the palette (some writers add 4 bytes after it).
+    let palette = if mode == 2 {
+        let palette = r.take(768)?;
+        let at = r.pos();
+        if r.u32_be()? != 3 {
+            r.seek(at + 4)?;
+        } else {
+            r.seek(at)?;
+        }
+        Some(palette)
+    } else {
+        None
+    };
+    if r.u32_be()? != 3 {
+        return Err(format!("The pattern {name} couldn't be read"));
+    }
+    let len = r.u32_be()? as usize;
+    let mut v = Reader::new(r.take(len)?);
+    let (top, left, bottom, right) = (v.i32_be()?, v.i32_be()?, v.i32_be()?, v.i32_be()?);
+    let (w, h) = (
+        i64::from(right) - i64::from(left),
+        i64::from(bottom) - i64::from(top),
+    );
+    if w <= 0 || h <= 0 || w > i64::from(MAX_SIDE) || h > i64::from(MAX_SIDE) {
+        return Err(format!("The pattern {name} has a bad size"));
+    }
+    let (w, h) = (w as usize, h as usize);
+    let count = v.u32_be()?;
+    // Grey, indexed: one channel; RGB three (the rest: the first).
+    let wanted = if mode == 3 { 3 } else { 1 };
+    let mut planes: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..count.min(64) + 2 {
+        if planes.len() == wanted || v.pos() + 8 > v.len() {
+            break;
+        }
+        if v.u32_be()? == 0 {
+            continue;
+        }
+        let array_len = v.u32_be()? as usize;
+        if array_len == 0 {
+            continue;
+        }
+        if array_len < 23 {
+            return Err(format!("The pattern {name} is damaged"));
+        }
+        let _depth = v.u32_be()?;
+        let (ct, cl, cb, cr) = (v.i32_be()?, v.i32_be()?, v.i32_be()?, v.i32_be()?);
+        let depth = v.u16_be()?;
+        let compression = v.u8()?;
+        let mut d = Reader::new(v.take(array_len - 23)?);
+        if (ct, cl, cb, cr) != (top, left, bottom, right) {
+            return Err(format!("The pattern {name} has channels of another size"));
+        }
+        let plane = match (compression, depth) {
+            (0, 8) => d.take(w * h)?.to_vec(),
+            // 16-bit: the high bytes.
+            (0, 16) => d
+                .take(w * h * 2)?
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|p| p[0])
+                .collect(),
+            (1, 8) => {
+                let lengths: Vec<usize> = (0..h)
+                    .map(|_| d.u16_be().map(usize::from))
+                    .collect::<Result<_, _>>()?;
+                let mut out = Vec::with_capacity(w * h);
+                for len in lengths {
+                    let before = out.len();
+                    unpack_bits(&mut d, len, &mut out)?;
+                    out.resize(before + w, 0);
+                }
+                out
+            }
+            _ => {
+                return Err(format!(
+                    "The pattern {name} is of depth {depth} (compression {compression}), which isn't supported"
+                ));
+            }
+        };
+        planes.push(plane);
+    }
+    if planes.len() < wanted {
+        return Err(format!("The pattern {name} is missing channels"));
+    }
+    let grey: Vec<u8> = match (wanted, palette) {
+        (3, _) => (0..w * h)
+            .map(|i| {
+                let (r, g, b) = (
+                    planes[0][i] as u32,
+                    planes[1][i] as u32,
+                    planes[2][i] as u32,
+                );
+                ((r * 11 + g * 16 + b * 5) / 32) as u8
+            })
+            .collect(),
+        (_, Some(palette)) => planes[0]
+            .iter()
+            .map(|&i| {
+                let c = &palette[i as usize * 3..i as usize * 3 + 3];
+                ((c[0] as u32 * 11 + c[1] as u32 * 16 + c[2] as u32 * 5) / 32) as u8
+            })
+            .collect(),
+        _ => planes.swap_remove(0),
+    };
+    let grey = image::GrayImage::from_raw(w as u32, h as u32, grey)
+        .ok_or_else(|| format!("The pattern {name} is damaged"))?;
+    Ok(AbrPattern { id, name, grey })
+}
+
 /// Versions 6 and later: the `8BIM` blocks.
 fn new_versions(r: &mut Reader<'_>, stem: &str) -> Result<Imported, String> {
     let subversion = r.u16_be()?;
     let mut samples: Vec<(String, Arc<TipMask>)> = Vec::new();
+    let mut patterns: Vec<AbrPattern> = Vec::new();
     let mut desc = None;
     let mut out = Imported::default();
     while r.pos() + 12 <= r.len() {
@@ -161,6 +324,7 @@ fn new_versions(r: &mut Reader<'_>, stem: &str) -> Result<Imported, String> {
                     r.seek(((sample_end + 3) & !3).min(end))?;
                 }
             }
+            b"patt" => patterns = read_patterns(r.take(len)?, &mut out.notes),
             b"desc" => {
                 let mut d = Reader::new(r.take(len)?);
                 // A version number, then the descriptor.
@@ -172,6 +336,9 @@ fn new_versions(r: &mut Reader<'_>, stem: &str) -> Result<Imported, String> {
         // Blocks are padded to an even length (the last one may not be).
         r.seek(((end + 1) & !1).min(r.len()))?;
     }
+    // The textures made so far, by pattern and brightness and contrast
+    // (presets share them).
+    let mut textures = Vec::new();
     let presets = desc
         .as_ref()
         .and_then(|d| d.get("Brsh"))
@@ -179,7 +346,7 @@ fn new_versions(r: &mut Reader<'_>, stem: &str) -> Result<Imported, String> {
         .map(|list| {
             list.iter()
                 .filter_map(Value::object)
-                .filter_map(|p| preset_from(p, &samples, &mut out.notes))
+                .filter_map(|p| preset_from(p, &samples, &patterns, &mut textures, &mut out.notes))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -201,12 +368,220 @@ fn new_versions(r: &mut Reader<'_>, stem: &str) -> Result<Imported, String> {
     Ok(out)
 }
 
+/// A sampled tip by its id in `samples`.
+fn sample_of(samples: &[(String, Arc<TipMask>)], id: &str) -> Option<Arc<TipMask>> {
+    (samples.iter())
+        .find(|(s, _)| s.trim_start_matches('$') == id.trim_start_matches('$'))
+        .map(|(_, t)| t.clone())
+}
+
+/// Which control drives a dynamic `k` of `o` (2: pen pressure, 6: the
+/// stroke's direction, 8: the pen's rotation), and its jitter (0..1).
+fn dynamic_of(o: &Object, k: &str) -> Option<(i32, f32)> {
+    let o = o.get(k).and_then(Value::object)?;
+    let control = o.get("bVTy").and_then(Value::number).unwrap_or(0.0) as i32;
+    let jitter = o.get("jitter").and_then(Value::number).unwrap_or(0.0) as f32 / 100.0;
+    Some((control, jitter))
+}
+
+/// A blend mode key: this app's texture mode and the formula for it
+/// (Photoshop's own for the height modes; see [`KritaTexturing`]).
+///
+/// [`KritaTexturing`]: crate::brush_engine::texture::KritaTexturing
+fn texture_mode(key: &str) -> (crate::brush_engine::texture::TextureMode, u8) {
+    use crate::brush_engine::texture::TextureMode as M;
+    match key {
+        "Sbtr" => (M::Subtract, 1),
+        "Drkn" => (M::Multiply, 4),
+        "Ovrl" => (M::Multiply, 5),
+        "CDdg" => (M::ColorDodge, 6),
+        "CBrn" => (M::Subtract, 7),
+        "linearBurn" => (M::Subtract, 9),
+        "hardMix" => (M::HardMix, 10),
+        "Hght" | "height" => (M::Height, 14),
+        "linearHeight" => (M::Height, 15),
+        _ => (M::Multiply, 0),
+    }
+}
+
+/// The preset's texture: its pattern from `patterns`, made lighter or
+/// darker and its contrast changed as the preset says, in its blend mode
+/// at its depth. `None` when the pattern isn't in the file.
+fn texture_of(
+    p: &Object,
+    patterns: &[AbrPattern],
+    textures: &mut Textures,
+) -> Option<crate::brush_engine::texture::BrushTexture> {
+    use crate::brush_engine::texture::{BrushTexture, GrainPlacement, KritaTexturing};
+    let num = |k: &str| p.get(k).and_then(Value::number);
+    let flag = |k: &str| p.get(k).and_then(Value::boolean).unwrap_or(false);
+    let t = p.get("Txtr").and_then(Value::object)?;
+    let (id, name) = (
+        t.get("Idnt").and_then(Value::text).unwrap_or(""),
+        t.get("Nm  ").and_then(Value::text).unwrap_or(""),
+    );
+    let index = (patterns.iter().position(|q| !id.is_empty() && q.id == id)).or_else(|| {
+        patterns
+            .iter()
+            .position(|q| !name.is_empty() && q.name == name)
+    })?;
+    let source = &patterns[index];
+    // Photoshop's brightness -150..150 and contrast -50..100 (how far it
+    // takes them isn't documented: contrast -50 flattens the pattern, 100
+    // takes it to five times).
+    let brightness = num("textureBrightness").unwrap_or(0.0).clamp(-150.0, 150.0) as i32;
+    let contrast = num("textureContrast").unwrap_or(0.0).clamp(-50.0, 100.0) as i32;
+    let key = (index, brightness, contrast);
+    let pattern = match textures.iter().find(|(k, _)| *k == key) {
+        Some((_, pattern)) => pattern.clone(),
+        None => {
+            let shift = brightness as f32 / 150.0;
+            let gain = if contrast < 0 {
+                1.0 + contrast as f32 / 50.0
+            } else {
+                1.0 + contrast as f32 / 25.0
+            };
+            let label = if (brightness, contrast) == (0, 0) {
+                source.name.clone()
+            } else {
+                format!("{} ({brightness:+}, {contrast:+})", source.name)
+            };
+            let img = image::DynamicImage::ImageLuma8(source.grey.clone());
+            let pattern =
+                crate::brush_engine::texture::Pattern::from_image_with(&label, &img, |v| {
+                    ((v + shift - 0.5) * gain + 0.5).clamp(0.0, 1.0)
+                });
+            textures.push((key, pattern.clone()));
+            pattern
+        }
+    };
+    let (mode, formula) = texture_mode(
+        p.get("textureBlendMode")
+            .and_then(Value::text)
+            .unwrap_or(""),
+    );
+    // The pattern at its own pixels, however it was resampled.
+    let side = source.grey.width().max(source.grey.height()) as f32;
+    let scale = num("textureScale").unwrap_or(100.0) as f32 / 100.0 * side / pattern.size as f32;
+    Some(BrushTexture {
+        pattern,
+        mode,
+        scale: scale.clamp(0.05, 16.0),
+        strength: (num("textureDepth").unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0),
+        invert: flag("InvT"),
+        placement: GrainPlacement {
+            per_dab: flag("TxtC"),
+            ..Default::default()
+        },
+        // The soft formulas: like Photoshop's depth, none leaves the paint
+        // as it is (the plain ones take it all away at none).
+        krita: Some(KritaTexturing {
+            mode: formula,
+            soft: true,
+        }),
+    })
+}
+
+/// The preset's dual brush, its tip and size taken from the main tip's
+/// `diameter`; `None` when it has none.
+fn dual_of(
+    p: &Object,
+    samples: &[(String, Arc<TipMask>)],
+    diameter: f32,
+    name: &str,
+    notes: &mut Vec<String>,
+) -> Option<crate::brush_engine::dual::DualTip> {
+    use crate::brush_engine::dual::{DualMode, DualTip};
+    let db = p.get("dualBrush").and_then(Value::object)?;
+    if db.get("useDualBrush").and_then(Value::boolean) != Some(true)
+        && p.get("useDualBrush").and_then(Value::boolean) != Some(true)
+    {
+        return None;
+    }
+    let num = |o: &Object, k: &str| o.get(k).and_then(Value::number);
+    let tip = db.get("Brsh").and_then(Value::object);
+    let shape = match tip.and_then(|t| t.get("sampledData")).and_then(Value::text) {
+        Some(id) => match sample_of(samples, id) {
+            Some(t) => PixelBrushShape::Custom(t),
+            None => {
+                notes.push(format!("{name}: its dual brush's tip picture is missing"));
+                PixelBrushShape::Circle
+            }
+        },
+        None => PixelBrushShape::Circle,
+    };
+    let own = |k: &str| tip.and_then(|t| num(t, k));
+    Some(DualTip {
+        shape,
+        size: (own("Dmtr").unwrap_or(diameter as f64) as f32 / diameter).clamp(0.05, 20.0),
+        hardness: own("Hrdn").unwrap_or(100.0).clamp(0.0, 100.0) as f32,
+        // The tip's own spacing is the one Photoshop shows (the one beside
+        // it reads 100 whatever the panel says).
+        spacing: own("Spcn")
+            .or(num(db, "Spcn"))
+            .unwrap_or(25.0)
+            .clamp(1.0, 1000.0) as f32,
+        // A share of the size either way, as the main tip's scatter.
+        scatter: dynamic_of(db, "scatterDynamics")
+            .map_or(0.0, |(_, j)| (j * 50.0).clamp(0.0, 500.0)),
+        count: num(db, "Cnt ").unwrap_or(1.0).clamp(1.0, 16.0) as u32,
+        random_angle: false,
+        mode: match db.get("BlnM").and_then(Value::text).unwrap_or("") {
+            "Drkn" => DualMode::Darken,
+            "Sbtr" | "linearBurn" => DualMode::Subtract,
+            "Hght" | "height" | "linearHeight" => DualMode::Height,
+            "CBrn" => DualMode::Burn,
+            _ => DualMode::Multiply,
+        },
+    })
+}
+
+/// The tool's blend mode key as a layer blend; `None` for one with no
+/// counterpart here.
+fn paint_blend(key: &str) -> Option<crate::canvas::blend_modes::LayerBlend> {
+    use crate::canvas::blend_modes::LayerBlend as L;
+    Some(match key {
+        "Nrml" => L::Normal,
+        "Dslv" => L::Dissolve,
+        "Drkn" => L::Darken,
+        "Mltp" => L::Multiply,
+        "CBrn" => L::ColorBurn,
+        "linearBurn" => L::LinearBurn,
+        "darkerColor" => L::DarkerColor,
+        "Lghn" => L::Lighten,
+        "Scrn" => L::Screen,
+        "CDdg" => L::ColorDodge,
+        "linearDodge" => L::LinearDodge,
+        "lighterColor" => L::LighterColor,
+        "Ovrl" => L::Overlay,
+        "SftL" => L::SoftLight,
+        "HrdL" => L::HardLight,
+        "vividLight" => L::VividLight,
+        "linearLight" => L::LinearLight,
+        "pinLight" => L::PinLight,
+        "hardMix" => L::HardMix,
+        "Dfrn" => L::Difference,
+        "Xclu" => L::Exclusion,
+        "blendSubtraction" => L::Subtract,
+        "blendDivide" => L::Divide,
+        "H   " => L::Hue,
+        "Strt" => L::Saturation,
+        "Clr " => L::Color,
+        "Lmns" => L::Luminosity,
+        _ => return None,
+    })
+}
+
 /// A preset from one entry of `desc`'s brush list.
 fn preset_from(
     p: &Object,
     samples: &[(String, Arc<TipMask>)],
+    patterns: &[AbrPattern],
+    textures: &mut Textures,
     notes: &mut Vec<String>,
 ) -> Option<BrushPreset> {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    use crate::brush_engine::hardness::{CurvePoint, SoftnessCurve};
     let name = p
         .get("Nm  ")
         .and_then(Value::text)
@@ -222,21 +597,27 @@ fn preset_from(
     b.dynamics.tip.angle = num(tip, "Angl").unwrap_or(0.0) as f32;
     b.dynamics.tip.ratio = (num(tip, "Rndn").unwrap_or(100.0) as f32 / 100.0).clamp(0.02, 1.0);
     if let Some(id) = tip.get("sampledData").and_then(Value::text) {
-        match samples
-            .iter()
-            .find(|(s, _)| s.trim_start_matches('$') == id.trim_start_matches('$'))
-        {
-            Some((_, t)) => b.brush_options.pixel_shape = PixelBrushShape::Custom(t.clone()),
+        match sample_of(samples, id) {
+            Some(t) => b.brush_options.pixel_shape = PixelBrushShape::Custom(t),
             None => notes.push(format!("{name}: its tip picture is missing")),
         }
     }
     let flag = |k: &str| p.get(k).and_then(Value::boolean).unwrap_or(false);
-    // Which control drives a dynamic (2: pen pressure), and its jitter.
-    let dynamic = |k: &str| {
-        let o = p.get(k).and_then(Value::object)?;
-        let control = o.get("bVTy").and_then(Value::number).unwrap_or(0.0) as i32;
-        let jitter = o.get("jitter").and_then(Value::number).unwrap_or(0.0) as f32 / 100.0;
-        Some((control, jitter))
+    let dynamic = |k: &str| dynamic_of(p, k);
+    // A pen input on a setting: `falling`, a light touch moves it all the
+    // way (a heavy one leaves it).
+    let input = |sensor: Sensor, setting: DabSetting, amount: f32, falling: bool| InputMapping {
+        sensor,
+        setting,
+        amount,
+        curve: SoftnessCurve {
+            points: if falling {
+                vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 0.0)]
+            } else {
+                vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)]
+            },
+        },
+        ..Default::default()
     };
     if flag("useTipDynamics") {
         if let Some((control, jitter)) = dynamic("szVr") {
@@ -245,8 +626,22 @@ fn preset_from(
         }
         b.brush_options.pressure_min_size =
             (num(p, "minimumDiameter").unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
-        if let Some((_, jitter)) = dynamic("angleDynamics") {
+        if let Some((control, jitter)) = dynamic("angleDynamics") {
             b.dynamics.tip.random_angle = (jitter * 180.0).clamp(0.0, 180.0);
+            // The stroke's direction (or its first), the pen's rotation.
+            b.dynamics.tip.follow_stroke = matches!(control, 5 | 6);
+            b.dynamics.tip.follow_barrel = control == 8;
+        }
+        // Roundness by pressure: a light touch flattens the tip down to
+        // the minimum roundness.
+        if let Some((2, _)) = dynamic("roundnessDynamics") {
+            let least = (num(p, "minimumRoundness").unwrap_or(1.0) as f32 / 100.0).clamp(0.0, 1.0);
+            b.inputs.push(input(
+                Sensor::Pressure,
+                DabSetting::Squash,
+                1.0 - least,
+                true,
+            ));
         }
     }
     if flag("useScatter") {
@@ -263,18 +658,76 @@ fn preset_from(
             b.brush_options.pressure_opacity = control == 2;
             b.dynamics.random.opacity = jitter.clamp(0.0, 1.0);
         }
-        if let Some((control, _)) = dynamic("prVr") {
+        if let Some((control, jitter)) = dynamic("prVr") {
             b.brush_options.pressure_flow = control == 2;
+            if jitter > 0.0 {
+                b.inputs.push(input(
+                    Sensor::RandomDab,
+                    DabSetting::Flow,
+                    jitter.min(1.0),
+                    false,
+                ));
+            }
         }
     }
-    for (key, what) in [
-        ("useTexture", "texture"),
-        ("useDualBrush", "dual brush"),
-        ("useColorDynamics", "colour dynamics"),
-        ("Wtdg", "wet edges"),
-    ] {
-        if flag(key) {
-            notes.push(format!("{name}: its {what} wasn't imported"));
+    if flag("useTexture") {
+        match texture_of(p, patterns, textures) {
+            Some(texture) => b.texture = Some(texture),
+            None => notes.push(format!("{name}: its texture's pattern isn't in the file")),
+        }
+    }
+    b.dual = dual_of(p, samples, diameter, &name, notes);
+    if flag("useColorDynamics") {
+        let r = &mut b.dynamics.random;
+        // Hue jitter 100% reaches any hue.
+        r.hue = (num(p, "H   ").unwrap_or(0.0) as f32 / 100.0 * 180.0).clamp(0.0, 180.0);
+        r.saturation = (num(p, "Strt").unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
+        r.value = (num(p, "Brgh").unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
+        r.purity = (num(p, "purity").unwrap_or(0.0) as f32 / 100.0).clamp(-1.0, 1.0);
+        // Foreground to background: the secondary colour here, all of it
+        // at the lightest touch.
+        if let Some((control, jitter)) = dynamic("clVr") {
+            if control == 2 {
+                b.inputs
+                    .push(input(Sensor::Pressure, DabSetting::ColorMix, 1.0, true));
+            }
+            if jitter > 0.0 {
+                b.inputs.push(input(
+                    Sensor::RandomDab,
+                    DabSetting::ColorMix,
+                    jitter.min(1.0),
+                    false,
+                ));
+            }
+        }
+    }
+    if flag("Wtdg") {
+        // Photoshop's wet edges leave about half the paint in the middle.
+        b.wet_edge = 0.5;
+    }
+    // The tool's settings saved with the preset.
+    if let Some(to) = p.get("toolOptions").and_then(Value::object) {
+        if let Some(flow) = num(to, "flow") {
+            b.brush_options.flow = (flow as f32).clamp(1.0, 100.0);
+        }
+        if let Some(opacity) = num(to, "Opct") {
+            b.brush_options.opacity = (opacity as f32 / 100.0).clamp(0.01, 1.0);
+        }
+        if let Some(mode) = to.get("Md  ").and_then(Value::text) {
+            match paint_blend(mode) {
+                Some(blend) => b.paint_blend = blend,
+                None => notes.push(format!("{name}: its blend mode ({mode}) wasn't imported")),
+            }
+        }
+        if to
+            .get("usePressureOverridesOpacity")
+            .and_then(Value::boolean)
+            == Some(true)
+        {
+            b.brush_options.pressure_opacity = true;
+        }
+        if to.get("usePressureOverridesSize").and_then(Value::boolean) == Some(true) {
+            b.brush_options.pressure_size = true;
         }
     }
     Some(BrushPreset {
@@ -560,6 +1013,172 @@ mod tests {
         assert_eq!((tip.width, tip.height), (19, 10));
     }
 
+    fn put_bool(out: &mut Vec<u8>, k: &str) {
+        put_key(out, k);
+        out.extend_from_slice(b"bool\x01");
+    }
+
+    fn put_enum(out: &mut Vec<u8>, k: &str, v: &str) {
+        put_key(out, k);
+        out.extend_from_slice(b"enum");
+        put_key(out, "BlnM");
+        put_key(out, v);
+    }
+
+    /// An object value of `count` items, which the caller then writes.
+    fn put_object(out: &mut Vec<u8>, k: &str, count: u32) {
+        put_key(out, k);
+        out.extend_from_slice(b"Objc");
+        put_text(out, "");
+        put_key(out, "null");
+        out.extend_from_slice(&count.to_be_bytes());
+    }
+
+    /// An 8BIM block.
+    fn put_block(out: &mut Vec<u8>, key: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(b"8BIM");
+        out.extend_from_slice(key);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(data);
+    }
+
+    /// A version 6 file: the 20×10 sample, a 4×4 grey pattern (a ramp)
+    /// and a preset with a texture, a dual brush, colour dynamics and the
+    /// tool's flow, opacity and mode.
+    fn abr6_textured() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&6u16.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes());
+        let s = sample("$abc", 20, 10);
+        let mut samp = (s.len() as u32).to_be_bytes().to_vec();
+        samp.extend_from_slice(&s);
+        while !samp.len().is_multiple_of(4) {
+            samp.push(0);
+        }
+        put_block(&mut out, b"samp", &samp);
+        // The pattern: grey, raw, one channel written of three slots.
+        let mut pat = Vec::new();
+        pat.extend_from_slice(&1u32.to_be_bytes());
+        pat.extend_from_slice(&1u32.to_be_bytes());
+        pat.extend_from_slice(&[0, 4, 0, 4]);
+        put_text(&mut pat, "Paper");
+        pat.push(4);
+        pat.extend_from_slice(b"pat1");
+        let mut vma = Vec::new();
+        for v in [0i32, 0, 4, 4] {
+            vma.extend_from_slice(&v.to_be_bytes());
+        }
+        vma.extend_from_slice(&1u32.to_be_bytes());
+        vma.extend_from_slice(&1u32.to_be_bytes());
+        vma.extend_from_slice(&(23u32 + 16).to_be_bytes());
+        vma.extend_from_slice(&8u32.to_be_bytes());
+        for v in [0i32, 0, 4, 4] {
+            vma.extend_from_slice(&v.to_be_bytes());
+        }
+        vma.extend_from_slice(&8u16.to_be_bytes());
+        vma.push(0);
+        vma.extend((0..16u8).map(|i| i * 16));
+        vma.extend_from_slice(&[0; 8]);
+        pat.extend_from_slice(&3u32.to_be_bytes());
+        pat.extend_from_slice(&(vma.len() as u32).to_be_bytes());
+        pat.extend_from_slice(&vma);
+        let mut patt = (pat.len() as u32).to_be_bytes().to_vec();
+        patt.extend_from_slice(&pat);
+        while !patt.len().is_multiple_of(4) {
+            patt.push(0);
+        }
+        put_block(&mut out, b"patt", &patt);
+        let mut d = 16u32.to_be_bytes().to_vec();
+        put_text(&mut d, "");
+        put_key(&mut d, "null");
+        d.extend_from_slice(&1u32.to_be_bytes());
+        put_key(&mut d, "Brsh");
+        d.extend_from_slice(b"VlLs");
+        d.extend_from_slice(&1u32.to_be_bytes());
+        d.extend_from_slice(b"Objc");
+        put_text(&mut d, "");
+        put_key(&mut d, "brushPreset");
+        d.extend_from_slice(&11u32.to_be_bytes());
+        put_key(&mut d, "Nm  ");
+        d.extend_from_slice(b"TEXT");
+        put_text(&mut d, "Wash");
+        put_object(&mut d, "Brsh", 2);
+        put_untf(&mut d, "Dmtr", 60.0);
+        put_untf(&mut d, "Hrdn", 0.0);
+        put_bool(&mut d, "useTexture");
+        put_object(&mut d, "Txtr", 1);
+        put_key(&mut d, "Idnt");
+        d.extend_from_slice(b"TEXT");
+        put_text(&mut d, "pat1");
+        put_untf(&mut d, "textureDepth", 40.0);
+        put_enum(&mut d, "textureBlendMode", "Hght");
+        put_object(&mut d, "dualBrush", 4);
+        put_bool(&mut d, "useDualBrush");
+        put_object(&mut d, "Brsh", 3);
+        put_untf(&mut d, "Dmtr", 30.0);
+        put_untf(&mut d, "Spcn", 50.0);
+        put_key(&mut d, "sampledData");
+        d.extend_from_slice(b"TEXT");
+        put_text(&mut d, "$abc");
+        put_enum(&mut d, "BlnM", "linearHeight");
+        put_object(&mut d, "scatterDynamics", 1);
+        put_untf(&mut d, "jitter", 20.0);
+        put_bool(&mut d, "useColorDynamics");
+        put_untf(&mut d, "H   ", 10.0);
+        put_object(&mut d, "clVr", 1);
+        put_untf(&mut d, "bVTy", 2.0);
+        put_object(&mut d, "toolOptions", 3);
+        put_untf(&mut d, "flow", 70.0);
+        put_untf(&mut d, "Opct", 80.0);
+        put_enum(&mut d, "Md  ", "Drkn");
+        put_block(&mut out, b"desc", &d);
+        out
+    }
+
+    #[test]
+    fn a_brush_brings_its_texture_dual_brush_colour_dynamics_and_tool_settings() {
+        use crate::brush_engine::dual::DualMode;
+        use crate::brush_engine::dynamics::{DabSetting, Sensor};
+        let imported = import(&abr6_textured(), "set").unwrap();
+        assert!(imported.notes.is_empty(), "{:?}", imported.notes);
+        let b = &imported.presets[0].brush;
+        let t = b.texture.as_ref().expect("the texture");
+        assert!(t.pattern.name == "Paper" && (t.strength - 0.4).abs() < 1e-6);
+        // Photoshop's height formula, the soft way (none leaves the paint).
+        assert_eq!(t.krita.map(|k| (k.mode, k.soft)), Some((14, true)));
+        // The ramp kept as it is (dark to light), at its own 4 px.
+        let d = t.pattern.data();
+        assert!(
+            d[0] < 0.1 && d[d.len() - 1] > 0.8,
+            "{} {}",
+            d[0],
+            d[d.len() - 1]
+        );
+        assert!((t.scale - 4.0 / t.pattern.size as f32).abs() < 1e-6);
+        let dual = b.dual.as_ref().expect("the dual brush");
+        assert!(matches!(dual.shape, PixelBrushShape::Custom(_)));
+        assert_eq!(
+            (dual.size, dual.spacing, dual.mode),
+            (0.5, 50.0, DualMode::Height)
+        );
+        assert!((dual.scatter - 10.0).abs() < 1e-3);
+        assert!((b.dynamics.random.hue - 18.0).abs() < 1e-3);
+        // A light touch paints the secondary colour.
+        let mix = b
+            .inputs
+            .iter()
+            .find(|m| m.setting == DabSetting::ColorMix)
+            .unwrap();
+        assert_eq!(mix.sensor, Sensor::Pressure);
+        assert!(mix.curve.points[0].y == 1.0 && mix.curve.points[1].y == 0.0);
+        let o = &b.brush_options;
+        assert_eq!((o.flow, o.opacity), (70.0, 0.8));
+        assert_eq!(
+            b.paint_blend,
+            crate::canvas::blend_modes::LayerBlend::Darken
+        );
+    }
+
     #[test]
     fn a_version_1_file_brings_computed_and_sampled_brushes() {
         let mut out = Vec::new();
@@ -607,9 +1226,10 @@ mod tests {
 
     #[test]
     fn damaged_photoshop_brushes_are_refused_not_panicked_on() {
-        let good = abr6();
-        for cut in (0..good.len()).step_by(7) {
-            let _ = import(&good[..cut], "cut");
+        for good in [abr6(), abr6_textured()] {
+            for cut in (0..good.len()).step_by(7) {
+                let _ = import(&good[..cut], "cut");
+            }
         }
         assert!(import(&[0, 99], "bad").is_err());
     }

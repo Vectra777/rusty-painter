@@ -525,6 +525,7 @@ fn bench_text(c: &mut Criterion) {
                 paragraph,
                 &style,
                 Vec2::splat(100.0),
+                None,
             ))
         })
     });

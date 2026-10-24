@@ -141,8 +141,17 @@ impl PainterApp {
     /// 3. the canvas, fresh per-layer state and render cache are installed;
     /// 4. the selection is cleared and the view refits.
     pub(crate) fn replace_document(&mut self, canvas: Canvas, history: History) {
-        // 0. A document with work in it stays open, in its own tab.
+        // 0. A document with work in it stays open, in its own tab (one
+        // painted together goes on in it); one that doesn't is gone.
         self.keep_document_in_tab();
+        self.collab_document_replaced();
+        self.install_document(canvas, history, true);
+    }
+
+    /// Steps 1 to 4 of [`Self::replace_document`], the view refitted if
+    /// `refit` (a document painted together changing under the painter
+    /// keeps it).
+    pub(crate) fn install_document(&mut self, canvas: Canvas, history: History, refit: bool) {
         // 1. Background work.
         self.release_canvas();
         self.patch_abandon();
@@ -169,7 +178,10 @@ impl PainterApp {
         self.selection_manager.clear_selection();
         self.selection_manager.canvas_size = [width, height];
         self.workspace.select.saved.clear();
-        self.reset_viewport_state();
+        self.brush_state.palettes.forget_document();
+        if refit {
+            self.reset_viewport_state();
+        }
         self.mark_saved();
     }
 
@@ -227,6 +239,15 @@ impl PainterApp {
             .new_canvas
             .background_color32(self.workspace.color_model);
         self.rebuild_canvas(width, height, background);
+        let paper = self.modal_state.new_canvas.paper.tiles(
+            (width, height),
+            TILE_SIZE,
+            background,
+            self.workspace.color_model,
+        );
+        for ((tx, ty), data) in paper {
+            self.canvas_mut().set_layer_tile_data(0, tx, ty, data);
+        }
         self.workspace.library.has_document = true;
         self.canvas_mut().blend_space = self.modal_state.new_canvas.blend_space;
         let depth = self.modal_state.new_canvas.depth;

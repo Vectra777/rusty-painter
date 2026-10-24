@@ -84,6 +84,17 @@ enum WheelDrag {
     Triangle,
 }
 
+/// Where a slider's menu leaves its colours for the palette.
+const SLIDER_PALETTE: &str = "slider_palette_request";
+
+/// A slider's colours asked for as a palette row (`new`: a new palette).
+#[derive(Clone)]
+struct SliderPalette {
+    colors: Vec<Color32>,
+    new: bool,
+    name: String,
+}
+
 /// Horizontal gradient bar with a handle; returns whether `value` changed.
 fn gradient_slider(
     ui: &mut egui::Ui,
@@ -155,6 +166,40 @@ fn gradient_slider(
         }
         painter.circle_filled(center, knob - 2.5, inner);
 
+        // Right-click (or long-press): the bar's colours into a palette.
+        response.context_menu(|ui| {
+            let steps_id = egui::Id::new("slider_palette_steps");
+            let mut steps: usize = ui.data(|d| d.get_temp(steps_id)).unwrap_or(9);
+            ui.horizontal(|ui| {
+                ui.label("Steps");
+                ui.add(egui::DragValue::new(&mut steps).range(2..=32));
+            });
+            ui.data_mut(|d| d.insert_temp(steps_id, steps));
+            let colors: Vec<Color32> = (0..steps)
+                .map(|i| {
+                    let c = color_at(i as f32 / (steps - 1) as f32);
+                    let [r, g, b, _] = c.to_srgba_unmultiplied();
+                    Color32::from_rgb(r, g, b)
+                })
+                .collect();
+            let mut new = None;
+            if ui.button("Add as a palette row").clicked() {
+                new = Some(false);
+            }
+            if ui.button("New palette from it").clicked() {
+                new = Some(true);
+            }
+            if let Some(new) = new {
+                let request = SliderPalette {
+                    colors,
+                    new,
+                    name: format!("{label} steps"),
+                };
+                ui.data_mut(|d| d.insert_temp(egui::Id::new(SLIDER_PALETTE), request));
+                ui.close_menu();
+            }
+        });
+
         let mut changed = false;
         if (response.dragged() || response.clicked())
             && let Some(pos) = response.interact_pointer_pos()
@@ -200,6 +245,12 @@ fn barycentric(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> (f32, f32, f32) {
 /// The smallest the wheel gets to make room for the rest.
 const MIN_WHEEL: f32 = 120.0;
 
+#[cfg(test)]
+thread_local! {
+    /// The wheel's side as last drawn.
+    static WHEEL_SIDE: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
 /// Hue ring with a saturation/value triangle inside, at most `max_side`
 /// across. The triangle rotates so its pure-hue corner points at the
 /// selected hue on the ring.
@@ -208,6 +259,8 @@ fn hue_wheel(ui: &mut egui::Ui, state: &mut PickerState, max_side: f32) -> bool 
         .available_width()
         .min(metrics(ui.ctx()).wheel_max)
         .min(max_side);
+    #[cfg(test)]
+    WHEEL_SIDE.with(|s| s.set(side));
     let (outer_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), side), Sense::hover());
     let rect = egui::Rect::from_center_size(outer_rect.center(), egui::vec2(side, side));
@@ -544,7 +597,11 @@ pub fn color_picker_panel(
     // scrolls rather than the wheel shrinking to a thumbnail.
     let wheel_cap = (ui.available_height() - rest)
         .max(MIN_WHEEL)
-        .max((ui.available_width() * 0.8).min(ui.available_height() * 0.55));
+        .max((ui.available_width() * 0.8).min(ui.available_height() * 0.55))
+        // As wide as the panel less the scroll bar, shown or not: the bar
+        // coming and going would otherwise change the wheel, which changes
+        // whether it's needed, and the wheel flickers between two sizes.
+        .min(ui.available_width() - ui.spacing().scroll.allocated_width());
     let mut wheel_side = 0.0;
     // Wide and short (a phone held sideways): the wheel on the left, as
     // tall as the panel, the rest beside it.
@@ -672,13 +729,28 @@ pub fn color_picker_panel(
                 new_color = Some((c, true));
             }
             ui.add_space(4.0);
-            let (picked, changed) =
-                crate::ui::palette_window::swatches(&mut brush_state.swatches, color, ui);
+            let picked =
+                crate::ui::palette_window::palette_grid(&mut brush_state.palettes, color, ui);
             if let Some(c) = picked {
                 new_color = Some((c, true));
             }
-            brush_state.swatches_dirty |= changed;
         });
+    let request: Option<SliderPalette> = ui.ctx().data_mut(|d| {
+        let id = egui::Id::new(SLIDER_PALETTE);
+        let r = d.get_temp(id);
+        d.remove::<SliderPalette>(id);
+        r
+    });
+    if let Some(r) = request {
+        let palettes = &mut brush_state.palettes;
+        if r.new {
+            let mut p = crate::app::tools::palettes::Palette::new(&r.name, &r.colors);
+            p.columns = r.colors.len().min(crate::app::tools::palettes::MAX_COLUMNS);
+            palettes.add(p, false);
+        } else {
+            palettes.edit_active().add_rows(0, &r.colors);
+        }
+    }
     let below = scroll.content_size.y - wheel_side;
     if (below - rest).abs() > 0.5 {
         ui.data_mut(|d| d.insert_temp(rest_id, below));
@@ -746,5 +818,59 @@ mod tests {
         let mut s = state(0.3, 0.8, 0.9);
         sync_state_from_color(&mut s, Color32::BLACK);
         assert_eq!((s.hue, s.sat, s.val), (0.3, 0.8, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    /// The wheel's side over 40 frames of the panel at `size` (with the
+    /// touch layout's style if `touch`).
+    fn sides(size: egui::Vec2, touch: bool) -> Vec<f32> {
+        let mut app = crate::project::tests::test_app_pub(crate::canvas::Canvas::new(
+            64,
+            64,
+            Color32::WHITE,
+            64,
+        ));
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_style(&ctx, touch);
+        (0..40)
+            .map(|_| {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        color_picker_panel(ui, &mut app.brush_state, ColorModel::Rgba);
+                    });
+                });
+                WHEEL_SIDE.with(|s| s.get())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_wheel_settles_at_any_panel_size() {
+        let mut bad = Vec::new();
+        for touch in [false, true] {
+            for w in (200..=420).step_by(9) {
+                for h in (250..=900).step_by(11) {
+                    let sides = sides(egui::vec2(w as f32, h as f32), touch);
+                    let tail = &sides[30..];
+                    if tail.windows(2).any(|p| (p[0] - p[1]).abs() > 0.5) {
+                        bad.push((touch, w, h, tail[0], tail[1]));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} sizes flicker, e.g. {:?}",
+            bad.len(),
+            &bad[..bad.len().min(6)]
+        );
     }
 }

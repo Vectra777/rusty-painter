@@ -39,6 +39,96 @@ pub enum ColorModel {
     Grayscale,
 }
 
+/// What a new canvas's Background layer shows on its colour.
+#[derive(Clone, Default)]
+pub enum Paper {
+    #[default]
+    None,
+    /// A paper texture, repeated: its valleys shade the colour by
+    /// `strength`, the texture `scale` times its size.
+    Texture {
+        pattern: std::sync::Arc<crate::brush_engine::texture::Pattern>,
+        strength: f32,
+        scale: f32,
+    },
+    /// A picture covering the canvas (its edges cut to the canvas's shape).
+    Picture {
+        name: String,
+        image: std::sync::Arc<image::RgbaImage>,
+    },
+}
+
+impl Paper {
+    /// The Background layer's tiles (`ts` pixels a side) for a `w`×`h`
+    /// canvas of colour `background` (premultiplied; white when
+    /// transparent); none for no paper.
+    pub fn tiles(
+        &self,
+        (w, h): (usize, usize),
+        ts: usize,
+        background: Color32,
+        model: ColorModel,
+    ) -> Vec<((i32, i32), Vec<Color32>)> {
+        let base = if background.a() == 0 {
+            Color32::WHITE
+        } else {
+            background
+        };
+        let gray = |c: Color32| match model {
+            ColorModel::Rgba => c,
+            ColorModel::Grayscale => to_grayscale(c),
+        };
+        let size = (w as i32, h as i32);
+        match self {
+            Paper::None => Vec::new(),
+            Paper::Texture {
+                pattern,
+                strength,
+                scale,
+            } => {
+                let inv = 1.0 / scale.max(0.01);
+                crate::app::import::pixels_to_tiles(ts as i32, (0, 0), size, |x, y| {
+                    let k = 1.0 - strength * (1.0 - pattern.at(x as f32, y as f32, inv));
+                    let [r, g, b, a] = base.to_array();
+                    let shade = |v: u8| (v as f32 * k).round() as u8;
+                    Color32::from_rgba_premultiplied(shade(r), shade(g), shade(b), a)
+                })
+            }
+            Paper::Picture { image, .. } => {
+                // Scaled to cover the canvas, its middle kept.
+                let (iw, ih) = (image.width().max(1) as f32, image.height().max(1) as f32);
+                let k = (w as f32 / iw).max(h as f32 / ih);
+                let (sw, sh) = ((iw * k).ceil() as u32, (ih * k).ceil() as u32);
+                let img = image::imageops::resize(
+                    image.as_ref(),
+                    sw.max(w as u32),
+                    sh.max(h as u32),
+                    image::imageops::FilterType::Triangle,
+                );
+                let (ox, oy) = ((img.width() - w as u32) / 2, (img.height() - h as u32) / 2);
+                crate::app::import::pixels_to_tiles(ts as i32, (0, 0), size, |x, y| {
+                    let [r, g, b, a] = img.get_pixel(x as u32 + ox, y as u32 + oy).0;
+                    let top = Color32::from_rgba_unmultiplied(r, g, b, a).to_array();
+                    // Over the colour, where the picture is see-through.
+                    let under = base.to_array();
+                    let c: [u8; 4] = std::array::from_fn(|i| {
+                        top[i] + ((under[i] as u32 * (255 - a as u32) + 127) / 255) as u8
+                    });
+                    gray(Color32::from_rgba_premultiplied(c[0], c[1], c[2], c[3]))
+                })
+            }
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Paper::None => "None",
+            Paper::Texture { pattern, .. } => &pattern.name,
+            Paper::Picture { name, .. } => name,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct NewCanvasSettings {
     pub name: String,
@@ -54,6 +144,7 @@ pub struct NewCanvasSettings {
     pub blend_space: crate::canvas::blend_modes::BlendSpace,
     /// Bits the new document keeps for each channel.
     pub depth: crate::canvas::storage::Depth,
+    pub paper: Paper,
 }
 
 /// A changed rectangle inside one tile, in tile-local pixels:
@@ -130,6 +221,7 @@ impl NewCanvasSettings {
             color_model: ColorModel::Rgba,
             blend_space: canvas.blend_space,
             depth: canvas.depth(),
+            paper: Paper::None,
         }
     }
 
@@ -240,6 +332,42 @@ mod tests {
     }
 
     #[test]
+    fn paper_shades_the_background_and_a_picture_covers_the_canvas() {
+        use super::Paper;
+        let pattern = crate::brush_engine::texture::builtin()[0].clone();
+        let paper = Paper::Texture {
+            pattern,
+            strength: 0.5,
+            scale: 1.0,
+        };
+        let tiles = paper.tiles((100, 70), 64, Color32::WHITE, ColorModel::Rgba);
+        assert_eq!(tiles.len(), 4);
+        let px: Vec<Color32> = tiles.iter().flat_map(|(_, t)| t.iter().copied()).collect();
+        // Shaded by up to half, never see-through where the canvas is.
+        assert!(px.iter().any(|c| c.r() < 200));
+        assert!((px.iter()).all(|c| c.a() == 0 || (c.a() == 255 && c.r() >= 127)));
+        // A 2×1 picture, red left and blue right, on a square canvas: its
+        // middle, scaled up, so the canvas's left edge is red.
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 0, 255, 255]));
+        let paper = Paper::Picture {
+            name: "p".into(),
+            image: std::sync::Arc::new(img),
+        };
+        let tiles = paper.tiles((64, 64), 64, Color32::WHITE, ColorModel::Rgba);
+        let tile = &tiles[0].1;
+        assert!(tile[0].r() > 200 && tile[0].b() < 60, "{:?}", tile[0]);
+        assert!(tile[63].b() > 200, "{:?}", tile[63]);
+        assert!(tile.iter().all(|c| c.a() == 255));
+        assert!(
+            Paper::None
+                .tiles((8, 8), 64, Color32::WHITE, ColorModel::Rgba)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn unit_conversion_is_capped() {
         let settings = NewCanvasSettings {
             width: 2.0,
@@ -253,6 +381,7 @@ mod tests {
             color_model: ColorModel::Rgba,
             blend_space: Default::default(),
             depth: Default::default(),
+            paper: Paper::None,
         };
         assert_eq!(settings.validated_dimensions().unwrap(), (9_600, 14_400));
     }
@@ -271,6 +400,7 @@ mod tests {
             color_model: ColorModel::Grayscale,
             blend_space: Default::default(),
             depth: Default::default(),
+            paper: Paper::None,
         };
 
         let [r, g, b, _] = settings

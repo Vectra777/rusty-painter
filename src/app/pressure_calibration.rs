@@ -151,6 +151,8 @@ mod tests {
             time: None,
             is_eraser: false,
             phase,
+            predicted: false,
+            awaiting: None,
         };
         let mut c = Calibration::default();
         c.record(&[sample(10.0, 0.5, TabletPhase::Down)]);

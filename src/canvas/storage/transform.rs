@@ -317,6 +317,46 @@ pub(crate) fn apply_homography(h: &[f64; 9], p: Vec2) -> Vec2 {
     )
 }
 
+/// `a` after `b`: the map taking p to a(b(p)).
+pub(crate) fn mul3(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
+    std::array::from_fn(|i| {
+        let (r, c) = (i / 3, i % 3);
+        (0..3).map(|k| a[r * 3 + k] * b[k * 3 + c]).sum()
+    })
+}
+
+impl TransformParams {
+    /// This transform as one 3×3 projective map (an affine one or a
+    /// perspective; `None` for a warp, which no such map describes),
+    /// worked out from where it takes the corners of `bounds`.
+    pub fn as_homography(&self, bounds: eframe::egui::Rect) -> Option<[f64; 9]> {
+        if self.warp.is_some() {
+            return None;
+        }
+        let src = rect_corners(bounds);
+        homography(src, src.map(|p| self.forward(p)))
+    }
+}
+
+/// How much a map grows lengths around the quad `src` goes to as `dst`
+/// (the square root of how much it grows areas): what a line's width is
+/// scaled by.
+pub fn length_scale(src: [Vec2; 4], dst: [Vec2; 4]) -> f32 {
+    let area = |q: [Vec2; 4]| {
+        (0..4)
+            .map(|i| q[i].x * q[(i + 1) % 4].y - q[(i + 1) % 4].x * q[i].y)
+            .sum::<f32>()
+            .abs()
+            * 0.5
+    };
+    let (a, b) = (area(src), area(dst));
+    if a > 1e-6 && b.is_finite() {
+        (b / a).sqrt()
+    } else {
+        1.0
+    }
+}
+
 pub(super) fn source_bounds_and_tiles(
     src_tiles: &HashMap<(i32, i32), Vec<Color32>>,
     tile_size: usize,

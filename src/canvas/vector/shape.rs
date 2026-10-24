@@ -301,6 +301,16 @@ impl VectorItem {
         }
     }
 
+    /// Boxes together covering what it draws, `[x0, y0, x1, y1)`, added to
+    /// `out`: a line's piece by piece (a long or diagonal one covers far
+    /// less than its box), anything else its box.
+    pub fn reach(&self, out: &mut Vec<[i32; 4]>) {
+        match self {
+            VectorItem::Line(l) => l.reach(out),
+            _ => out.push(self.bounds()),
+        }
+    }
+
     /// Whether a circle at `c` of radius `r` touches what it draws.
     pub fn touches(&self, c: Vec2, r: f32) -> bool {
         match self {
@@ -318,13 +328,24 @@ impl VectorItem {
     }
 
     /// Every point moved through `f` and every width scaled by `scale`
-    /// (a move, a crop or an affine transform's size change).
+    /// (a move, a crop or an affine transform's size change), lines no
+    /// wider than [`super::MAX_WIDTH`].
     pub fn map_points(&mut self, f: &impl Fn(Vec2) -> Vec2, scale: f32) {
+        self.map_points_within(f, scale, super::MAX_WIDTH);
+    }
+
+    /// [`Self::map_points`] for a picture of it zoomed in: lines as wide
+    /// as they come out.
+    pub fn map_points_for_view(&mut self, f: &impl Fn(Vec2) -> Vec2, scale: f32) {
+        self.map_points_within(f, scale, f32::INFINITY);
+    }
+
+    fn map_points_within(&mut self, f: &impl Fn(Vec2) -> Vec2, scale: f32, max_width: f32) {
         match self {
             VectorItem::Line(l) => {
                 for p in &mut l.points {
                     let q = f(Vec2::new(p[0], p[1]));
-                    *p = [q.x, q.y, (p[2] * scale).clamp(0.0, super::MAX_WIDTH)];
+                    *p = [q.x, q.y, (p[2] * scale).clamp(0.0, max_width)];
                 }
             }
             VectorItem::Shape(s) => {
@@ -349,7 +370,7 @@ impl VectorItem {
             }
             VectorItem::Group(g) => {
                 for i in &mut g.items {
-                    i.map_points(f, scale);
+                    i.map_points_within(f, scale, max_width);
                 }
             }
         }
@@ -424,7 +445,7 @@ impl Painter {
     pub(super) fn at(&self, x: i32, y: i32, coverage: f32) -> Color32 {
         match self {
             Painter::Colour([r, g, b, a]) => {
-                let a = (*a as f32 * coverage).round() as u8;
+                let a = (*a as f32 * coverage + 0.5) as u8;
                 Color32::from_rgba_unmultiplied(*r, *g, *b, a)
             }
             Painter::Gradient {
