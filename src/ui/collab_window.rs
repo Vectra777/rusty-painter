@@ -22,12 +22,30 @@ pub fn collab_window(app: &mut PainterApp, ctx: &egui::Context) {
             if let Some(c) = &app.workspace.collab {
                 ui.label(&c.status);
                 if let Some(invite) = &c.invite {
-                    ui.separator();
-                    ui.label("Invite code:");
-                    let mut code = invite.clone();
-                    ui.add(egui::TextEdit::multiline(&mut code).desired_rows(2));
-                    if ui.button("Copy").clicked() {
-                        ctx.copy_text(invite.clone());
+                    let codes = [
+                        ("Invite code:", Some(invite)),
+                        ("Through Tailscale:", c.tailnet_invite.as_ref()),
+                    ];
+                    for (title, code) in codes {
+                        let Some(code) = code else { continue };
+                        ui.separator();
+                        ui.label(title);
+                        let mut shown = code.clone();
+                        ui.add(egui::TextEdit::multiline(&mut shown).desired_rows(2));
+                        let qr_id = ui.id().with((title, "qr"));
+                        let mut qr = ui.data(|d| d.get_temp(qr_id)).unwrap_or(false);
+                        ui.push_id(title, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("Copy").clicked() {
+                                    ctx.copy_text(code.clone());
+                                }
+                                qr ^= ui.selectable_label(qr, "QR code").clicked();
+                            });
+                        });
+                        ui.data_mut(|d| d.insert_temp(qr_id, qr));
+                        if qr {
+                            qr_code(ui, code);
+                        }
                     }
                     ui.label(
                         RichText::new(
@@ -95,6 +113,14 @@ pub fn collab_window(app: &mut PainterApp, ctx: &egui::Context) {
             }
             ui.label(RichText::new("Join").strong());
             ui.add(egui::TextEdit::singleline(&mut form.invite).hint_text("rp://…"));
+            // A phone's camera reads the host's QR code and copies it.
+            #[cfg(target_os = "android")]
+            if ui.button("Paste").clicked() {
+                match crate::android::clipboard_text() {
+                    Ok(text) => form.invite = text.trim().to_string(),
+                    Err(err) => form.error = Some(err),
+                }
+            }
             ui.label(
                 RichText::new("The open document stays in its own tab.")
                     .small()
@@ -118,6 +144,36 @@ pub fn collab_window(app: &mut PainterApp, ctx: &egui::Context) {
     };
     app.workspace.collab_form.error = result.err();
     app.workspace.collab_form.open = open;
+}
+
+/// `text` as a QR code, dark on a light square with its quiet zone, as
+/// big as the window allows (a camera reads it off the screen).
+fn qr_code(ui: &mut egui::Ui, text: &str) {
+    use qrcodegen::{QrCode, QrCodeEcc};
+    let Ok(qr) = QrCode::encode_text(text, QrCodeEcc::Low) else {
+        return;
+    };
+    let modules = qr.size() + 8;
+    let side = ui.available_width().min(320.0);
+    let cell = (side / modules as f32).floor().max(1.0);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::Vec2::splat(cell * modules as f32),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
+    for y in 0..qr.size() {
+        for x in 0..qr.size() {
+            if qr.get_module(x, y) {
+                let min = rect.min + egui::vec2((x + 4) as f32, (y + 4) as f32) * cell;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(min, egui::Vec2::splat(cell)),
+                    0.0,
+                    egui::Color32::BLACK,
+                );
+            }
+        }
+    }
 }
 
 enum Action {

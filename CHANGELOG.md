@@ -10,6 +10,8 @@
 - The session belongs to its document: on another tab, what the others do waits for coming back to it. Joining keeps what was open in its own tab; the joined canvas is a new document of your own, to save or export, and what the others paint counts as unsaved work (and is autosaved).
 - On the same network the invite works as is (the host's firewall must let port 7878 in). Over the internet: a VPN such as Tailscale, a forwarded port, or a relay (`cargo run --release --bin relay`, port 7879) when neither side can open one.
 - Connections are encrypted end to end (TLS; the invite pins the host's certificate, so even a relay sees nothing), with an optional password.
+- Each invite code can be shown as a QR code, for a phone's camera; on Android, Paste puts what the camera copied into Join.
+- A host on a Tailscale network also gets an invite through Tailscale, for guests the local network doesn't reach (a router that keeps Wi-Fi devices apart, say).
 
 ### Navigator and check view
 - The Navigator is a second view for painting zoomed in. It's drawn from the canvas view's GPU textures, so it follows each stroke as it's painted, and the parts of the canvas off screen are brought up to date for it. Its window can be made any size. It can be mirrored, and has its own check view.
@@ -17,6 +19,15 @@
 
 ### Interface
 - Slimmer floating windows: their title bars are about a third shorter, with less room between the title and the contents, and rows are a little tighter. Touch mode keeps its larger spacing.
+- Windows and the layers dropdown are only as tall as what's in them (they took the screen's whole height before, most of it empty on a phone).
+- The brush palette button and the tool's action bar no longer show over windows.
+
+### Android
+- Painting together works on Android (it lacked the permission to use the network).
+- Back, and the swipe in from the screen's edge, no longer close the app. When Android closes it anyway, everything is saved first and opening it again starts it fresh: it froze on its splash screen, or crashed, before.
+- Turning the screen, dark mode, split screen and a keyboard coming or going no longer restart the app.
+- What was open comes back by itself at the next start, without asking (Android ends apps in the background as it likes).
+- Painting is faster: memory a stroke frees is kept a second instead of going straight back to the system (eleven times fewer page faults with some brushes).
 
 ### Palettes
 - Several named palettes instead of one list of swatches, chosen in the colour panel. Each is a grid with a set number of columns that can have gaps, and named groups below its first rows; swatches can be named. The swatches of older versions become the first palette.

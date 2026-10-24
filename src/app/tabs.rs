@@ -430,11 +430,10 @@ fn close_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     };
     let (mut discard, mut keep) = (false, false);
     egui::Window::new("Close without saving?")
-        .fit_screen(ctx)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             ui.label("This tab has changes that aren't saved.");
             ui.add_space(6.0);
             ui.horizontal(|ui| {

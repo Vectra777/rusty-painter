@@ -173,12 +173,11 @@ pub fn guides_window(app: &mut PainterApp, ctx: &egui::Context) {
     }
     let (w, h) = (app.canvas.width() as f32, app.canvas.height() as f32);
     egui::Window::new("Guides")
-        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
         .default_width(260.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let guides = &mut app.workspace.view_aids.guides;
             let new = &mut guides.new_guide;
             let was = new.vertical;

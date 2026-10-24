@@ -84,6 +84,20 @@ pub(crate) fn tune_malloc() {
             mallopt(M_MMAP_THRESHOLD, 32 << 20);
         }
     }
+    // Android's malloc gives freed memory back at once: a stroke's buffers,
+    // made anew each sample, came back as fresh pages every time (eleven
+    // times the page faults; painting slower). Kept a second instead.
+    #[cfg(target_os = "android")]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        const M_DECAY_TIME: i32 = -100;
+        // SAFETY: only tunes malloc.
+        unsafe {
+            mallopt(M_DECAY_TIME, 1);
+        }
+    }
 }
 
 /// Give the system back memory that was freed but kept: glibc holds on to

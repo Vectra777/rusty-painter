@@ -18,12 +18,11 @@ pub fn filter_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let (mut ok, mut cancel) = (false, false);
     let mut gradients = Gradients::of(app);
     egui::Window::new(filter.name())
-        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
         .default_width(340.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             settings(ui, &mut filter, &mut gradients);
             ui.separator();
             ui.horizontal(|ui| {
@@ -515,13 +514,12 @@ pub fn adjustment_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = true;
     let mut done = false;
     egui::Window::new(title)
-        .fit_screen(ctx)
         .id(egui::Id::new("adjustment_dialog"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(340.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             settings(ui, &mut filter, &mut Gradients::of(app));
             ui.label(
                 egui::RichText::new(

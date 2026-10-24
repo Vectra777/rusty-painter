@@ -238,6 +238,9 @@ pub(crate) struct Collab {
     name: String,
     /// What guests join with (the host's).
     pub(crate) invite: Option<String>,
+    /// The same through Tailscale, when this machine is on a tailnet (for
+    /// guests the local network doesn't reach).
+    pub(crate) tailnet_invite: Option<String>,
     pub(crate) status: String,
     rx: Receiver<Net>,
     stop: Arc<AtomicBool>,
@@ -937,6 +940,19 @@ fn host_on_relay(relay: String, room: String, door: Door) {
 
 /// The address others on this network reach us at (no packet is sent: a
 /// UDP "connection" just picks the route).
+/// This machine's Tailscale address, when it's on a tailnet: the address
+/// it would reach Tailscale's own resolver from (in 100.64.0.0/10).
+fn tailnet_ip() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("100.100.100.100:53").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64 => {
+            Some(ip)
+        }
+        _ => None,
+    }
+}
+
 fn local_ip() -> String {
     std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| {
@@ -954,6 +970,7 @@ impl Collab {
             me: 0,
             name: name.chars().take(32).collect(),
             invite: None,
+            tailnet_invite: None,
             status: String::new(),
             rx,
             stop,
@@ -1039,6 +1056,19 @@ impl Collab {
             }
         };
         let mut c = Self::new(true, name, rx, stop);
+        if invite.room.is_none()
+            && let Some(ip) = tailnet_ip()
+        {
+            let port = invite.addr.rsplit_once(':').map_or("", |(_, p)| p);
+            c.tailnet_invite = Some(
+                Invite {
+                    addr: format!("{ip}:{port}"),
+                    room: None,
+                    fingerprint,
+                }
+                .code(),
+            );
+        }
         c.invite = Some(invite.code());
         c.users = vec![(0, c.name.clone())];
         c.status = "Hosting: share the invite code".into();

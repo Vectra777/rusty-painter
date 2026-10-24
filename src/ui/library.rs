@@ -1440,12 +1440,11 @@ pub fn library_dialogs(app: &mut PainterApp, ctx: &egui::Context) {
     let mut done: Option<Result<(), String>> = None;
     let mut then = None;
     egui::Window::new(title)
-        .fit_screen(ctx)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .open(&mut keep)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             match &mut dialog {
                 Dialog::NewFolder(name) => {

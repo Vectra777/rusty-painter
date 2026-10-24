@@ -219,6 +219,45 @@ fn picker_class<'a>(
     helper_class(env, activity, "FilePicker")
 }
 
+/// Back no longer ends the app (see `BackGuard.java`).
+#[cfg(target_os = "android")]
+pub fn guard_back() -> Result<(), String> {
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "BackGuard")?;
+        env.call_static_method(
+            &class,
+            "install",
+            "(Landroid/app/Activity;)V",
+            &[JValue::Object(&activity)],
+        )
+        .map_err(jerr)?;
+        Ok(())
+    })
+}
+
+/// The text on the clipboard (what the camera copied from a QR code, say).
+#[cfg(target_os = "android")]
+pub fn clipboard_text() -> Result<String, String> {
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "Clipboard")?;
+        let text = env
+            .call_static_method(
+                &class,
+                "text",
+                "(Landroid/app/Activity;)Ljava/lang/String;",
+                &[JValue::Object(&activity)],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        if text.is_null() {
+            return Err("The clipboard has no text".into());
+        }
+        env.get_string(&JString::from(text))
+            .map(String::from)
+            .map_err(jerr)
+    })
+}
+
 /// Show or hide the soft keyboard (NativeActivity can't by itself).
 #[cfg(target_os = "android")]
 pub fn show_keyboard(on: bool) -> Result<(), String> {

@@ -624,12 +624,11 @@ pub fn gradient_editor_window(app: &mut PainterApp, ctx: &egui::Context) {
     let mut changed = false;
     let mut delete = false;
     egui::Window::new("Gradient Editor")
-        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
         .default_width(380.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let g = &mut state.library.custom[editor.index];
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Name").color(TEXT_DIM));
