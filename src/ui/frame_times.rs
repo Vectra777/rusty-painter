@@ -56,12 +56,11 @@ pub fn frame_times_window(app: &mut PainterApp, ctx: &egui::Context) {
     }
     let mut open = true;
     egui::Window::new("Frame Times")
-        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(true)
         .default_width(340.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let summary = stats.summary();
             let fps = summary
                 .fps

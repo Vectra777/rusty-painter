@@ -118,11 +118,10 @@ pub fn select_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         SelectDialog::Save { .. } => "Save Selection".to_string(),
     };
     egui::Window::new(title)
-        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             match &mut dialog {
                 SelectDialog::Modify { op, radius } => {
                     slider_row(

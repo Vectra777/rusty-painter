@@ -14,15 +14,27 @@ const WINDOW_MARGIN: f32 = 8.0;
 /// wider or taller than the window (or, after a resize, left past its
 /// edges).
 pub(crate) trait FitScreen: Sized {
-    /// Sized by its contents: what doesn't fit scrolls.
-    fn fit_screen(self, ctx: &egui::Context) -> Self;
+    /// Shown sized by its contents (no taller): what doesn't fit scrolls.
+    fn show_fitted<R>(
+        self,
+        ctx: &egui::Context,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Option<egui::InnerResponse<Option<R>>>;
     /// Resizable (it scrolls its own contents): only capped.
     fn fit_screen_size(self, ctx: &egui::Context) -> Self;
 }
 
 impl FitScreen for egui::Window<'_> {
-    fn fit_screen(self, ctx: &egui::Context) -> Self {
-        self.fit_screen_size(ctx).vscroll(true)
+    fn show_fitted<R>(
+        self,
+        ctx: &egui::Context,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Option<egui::InnerResponse<Option<R>>> {
+        // The scroll area of its own: the window's (`vscroll`) never
+        // shrinks, so the window took all the height it was allowed.
+        self.fit_screen_size(ctx).show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, add_contents).inner
+        })
     }
 
     fn fit_screen_size(self, ctx: &egui::Context) -> Self {
@@ -454,7 +466,8 @@ pub(crate) fn flyout(
 }
 
 /// A small menu dropping from a top-bar button (`anchor`) while `*open`,
-/// its right edge under the button's; `size` is its content's. Closes on a
+/// its right edge under the button's; `size` is its content's (the most:
+/// shorter contents make it shorter). Closes on a
 /// tap on the canvas or a panel (not on its own popups, like a combo box).
 pub(crate) fn dropdown(
     ctx: &egui::Context,
@@ -481,8 +494,9 @@ pub(crate) fn dropdown(
                 .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
                 .inner_margin(egui::Margin::same(8.0))
                 .show(ui, |ui| {
+                    // At most that tall: a short list leaves no empty box.
                     ui.set_width(size.x);
-                    ui.set_height(size.y);
+                    ui.set_max_height(size.y);
                     ui.set_clip_rect(ui.max_rect().expand(1.0));
                     add_contents(ui);
                 });

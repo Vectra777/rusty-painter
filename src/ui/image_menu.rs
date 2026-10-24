@@ -111,11 +111,10 @@ pub fn size_dialog(app: &mut PainterApp, ctx: &egui::Context) {
         SizeDialog::Image { .. } => "Image Size",
     };
     egui::Window::new(title)
-        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             ui.label(format!("Now {cw} × {ch} px"));
             match &mut dialog {
                 SizeDialog::Canvas { w, h, anchor } => {

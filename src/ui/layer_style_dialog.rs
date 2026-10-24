@@ -32,13 +32,12 @@ pub fn fill_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let title = format!("Fill: {}", app.canvas.layers[idx].name);
     let (mut open, mut done) = (true, false);
     egui::Window::new(title)
-        .fit_screen(ctx)
         .id(egui::Id::new("fill_dialog"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(340.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             fill_settings(
                 ui,
                 &mut fill,
@@ -202,13 +201,12 @@ pub fn border_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let title = format!("Border: {}", app.canvas.layers[idx].name);
     let (mut open, mut done) = (true, false);
     egui::Window::new(title)
-        .fit_screen(ctx)
         .id(egui::Id::new("border_dialog"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(320.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let mut on = style.border.is_some();
             if ui.checkbox(&mut on, "Border around the paint").changed() {
                 style.border = on.then(Border::default);
@@ -264,13 +262,12 @@ pub fn overlay_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let (mut open, mut done) = (true, false);
     let mut gradients = crate::ui::filter_dialog::Gradients::of(app);
     egui::Window::new(title)
-        .fit_screen(ctx)
         .id(egui::Id::new("overlay_dialog"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(340.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let mut on = style.overlay.is_some();
             if ui.checkbox(&mut on, "Gradient over the paint").changed() {
                 style.overlay = on.then(|| {
@@ -326,13 +323,12 @@ pub fn line_width_dialog(app: &mut PainterApp, ctx: &egui::Context) {
     let title = format!("Line Width: {}", app.canvas.layers[idx].name);
     let (mut open, mut ok, mut cancel) = (true, false, false);
     egui::Window::new(title)
-        .fit_screen(ctx)
         .id(egui::Id::new("line_width_dialog"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .default_width(300.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             slider_row(
                 ui,
                 "Width",

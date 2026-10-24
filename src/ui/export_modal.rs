@@ -17,12 +17,11 @@ pub fn export_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     let mut open = app.export_state.show_modal;
     egui::Window::new("Export Canvas")
-        .fit_screen(ctx)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let settings = &mut app.export_state.settings;
             let mut choose = false;
 

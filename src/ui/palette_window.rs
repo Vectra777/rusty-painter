@@ -26,7 +26,6 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
     let touch = metrics(ctx).touch;
     let swatch = if touch { 34.0 } else { 24.0 };
     let response = egui::Window::new("Palette")
-        .fit_screen(ctx)
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
@@ -34,7 +33,7 @@ pub fn palette_window(app: &mut PainterApp, ctx: &egui::Context) {
         // Tall enough for all of it, where the screen is (it scrolls
         // where not).
         .default_height(640.0)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             palettes_section(app, ui);
             ui.separator();
             picture_section(app, ui, swatch);

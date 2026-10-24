@@ -497,7 +497,9 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     }
     egui::ScrollArea::vertical()
         .id_salt("layers_scroll")
-        .auto_shrink([false; 2])
+        // A touch screen's dropdown ends with its last layer; the side
+        // panel fills its column.
+        .auto_shrink([false, m.touch])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             for &(i, depth) in &order {

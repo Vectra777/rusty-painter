@@ -588,11 +588,10 @@ fn save_preset_modal(app: &mut PainterApp, ctx: &egui::Context) {
     let warning_id = egui::Id::new(DUPLICATE_NAME_WARNING_ID);
     let mut save = None;
     egui::Window::new("Save Brush Preset")
-        .fit_screen(ctx)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             ui.label("Preset name");
             ui.text_edit_singleline(&mut bs.new_preset_name);
             if ctx.data(|d| d.get_temp::<bool>(warning_id).unwrap_or(false)) {

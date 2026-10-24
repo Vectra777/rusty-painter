@@ -249,13 +249,12 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = true;
     let mut pick = None;
     egui::Window::new("Import image")
-        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .fixed_size(screen.size() * egui::vec2(0.8, 0.75))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let g = &mut app.workspace.gallery;
             if let Some(e) = &g.error {
                 ui.label(RichText::new(e).color(egui::Color32::from_rgb(230, 110, 110)));

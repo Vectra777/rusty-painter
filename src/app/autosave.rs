@@ -356,17 +356,22 @@ pub fn recovery_dialog(app: &mut PainterApp, ctx: &eframe::egui::Context) {
     let Some(path) = app.workspace.autosave.recovery.as_ref() else {
         return;
     };
+    // Phones end apps in the background as they like (and an update ends
+    // it too): what was open comes back as it was, without asking.
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        app.recover_autosave();
+        return;
+    }
     let age = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .map(crate::ui::library::ago)
         .unwrap_or_default();
     let (mut recover, mut discard) = (false, false);
     egui::Window::new("Recover unsaved work?")
-        .fit_screen(ctx)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             ui.label(format!(
                 "Rusty Painter closed with work that wasn't saved (kept {age})."
             ));

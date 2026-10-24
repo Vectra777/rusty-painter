@@ -122,7 +122,7 @@ fn context_bar(ctx: &egui::Context, area: egui::Rect, add_contents: impl FnOnce(
     egui::Area::new(egui::Id::new("canvas_context_action"))
         .fixed_pos(egui::pos2(area.center().x, area.top() + 12.0))
         .pivot(egui::Align2::CENTER_TOP)
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Middle)
         .show(ctx, |ui| {
             egui::Frame::none()
                 .fill(BG_PANEL)
@@ -137,7 +137,8 @@ fn context_bar(ctx: &egui::Context, area: egui::Rect, add_contents: impl FnOnce(
 
 /// Touch-mode canvas overlays for the canvas `area`.
 pub fn canvas_sliders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
-    // They'd float over the menu sheet and dialogs.
+    // They'd float over the menu sheet and dialogs (in the windows' layer,
+    // any other window covers them).
     let m = &app.modal_state;
     let covered = m.menu_sheet_open
         || m.select_menu_open
@@ -165,7 +166,7 @@ fn palette_button(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
     let size = HIT_WIDTH;
     egui::Area::new(egui::Id::new("canvas_palette_button"))
         .fixed_pos(egui::pos2(area.left() + 6.0, area.bottom() - size - 12.0))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Middle)
         .show(ctx, |ui| {
             let icon = crate::ui::icons::Icon::Brush;
             let open = app.brush_state.library.radial.is_some();

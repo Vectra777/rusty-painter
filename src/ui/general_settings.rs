@@ -305,13 +305,12 @@ pub fn general_settings_modal(app: &mut PainterApp, ctx: &egui::Context) {
 
     let mut open = app.modal_state.show_general_settings;
     egui::Window::new("Settings")
-        .fit_screen(ctx)
         .open(&mut open)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .resizable(false)
         .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             general_settings_panel(app, ui);
         });
     app.modal_state.show_general_settings = open;
@@ -447,12 +446,11 @@ pub fn shortcuts_window(app: &mut PainterApp, ctx: &egui::Context) {
     let columns = shortcut_columns(columns);
     let mut open = true;
     egui::Window::new("Keyboard Shortcuts")
-        .fit_screen(ctx)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(

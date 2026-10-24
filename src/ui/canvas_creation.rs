@@ -82,14 +82,13 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
     let mut open = app.modal_state.show_new_canvas_modal;
     let mut pick = None;
     egui::Window::new("New Canvas")
-        .fit_screen(ctx)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         // Rows wrap on a narrow screen instead of running off it.
         .max_width(540.0_f32.min(ctx.screen_rect().width() - 16.0))
-        .show(ctx, |ui| {
+        .show_fitted(ctx, |ui| {
             let clip = (app.workspace.clipboard.clip.as_ref()).map(|c| (c.w, c.h));
             presets_panel(
                 ui,

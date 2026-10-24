@@ -123,6 +123,10 @@ pub fn android_main(app: AndroidApp) {
     if let Some(dir) = app.internal_data_path() {
         let _ = ANDROID_DATA.set(dir);
     }
+    app::tune_malloc();
+    if let Err(err) = android::guard_back() {
+        log::error!("Back: {err}");
+    }
     let options = android_native_options(app);
     let _ = eframe::run_native(
         APP_NAME,
@@ -132,4 +136,8 @@ pub fn android_main(app: AndroidApp) {
             Ok(Box::new(PainterApp::new(cc)))
         }),
     );
+    // The activity ended and everything is saved: end the process too, so
+    // opening the app again starts it fresh (android-activity can't start a
+    // second activity in the same process).
+    std::process::exit(0);
 }

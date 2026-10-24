@@ -420,9 +420,10 @@ impl<T: 'static> EventLoop<T> {
                     warn!("TODO: forward onStop notification to application");
                 },
                 MainEvent::Destroy => {
-                    // XXX: maybe exit mainloop to drop things before being
-                    // killed by the OS?
-                    warn!("TODO: forward onDestroy notification to application");
+                    // The activity is gone (Back on Android 16 ends it): end the
+                    // loop so the app's exit handler runs. Left running, a new
+                    // activity in this process never gets its own main thread.
+                    self.window_target.p.exit();
                 },
                 MainEvent::InsetsChanged { .. } => {
                     // XXX: how to forward this state to applications?
