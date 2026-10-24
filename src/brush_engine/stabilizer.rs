@@ -308,7 +308,7 @@ pub fn smooth_path_settled(points: &[Vec2], strength: f32, view_scale: f32) -> u
 /// StreamLine (Procreate's feel): `points` from index `from` on, each
 /// smoothed over its neighbours along the path by as much as it's behind
 /// the pen. The newest is where the pen is, and the smoothing grows to its
-/// full `strength` over [`streamline_reach`], so the line trails the pen
+/// full `strength` over `streamline_reach`, so the line trails the pen
 /// by a little, smooth behind it, and ends where the pen lifts.
 pub fn streamline_path_from(
     points: &[Vec2],
@@ -353,7 +353,7 @@ pub fn streamline_path_from(
 
 /// How many of `points` (from the first) [`streamline_path_from`] puts
 /// where it will whatever comes after them: those further behind the pen
-/// than [`streamline_reach`].
+/// than `streamline_reach`.
 pub fn streamline_settled(points: &[Vec2], strength: f32, view_scale: f32) -> usize {
     let full = correction_sigma(strength, view_scale);
     if full <= 0.0 {
