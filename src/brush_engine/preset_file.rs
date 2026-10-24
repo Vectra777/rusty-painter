@@ -262,6 +262,9 @@ struct StoredBrush {
     dual: Option<StoredDual>,
     wet_edge: f32,
     wet_edge_width: f32,
+    wet_edge_style: crate::brush_engine::wet_edge::WetEdgeStyle,
+    /// Burnt edges: their amount and a [`LayerBlend::key`].
+    burnt_edges: Option<(f32, String)>,
     bristles: crate::brush_engine::bristle::Bristles,
     sketch: crate::brush_engine::sketch::Sketch,
     hatching: crate::brush_engine::hatching::Hatching,
@@ -383,6 +386,8 @@ impl StoredBrush {
             dual: b.dual.as_ref().map(|d| StoredDual::from_dual(d, res)),
             wet_edge: b.wet_edge,
             wet_edge_width: b.wet_edge_width,
+            wet_edge_style: b.wet_edge_style,
+            burnt_edges: b.burnt_edges.map(|e| (e.amount, e.mode.key().to_string())),
             bristles: b.bristles.clone(),
             sketch: b.sketch,
             hatching: b.hatching,
@@ -489,6 +494,13 @@ impl StoredBrush {
         b.dual = self.dual.map(|d| d.into_dual(res)).transpose()?;
         b.wet_edge = self.wet_edge;
         b.wet_edge_width = self.wet_edge_width;
+        b.wet_edge_style = self.wet_edge_style;
+        b.burnt_edges = self.burnt_edges.and_then(|(amount, key)| {
+            Some(crate::brush_engine::wet_edge::BurntEdges {
+                amount: amount.clamp(0.0, 1.0),
+                mode: LayerBlend::from_key(&key)?,
+            })
+        });
         b.bristles = self.bristles;
         b.sketch = self.sketch;
         b.hatching = self.hatching;
@@ -992,6 +1004,7 @@ mod tests {
             correction_live: true,
             filter_strength: 0.9,
             filter_speed: 0.1,
+            streamline: 0.3,
         };
         let preset = BrushPreset {
             name: "Lazy".into(),
@@ -1083,6 +1096,7 @@ mod tests {
             load: 12.0,
             keep_dirty: true,
             sample_all: true,
+            gamma_correct: true,
         };
         brush.mixing = Some(mixing);
         brush.antialias_width = 3.0;

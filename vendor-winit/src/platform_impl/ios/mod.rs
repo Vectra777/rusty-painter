@@ -23,7 +23,7 @@ pub(crate) use crate::cursor::{
     NoCustomCursor as PlatformCustomCursor, NoCustomCursor as PlatformCustomCursorSource,
 };
 pub(crate) use crate::icon::NoIcon as PlatformIcon;
-pub(crate) use self::pen::take_pen_samples;
+pub(crate) use self::pen::{take_pen_samples, take_pen_updates};
 pub(crate) use crate::platform_impl::Fullscreen;
 
 /// There is no way to detect which device that performed a certain event in

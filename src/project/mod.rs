@@ -32,6 +32,7 @@ pub(crate) mod export;
 pub(crate) mod kra;
 pub(crate) mod palette_files;
 mod preview;
+pub(crate) mod procreate;
 pub(crate) mod psd;
 pub(crate) mod svg;
 pub(crate) mod svg_import;
@@ -188,6 +189,7 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> 
 pub(crate) const FOREIGN_EXTENSIONS: &[&str] = &[
     "psd",
     "kra",
+    "procreate",
     "svg",
     #[cfg(feature = "sut-import")]
     "clip",
@@ -200,6 +202,7 @@ fn foreign_decoder(extension: &str) -> Option<Decoder> {
     Some(match extension {
         "psd" => psd::decode_psd,
         "kra" => kra::decode_kra,
+        "procreate" => procreate::decode_procreate,
         "svg" => svg_import::decode_svg,
         #[cfg(feature = "sut-import")]
         "clip" => clip::decode_clip,

@@ -171,6 +171,9 @@ pub struct Mixing {
     /// An imported brush's own colour smudge, instead of this app's:
     /// `smudge_length` is then its smudge rate.
     pub krita: Option<KritaSmudge>,
+    /// Mix in linear light even in a document that blends stored values
+    /// (Procreate's gamma-correct blending): mixes keep their brightness.
+    pub gamma_correct: bool,
 }
 
 impl Default for Mixing {
@@ -184,6 +187,7 @@ impl Default for Mixing {
             keep_dirty: false,
             sample_all: false,
             krita: None,
+            gamma_correct: false,
         }
     }
 }

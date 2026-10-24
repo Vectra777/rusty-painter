@@ -3,8 +3,10 @@
 //! the Shape tool's handles until it's applied (a press elsewhere, Enter,
 //! or another tool), then the brush is back.
 //!
-//! Ellipses keep the slant they were drawn with: their axes come from the
-//! stroke's second moments. One drawn nearly upright comes out upright.
+//! Ellipses keep the slant they were drawn with: they're fitted to the
+//! stroke by least squares, so a lopsided one still finds its centre. One
+//! drawn nearly upright comes out upright. An open stroke can become an
+//! arc or a polyline (as a curve, editable like one).
 
 use crate::app::PainterApp;
 use crate::app::tools::Tool;
@@ -50,6 +52,13 @@ impl QuickShapeState {
         self.path.clear();
         self.path.push(pos);
         self.rest = Some((pos, Instant::now()));
+    }
+
+    /// No stroke to watch (it ended, or isn't one QuickShape follows):
+    /// nothing left over for the next stroke to be judged by.
+    pub(crate) fn reset(&mut self) {
+        self.path.clear();
+        self.rest = None;
     }
 
     pub(crate) fn sample(&mut self, pos: Vec2, zoom: f32) {
@@ -141,45 +150,255 @@ fn simplify(pts: &[Vec2], eps: f32) -> Vec<Vec2> {
     left
 }
 
-/// The slant of the ellipse through `pts` (radians, clockwise on screen,
-/// within ±45°: the box can take either axis across), from the second
-/// moments of the stroke weighted by length, so a slower part of the
-/// stroke doesn't count more. 0 for a nearly upright ellipse or a circle.
-fn ellipse_slant(pts: &[Vec2]) -> f32 {
-    let mut total = 0.0;
-    let mut mean = Vec2::ZERO;
-    for w in pts.windows(2) {
-        let len = (w[1] - w[0]).length();
-        total += len;
-        mean += (w[0] + w[1]) * 0.5 * len;
+fn bounds(pts: &[Vec2]) -> (Vec2, Vec2) {
+    pts.iter()
+        .fold((pts[0], pts[0]), |(lo, hi), &p| (lo.min(p), hi.max(p)))
+}
+
+/// An ellipse: its centre, its half-axes (along `angle` and across), and
+/// `angle` (radians, clockwise on screen).
+#[derive(Clone, Copy, Debug)]
+struct Ellipse {
+    c: Vec2,
+    r: Vec2,
+    angle: f32,
+}
+
+impl Ellipse {
+    /// The point at parameter `t` (radians around it).
+    fn at(&self, t: f32) -> Vec2 {
+        self.c
+            + turned(
+                Vec2::new(self.r.x * t.cos(), self.r.y * t.sin()),
+                self.angle,
+            )
     }
-    if total <= 0.0 {
-        return 0.0;
+
+    /// The derivative of [`Self::at`].
+    fn tangent(&self, t: f32) -> Vec2 {
+        turned(
+            Vec2::new(-self.r.x * t.sin(), self.r.y * t.cos()),
+            self.angle,
+        )
     }
-    mean /= total;
-    let (mut xx, mut yy, mut xy) = (0.0, 0.0, 0.0);
-    for w in pts.windows(2) {
-        let len = (w[1] - w[0]).length();
-        let d = (w[0] + w[1]) * 0.5 - mean;
-        xx += d.x * d.x * len;
-        yy += d.y * d.y * len;
-        xy += d.x * d.y * len;
+
+    /// `p` in the ellipse's own frame, scaled so the ellipse is the unit
+    /// circle.
+    fn unit(&self, p: Vec2) -> Vec2 {
+        turned(p - self.c, -self.angle) / self.r
     }
-    // Eigenvalues of the covariance: the spread along each axis.
-    let half_diff = ((xx - yy) * 0.5).hypot(xy);
-    let (big, small) = ((xx + yy) * 0.5 + half_diff, (xx + yy) * 0.5 - half_diff);
-    if small <= 0.0 || big < small * ROUND * ROUND {
-        return 0.0;
+
+    /// How far `pts` stray from it on average, as a fraction of its size.
+    fn error(&self, pts: &[Vec2]) -> f32 {
+        pts.iter()
+            .map(|&p| (self.unit(p).length() - 1.0).abs())
+            .sum::<f32>()
+            / pts.len() as f32
     }
-    let quarter = std::f32::consts::FRAC_PI_2;
-    let mut angle = 0.5 * (2.0 * xy).atan2(xx - yy);
-    // The major axis, or the minor one, whichever is nearer across.
-    if angle > quarter * 0.5 {
-        angle -= quarter;
-    } else if angle <= -quarter * 0.5 {
-        angle += quarter;
+}
+
+type M3 = [[f64; 3]; 3];
+
+fn mul3(a: &M3, b: &M3) -> M3 {
+    std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+}
+
+fn inv3(m: &M3) -> Option<M3> {
+    let cof = |r: usize, c: usize| {
+        let (r0, r1) = ((r + 1) % 3, (r + 2) % 3);
+        let (c0, c1) = ((c + 1) % 3, (c + 2) % 3);
+        m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
+    };
+    let det: f64 = (0..3).map(|c| m[0][c] * cof(0, c)).sum();
+    if det.abs() < 1e-12 {
+        return None;
     }
-    if angle.abs() < UPRIGHT { 0.0 } else { angle }
+    // The adjugate is the transposed cofactors.
+    Some(std::array::from_fn(|i| {
+        std::array::from_fn(|j| cof(j, i) / det)
+    }))
+}
+
+/// The real roots of x³ + b·x² + c·x + d.
+fn cubic_roots(b: f64, c: f64, d: f64) -> Vec<f64> {
+    let p = c - b * b / 3.0;
+    let q = 2.0 * b * b * b / 27.0 - b * c / 3.0 + d;
+    let shift = -b / 3.0;
+    if p.abs() < 1e-12 {
+        return vec![(-q).cbrt() + shift];
+    }
+    let disc = q * q / 4.0 + p * p * p / 27.0;
+    if disc > 0.0 {
+        let s = disc.sqrt();
+        return vec![(-q / 2.0 + s).cbrt() + (-q / 2.0 - s).cbrt() + shift];
+    }
+    let m = 2.0 * (-p / 3.0).sqrt();
+    let phi = ((3.0 * q / (p * m)).clamp(-1.0, 1.0)).acos() / 3.0;
+    (0..3)
+        .map(|k| m * (phi - std::f64::consts::TAU * k as f64 / 3.0).cos() + shift)
+        .collect()
+}
+
+/// The eigenvectors of `m` for its real eigenvalues (not normalised).
+fn eigenvectors3(m: &M3) -> Vec<[f64; 3]> {
+    let tr = m[0][0] + m[1][1] + m[2][2];
+    let minors = m[0][0] * m[1][1] - m[0][1] * m[1][0] + m[0][0] * m[2][2] - m[0][2] * m[2][0]
+        + m[1][1] * m[2][2]
+        - m[1][2] * m[2][1];
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    cubic_roots(-tr, minors, -det)
+        .into_iter()
+        .filter_map(|l| {
+            let r: [[f64; 3]; 3] = std::array::from_fn(|i| {
+                std::array::from_fn(|j| m[i][j] - if i == j { l } else { 0.0 })
+            });
+            let cross = |a: [f64; 3], b: [f64; 3]| {
+                [
+                    a[1] * b[2] - a[2] * b[1],
+                    a[2] * b[0] - a[0] * b[2],
+                    a[0] * b[1] - a[1] * b[0],
+                ]
+            };
+            // The null space of a rank-2 matrix: the cross product of two
+            // of its rows (the pair giving the longest, for precision).
+            [cross(r[0], r[1]), cross(r[0], r[2]), cross(r[1], r[2])]
+                .into_iter()
+                .max_by(|a, b| {
+                    let n = |v: &[f64; 3]| v.iter().map(|x| x * x).sum::<f64>();
+                    n(a).total_cmp(&n(b))
+                })
+                .filter(|v| v.iter().any(|x| x.abs() > 1e-15))
+        })
+        .collect()
+}
+
+/// The ellipse nearest `pts` by Fitzgibbon's direct least-squares fit
+/// (in Halíř and Flusser's stable form): it always gives an ellipse, and
+/// copes with a lopsided or partial one, which a stroke's box or second
+/// moments don't. `None` when the points don't pin one down.
+fn fit_conic(pts: &[Vec2]) -> Option<Ellipse> {
+    if pts.len() < 6 {
+        return None;
+    }
+    // Fitted about the stroke's box, scaled to ±1, for precision.
+    let (lo, hi) = bounds(pts);
+    let c = (lo + hi) * 0.5;
+    let s = ((hi - lo) * 0.5).max(Vec2::splat(1.0));
+    let (sx, sy) = (s.x as f64, s.y as f64);
+    // The scatter matrix of rows [x², xy, y², x, y, 1].
+    let mut scatter = [[0.0f64; 6]; 6];
+    for p in pts {
+        let (x, y) = ((p.x - c.x) as f64 / sx, (p.y - c.y) as f64 / sy);
+        let row = [x * x, x * y, y * y, x, y, 1.0];
+        for i in 0..6 {
+            for j in 0..6 {
+                scatter[i][j] += row[i] * row[j];
+            }
+        }
+    }
+    let block = |r: usize, c: usize| -> M3 {
+        std::array::from_fn(|i| std::array::from_fn(|j| scatter[r + i][c + j]))
+    };
+    let (s1, s2, s3) = (block(0, 0), block(0, 3), block(3, 3));
+    let s2t: M3 = std::array::from_fn(|i| std::array::from_fn(|j| s2[j][i]));
+    // The linear part in terms of the quadratic one: T = -S3⁻¹·S2ᵀ.
+    let t = mul3(&inv3(&s3)?, &s2t).map(|row| row.map(|x| -x));
+    let reduced = mul3(&s2, &t);
+    let m: M3 = std::array::from_fn(|i| std::array::from_fn(|j| s1[i][j] + reduced[i][j]));
+    // Times the inverse of the constraint 4ac − b² = 1.
+    let m = [
+        m[2].map(|x| x * 0.5),
+        m[1].map(|x| -x),
+        m[0].map(|x| x * 0.5),
+    ];
+    let q = eigenvectors3(&m)
+        .into_iter()
+        .find(|v| 4.0 * v[0] * v[2] - v[1] * v[1] > 0.0)?;
+    let lin: [f64; 3] = std::array::from_fn(|i| (0..3).map(|k| t[i][k] * q[k]).sum());
+    // The conic about `c` in canvas pixels.
+    let (a, b, cc) = (q[0] / (sx * sx), q[1] / (sx * sy), q[2] / (sy * sy));
+    let (d, e, f) = (lin[0] / sx, lin[1] / sy, lin[2]);
+    let det = 4.0 * a * cc - b * b;
+    if det <= 0.0 {
+        return None;
+    }
+    // Its centre, where the gradient vanishes, and its value there.
+    let (u, v) = ((b * e - 2.0 * cc * d) / det, (b * d - 2.0 * a * e) / det);
+    let f0 = f + (d * u + e * v) * 0.5;
+    // Turned to its axes.
+    let angle = 0.5 * b.atan2(a - cc);
+    let (sin, cos) = angle.sin_cos();
+    let along = a * cos * cos + b * sin * cos + cc * sin * sin;
+    let across = a * sin * sin - b * sin * cos + cc * cos * cos;
+    let (rx, ry) = ((-f0 / along).sqrt(), (-f0 / across).sqrt());
+    if !(rx.is_finite() && ry.is_finite() && rx > 0.0 && ry > 0.0) {
+        return None;
+    }
+    Some(Ellipse {
+        c: c + Vec2::new(u as f32, v as f32),
+        r: Vec2::new(rx as f32, ry as f32),
+        angle: angle as f32,
+    })
+}
+
+/// A closed ellipse as the Shape tool keeps it: its box before turning
+/// and its slant (within ±45°: the box can take either axis across).
+/// Nearly upright, or nearly round (its slant means nothing), it comes out
+/// upright, as the stroke's own box `min`–`max`.
+fn ellipse_shape(e: Ellipse, min: Vec2, max: Vec2) -> (ShapeKind, Vec<Vec2>, f32) {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    let (mut angle, mut r) = (e.angle.rem_euclid(PI), e.r);
+    if angle > FRAC_PI_2 {
+        angle -= PI;
+    }
+    if angle > FRAC_PI_4 {
+        angle -= FRAC_PI_2;
+        r = Vec2::new(r.y, r.x);
+    } else if angle <= -FRAC_PI_4 {
+        angle += FRAC_PI_2;
+        r = Vec2::new(r.y, r.x);
+    }
+    let round = r.max_elem() < r.min_elem() * ROUND;
+    if round || angle.abs() < UPRIGHT {
+        return (ShapeKind::Ellipse, vec![min, max], 0.0);
+    }
+    (ShapeKind::Ellipse, vec![e.c - r, e.c + r], angle)
+}
+
+/// Curve nodes (anchor, handle in, handle out) for the arc of `e` from
+/// parameter `from` turning by `span`: cubic Béziers of at most a quarter
+/// turn each, which follow an ellipse to well under a pixel.
+fn arc_nodes(e: &Ellipse, from: f32, span: f32) -> Vec<Vec2> {
+    let pieces = (span.abs() / std::f32::consts::FRAC_PI_2).ceil().max(1.0) as usize;
+    let step = span / pieces as f32;
+    let k = 4.0 / 3.0 * (step / 4.0).tan();
+    let mut nodes = Vec::with_capacity((pieces + 1) * 3);
+    for i in 0..=pieces {
+        let t = from + step * i as f32;
+        let (p, d) = (e.at(t), e.tangent(t) * k);
+        let handle_in = if i == 0 { p } else { p - d };
+        let handle_out = if i == pieces { p } else { p + d };
+        nodes.extend([p, handle_in, handle_out]);
+    }
+    nodes
+}
+
+/// Mean distance from `pts` to the polyline through `corners` (closed:
+/// back to the first), as a fraction of `half`.
+fn polyline_error(pts: &[Vec2], corners: &[Vec2], closed: bool, half: f32) -> f32 {
+    let n = corners.len();
+    let sides = if closed { n } else { n - 1 };
+    pts.iter()
+        .map(|&p| {
+            (0..sides)
+                .map(|i| to_segment(p, corners[i], corners[(i + 1) % n]))
+                .fold(f32::MAX, f32::min)
+        })
+        .sum::<f32>()
+        / pts.len() as f32
+        / half.max(1.0)
 }
 
 /// The clean shape a hand-drawn stroke was meant to be, if any: its kind,
@@ -205,35 +424,16 @@ pub fn fit_shape(pts: &[Vec2]) -> Option<(ShapeKind, Vec<Vec2>, f32)> {
     if chord > size * 0.9 && off_line <= (chord * 0.04).max(2.0) {
         return Some((ShapeKind::Line, vec![first, last], 0.0));
     }
-    // Otherwise only closed shapes: the end near the start.
+    let ellipse = fit_conic(pts);
+    // An open stroke: an arc, or a polyline.
     if chord > size * 0.25 {
-        return None;
+        return open_shape(pts, ellipse, size);
     }
-    // As an ellipse in its box (turned with the stroke's slant): how far
-    // points stray from it.
-    let slant = ellipse_slant(pts);
-    let (box_min, box_max) = if slant == 0.0 {
-        (min, max)
-    } else {
-        pts.iter().map(|&p| turned(p, -slant)).fold(
-            (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
-            |(lo, hi), p| (lo.min(p), hi.max(p)),
-        )
-    };
-    // (Sizes are measured in that box too, so a slanted shape is judged
-    // like the same shape upright.)
-    let half = ((box_max.x - box_min.x) + (box_max.y - box_min.y)) * 0.25;
-    let c = (box_min + box_max) * 0.5;
-    let r = ((box_max - box_min) * 0.5).max(Vec2::splat(1.0));
-    let ellipse_err = pts
-        .iter()
-        .map(|&p| {
-            let p = if slant == 0.0 { p } else { turned(p, -slant) };
-            let q = (p - c) / r;
-            (q.length() - 1.0).abs()
-        })
-        .sum::<f32>()
-        / pts.len() as f32;
+    // A closed one, as an ellipse: how far points stray from it.
+    let ellipse_err = ellipse.map_or(f32::MAX, |e| e.error(pts));
+    // (Polygons are judged against the ellipse's size, so a slanted shape
+    // is judged like the same shape upright.)
+    let half = ellipse.map_or(size * 0.35, |e| (e.r.x + e.r.y) * 0.5);
     // As a polygon: its corners, and how far points stray from its sides.
     let mut corners = simplify(pts, size * 0.06);
     if corners.len() > 2 && (corners[0] - corners[corners.len() - 1]).length() < size * 0.25 {
@@ -241,15 +441,7 @@ pub fn fit_shape(pts: &[Vec2]) -> Option<(ShapeKind, Vec<Vec2>, f32)> {
     }
     let n = corners.len();
     let polygon_err = if (3..=8).contains(&n) {
-        pts.iter()
-            .map(|&p| {
-                (0..n)
-                    .map(|i| to_segment(p, corners[i], corners[(i + 1) % n]))
-                    .fold(f32::MAX, f32::min)
-            })
-            .sum::<f32>()
-            / pts.len() as f32
-            / half.max(1.0)
+        polyline_error(pts, &corners, true, half)
     } else {
         f32::MAX
     };
@@ -273,16 +465,62 @@ pub fn fit_shape(pts: &[Vec2]) -> Option<(ShapeKind, Vec<Vec2>, f32)> {
         }
         return Some((ShapeKind::Polygon, corners, 0.0));
     }
-    if ellipse_err >= 0.12 {
-        return None;
+    match ellipse {
+        Some(e) if ellipse_err < 0.12 => Some(ellipse_shape(e, min, max)),
+        _ => None,
     }
-    if slant == 0.0 {
-        return Some((ShapeKind::Ellipse, vec![min, max], 0.0));
+}
+
+/// An open stroke that isn't a line: an arc of an ellipse, or a polyline
+/// of 3 to 8 corners, whichever it follows more closely; both as a curve
+/// (a polyline's handles on its corners, so they stay sharp).
+fn open_shape(
+    pts: &[Vec2],
+    ellipse: Option<Ellipse>,
+    size: f32,
+) -> Option<(ShapeKind, Vec<Vec2>, f32)> {
+    // As an arc: how far it turns around the ellipse, followed along the
+    // stroke (so it can't jump the seam at ±π).
+    let arc = ellipse
+        // A huge ellipse is a nearly straight stroke, not an arc.
+        .filter(|e| e.r.max_elem() < size * 2.0)
+        .map(|e| {
+            let turn = |p: Vec2| {
+                let q = e.unit(p);
+                q.y.atan2(q.x)
+            };
+            let from = turn(pts[0]);
+            let (mut span, mut last) = (0.0f32, from);
+            for &p in &pts[1..] {
+                let t = turn(p);
+                let step = (t - last + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                span += step;
+                last = t;
+            }
+            (e, from, span, e.error(pts))
+        })
+        .filter(|&(_, _, span, err)| {
+            (30f32.to_radians()..330f32.to_radians()).contains(&span.abs()) && err < 0.05
+        });
+    // As a polyline: its corners, none of its sides tiny.
+    let corners = simplify(pts, size * 0.06);
+    let polyline = ((3..=8).contains(&corners.len())
+        && corners
+            .windows(2)
+            .all(|w| (w[1] - w[0]).length() > size * 0.1))
+    .then(|| polyline_error(pts, &corners, false, size * 0.5))
+    .filter(|&err| err < 0.03);
+    match (arc, polyline) {
+        (Some((e, from, span, arc_err)), poly) if poly.is_none_or(|p| arc_err < p) => {
+            Some((ShapeKind::Curve, arc_nodes(&e, from, span), 0.0))
+        }
+        (_, Some(_)) => {
+            let nodes = corners.iter().flat_map(|&c| [c, c, c]).collect();
+            Some((ShapeKind::Curve, nodes, 0.0))
+        }
+        _ => None,
     }
-    // The box before turning, about the ellipse's centre on the canvas.
-    let center = turned(c, slant);
-    let r = (box_max - box_min) * 0.5;
-    Some((ShapeKind::Ellipse, vec![center - r, center + r], slant))
 }
 
 #[cfg(test)]
@@ -429,6 +667,84 @@ mod tests {
         assert_eq!(p.len(), 3, "{p:?}");
     }
 
+    /// The anchors of curve `nodes`.
+    fn anchors(nodes: &[Vec2]) -> Vec<Vec2> {
+        nodes.chunks(3).map(|c| c[0]).collect()
+    }
+
+    #[test]
+    fn an_open_zigzag_becomes_a_polyline() {
+        let (a, b, c, d) = (
+            Vec2::new(20.0, 200.0),
+            Vec2::new(120.0, 40.0),
+            Vec2::new(220.0, 200.0),
+            Vec2::new(320.0, 40.0),
+        );
+        let zig: Vec<Vec2> = along(a, b, 30)
+            .chain(along(b, c, 30))
+            .chain(along(c, d, 30))
+            .chain(std::iter::once(d))
+            .collect();
+        let (kind, nodes, _) = fit_shape(&wobble(zig.into_iter(), 2.0)).unwrap();
+        assert_eq!(kind, ShapeKind::Curve);
+        let corners = anchors(&nodes);
+        assert_eq!(corners.len(), 4, "{corners:?}");
+        for (got, want) in corners.iter().zip([a, b, c, d]) {
+            assert!((*got - want).length() < 6.0, "{corners:?}");
+        }
+        // Sharp corners: the handles sit on their anchors.
+        assert!(nodes.chunks(3).all(|n| n[1] == n[0] && n[2] == n[0]));
+    }
+
+    /// Part of an ellipse, from `from` turning by `span` (radians).
+    fn arc(c: Vec2, a: f32, b: f32, from: f32, span: f32, n: usize) -> Vec<Vec2> {
+        (0..=n)
+            .map(|i| {
+                let t = from + span * i as f32 / n as f32;
+                c + Vec2::new(a * t.cos(), b * t.sin())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn half_and_three_quarter_circles_become_arcs() {
+        let c = Vec2::new(200.0, 200.0);
+        for span in [std::f32::consts::PI, 1.5 * std::f32::consts::PI] {
+            let pts = wobble(arc(c, 100.0, 100.0, 0.3, span, 90).into_iter(), 2.0);
+            let (kind, nodes, _) = fit_shape(&pts).unwrap();
+            assert_eq!(kind, ShapeKind::Curve, "span {span}");
+            let ends = anchors(&nodes);
+            assert!((ends[0] - pts[0]).length() < 6.0, "starts where drawn");
+            assert!(
+                (ends[ends.len() - 1] - pts[pts.len() - 1]).length() < 6.0,
+                "ends there"
+            );
+            // Every anchor and the curve between them lie on the circle.
+            let mut tool = crate::app::tools::shape::ShapeToolState::default();
+            tool.start_editing(kind, nodes, 0.0);
+            for p in tool.session.unwrap().outline(false) {
+                assert!(((p - c).length() - 100.0).abs() < 4.0, "{p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lopsided_ellipse_finds_its_centre() {
+        // Drawn round past its start, the overlap bulging the box.
+        let c = Vec2::new(200.0, 150.0);
+        let mut pts = arc(c, 120.0, 70.0, 0.0, std::f32::consts::TAU, 100);
+        pts.extend(
+            arc(c, 120.0, 70.0, 0.0, 0.6, 12)
+                .into_iter()
+                .map(|p| p + Vec2::new(0.0, -6.0)),
+        );
+        let (kind, p, _) = fit_shape(&wobble(pts.into_iter(), 2.0)).unwrap();
+        assert_eq!(kind, ShapeKind::Ellipse);
+        let fitted = fit_conic(&arc(c, 120.0, 70.0, 0.0, std::f32::consts::TAU, 100)).unwrap();
+        assert!((fitted.c - c).length() < 0.5, "{fitted:?}");
+        assert!(((p[0] + p[1]) * 0.5 - c).length() < 8.0, "{p:?}");
+    }
+
     #[test]
     fn a_scribble_stays_a_scribble() {
         let s: Vec<Vec2> = (0..100)
@@ -438,6 +754,35 @@ mod tests {
             })
             .collect();
         assert!(fit_shape(&s).is_none());
+    }
+
+    /// A mixing brush's stroke (painted by the smudge engine) never turns
+    /// into the shape the stroke before it was.
+    #[test]
+    fn a_mixing_stroke_isnt_judged_by_the_last_strokes_path() {
+        use crate::canvas::Canvas;
+        use eframe::egui::Color32;
+        let mut app =
+            crate::project::tests::test_app_pub(Canvas::new(400, 300, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        app.viewport.zoom = 1.0;
+        // A circle, the pen resting long enough at its end only after it
+        // has lifted.
+        let circle: Vec<Vec2> = ellipse(Vec2::new(200.0, 150.0), 80.0, 60.0, 0.0, 60).collect();
+        app.start_stroke_with_pressure(circle[0], 1.0);
+        for &p in &circle[1..] {
+            app.add_stroke_point(p, 1.0);
+        }
+        if let Some((at, _)) = app.workspace.quickshape.rest {
+            app.workspace.quickshape.rest = Some((at, Instant::now() - HOLD * 2));
+        }
+        app.release_canvas();
+        // Now a wet brush: the first frame of its stroke.
+        app.brush_state.brush.mixing = Some(Default::default());
+        app.start_stroke_with_pressure(Vec2::new(30.0, 30.0), 1.0);
+        app.quickshape_tick();
+        assert!(matches!(app.active_tool, Tool::Brush), "no shape popped up");
+        app.release_canvas();
     }
 
     #[test]

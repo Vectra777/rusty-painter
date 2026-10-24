@@ -205,6 +205,8 @@ struct SmudgeMix {
     sample_all: bool,
     /// Brush widths the brush colour lasts (0: for ever).
     load: f32,
+    /// Mix in linear light whatever the document blends in.
+    gamma_correct: bool,
     /// Where the brush's paint is kept from stroke to stroke, when it
     /// isn't cleaned after each.
     dirty: Option<Arc<DirtyBrush>>,
@@ -310,7 +312,11 @@ impl BlendSession {
         BlendSession {
             inside: None,
             keep_paint: false,
-            codec: Codec::for_canvas(&canvas),
+            codec: if mix.gamma_correct {
+                Codec::new()
+            } else {
+                Codec::for_canvas(&canvas)
+            },
             idx: canvas.active_layer_idx,
             canvas,
             pool,
@@ -368,6 +374,7 @@ impl BlendSession {
             sample_all: false,
             load: 0.0,
             dirty: None,
+            gamma_correct: false,
         };
         Self::new(canvas, pool, brush, BlendKind::Smudge, mix, pos, pressure)
     }
@@ -997,6 +1004,7 @@ impl PainterApp {
             sample_all: b.smudge_merged,
             load: 0.0,
             dirty: None,
+            gamma_correct: false,
         };
         self.blend_begin(pos, pressure, None, mix);
     }
@@ -1020,6 +1028,7 @@ impl PainterApp {
             krita: m.krita.or((!m.keep_dirty).then(Default::default)),
             sample_all: m.sample_all,
             load: m.load.max(0.0),
+            gamma_correct: m.gamma_correct,
             dirty: m
                 .keep_dirty
                 .then(|| Arc::clone(&self.brush_state.dirty_brush)),

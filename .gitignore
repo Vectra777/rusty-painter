@@ -12,3 +12,6 @@ keystore.properties
 *.jks
 /docs/book
 /graphify-out
+
+# Procreate app bundles kept for reverse-engineering notes: not ours to ship (and too big).
+pro_create/*.ipa

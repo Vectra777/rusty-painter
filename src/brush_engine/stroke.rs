@@ -56,6 +56,9 @@ pub(crate) struct StrokeBuffer {
     /// since the pixels were last resolved with it.
     pub mask: Option<Vec<f32>>,
     pub mask_dirty: Option<[usize; 4]>,
+    /// Watercolour edges from round dabs: how near a rim each pixel is,
+    /// the deepest any dab reached (see [`crate::brush_engine::wet_edge::WetRim`]).
+    pub rim: Option<Vec<f32>>,
     /// Painted but not resolved into the tile's pixels yet (see
     /// [`StrokeTiles::defer_resolve`]): each row's columns `[min, max]`.
     pub pending: Option<Vec<(usize, usize)>>,
@@ -162,6 +165,7 @@ impl StrokeTiles {
             buffer.tail_colors = [None, None];
             buffer.mask = None;
             buffer.mask_dirty = None;
+            buffer.rim = None;
             buffer.damage = Some([0, 0, tile_size, tile_size]);
             self.dirty.insert(key);
         }
@@ -265,6 +269,7 @@ impl StrokeTiles {
                     buffer.tail_colors = [None, None];
                     buffer.mask = None;
                     buffer.mask_dirty = None;
+                    buffer.rim = None;
                     (buffer.original.clone(), buffer.original_deep.clone())
                 }
             };
@@ -436,7 +441,7 @@ impl<'a> StrokeContext<'a> {
     /// Watercolour edges on what was just painted, as they'll be when the
     /// pen lifts (so nothing changes then).
     fn wet_edges_live(&mut self, brush: &Brush) {
-        if brush.wet_edge > 0.0 && brush.wet.is_none() {
+        if brush.edge_pass() {
             // (They show the stroke's coverage resolved their way.)
             self.flush_resolves(brush);
         }
@@ -1415,8 +1420,8 @@ impl StrokeState {
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
         }
-        // Watercolour edges, on the whole stroke once it's down.
-        if brush.wet_edge > 0.0 {
+        // Watercolour and burnt edges, on the whole stroke once it's down.
+        if brush.edge_pass() {
             context.wet_edges(brush);
         }
         // Wet paint: the stroke becomes water and pigment, drying from now.

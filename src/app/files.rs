@@ -20,6 +20,10 @@ pub(crate) enum OpenFor {
     Gradients,
     /// An image whose colours become a palette.
     Palette,
+    /// Pictures to add as paper textures (several at once).
+    Textures,
+    /// A picture for a new canvas's Background layer.
+    Paper,
     /// Other apps' palette files (several at once).
     PaletteFiles,
     /// An ICC profile, for what [`ProfileUse`] says.
@@ -64,7 +68,7 @@ impl OpenFor {
         };
         match self {
             OpenFor::Document | OpenFor::Library(_) => (
-                "Rusty Painter, Photoshop, Krita or Clip Studio",
+                "Rusty Painter, Photoshop, Krita, Procreate or Clip Studio",
                 documents(),
             ),
             OpenFor::Brushes => {
@@ -74,9 +78,11 @@ impl OpenFor {
                 e.extend(crate::brush_engine::import::ibis::IMAGE_EXTENSIONS);
                 ("Brushes", e)
             }
-            OpenFor::Palette | OpenFor::Image | OpenFor::Reference => {
-                ("Images", vec!["png", "jpg", "jpeg", "bmp", "tif", "tiff"])
-            }
+            OpenFor::Palette
+            | OpenFor::Image
+            | OpenFor::Reference
+            | OpenFor::Textures
+            | OpenFor::Paper => ("Images", vec!["png", "jpg", "jpeg", "bmp", "tif", "tiff"]),
             OpenFor::Profile(_) => ("ICC profiles", vec!["icc", "icm"]),
             OpenFor::Gradients => ("Photoshop gradients", vec!["grd"]),
             OpenFor::PaletteFiles => (
@@ -91,7 +97,11 @@ impl OpenFor {
     #[cfg_attr(not(mobile), allow(dead_code))]
     fn mimes(&self) -> &'static [&'static str] {
         match self {
-            OpenFor::Palette | OpenFor::Image | OpenFor::Reference => &["image/*"],
+            OpenFor::Palette
+            | OpenFor::Image
+            | OpenFor::Reference
+            | OpenFor::Textures
+            | OpenFor::Paper => &["image/*"],
             _ => &["*/*"],
         }
     }
@@ -111,7 +121,7 @@ impl PainterApp {
         let dialog = crate::app::settings::file_dialog().add_filter(label, &all);
         let pick = if matches!(
             purpose,
-            OpenFor::Brushes | OpenFor::Gradients | OpenFor::PaletteFiles
+            OpenFor::Brushes | OpenFor::Gradients | OpenFor::PaletteFiles | OpenFor::Textures
         ) {
             crate::app::jobs::Pick::Files
         } else {
@@ -131,7 +141,7 @@ impl PainterApp {
     pub(crate) fn pick_open(&mut self, purpose: OpenFor) {
         let multiple = matches!(
             purpose,
-            OpenFor::Brushes | OpenFor::Gradients | OpenFor::PaletteFiles
+            OpenFor::Brushes | OpenFor::Gradients | OpenFor::PaletteFiles | OpenFor::Textures
         );
         match crate::platform::picker_open(purpose.mimes(), multiple) {
             Ok(()) => self.workspace.file_pick = Some(PendingPick::Open(purpose)),
@@ -251,6 +261,29 @@ impl PainterApp {
                 self.import_image_in_background(stem, source);
             }
             OpenFor::Reference => self.open_reference_in_background(name, source),
+            OpenFor::Paper => self.spawn_job(None, move || {
+                let image = source.read().and_then(|bytes| {
+                    image::load_from_memory(&bytes)
+                        .map(|img| img.to_rgba8())
+                        .map_err(|e| format!("Couldn't open {name}: {e}"))
+                });
+                Box::new(move |app: &mut PainterApp| match image {
+                    Ok(image) => {
+                        let name = std::path::Path::new(&name)
+                            .file_stem()
+                            .map_or_else(|| "Picture".into(), |s| s.to_string_lossy().into_owned());
+                        app.modal_state.new_canvas.paper = crate::app::document::Paper::Picture {
+                            name,
+                            image: std::sync::Arc::new(image),
+                        };
+                    }
+                    Err(err) => app.report(err),
+                })
+            }),
+            OpenFor::Textures => match source.read() {
+                Ok(bytes) => self.add_texture(&name, &bytes),
+                Err(err) => self.report(err),
+            },
             OpenFor::Profile(target) => {
                 let stem = std::path::Path::new(&name).file_stem().map_or_else(
                     || "ICC profile".into(),

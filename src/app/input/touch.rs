@@ -60,6 +60,9 @@ pub struct TouchState {
     /// When the latest pen sample was taken, where the platform says
     /// (seconds, its own clock); `None` for the mouse and fingers.
     pub(crate) pen_time: Option<f64>,
+    /// The latest pen sample's pressure is an estimate, the measured value
+    /// to come with this index (iOS); `None` otherwise.
+    pub(crate) pen_awaiting: Option<u64>,
     /// The mouse's (and fingers') moves have no time of their own: each
     /// frame's are spread over the time since the last frame (egui's clock,
     /// seconds), so a slow frame's moves don't all land at one instant.

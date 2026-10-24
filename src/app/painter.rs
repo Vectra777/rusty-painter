@@ -172,10 +172,17 @@ impl eframe::App for PainterApp {
                 self.viewport.canvas_area = Some(view.response.rect);
                 // Pen samples first: touch handling needs to know the pen is
                 // down to tell a resting palm from a finger.
-                let pen = self
+                let (pen, predicted): (Vec<_>, Vec<_>) = self
                     .tablet
                     .as_mut()
                     .map(|t| t.poll(ctx))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .partition(|s| !s.predicted);
+                let pen_updates = self
+                    .tablet
+                    .as_mut()
+                    .map(|t| t.poll_updates(ctx))
                     .unwrap_or_default();
                 if let Some(calibration) = &mut self.workspace.calibration {
                     calibration.record(&pen);
@@ -216,6 +223,8 @@ impl eframe::App for PainterApp {
                         view.origin,
                         view.canvas_center,
                         &pen,
+                        &predicted,
+                        &pen_updates,
                     );
                 }
                 // Overlay first: on a drag's first frame it takes over at once,

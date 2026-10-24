@@ -129,6 +129,7 @@ fn paint_batch(
             colors,
             tail_colors,
             mask,
+            rim,
             ..
         } = &mut *buffer;
         let mut no_colors = None;
@@ -150,6 +151,9 @@ fn paint_batch(
         let colors = ctx
             .colored
             .then(|| colors.get_or_insert_with(|| vec![[0.0; 3]; tile_size * tile_size]));
+        // Watercolour edges: the stroke's dabs (its tail's too) record their depth.
+        let rim = (ctx.rim.is_some() && ctx.target != Target::Mask)
+            .then(|| rim.get_or_insert_with(|| vec![1.0; tile_size * tile_size]));
         // Per tile row, the columns [min, max] any dab of this batch actually
         // reached (non-zero alpha). Resolving only those, rather than the
         // union of dab rectangles, skips the rectangles' empty corners and the
@@ -171,6 +175,7 @@ fn paint_batch(
         let paint_rows = |rows: Range<usize>,
                           coverage: &mut [f32],
                           mut colors: Option<&mut [[f32; 3]]>,
+                          mut rim: Option<&mut [f32]>,
                           spans: &mut [(usize, usize)]| {
             let mut alpha_row = vec![0.0f32; tile_size];
             let mut color_row = if color_stamp.is_some() {
@@ -309,6 +314,16 @@ fn paint_batch(
                             }
                         }
                     }
+                    if let (Some(rim), Some(wet)) = (rim.as_deref_mut(), ctx.rim) {
+                        wet.record(
+                            [dab.center.x, dab.center.y],
+                            dab.r,
+                            dab.orient,
+                            gy,
+                            overlap.min_x + first,
+                            &mut rim[start + first..=start + last],
+                        );
+                    }
                     let covered = coverage[start + first..=start + last].iter_mut();
                     match wash {
                         Some(flow) => {
@@ -342,9 +357,11 @@ fn paint_batch(
             })
             .sum();
         let colors = colors.map(|c| c.as_mut_slice());
+        let rim = rim.map(|r| r.as_mut_slice());
         let touched = if work >= 2 * PIXELS_PER_THREAD && tile_size >= 2 * BAND_ROWS {
             let mut bands = Vec::new();
-            let (mut coverage, mut colors, mut spans) = (&mut coverage[..], colors, &mut spans[..]);
+            let (mut coverage, mut colors, mut rim, mut spans) =
+                (&mut coverage[..], colors, rim, &mut spans[..]);
             let mut y = tile_y0;
             while !spans.is_empty() {
                 let n = BAND_ROWS.min(spans.len());
@@ -355,17 +372,28 @@ fn paint_batch(
                     colors = Some(rest);
                     band
                 });
+                let rm = rim.take().map(|r| {
+                    let (band, rest) = r.split_at_mut(n * tile_size);
+                    rim = Some(rest);
+                    band
+                });
                 let (sp, rest) = std::mem::take(&mut spans).split_at_mut(n);
                 spans = rest;
-                bands.push((y..y + n, cov, col, sp));
+                bands.push((y..y + n, cov, col, rm, sp));
                 y += n;
             }
             bands
                 .into_par_iter()
-                .map(|(rows, cov, col, sp)| paint_rows(rows, cov, col, sp))
+                .map(|(rows, cov, col, rm, sp)| paint_rows(rows, cov, col, rm, sp))
                 .reduce(|| false, |a, b| a || b)
         } else {
-            paint_rows(tile_y0..tile_y0 + tile_size, coverage, colors, &mut spans)
+            paint_rows(
+                tile_y0..tile_y0 + tile_size,
+                coverage,
+                colors,
+                rim,
+                &mut spans,
+            )
         };
 
         if !touched {
@@ -553,6 +581,52 @@ fn resolve_spans(
     tile.is_empty = false;
 }
 
+/// Burnt edges on a tile just resolved: where the stroke changed a pixel,
+/// mix in `paint` laid with the burnt blend mode, the more the thinner the
+/// stroke is there (see [`crate::brush_engine::wet_edge::BurntEdges`]).
+/// Pixels the stroke left alone (outside a selection, say) stay as they are.
+fn burn_edges(
+    canvas: &Canvas,
+    region: TileRegion,
+    buffer: &StrokeBuffer,
+    burnt: &crate::brush_engine::wet_edge::BurntEdges,
+    paint: eframe::egui::Rgba,
+) {
+    use eframe::egui::Rgba;
+    let Some(tile_arc) = canvas.lock_tile(region.tx, region.ty) else {
+        return;
+    };
+    let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
+    let side = canvas.tile_size();
+    let (data, mut deep) = tile.deep_parts(canvas.depth(), side * side);
+    let original_deep = buffer.original_deep.as_ref();
+    for (i, &c) in buffer.coverage.iter().enumerate() {
+        if c <= 0.0 || (data[i] == buffer.original[i] && deep.is_none()) {
+            continue;
+        }
+        let read = |deep: Option<&crate::canvas::storage::DeepTile>, px: Color32| match deep {
+            Some(d) => {
+                let [r, g, b, a] = d.linear(i);
+                Rgba::from_rgba_premultiplied(r, g, b, a)
+            }
+            None => Rgba::from(px),
+        };
+        let normal = read(deep.as_deref(), data[i]);
+        let original = read(original_deep, buffer.original[i]);
+        if normal == original {
+            continue;
+        }
+        // A selection's soft edge burns as much as it lets paint through.
+        let sel = buffer.selection.as_ref().map_or(1.0, |s| s[i]);
+        let out = burnt.pixel(normal, original, paint * c, c);
+        let out = normal * (1.0 - sel) + out * sel;
+        data[i] = Color32::from(out);
+        if let Some(d) = deep.as_deref_mut() {
+            d.set_linear(i, out.to_array());
+        }
+    }
+}
+
 /// [`resolve_spans`] into a tile's pixels the caller holds locked.
 #[inline]
 fn resolve_spans_in(
@@ -605,6 +679,17 @@ fn resolve_spans_in(
                 &masked[..]
             }
             None => coverage,
+        };
+        // Watercolour edges: the middle thinned, the rim kept.
+        let rimmed;
+        let coverage = match (ctx.rim, &buffer.rim) {
+            (Some(wet), Some(rim)) => {
+                rimmed = (coverage.iter().zip(&rim[range.clone()]))
+                    .map(|(&c, &e)| c * wet.keep(e))
+                    .collect::<Vec<f32>>();
+                &rimmed[..]
+            }
+            _ => coverage,
         };
         if let (Some((impasto, erase)), Some(before)) = (ctx.impasto, &buffer.heights) {
             let laid: Vec<u16> = (before[range.clone()].iter().zip(coverage))
@@ -913,7 +998,7 @@ impl Brush {
         selection: Option<&SelectionManager>,
         stroke_tiles: &mut StrokeTiles,
     ) {
-        if self.wet_edge <= 0.0 || self.wet.is_some() || stroke_tiles.dirty.is_empty() {
+        if !self.edge_pass() || stroke_tiles.dirty.is_empty() {
             return;
         }
         let mut keys: Vec<(usize, usize)> = Vec::new();
@@ -941,12 +1026,22 @@ impl Brush {
         keys: &[(usize, usize)],
         last: bool,
     ) {
+        use crate::brush_engine::wet_edge::WetEdgeStyle;
         use rayon::prelude::*;
-        if self.wet_edge <= 0.0 || self.wet.is_some() || keys.is_empty() {
+        if !self.edge_pass() || keys.is_empty() {
             return;
         }
+        // The coverage changes for a wet edge drawn from it (a round tip's
+        // rim is drawn as it's resolved instead); burnt edges only need it.
+        let thin = self.wet_edge > 0.0 && self.wet_rim().is_none();
+        let ring = thin && self.wet_edge_style == WetEdgeStyle::Ring;
+        let burnt = self.burnt_edges.filter(|b| b.amount > 0.0);
         let ts = canvas.tile_size();
-        let radius = (self.wet_edge_width.round() as usize).clamp(1, ts);
+        // At least as wide as the tip's soft fade: a narrower blur matches
+        // the fade everywhere and the rim never shows on a big soft brush.
+        let o = &self.brush_options;
+        let fade = o.diameter / 2.0 * (1.0 - o.hardness / 100.0).clamp(0.0, 1.0);
+        let radius = (self.wet_edge_width.max(fade).round() as usize).clamp(1, ts);
         let pad = radius;
         let side = ts + 2 * pad;
         let buffers = &stroke_tiles.buffers;
@@ -956,6 +1051,21 @@ impl Brush {
         let after: Vec<((usize, usize), Vec<f32>)> = pool.install(|| {
             keys.par_iter()
                 .map(|&(tx, ty)| {
+                    // Each pixel's coverage on its own: no neighbours needed.
+                    if !thin || ring {
+                        let own = buffers.get(&(tx, ty)).map_or_else(Vec::new, |b| {
+                            let b = b.lock().unwrap_or_else(|e| e.into_inner());
+                            if ring {
+                                b.coverage
+                                    .iter()
+                                    .map(|&c| crate::brush_engine::wet_edge::ring(c, strength))
+                                    .collect()
+                            } else {
+                                b.coverage.clone()
+                            }
+                        });
+                        return ((tx, ty), own);
+                    }
                     let mut patch = vec![0.0f32; side * side];
                     // The tiles under the patch (itself and its neighbours),
                     // each locked once.
@@ -1000,34 +1110,53 @@ impl Brush {
             stroke_tiles.tail_newer,
             stroke_tiles.grain,
         );
-        for (key, coverage) in after {
-            let Some(buffer) = stroke_tiles.buffers.get(&key) else {
-                continue;
+        // Burnt edges lay the brush's colour (at full coverage: the
+        // stroke's opacity is in its coverage already, but for a wash's).
+        let paint = {
+            let cap = if o.painting_mode == PaintingMode::Wash {
+                o.opacity
+            } else {
+                1.0
             };
-            let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
-            // Where the stroke has paint (the rest stays as it was).
-            let spans: Vec<(usize, usize)> = coverage
-                .chunks_exact(ts)
-                .map(|row| {
-                    let first = row.iter().position(|&c| c > 0.0);
-                    let last = row.iter().rposition(|&c| c > 0.0);
-                    match (first, last) {
-                        (Some(a), Some(b)) => (a, b),
-                        _ => (usize::MAX, 0),
-                    }
-                })
-                .collect();
-            let raw = std::mem::replace(&mut buffer.coverage, coverage);
-            let region = TileRegion {
-                tx: key.0,
-                ty: key.1,
-            };
-            resolve_spans(&ctx, region, &mut buffer, &spans);
-            if !last {
-                buffer.coverage = raw;
-            }
-            stroke_tiles.dirty.insert(key);
-        }
+            eframe::egui::Rgba::from(o.color) * cap.clamp(0.0, 1.0)
+        };
+        // Each tile resolved on its own thread (a big brush touches dozens
+        // a move, and this runs every move while the pen is down).
+        pool.install(|| {
+            after.into_par_iter().for_each(|(key, coverage)| {
+                let Some(buffer) = buffers.get(&key) else {
+                    return;
+                };
+                let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                // Where the stroke has paint (the rest stays as it was).
+                let spans: Vec<(usize, usize)> = coverage
+                    .chunks_exact(ts)
+                    .map(|row| {
+                        let first = row.iter().position(|&c| c > 0.0);
+                        let last = row.iter().rposition(|&c| c > 0.0);
+                        match (first, last) {
+                            (Some(a), Some(b)) => (a, b),
+                            _ => (usize::MAX, 0),
+                        }
+                    })
+                    .collect();
+                let raw = std::mem::replace(&mut buffer.coverage, coverage);
+                let region = TileRegion {
+                    tx: key.0,
+                    ty: key.1,
+                };
+                resolve_spans(&ctx, region, &mut buffer, &spans);
+                if let Some(burnt) = burnt
+                    && !ctx.alpha_lock
+                {
+                    burn_edges(ctx.canvas, region, &buffer, &burnt, paint);
+                }
+                if !last {
+                    buffer.coverage = raw;
+                }
+            });
+        });
+        stroke_tiles.dirty.extend(keys.iter().copied());
     }
 
     /// What a batch needs to paint and resolve with this brush.
@@ -1082,7 +1211,38 @@ impl Brush {
             strength: 1.0,
             wash: None,
             defer: false,
+            rim: self.wet_rim(),
         }
+    }
+
+    /// Whether the stroke needs the edge pass of [`Self::apply_wet_edges`]:
+    /// a wet edge drawn from its coverage, or burnt edges. (Wet paint
+    /// darkens its own edges instead.)
+    pub(crate) fn edge_pass(&self) -> bool {
+        self.wet.is_none()
+            && ((self.wet_edge > 0.0 && self.wet_rim().is_none())
+                || self.burnt_edges.is_some_and(|b| b.amount > 0.0))
+    }
+
+    /// Watercolour edges from the dabs' depth, for a round soft tip; `None`
+    /// for none, or for a tip whose painted outline isn't its circle (an
+    /// image or spiked tip, a ribbon, another engine), which blurs its
+    /// coverage instead (see [`Self::apply_wet_edges`]).
+    pub(crate) fn wet_rim(&self) -> Option<crate::brush_engine::wet_edge::WetRim> {
+        let o = &self.brush_options;
+        let round = self.brush_type == BrushType::Soft
+            && matches!(o.pixel_shape, PixelBrushShape::Circle)
+            && o.extra_tips.is_empty()
+            && o.placement == crate::brush_engine::brush_options::Placement::Dabs
+            && !o.auto_tip.is_active();
+        let rim_style = self.wet_edge_style == crate::brush_engine::wet_edge::WetEdgeStyle::Rim;
+        (round && rim_style && self.wet_edge > 0.0 && self.wet.is_none()).then(|| {
+            crate::brush_engine::wet_edge::WetRim {
+                strength: self.wet_edge.clamp(0.0, 0.95),
+                width: self.wet_edge_width,
+                fade: (1.0 - o.hardness / 100.0).clamp(0.0, 1.0),
+            }
+        })
     }
 
     /// Resolve what was left unresolved (see [`StrokeTiles::defer_resolve`])
@@ -1453,6 +1613,7 @@ impl Brush {
                     tail_colors: [None, None],
                     mask: None,
                     mask_dirty: None,
+                    rim: None,
                     pending: None,
                 }),
             );

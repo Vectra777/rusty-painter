@@ -16,6 +16,7 @@ use crate::selection::SelectionManager;
 use eframe::egui::Vec2;
 use rayon::ThreadPool;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -122,6 +123,17 @@ pub struct PenSample {
     pub barrel: PenBarrel,
 }
 
+/// A predicted pen sample, for [`StrokeWorker::predict`].
+#[derive(Clone, Copy, Debug)]
+pub struct PredictedSample {
+    pub pos: Vec2,
+    pub pressure: f32,
+    pub tilt: Option<PenTilt>,
+    pub barrel: PenBarrel,
+    /// The pen's own time, as [`StrokeWorker::sample_tilted`] takes it.
+    pub time: Option<f64>,
+}
+
 /// Canvas work queued behind the strokes (a filter, a merge, a fill): it
 /// shares the canvas the way a stroke does, so it runs here, in order with
 /// them, and whatever waits for the strokes waits for it too.
@@ -166,13 +178,23 @@ enum Job {
     Begin(Box<StrokeSetup>),
     /// A sequential stroke.
     BeginSequential(Box<dyn SequentialStroke>),
-    /// `time`: seconds since the worker started, for stroke speed.
+    /// `time`: seconds since the worker started, for stroke speed;
+    /// `awaiting`: the pressure is an estimate, its measured value to come
+    /// as an [`Job::Update`] with this index.
     Sample {
         pos: Vec2,
         pressure: f32,
         time: f64,
         tilt: Option<crate::brush_engine::dynamics::PenTilt>,
         barrel: PenBarrel,
+        awaiting: Option<u64>,
+    },
+    /// Where the pen is predicted to go next: drawn for now, taken back.
+    Predict(Vec<Sample>),
+    /// The measured pressure of the sample sent awaiting `index`.
+    Update {
+        index: u64,
+        pressure: f32,
     },
     End,
     Task(Task),
@@ -309,8 +331,10 @@ impl StrokeWorker {
                     if matches!(job, Job::Begin(_) | Job::BeginSequential(_)) {
                         begun += 1;
                     }
-                    let skip = matches!(job, Job::Sample { .. })
-                        && thread_skip.load(std::sync::atomic::Ordering::Relaxed) == begun;
+                    let skip = matches!(
+                        job,
+                        Job::Sample { .. } | Job::Predict(_) | Job::Update { .. }
+                    ) && thread_skip.load(std::sync::atomic::Ordering::Relaxed) == begun;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if !skip {
                             run_job(&mut session, &mut sequential, job, &thread_shared)
@@ -382,6 +406,21 @@ impl StrokeWorker {
         barrel: PenBarrel,
         pen_time: Option<f64>,
     ) {
+        self.sample_awaiting(pos, pressure, tilt, barrel, pen_time, None);
+    }
+
+    /// [`Self::sample_tilted`] whose pressure is an estimate, the measured
+    /// value to come through [`Self::update`] with index `awaiting`: it's
+    /// drawn for now and kept once that arrives (or a moment has passed).
+    pub fn sample_awaiting(
+        &self,
+        pos: Vec2,
+        pressure: f32,
+        tilt: Option<crate::brush_engine::dynamics::PenTilt>,
+        barrel: PenBarrel,
+        pen_time: Option<f64>,
+        awaiting: Option<u64>,
+    ) {
         let now = self.epoch.elapsed().as_secs_f64();
         let time = pen_time.map_or(now, |t| self.pen_to_epoch(t, now));
         self.send(Job::Sample {
@@ -390,7 +429,33 @@ impl StrokeWorker {
             time,
             tilt,
             barrel,
+            awaiting,
         });
+    }
+
+    /// Where the pen is predicted to go next (the platform's guess, after
+    /// the samples sent so far): drawn ahead of them until the next sample
+    /// takes it back, so the line keeps up with the pen. Each is a
+    /// position, pressure, lean, barrel and pen time, as
+    /// [`Self::sample_tilted`] takes.
+    pub fn predict(&self, samples: &[PredictedSample]) {
+        let now = self.epoch.elapsed().as_secs_f64();
+        let samples = samples
+            .iter()
+            .map(|p| Sample {
+                pos: p.pos,
+                pressure: p.pressure,
+                time: p.time.map_or(now, |t| self.pen_to_epoch(t, now)),
+                tilt: p.tilt,
+                barrel: p.barrel,
+            })
+            .collect();
+        self.send(Job::Predict(samples));
+    }
+
+    /// The measured pressure of the sample sent awaiting `index`.
+    pub fn update(&self, index: u64, pressure: f32) {
+        self.send(Job::Update { index, pressure });
     }
 
     /// A pen's own sample time `t` counted from the epoch: shifted so the
@@ -515,7 +580,28 @@ struct Session {
     /// When what was painted was last resolved into the pixels (see
     /// [`StrokeTiles::defer_resolve`]).
     resolved: std::time::Instant,
+    /// Samples drawn for now and not yet kept: those whose measured
+    /// pressure is still to come, oldest first (and any behind them).
+    waiting: VecDeque<Waiting>,
+    /// Where the pen is predicted to go next, drawn after `waiting`.
+    predicted: Vec<Sample>,
+    /// The stroke and its brush before `waiting` and `predicted` were
+    /// drawn (the tiles keep theirs): put back before anything else.
+    provisional: Option<(StrokeState, Brush)>,
 }
+
+/// A sample drawn for now, kept once its measured pressure arrives.
+struct Waiting {
+    /// The index its measured values come with; `None` once they have
+    /// (or for one only waiting behind another).
+    index: Option<u64>,
+    sample: Sample,
+    since: std::time::Instant,
+}
+
+/// How long a sample waits for its measured pressure before it's kept as
+/// it is (UIKit sends them within a few frames).
+const WAIT_FOR_UPDATE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Post-correction while drawing: the events painted along the smoothed
 /// path for good (those whose place can't change any more), and the stroke
@@ -576,6 +662,7 @@ fn run_job(
                 time,
                 tilt,
                 barrel,
+                ..
             } => {
                 stroke.sample(PenSample {
                     pos,
@@ -598,6 +685,8 @@ fn run_job(
                 }
                 return;
             }
+            // A sequential stroke draws nothing ahead.
+            Job::Predict(_) | Job::Update { .. } => return,
             // A new stroke: this one is left as it is (a stroke always
             // ends first).
             Job::Begin(_) | Job::BeginSequential(_) => *sequential = None,
@@ -625,10 +714,15 @@ fn run_job(
             stroke.view_scale = setup.view_scale;
             stroke.perspective = setup.perspective.clone();
             let brush = &setup.brush;
-            let correction = (brush.stabilizer_algorithm == StabilizerAlgorithm::PostCorrection
-                && brush.stabilizer_modes.correction > 0.0)
+            let modes = &brush.stabilizer_modes;
+            let streamline = brush.stabilizer_algorithm == StabilizerAlgorithm::StreamLine
+                && modes.streamline > 0.0;
+            let correction = (streamline
+                || (brush.stabilizer_algorithm == StabilizerAlgorithm::PostCorrection
+                    && modes.correction > 0.0))
                 .then(|| (brush.clone(), Vec::new()));
-            let live = (correction.is_some() && brush.stabilizer_modes.correction_live)
+            // StreamLine is always drawn as it goes.
+            let live = (correction.is_some() && (modes.correction_live || streamline))
                 .then(LiveCorrection::default);
             *session = Some(Session {
                 copies,
@@ -646,6 +740,9 @@ fn run_job(
                 },
                 tiles: StrokeTiles::default(),
                 resolved: std::time::Instant::now(),
+                waiting: VecDeque::new(),
+                predicted: Vec::new(),
+                provisional: None,
             });
         }
         Job::Sample {
@@ -654,6 +751,7 @@ fn run_job(
             time,
             tilt,
             barrel,
+            awaiting,
         } => {
             let Some(session) = session else {
                 return;
@@ -665,25 +763,55 @@ fn run_job(
                 tilt,
                 barrel,
             };
-            session.last_sample = Some(sample);
-            if let Some((_, events)) = session.correction.as_mut() {
-                events.push(Event::Sample(sample));
-            }
-            if session.live.is_some() {
-                session.correct_live(shared, false);
+            session.drop_provisional(shared);
+            // A real sample: the predictions before it are past.
+            session.predicted.clear();
+            if !session.draws_ahead() {
+                session.commit(shared, sample);
                 return;
             }
-            session.paint(shared, |stroke, brush, context| {
-                stroke.tilt = tilt;
-                stroke.barrel = barrel;
-                stroke.add_sample(brush, pos, pressure, Some(time), context);
-            });
-            session.flow_wet(shared, time);
+            // Kept in order: one behind a sample still waiting waits too.
+            if awaiting.is_some() || !session.waiting.is_empty() {
+                session.waiting.push_back(Waiting {
+                    index: awaiting,
+                    sample,
+                    since: std::time::Instant::now(),
+                });
+            } else {
+                session.commit(shared, sample);
+            }
+            session.settle(shared, false);
+            session.show_provisional(shared);
+        }
+        Job::Predict(samples) => {
+            let Some(session) = session.as_mut().filter(|s| s.draws_ahead()) else {
+                return;
+            };
+            session.drop_provisional(shared);
+            session.predicted = samples;
+            session.settle(shared, false);
+            session.show_provisional(shared);
+        }
+        Job::Update { index, pressure } => {
+            let Some(session) = session.as_mut() else {
+                return;
+            };
+            session.drop_provisional(shared);
+            if let Some(w) = session.waiting.iter_mut().find(|w| w.index == Some(index)) {
+                w.sample.pressure = pressure;
+                w.index = None;
+            }
+            session.settle(shared, false);
+            session.show_provisional(shared);
         }
         Job::Task(task) => run_task(task, shared),
         Job::End => {
             // The pen lifted: the end of the stroke (an end taper) first.
             if let Some(session) = session.as_mut() {
+                // What was drawn ahead goes; what waited is kept as it is.
+                session.drop_provisional(shared);
+                session.predicted.clear();
+                session.settle(shared, true);
                 session.catch_up(shared);
                 if session.live.is_some() {
                     session.correct_live(shared, true);
@@ -763,6 +891,83 @@ fn hand_over_damage(stroke: &mut dyn SequentialStroke, shared: &Shared) {
 }
 
 impl Session {
+    /// Whether samples can be drawn for now and taken back: not while
+    /// corrections or wet paint (which can't be taken back) keep their
+    /// own record of the stroke.
+    fn draws_ahead(&self) -> bool {
+        self.correction.is_none() && self.live.is_none() && self.setup.brush.wet.is_none()
+    }
+
+    /// Take back what was drawn for now (the waiting and predicted
+    /// samples), showing the tiles as they were.
+    fn drop_provisional(&mut self, shared: &Shared) {
+        if let Some((stroke, brush)) = self.provisional.take() {
+            self.tiles.rewind(&self.setup.canvas);
+            self.stroke = stroke;
+            self.setup.brush = brush;
+            // (Hands the rewound tiles to the UI.)
+            self.paint(shared, |_, _, _| {});
+        }
+    }
+
+    /// Paint `sample` for good.
+    fn commit(&mut self, shared: &Shared, sample: Sample) {
+        self.last_sample = Some(sample);
+        if let Some((_, events)) = self.correction.as_mut() {
+            events.push(Event::Sample(sample));
+        }
+        if self.live.is_some() {
+            self.correct_live(shared, false);
+            return;
+        }
+        self.paint(shared, |stroke, brush, context| {
+            stroke.tilt = sample.tilt;
+            stroke.barrel = sample.barrel;
+            stroke.add_sample(
+                brush,
+                sample.pos,
+                sample.pressure,
+                Some(sample.time),
+                context,
+            );
+        });
+        self.flow_wet(shared, sample.time);
+    }
+
+    /// Keep the waiting samples that are ready, oldest first: those whose
+    /// measured pressure came, or that waited long enough (all of them
+    /// when `all`).
+    fn settle(&mut self, shared: &Shared, all: bool) {
+        while let Some(w) = self.waiting.front() {
+            if !(all || w.index.is_none() || w.since.elapsed() >= WAIT_FOR_UPDATE) {
+                break;
+            }
+            let w = self.waiting.pop_front().expect("front was there");
+            self.commit(shared, w.sample);
+        }
+    }
+
+    /// Draw the waiting and predicted samples for now, to be taken back
+    /// by [`Self::drop_provisional`]; not while more samples queue up
+    /// (they'd be taken back straight away).
+    fn show_provisional(&mut self, shared: &Shared) {
+        if (self.waiting.is_empty() && self.predicted.is_empty()) || shared.lock().pending > 1 {
+            return;
+        }
+        self.provisional = Some((self.stroke.clone(), self.setup.brush.clone()));
+        self.tiles.checkpoint(&self.setup.canvas);
+        let samples: Vec<Sample> = (self.waiting.iter().map(|w| w.sample))
+            .chain(self.predicted.iter().copied())
+            .collect();
+        self.paint(shared, |stroke, brush, context| {
+            for s in &samples {
+                stroke.tilt = s.tilt;
+                stroke.barrel = s.barrel;
+                stroke.add_sample(brush, s.pos, s.pressure, Some(s.time), context);
+            }
+        });
+    }
+
     /// Wet paint flowing while the pen is down (not while the stroke may
     /// still be redrawn: its corrections start again from the canvas).
     fn flow_wet(&mut self, shared: &Shared, now: f64) {
@@ -783,9 +988,12 @@ impl Session {
         if self.live.is_some() {
             return self.correct_live(shared, false);
         }
+        self.drop_provisional(shared);
+        self.settle(shared, false);
         self.paint(shared, |stroke, brush, context| {
             stroke.airbrush(brush, now, context)
         });
+        self.show_provisional(shared);
     }
 
     /// A pulled string with catch-up: the line goes on to where the pen
@@ -876,19 +1084,31 @@ impl Session {
                 Event::Airbrush(_) => None,
             })
             .collect();
-        let strength = self.setup.brush.stabilizer_modes.correction;
+        use crate::brush_engine::stabilizer as st;
+        let modes = &self.setup.brush.stabilizer_modes;
+        let streamline = self.setup.brush.stabilizer_algorithm == StabilizerAlgorithm::StreamLine;
+        let strength = if streamline {
+            modes.streamline
+        } else {
+            modes.correction
+        };
         let scale = self.setup.view_scale;
         let settled = if last {
             points.len()
+        } else if streamline {
+            st::streamline_settled(&points, strength, scale)
         } else {
-            crate::brush_engine::stabilizer::smooth_path_settled(&points, strength, scale)
+            st::smooth_path_settled(&points, strength, scale)
         };
         let committed = live.committed;
         let first = (events[..committed].iter())
             .filter(|e| matches!(e, Event::Sample(_)))
             .count();
-        let smoothed =
-            crate::brush_engine::stabilizer::smooth_path_from(&points, strength, scale, first);
+        let smoothed = if streamline {
+            st::streamline_path_from(&points, strength, scale, first)
+        } else {
+            st::smooth_path_from(&points, strength, scale, first)
+        };
         // The events from `committed` on, each with its smoothed place, and
         // how many of them are final.
         let mut place = smoothed.into_iter();
@@ -1262,6 +1482,162 @@ mod tests {
             })
             .collect();
         (canvas, strokes)
+    }
+
+    /// What a pen sends, for [`paint_steps`].
+    enum Step {
+        Sample(Vec2, f32, Option<u64>),
+        Predict(Vec<(Vec2, f32)>),
+        Update(u64, f32),
+    }
+
+    /// `steps` painted on the worker with `brush`, waiting after each.
+    fn paint_steps(brush: Brush, steps: &[Step]) -> (Arc<Canvas>, Vec<FinishedStroke>) {
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+        let canvas = Arc::new(Canvas::new(128, 128, Color32::TRANSPARENT, 64));
+        let worker = StrokeWorker::new();
+        worker.begin(StrokeSetup {
+            canvas: Arc::clone(&canvas),
+            brush,
+            selection: None,
+            pool,
+            layer_idx: 1,
+            symmetry: Default::default(),
+            view_scale: 1.0,
+            perspective: Vec::new(),
+            wet_gravity: Vec2::new(0.0, 1.0),
+            inside: None,
+            wrap: false,
+        });
+        for step in steps {
+            match step {
+                &Step::Sample(pos, pressure, awaiting) => worker.sample_awaiting(
+                    pos,
+                    pressure,
+                    None,
+                    PenBarrel::default(),
+                    None,
+                    awaiting,
+                ),
+                Step::Predict(ahead) => {
+                    let ahead: Vec<PredictedSample> = ahead
+                        .iter()
+                        .map(|&(pos, pressure)| PredictedSample {
+                            pos,
+                            pressure,
+                            tilt: None,
+                            barrel: PenBarrel::default(),
+                            time: None,
+                        })
+                        .collect();
+                    worker.predict(&ahead);
+                }
+                &Step::Update(index, pressure) => worker.update(index, pressure),
+            }
+            worker.wait_idle();
+        }
+        worker.end();
+        worker.wait_idle();
+        let (finished, _) = worker.take_finished();
+        let strokes = finished
+            .into_iter()
+            .filter_map(|f| match f {
+                Finished::Stroke(s) => Some(*s),
+                Finished::Task(_) => None,
+            })
+            .collect();
+        (canvas, strokes)
+    }
+
+    #[test]
+    fn predictions_are_drawn_ahead_and_leave_nothing_behind() {
+        let path = samples();
+        let mut wash = Brush::new(18.0, 50.0, Color32::from_rgb(120, 60, 10), 8.0);
+        wash.brush_options.painting_mode = crate::brush_engine::brush_options::PaintingMode::Wash;
+        for (name, brush) in [
+            (
+                "round",
+                Brush::new(10.0, 80.0, Color32::from_rgb(200, 40, 40), 10.0),
+            ),
+            ("wash", wash),
+        ] {
+            let (plain, _) = paint_on_worker_paced(brush.clone(), &path, true);
+            // After every sample a wrong guess, off the line and heavy.
+            let steps: Vec<Step> = path
+                .iter()
+                .flat_map(|&(p, pressure)| {
+                    let ahead = vec![
+                        (p + Vec2::new(6.0, 20.0), 1.0),
+                        (p + Vec2::new(12.0, 40.0), 1.0),
+                    ];
+                    [Step::Sample(p, pressure, None), Step::Predict(ahead)]
+                })
+                .collect();
+            let (ahead, strokes) = paint_steps(brush, &steps);
+            assert!(tiles_of(&ahead) == tiles_of(&plain), "{name}");
+            assert_eq!(strokes.len(), 1, "{name}: one undo step");
+            // Undo takes it all back, the guesses' tiles too.
+            assert!(
+                strokes[0].undo.tiles.iter().all(|t| t
+                    .data
+                    .to_vec()
+                    .iter()
+                    .all(|&p| p == Color32::TRANSPARENT))
+            );
+        }
+    }
+
+    #[test]
+    fn estimated_pressures_are_replaced_by_the_measured_ones() {
+        let path = samples();
+        let brush = Brush::new(12.0, 80.0, Color32::from_rgb(20, 40, 200), 10.0);
+        let mut brush = brush;
+        brush.brush_options.pressure_size = true;
+        brush.brush_options.pressure_min_size = 0.1;
+        let (measured, _) = paint_on_worker_paced(brush.clone(), &path, true);
+        // Each sent with a faint estimate, its measured pressure a sample
+        // later.
+        let mut steps = Vec::new();
+        for (i, &(p, pressure)) in path.iter().enumerate() {
+            steps.push(Step::Sample(p, 0.05, Some(i as u64)));
+            if i > 0 {
+                steps.push(Step::Update(i as u64 - 1, path[i - 1].1));
+            }
+            let _ = pressure;
+        }
+        steps.push(Step::Update(path.len() as u64 - 1, path[path.len() - 1].1));
+        let (updated, _) = paint_steps(brush.clone(), &steps);
+        assert!(tiles_of(&updated) == tiles_of(&measured));
+        // No measured value ever comes: the estimates are kept.
+        let faint: Vec<(Vec2, f32)> = path.iter().map(|&(p, _)| (p, 0.05)).collect();
+        let (estimated, _) = paint_on_worker_paced(brush.clone(), &faint, true);
+        let steps: Vec<Step> = (path.iter().enumerate())
+            .map(|(i, &(p, _))| Step::Sample(p, 0.05, Some(i as u64)))
+            .collect();
+        let (kept, _) = paint_steps(brush, &steps);
+        assert!(tiles_of(&kept) == tiles_of(&estimated));
+        assert!(tiles_of(&kept) != tiles_of(&measured), "the estimates show");
+    }
+
+    #[test]
+    fn streamline_paints_the_same_line_however_the_samples_arrive() {
+        let path: Vec<(Vec2, f32)> = samples()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (p, pressure))| (p + Vec2::new(0.0, (i % 2) as f32 * 6.0 - 3.0), pressure))
+            .collect();
+        let mut brush = Brush::new(8.0, 80.0, Color32::from_rgb(200, 40, 40), 10.0);
+        brush.stabilizer_algorithm = StabilizerAlgorithm::StreamLine;
+        brush.stabilizer_modes.streamline = 0.7;
+        // Painted for now and taken back after every sample, or all queued.
+        let (paced, strokes) = paint_on_worker_paced(brush.clone(), &path, true);
+        let (queued, _) = paint_on_worker(brush.clone(), &path);
+        assert!(tiles_of(&paced) == tiles_of(&queued));
+        assert_eq!(strokes.len(), 1, "one undo step");
+        // And it smooths: not the raw zigzag.
+        brush.stabilizer_algorithm = StabilizerAlgorithm::None;
+        let (raw, _) = paint_on_worker(brush, &path);
+        assert!(tiles_of(&raw) != tiles_of(&queued));
     }
 
     #[test]

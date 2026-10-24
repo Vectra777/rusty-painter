@@ -98,6 +98,27 @@ impl PainterApp {
         self.brush_state.loaded_textures = textures;
     }
 
+    /// Copy picture `name` (`bytes`) into `brushes/textures/`, where it's a
+    /// paper texture from now on.
+    pub(crate) fn add_texture(&mut self, name: &str, bytes: &[u8]) {
+        if let Err(err) = image::load_from_memory(bytes) {
+            self.report(format!("{name} isn't a picture this app can read: {err}"));
+            return;
+        }
+        let dir = self.brush_state.brushes_path.join("textures");
+        // The name alone: a picker's name could hold a path.
+        let file = std::path::Path::new(name)
+            .file_name()
+            .map_or_else(|| "Texture.png".into(), |n| n.to_os_string());
+        if let Err(err) =
+            std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&file), bytes))
+        {
+            self.report(format!("Can't add the texture {name}: {err}"));
+            return;
+        }
+        self.load_textures();
+    }
+
     fn ensure_brushes_directory_exists(&self) {
         if !self.brush_state.brushes_path.exists()
             && let Err(err) = std::fs::create_dir_all(&self.brush_state.brushes_path)
@@ -784,6 +805,30 @@ fn write_preset_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_added_picture_is_a_paper_texture_and_a_bad_one_is_reported() {
+        use crate::canvas::Canvas;
+        let dir = std::env::temp_dir().join(format!("rp-texture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.brush_state.brushes_path = dir.join("brushes");
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(image::GrayImage::from_fn(32, 32, |x, _| {
+            image::Luma([(x * 8) as u8])
+        }))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+        app.add_texture("../Cold press.png", &png);
+        let names: Vec<_> = (app.brush_state.loaded_textures.iter())
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["Cold press"]);
+        assert!(dir.join("brushes/textures/Cold press.png").is_file());
+        app.add_texture("notes.png", b"not a picture");
+        assert_eq!(app.brush_state.loaded_textures.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_edited_preset_keeps_its_old_preview_until_the_next_frame() {

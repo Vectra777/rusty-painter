@@ -20,6 +20,7 @@ struct CanvasPlacement {
     center: egui::Pos2,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_input(
     app: &mut PainterApp,
     ctx: &egui::Context,
@@ -27,12 +28,15 @@ pub fn handle_input(
     origin: egui::Pos2,
     canvas_center: egui::Pos2,
     pen: &[TabletSample],
+    predicted: &[TabletSample],
+    updates: &[crate::tablet::TabletUpdate],
 ) {
     let placement = CanvasPlacement {
         origin,
         center: canvas_center,
     };
     handle_pen(app, ctx, response, placement, pen);
+    pen_lookahead(app, placement, predicted, updates);
     settle_lost_release(app, ctx);
     handle_events(app, ctx, response, placement, !pen.is_empty());
     settle_lost_release(app, ctx);
@@ -65,6 +69,41 @@ fn settle_lost_release(app: &mut PainterApp, ctx: &egui::Context) {
     }
 }
 
+/// The pen's lookahead for a brush stroke in progress (iOS): where it's
+/// predicted to go next, drawn ahead of the stroke, and the measured
+/// pressure of samples sent with estimates.
+fn pen_lookahead(
+    app: &mut PainterApp,
+    placement: CanvasPlacement,
+    predicted: &[TabletSample],
+    updates: &[crate::tablet::TabletUpdate],
+) {
+    if !app.brush_state.is_drawing {
+        return;
+    }
+    for u in updates {
+        let pressure = app.map_pressure(u.pressure);
+        app.stroke_worker.update(u.index, pressure);
+    }
+    // (The lean and barrel stay as the last real sample's.)
+    let touch = &app.viewport.touch;
+    let (tilt, barrel) = (touch.pen_tilt, touch.pen_barrel);
+    let ahead: Vec<_> = predicted
+        .iter()
+        .map(|s| {
+            let pos = egui::Pos2::new(s.pos[0], s.pos[1]);
+            crate::brush_engine::stroke_worker::PredictedSample {
+                pos: app.screen_to_canvas_raw(pos, placement.origin, placement.center),
+                pressure: app.map_pressure(s.pressure),
+                tilt,
+                barrel,
+                time: s.time,
+            }
+        })
+        .collect();
+    app.predict_stroke(&ahead);
+}
+
 /// Pen contact samples (with pressure), in order.
 fn handle_pen(
     app: &mut PainterApp,
@@ -89,6 +128,7 @@ fn handle_pen(
         // The lean in canvas terms: a short screen vector mapped through the
         // view (zoom, rotation, flip), like the pen's position.
         app.viewport.touch.pen_time = sample.time;
+        app.viewport.touch.pen_awaiting = sample.awaiting;
         app.viewport.touch.pen_tilt = sample.tilt.map(|[x, y]| {
             let lean = (x * x + y * y).sqrt().min(1.0);
             let tip = pos + egui::vec2(x, y) * (20.0 / lean.max(1e-3));
@@ -729,6 +769,7 @@ fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2)
     // Mouse and finger input paint at full pressure (the pen has its own path).
     app.viewport.touch.pen_tilt = None;
     app.viewport.touch.pen_time = app.viewport.touch.pointer_time;
+    app.viewport.touch.pen_awaiting = None;
     app.viewport.touch.pen_barrel = Default::default();
     if app.brush_state.is_drawing {
         app.add_stroke_point(pos, 1.0);
@@ -811,7 +852,7 @@ mod tests {
                         .show(ctx, |ui| ui.label("OK"));
                 }
                 let rect = response.rect;
-                super::handle_input(app, ctx, &response, rect.min, rect.center(), &[]);
+                super::handle_input(app, ctx, &response, rect.min, rect.center(), &[], &[], &[]);
             });
         });
     }

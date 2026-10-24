@@ -7,7 +7,8 @@ fn wet_edges_thin_the_middle_of_a_wash_and_keep_its_rim() {
     // A thick line across tile borders (tiles are 64 px): 50 px wide.
     let (plain, _) = paint(&mut wash(0.0), &line(64.0, 0.5), 1, true);
     let (mut wet, undo) = paint(&mut wash(0.6), &line(64.0, 0.5), 1, true);
-    let (middle, rim) = (alpha(&wet, 128, 64), alpha(&wet, 128, 64 - 22));
+    // (The rim fades in across its width, strongest just inside the edge.)
+    let (middle, rim) = (alpha(&wet, 128, 64), alpha(&wet, 128, 64 - 24));
     let plain_middle = alpha(&plain, 128, 64) as u32;
     assert!(
         (middle as u32) < plain_middle * 2 / 3,

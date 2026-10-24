@@ -1753,6 +1753,8 @@ mod tests {
                         rect.min,
                         rect.center(),
                         &[],
+                        &[],
+                        &[],
                     );
                 });
             });

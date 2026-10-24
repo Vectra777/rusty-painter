@@ -606,7 +606,7 @@ pub(crate) fn palette_grid(
                 ui.painter().rect_stroke(
                     rect.expand(1.0),
                     RADIUS_SMALL,
-                    Stroke::new(2.0, accent()),
+                    Stroke::new(2.0_f32, accent()),
                 );
             }
             if let Some(from) = r.dnd_release_payload::<Slot>() {
@@ -668,7 +668,7 @@ pub(crate) fn palette_grid(
                         painter.rect_stroke(
                             rect.expand(1.0),
                             RADIUS_SMALL,
-                            Stroke::new(1.0, TEXT_STRONG),
+                            Stroke::new(1.0_f32, TEXT_STRONG),
                         );
                     }
                 }
@@ -686,7 +686,11 @@ pub(crate) fn palette_grid(
                         );
                     } else {
                         let line = if hovered { BORDER_LIGHT } else { WIDGET };
-                        painter.rect_stroke(rect.shrink(0.5), RADIUS_SMALL, Stroke::new(1.0, line));
+                        painter.rect_stroke(
+                            rect.shrink(0.5),
+                            RADIUS_SMALL,
+                            Stroke::new(1.0_f32, line),
+                        );
                     }
                     let tip = if plus == Some(i) {
                         "Add the brush colour"

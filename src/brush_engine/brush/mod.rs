@@ -99,6 +99,9 @@ pub enum StabilizerAlgorithm {
     PostCorrection,
     /// Jitter filtered out by speed: smooth when slow, direct when fast.
     MotionFilter,
+    /// StreamLine (Procreate's): the line behind the pen is smoothed as
+    /// it's drawn, the more the further back, so it ends where the pen is.
+    StreamLine,
 }
 
 /// Gaussian circle brush tip: per-pixel alpha as a function of distance from
@@ -271,6 +274,11 @@ pub struct Brush {
     pub wet_edge: f32,
     /// How wide the pooled rim is, in canvas pixels.
     pub wet_edge_width: f32,
+    /// How the watercolour edge is drawn (this app's rim, or Procreate's
+    /// ring from each pixel's coverage).
+    pub wet_edge_style: crate::brush_engine::wet_edge::WetEdgeStyle,
+    /// Burnt edges: the stroke's thin parts laid with another blend mode.
+    pub burnt_edges: Option<crate::brush_engine::wet_edge::BurntEdges>,
     /// The hairs of a [`BrushType::Bristle`] brush.
     pub bristles: crate::brush_engine::bristle::Bristles,
     /// The joining lines of a [`BrushType::Sketch`] brush.
@@ -366,6 +374,9 @@ struct BatchCtx<'a> {
     wash: Option<f32>,
     /// Leave the painted rows unresolved (see [`StrokeTiles::defer_resolve`]).
     defer: bool,
+    /// Watercolour edges from the round dabs' depth, applied as the stroke
+    /// is resolved.
+    rim: Option<crate::brush_engine::wet_edge::WetRim>,
 }
 
 /// Where a batch of dabs accumulates.
@@ -765,6 +776,8 @@ impl Brush {
             dual: None,
             wet_edge: 0.0,
             wet_edge_width: 6.0,
+            wet_edge_style: Default::default(),
+            burnt_edges: None,
             bristles: Default::default(),
             sketch: Default::default(),
             hatching: Default::default(),
@@ -804,6 +817,8 @@ impl Brush {
             dual: None,
             wet_edge: 0.0,
             wet_edge_width: 6.0,
+            wet_edge_style: Default::default(),
+            burnt_edges: None,
             bristles: Default::default(),
             sketch: Default::default(),
             hatching: Default::default(),

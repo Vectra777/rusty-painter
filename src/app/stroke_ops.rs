@@ -387,6 +387,8 @@ impl PainterApp {
         // Colour mixing paints through the Smudge tool's engine (it erases
         // like any brush).
         if self.brush_state.brush.mixing.is_some() && !erasing {
+            // (Not one QuickShape follows: the smudge engine paints it.)
+            self.workspace.quickshape.reset();
             self.mixing_press(pos, pressure);
             // A stroke is on, as far as the rest of the app goes (moves
             // extend it, nothing autosaves meanwhile).
@@ -449,12 +451,13 @@ impl PainterApp {
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;
-        self.stroke_worker.sample_tilted(
+        self.stroke_worker.sample_awaiting(
             pos,
             pressure,
             self.viewport.touch.pen_tilt,
             self.viewport.touch.pen_barrel,
             self.viewport.touch.pen_time,
+            self.viewport.touch.pen_awaiting.take(),
         );
         self.viewport.touch.stroke_started = Some(std::time::Instant::now());
     }
@@ -472,19 +475,52 @@ impl PainterApp {
             return;
         }
         self.workspace.quickshape.sample(pos, self.viewport.zoom);
+        // (A guide's extra samples have their pressure from this one: only
+        // the first waits for its measured value.)
+        let mut awaiting = self.viewport.touch.pen_awaiting.take();
         for (pos, pressure) in self.guide_samples(pos, pressure) {
             if let Some(s) = self.brush_state.string.as_mut() {
                 s.pen = pos;
                 s.tip = crate::brush_engine::stabilizer::pull_string(s.tip, pos, s.length);
             }
-            self.stroke_worker.sample_tilted(
+            self.stroke_worker.sample_awaiting(
                 pos,
                 pressure,
                 self.viewport.touch.pen_tilt,
                 self.viewport.touch.pen_barrel,
                 self.viewport.touch.pen_time,
+                awaiting.take(),
             );
         }
+    }
+
+    /// Where the pen is predicted to go next (canvas points, pressures
+    /// already curved): drawn ahead of the brush stroke and taken back by
+    /// its next sample. Not for strokes whose samples are reshaped (a
+    /// guide, a ruler, a pulled string) or not painted by the stroke
+    /// worker (vector lines, smudging).
+    pub(crate) fn predict_stroke(
+        &mut self,
+        predicted: &[crate::brush_engine::stroke_worker::PredictedSample],
+    ) {
+        if predicted.is_empty()
+            || !self.brush_state.is_drawing
+            || self.brush_state.string.is_some()
+            || self.brush_state.blend_stroke.is_some()
+            || self.mixing_stroke()
+            || self.workspace.guides.ruler.enabled
+            || self.stroke_on_curve()
+        {
+            return;
+        }
+        let in_layer: Vec<_> = predicted
+            .iter()
+            .map(|p| crate::brush_engine::stroke_worker::PredictedSample {
+                pos: self.to_layer_space(p.pos),
+                ..*p
+            })
+            .collect();
+        self.stroke_worker.predict(&in_layer);
     }
 
     /// The pen lifted (or the stroke must end): a vector line is kept, a
@@ -502,6 +538,7 @@ impl PainterApp {
         }
         self.brush_state.is_drawing = false;
         self.brush_state.string = None;
+        self.workspace.quickshape.reset();
         self.render_cache.below_cache = None;
     }
 

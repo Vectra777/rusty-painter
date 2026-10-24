@@ -228,6 +228,15 @@ impl PainterApp {
             .new_canvas
             .background_color32(self.workspace.color_model);
         self.rebuild_canvas(width, height, background);
+        let paper = self.modal_state.new_canvas.paper.tiles(
+            (width, height),
+            TILE_SIZE,
+            background,
+            self.workspace.color_model,
+        );
+        for ((tx, ty), data) in paper {
+            self.canvas_mut().set_layer_tile_data(0, tx, ty, data);
+        }
         self.workspace.library.has_document = true;
         self.canvas_mut().blend_space = self.modal_state.new_canvas.blend_space;
         let depth = self.modal_state.new_canvas.depth;
