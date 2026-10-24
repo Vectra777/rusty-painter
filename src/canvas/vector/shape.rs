@@ -152,7 +152,7 @@ fn yes() -> bool {
 const FLATNESS: f32 = 0.1;
 
 impl PathShape {
-    /// Each subpath as a polyline within [`FLATNESS`] of it, and whether
+    /// Each subpath as a polyline within `FLATNESS` of it, and whether
     /// it's closed.
     pub fn flattened(&self) -> Vec<(Vec<Vec2>, bool)> {
         self.path

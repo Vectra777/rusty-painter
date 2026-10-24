@@ -6,7 +6,7 @@
 //! strength; near the edge the coverage exceeds its blur, and the paint
 //! keeps its full strength. Thin lines, all edge, stay as they were.
 //!
-//! Round tips do it without the blur ([`WetRim`]): each dab records how
+//! Round tips do it without the blur (`WetRim`): each dab records how
 //! deep inside it every pixel lies, the stroke keeps the deepest, and the
 //! paint thins by that depth as the stroke is put on the layer. The blur
 //! stays for image tips, whose painted outline isn't their circle.

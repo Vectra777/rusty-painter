@@ -332,7 +332,7 @@ fn box_meets(a: [i32; 4], b: [i32; 4]) -> bool {
     a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
 }
 
-/// A smoothed path with a box around each run of [`RUN`] segments, so
+/// A smoothed path with a box around each run of `RUN` segments, so
 /// finding what crosses a segment skips the runs nowhere near it.
 pub struct RunPath {
     pub path: Vec<[f32; 3]>,
@@ -1165,7 +1165,7 @@ impl Segment {
         Cone::new(self.ab.length_sq(), self.width, self.width + self.dw)
     }
 
-    /// [`Self::coverage`] of a width-changing one: without branches (each
+    /// `coverage` of a width-changing one: without branches (each
     /// case worked out and one picked), so it too runs several pixels at a
     /// time.
     #[inline(always)]
@@ -1200,7 +1200,7 @@ impl Segment {
         (0.5 - outside).min(1.0) * fade
     }
 
-    /// [`Self::coverage`] of one as wide all along.
+    /// `coverage` of one as wide all along.
     #[inline(always)]
     fn plain_coverage(&self, dx0: f32, dy0: f32, along_y: f32) -> f32 {
         let t = ((dx0 * self.ab.x + along_y) * self.inv_len2).clamp(0.0, 1.0);
