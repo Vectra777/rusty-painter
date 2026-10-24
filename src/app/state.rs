@@ -443,6 +443,9 @@ pub struct LayerState {
     pub thumbnails: Vec<Option<egui::TextureHandle>>,
     /// Set when canvas content may have changed since thumbnails were built.
     pub thumbnails_dirty: bool,
+    /// Changes others made while painting together: they're not steps in
+    /// this painter's history, but are work to save (and autosave).
+    pub remote_edits: u64,
     pub thumbnails_built_at: Option<std::time::Instant>,
 }
 
@@ -469,6 +472,7 @@ impl LayerState {
             history: History::new(),
             thumbnails: Vec::new(),
             thumbnails_dirty: true,
+            remote_edits: 0,
             thumbnails_built_at: None,
         }
     }
@@ -666,6 +670,9 @@ pub struct WorkspaceState {
     pub autosave: crate::app::autosave::AutosaveState,
     /// Time-lapse recording.
     pub timelapse: crate::app::timelapse::TimelapseState,
+    /// Painting together: the session, and the window starting one.
+    pub collab: Option<crate::app::collab::Collab>,
+    pub collab_form: crate::app::collab::Form,
     /// Text tool settings and the text being typed.
     pub text: crate::app::tools::text::TextToolState,
     /// Shader layers: compiled shaders, clocks, editor windows.
@@ -779,6 +786,8 @@ impl WorkspaceState {
             filter: Default::default(),
             autosave: crate::app::autosave::AutosaveState::new(std::path::Path::new("")),
             timelapse: Default::default(),
+            collab: None,
+            collab_form: Default::default(),
             text: Default::default(),
             shaders: Default::default(),
             quickshape: Default::default(),

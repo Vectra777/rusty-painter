@@ -141,8 +141,17 @@ impl PainterApp {
     /// 3. the canvas, fresh per-layer state and render cache are installed;
     /// 4. the selection is cleared and the view refits.
     pub(crate) fn replace_document(&mut self, canvas: Canvas, history: History) {
-        // 0. A document with work in it stays open, in its own tab.
+        // 0. A document with work in it stays open, in its own tab (one
+        // painted together goes on in it); one that doesn't is gone.
         self.keep_document_in_tab();
+        self.collab_document_replaced();
+        self.install_document(canvas, history, true);
+    }
+
+    /// Steps 1 to 4 of [`Self::replace_document`], the view refitted if
+    /// `refit` (a document painted together changing under the painter
+    /// keeps it).
+    pub(crate) fn install_document(&mut self, canvas: Canvas, history: History, refit: bool) {
         // 1. Background work.
         self.release_canvas();
         self.patch_abandon();
@@ -170,7 +179,9 @@ impl PainterApp {
         self.selection_manager.canvas_size = [width, height];
         self.workspace.select.saved.clear();
         self.brush_state.palettes.forget_document();
-        self.reset_viewport_state();
+        if refit {
+            self.reset_viewport_state();
+        }
         self.mark_saved();
     }
 

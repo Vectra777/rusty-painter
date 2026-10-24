@@ -448,6 +448,7 @@ impl PainterApp {
             perspective: self.perspective_grids(),
             wet_gravity: Vec2::from(self.workspace.wet_gravity),
             inside,
+            seed: None,
         });
         self.brush_state.is_drawing = true;
         self.render_cache.below_cache = None;

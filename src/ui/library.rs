@@ -647,6 +647,12 @@ pub fn library_screen(app: &mut PainterApp, ctx: &egui::Context) {
                     {
                         leave = Some(Leave::OpenFile);
                     }
+                    if pill(ui, None, "Paint together", h, true, false)
+                        .on_hover_text("Join someone's canvas with their invite code")
+                        .clicked()
+                    {
+                        app.workspace.collab_form.open = true;
+                    }
                     let has_entries = lib.entries.as_ref().is_some_and(|e| !e.is_empty());
                     if pill(ui, Some(Icon::Check), "Select", h, has_entries, false).clicked() {
                         lib.selecting = true;

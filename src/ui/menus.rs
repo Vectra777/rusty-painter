@@ -235,6 +235,9 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "Open…", keys(app, ctx, Action::Open)) {
         open_project(app);
     }
+    if menu_item(ui, "Paint Together…", None) {
+        app.workspace.collab_form.open = true;
+    }
     if menu_item(ui, "Save", keys(app, ctx, Action::Save)) {
         save_project(app);
     }

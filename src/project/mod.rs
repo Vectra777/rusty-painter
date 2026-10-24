@@ -372,6 +372,26 @@ fn checked_layer_tree(
     }
 }
 
+/// The document as painting together sends it: the project data alone (no
+/// flattened picture, no undo history: that's each painter's own), with
+/// its pixels or, `pixels` false, just its layer list.
+pub(crate) fn encode_shared(app: &PainterApp, pixels: bool) -> Result<Vec<u8>, String> {
+    let canvas = if pixels {
+        app.canvas.detached_copy()
+    } else {
+        app.canvas.layers_only()
+    };
+    encode_project_data(&ProjectSnapshot {
+        canvas,
+        color_model: app.workspace.color_model,
+        history: History::new(),
+        guides: crate::app::tools::guides::StoredGuides::from_app(app),
+        saved_selections: Vec::new(),
+        work_path: Default::default(),
+        palettes: Vec::new(),
+    })
+}
+
 pub(crate) fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
     ProjectSnapshot::capture(app).encode()
 }

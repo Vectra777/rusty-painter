@@ -122,8 +122,9 @@ impl PainterApp {
         let (undo, redo) = history.stacks();
         // Shader and palette edits aren't undo steps but are changes to
         // keep.
-        let edits =
-            (self.workspace.shaders.edits).wrapping_add(self.brush_state.palettes.document_edits);
+        let edits = (self.workspace.shaders.edits)
+            .wrapping_add(self.brush_state.palettes.document_edits)
+            .wrapping_add(self.layer_state.remote_edits);
         (
             history.push_count().wrapping_add(edits),
             undo.len(),

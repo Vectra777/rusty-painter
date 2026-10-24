@@ -43,6 +43,39 @@ pub struct StrokeSetup {
     /// Stay inside the lines: where the pen went down and how the Fill
     /// tool finds areas (see [`clip_inside_lines`]).
     pub inside: Option<(Vec2, crate::canvas::fill::FillSettings)>,
+    /// The stroke's random seed (`None`: a random one), to paint a stroke
+    /// again as another painter painted it.
+    pub seed: Option<u64>,
+}
+
+/// What a tapped worker was given (see [`StrokeWorker::set_tap`]): enough
+/// to paint the same strokes elsewhere.
+#[derive(Clone, Debug)]
+pub enum Tapped {
+    Begin {
+        brush: Box<Brush>,
+        /// The layer painted (`None`: not one of the canvas's).
+        layer: Option<crate::canvas::storage::LayerId>,
+        symmetry: Symmetry,
+        view_scale: f32,
+        wrap: bool,
+        wet_gravity: Vec2,
+        seed: u64,
+    },
+    /// `time`: seconds since the worker started.
+    Sample {
+        pos: Vec2,
+        pressure: f32,
+        time: f64,
+        tilt: Option<PenTilt>,
+        barrel: PenBarrel,
+        awaiting: Option<u64>,
+    },
+    Update {
+        index: u64,
+        pressure: f32,
+    },
+    End,
 }
 
 /// Clip `selection` to the area at `pos` on the canvas's reference layers,
@@ -254,6 +287,8 @@ pub struct StrokeWorker {
     /// Set by [`Self::drop_queued_samples`]: the stroke (counting begins
     /// from 1) whose samples still queued are skipped; 0 for none.
     skip_stroke: Arc<std::sync::atomic::AtomicU64>,
+    /// Where what it's given is reported too (see [`Self::set_tap`]).
+    tap: Mutex<Option<Sender<Tapped>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -365,6 +400,7 @@ impl StrokeWorker {
             shared,
             begins_sent: Default::default(),
             skip_stroke,
+            tap: Mutex::new(None),
             thread: Some(thread),
         }
     }
@@ -379,9 +415,33 @@ impl StrokeWorker {
             .store(latest, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn begin(&self, setup: StrokeSetup) {
+    /// Also report every stroke begun, sample, pressure update and end to
+    /// `tap` (`None`: stop), for painting them elsewhere.
+    pub fn set_tap(&self, tap: Option<Sender<Tapped>>) {
+        *self.tap.lock().unwrap_or_else(|e| e.into_inner()) = tap;
+    }
+
+    fn report(&self, tapped: impl FnOnce() -> Tapped) {
+        let tap = self.tap.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tap) = tap.as_ref() {
+            let _ = tap.send(tapped());
+        }
+    }
+
+    pub fn begin(&self, mut setup: StrokeSetup) {
         self.begins_sent
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // (Chosen here, so a tap gets it too.)
+        let seed = *setup.seed.get_or_insert_with(rand::random);
+        self.report(|| Tapped::Begin {
+            brush: Box::new(setup.brush.clone()),
+            layer: setup.canvas.layer_id_at(setup.layer_idx),
+            symmetry: setup.symmetry,
+            view_scale: setup.view_scale,
+            wrap: setup.wrap,
+            wet_gravity: setup.wet_gravity,
+            seed,
+        });
         self.send(Job::Begin(Box::new(setup)));
     }
 
@@ -423,6 +483,14 @@ impl StrokeWorker {
     ) {
         let now = self.epoch.elapsed().as_secs_f64();
         let time = pen_time.map_or(now, |t| self.pen_to_epoch(t, now));
+        self.report(|| Tapped::Sample {
+            pos,
+            pressure,
+            time,
+            tilt,
+            barrel,
+            awaiting,
+        });
         self.send(Job::Sample {
             pos,
             pressure,
@@ -455,6 +523,7 @@ impl StrokeWorker {
 
     /// The measured pressure of the sample sent awaiting `index`.
     pub fn update(&self, index: u64, pressure: f32) {
+        self.report(|| Tapped::Update { index, pressure });
         self.send(Job::Update { index, pressure });
     }
 
@@ -482,6 +551,7 @@ impl StrokeWorker {
     }
 
     pub fn end(&self) {
+        self.report(|| Tapped::End);
         self.ends_sent
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.send(Job::End);
@@ -706,10 +776,7 @@ fn run_job(
                 clip_inside_lines(&setup.canvas, &setup.pool, inside, &mut setup.selection);
             }
             let copies = setup.symmetry.copies();
-            let seed = match tests_seed() {
-                Some(seed) => seed,
-                None => rand::random(),
-            };
+            let seed = tests_seed().or(setup.seed).unwrap_or_else(rand::random);
             let mut stroke = StrokeState::with_seed(seed);
             stroke.view_scale = setup.view_scale;
             stroke.perspective = setup.perspective.clone();
@@ -1328,6 +1395,7 @@ mod tests {
             perspective: Vec::new(),
             wet_gravity: Vec2::new(0.0, 1.0),
             inside: None,
+            seed: None,
             wrap: false,
         });
         for (pos, pressure) in samples() {
@@ -1405,6 +1473,7 @@ mod tests {
                 perspective: Vec::new(),
                 wet_gravity: Vec2::new(0.0, 1.0),
                 inside: None,
+                seed: None,
                 wrap: false,
             })
         };
@@ -1463,6 +1532,7 @@ mod tests {
             perspective: Vec::new(),
             wet_gravity: Vec2::new(0.0, 1.0),
             inside: None,
+            seed: None,
             wrap: false,
         });
         for &(pos, pressure) in samples {
@@ -1507,6 +1577,7 @@ mod tests {
             perspective: Vec::new(),
             wet_gravity: Vec2::new(0.0, 1.0),
             inside: None,
+            seed: None,
             wrap: false,
         });
         for step in steps {
@@ -1798,6 +1869,7 @@ mod tests {
                 perspective: Vec::new(),
                 wet_gravity: Vec2::new(0.0, 1.0),
                 inside: None,
+                seed: None,
                 wrap: false,
             });
             worker.sample(Vec2::new(64.0, 64.0), 1.0);

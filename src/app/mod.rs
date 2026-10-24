@@ -13,6 +13,7 @@
 //! - [`frame_stats`]: how long each stage of a frame takes (the readout).
 //! - [`pressure_calibration`]: fitting the pen pressure curve to test strokes.
 //! - [`timelapse`]: recording the painting and exporting it as a video.
+//! - [`collab`]: painting together on one canvas over the network.
 //! - [`color_management`]: the monitor's profile, proofing, assigning and
 //!   converting the document's profile.
 //! - [`animation`]: frames, playback, drawings and exporting animations.
@@ -29,6 +30,7 @@ pub(crate) mod brush_io;
 pub(crate) mod brush_library;
 pub(crate) mod canvas_ops;
 pub(crate) mod clipboard;
+pub(crate) mod collab;
 pub(crate) mod color_management;
 #[cfg(not(target_os = "android"))]
 pub(crate) mod dev_shot;

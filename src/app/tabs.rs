@@ -80,7 +80,8 @@ impl Document {
         let version = (
             (history.push_count())
                 .wrapping_add(self.shader_edits)
-                .wrapping_add(self.palette_edits),
+                .wrapping_add(self.palette_edits)
+                .wrapping_add(self.layer_state.remote_edits),
             undo.len(),
             redo.len(),
         );
@@ -118,7 +119,7 @@ impl Tabs {
     }
 
     /// The autosave slots the tabs use.
-    fn slots<'a>(&'a self, app_slot: usize) -> impl Iterator<Item = usize> + 'a {
+    pub(crate) fn slots<'a>(&'a self, app_slot: usize) -> impl Iterator<Item = usize> + 'a {
         (self.docs.iter().flatten().map(|d| d.autosave.slot())).chain([app_slot])
     }
 }
@@ -192,6 +193,8 @@ impl PainterApp {
         ws.guides.end_drag();
         ws.animation.playing = false;
         self.release_canvas();
+        // What was just done goes to those painting it together first.
+        self.collab_flush();
     }
 
     /// Whether the tab shown can change now (nothing is being painted,

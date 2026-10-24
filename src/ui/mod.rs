@@ -5,6 +5,7 @@ pub(crate) mod brush_preview;
 pub(crate) mod brush_settings;
 pub(crate) mod canvas_creation;
 pub(crate) mod canvas_sliders;
+pub(crate) mod collab_window;
 pub(crate) mod color_picker;
 pub(crate) mod curve_editor;
 pub(crate) mod export_modal;

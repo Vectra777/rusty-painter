@@ -1109,6 +1109,7 @@ fn bench_post_correction(c: &mut Criterion) {
                     perspective: Vec::new(),
                     wet_gravity: Vec2::new(0.0, 1.0),
                     inside: None,
+                    seed: None,
                     wrap: false,
                 });
                 for &(pos, pressure) in &path {

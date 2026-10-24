@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Painting together
+- File → Paint Together (also on the Projects screen): host the open canvas and share its invite code, or join someone's. Everyone paints on the same canvas at once and sees the others' cursors with their names.
+- Others' strokes are painted as they paint them, with their own brush; when they lift the pen, their exact pixels replace it, so every canvas stays the same. Smudge, blur, mixing, wet and impasto brushes, vector strokes, fills and filters show when they're done.
+- Two people painting in the same place both keep their paint; only the very same pixel goes to whoever was last. Every few seconds the host checks the canvases match and puts right any that drifted.
+- Undo takes back only your own work: what someone painted over it since stays. Layer changes (added, removed, moved, their settings, text and vector edits) keep everyone's undo. Resizing, cropping, turning and merging can't be undone while painting together.
+- The session belongs to its document: on another tab, what the others do waits for coming back to it. Joining keeps what was open in its own tab; the joined canvas is a new document of your own, to save or export, and what the others paint counts as unsaved work (and is autosaved).
+- On the same network the invite works as is (the host's firewall must let port 7878 in). Over the internet: a VPN such as Tailscale, a forwarded port, or a relay (`cargo run --release --bin relay`, port 7879) when neither side can open one.
+- Connections are encrypted end to end (TLS; the invite pins the host's certificate, so even a relay sees nothing), with an optional password.
+
 ### Navigator and check view
 - The Navigator is a second view for painting zoomed in. It's drawn from the canvas view's GPU textures, so it follows each stroke as it's painted, and the parts of the canvas off screen are brought up to date for it. Its window can be made any size. It can be mirrored, and has its own check view.
 - Check view (View → Check View, `Shift+H`): the canvas shown in grey of the same lightness, in 2 to 8 flat steps of lightness, or as how saturated its colours are. Only the view changes. The key switches between colour and the mode last chosen.
