@@ -765,6 +765,12 @@ impl PainterApp {
                     }
                 }
             }
+            LayerHistoryOp::Guides(places) => {
+                let mut there = places.lock().unwrap_or_else(|e| e.into_inner());
+                let here = crate::app::tools::guides::GuidePlaces::of(self);
+                there.put(self);
+                *there = here;
+            }
             LayerHistoryOp::Text { .. }
             | LayerHistoryOp::Settings(_)
             | LayerHistoryOp::Vector { .. }

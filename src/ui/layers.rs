@@ -491,6 +491,13 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     } else {
         display_order(&app.canvas, false)
     };
+    // A transform's floating layer isn't a row: the layer it was lifted
+    // from stands for it.
+    let floating = app.layer_state.floating_layer_idx;
+    let order: Vec<(usize, usize)> = order
+        .into_iter()
+        .filter(|&(i, _)| Some(i) != floating)
+        .collect();
     ui.data_mut(|d| d.insert_temp(filter_id, (query, filter)));
     if filtering && order.is_empty() {
         ui.label(RichText::new("No layer matches").color(TEXT_DIM));
@@ -1061,6 +1068,71 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 }
             }
         });
+
+    // Anything done here puts a transform being made down first (its
+    // floating layer leaves the list), the rows' indices following.
+    let acted = select_paint.is_some()
+        || toggle_expanded.is_some()
+        || toggle_mask.is_some()
+        || pending_move.is_some()
+        || pick_click.is_some()
+        || active_idx != app.canvas.active_layer_idx
+        || add_layer
+        || add_folder
+        || add_mask
+        || add_shader
+        || group_picked
+        || merge_picked
+        || merge_down.is_some()
+        || delete_picked
+        || duplicate_picked
+        || lock_picked.is_some()
+        || copy_layers
+        || paste_layers
+        || ungroup.is_some()
+        || pick_tag.is_some()
+        || duplicate.is_some()
+        || edit_text.is_some()
+        || edit_shader.is_some()
+        || rasterise_text.is_some()
+        || rasterise_vector.is_some()
+        || line_width.is_some()
+        || to_delete.is_some();
+    let (picked, order) = if floating.is_some() && acted {
+        let at = app.put_transform_down();
+        for i in [
+            &mut toggle_expanded,
+            &mut toggle_mask,
+            &mut merge_down,
+            &mut ungroup,
+            &mut duplicate,
+            &mut edit_text,
+            &mut rasterise_text,
+            &mut rasterise_vector,
+            &mut line_width,
+            &mut to_delete,
+            &mut renaming,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *i = at(*i);
+        }
+        if let Some((i, _)) = &mut select_paint {
+            *i = at(*i);
+        }
+        if let Some((i, _)) = &mut pick_click {
+            *i = at(*i);
+        }
+        if let Some((from, to, _)) = &mut pending_move {
+            (*from, *to) = (at(*from), at(*to));
+        }
+        active_idx = at(active_idx);
+        let order = order.into_iter().map(|(i, depth)| (at(i), depth)).collect();
+        (app.selected_indices(), order)
+    } else {
+        (picked, order)
+    };
 
     if let Some((i, mode)) = select_paint {
         app.select_layer_paint(i, mode);

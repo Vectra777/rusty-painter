@@ -171,6 +171,7 @@ impl PainterApp {
     /// one, selected.
     pub(crate) fn add_vector_layer(&mut self) {
         self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
         let (index, parent) = self.insertion_point(true);
         let name = self.next_layer_name("Vector");
         self.insert_entry_with(

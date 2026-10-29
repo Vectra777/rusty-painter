@@ -131,6 +131,34 @@ impl Assistant {
         }
     }
 
+    /// Move all of it by `d`.
+    pub fn move_by(&mut self, d: Vec2) {
+        for i in 0..self.kind.handles() {
+            let p = self.point(i) + d;
+            self.set_point(i, p);
+        }
+    }
+
+    /// Whether canvas point `p` is on it (within `near` of its lines, or
+    /// inside its plane or ellipse), for grabbing it whole.
+    pub fn covers(&self, p: Vec2, near: f32) -> bool {
+        match self.kind {
+            // Its only handle moves it.
+            AssistantKind::VanishingPoint => false,
+            AssistantKind::Perspective => {
+                let corners: Vec<Vec2> = (0..4)
+                    .map(|i| self.point(i))
+                    .chain([self.point(0)])
+                    .collect();
+                nearest_on_polyline(&corners, p).1 <= near || inside(p, &corners[..4])
+            }
+            AssistantKind::Ellipse | AssistantKind::Concentric => self.ellipse().is_some_and(|e| {
+                let u = e.unit_coords(p).length();
+                u <= 1.0 || e.distance(p) <= near
+            }),
+        }
+    }
+
     /// Its ellipse, for an ellipse or concentric assistant.
     pub fn ellipse(&self) -> Option<Ellipse> {
         if !matches!(
@@ -166,6 +194,18 @@ impl Assistant {
             _ => Vec::new(),
         }
     }
+}
+
+/// Whether `p` is inside polygon `points` (crossing count).
+fn inside(p: Vec2, points: &[Vec2]) -> bool {
+    let mut odd = false;
+    for (i, &a) in points.iter().enumerate() {
+        let b = points[(i + 1) % points.len()];
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            odd = !odd;
+        }
+    }
+    odd
 }
 
 /// Where the lines through `a`, `b` and through `c`, `d` cross (none if

@@ -241,6 +241,7 @@ impl PainterApp {
 
     /// Copy the picked layers (settings, masks, folders' contents).
     pub(crate) fn copy_layers(&mut self) {
+        crate::app::tools::transform::commit_floating_layer(self);
         self.release_canvas();
         let layers = self.picked_snapshots();
         self.workspace.clipboard.layers = Some(LayerClip {
@@ -267,6 +268,7 @@ impl PainterApp {
     /// Duplicate the picked layers above the selected one (one undo step),
     /// or the selected layer alone.
     pub(crate) fn duplicate_picked(&mut self) {
+        crate::app::tools::transform::commit_floating_layer(self);
         if self.selected_indices().len() < 2 {
             return self.duplicate_layer();
         }
@@ -572,6 +574,80 @@ mod tests {
         assert_eq!(app.canvas.layers.len(), 2, "one undo takes it all back");
         app.apply_history(true);
         assert_eq!(pixel(&app, 2, 15, 15), RED, "redo brings the pixels too");
+    }
+
+    /// A pasted picture being moved: its floating layer above it.
+    fn moving_paste() -> PainterApp {
+        use crate::app::tools::transform::*;
+        let mut app = app();
+        let img = image::RgbaImage::from_pixel(20, 20, image::Rgba([0, 0, 255, 255]));
+        app.labelled("Paste", |app| app.import_rgba("Pasted", img));
+        transform_press(&mut app, Vec2::new(64.0, 32.0));
+        transform_drag(&mut app, Vec2::new(80.0, 40.0), false);
+        flush_transform_preview(&mut app);
+        transform_release(&mut app);
+        assert_eq!(app.layer_state.floating_layer_idx, Some(3));
+        assert_eq!(app.active_row(), 2, "the pasted layer's row stands for it");
+        app
+    }
+
+    fn names(app: &PainterApp) -> Vec<&str> {
+        app.canvas.layers.iter().map(|l| l.name.as_str()).collect()
+    }
+
+    #[test]
+    fn layer_changes_while_moving_a_paste_put_it_down_first() {
+        let mut app = moving_paste();
+        app.layer_state.selected = vec![app.canvas.layers[1].id, app.canvas.layers[2].id];
+        app.duplicate_picked();
+        assert_eq!(
+            names(&app),
+            [
+                "Background",
+                "Layer 1",
+                "Pasted",
+                "Layer 1 copy",
+                "Pasted copy"
+            ],
+            "no copy of the floating layer"
+        );
+
+        // Indices from before it was put down still name the same layers.
+        let mut app = moving_paste();
+        app.remove_layer(3);
+        assert_eq!(names(&app), ["Background", "Layer 1"]);
+        assert!(app.layer_state.floating_layer_idx.is_none());
+
+        let mut app = moving_paste();
+        app.layer_state.selected.clear();
+        app.move_layer(2, 1, None);
+        assert_eq!(names(&app), ["Background", "Pasted", "Layer 1"]);
+        assert_eq!(
+            pixel(&app, 1, 75, 40).b(),
+            255,
+            "moved where it was dragged"
+        );
+
+        let mut app = moving_paste();
+        app.merge_down();
+        assert_eq!(names(&app), ["Background", "Layer 1"]);
+        assert_eq!(pixel(&app, 1, 75, 40).b(), 255);
+    }
+
+    #[test]
+    fn undo_after_deleting_the_floating_row_keeps_the_layers_in_step() {
+        // Its row deleted while moving, then a layer moved: undo crashed.
+        let mut app = moving_paste();
+        app.remove_layer(3);
+        app.layer_state.selected.clear();
+        app.move_layer(1, 2, None);
+        for _ in 0..4 {
+            app.apply_history_now(false);
+            assert_eq!(
+                app.layer_state.layer_ui_colors.len(),
+                app.canvas.layers.len()
+            );
+        }
     }
 
     #[test]

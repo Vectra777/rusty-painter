@@ -1906,13 +1906,13 @@ fn rewrites_document(step: &UndoAction) -> bool {
 }
 
 /// A step that changes the layer list or a layer's settings or sources
-/// (all but wet paint drying, which isn't shared).
+/// (all but wet paint drying and guides moving, which aren't shared).
 fn changes_layers(step: &UndoAction) -> bool {
     let mut op = step.layer_action.as_ref();
     while let Some(LayerHistoryOp::Wet { inner, .. }) = op {
         op = inner.as_deref();
     }
-    op.is_some()
+    op.is_some_and(|op| !matches!(op, LayerHistoryOp::Guides(_)))
 }
 
 /// Where a step's vector lines changed without pixels kept: the others

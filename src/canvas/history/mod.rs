@@ -314,6 +314,9 @@ pub enum LayerHistoryOp {
     /// Layers' settings (opacity, visibility, blend mode, locks...) as they
     /// are on the other side of this step.
     Settings(Vec<(LayerId, LayerSettings)>),
+    /// The guides (ruler, assistants, mirror) moved: where they are on the
+    /// other side of this step, swapped in by the caller (it holds them).
+    Guides(std::sync::Arc<std::sync::Mutex<crate::app::tools::guides::GuidePlaces>>),
 }
 
 impl LayerHistoryOp {
@@ -495,6 +498,7 @@ fn describe(action: &UndoAction) -> Option<&'static str> {
         Some(LayerHistoryOp::Replaced(_)) => "Merge layers",
         Some(LayerHistoryOp::Batch(_)) => "Move layers",
         Some(LayerHistoryOp::Settings(_)) => "Layer settings",
+        Some(LayerHistoryOp::Guides(_)) => "Move helper",
         Some(LayerHistoryOp::Text { .. }) => "Text",
         None if matches!(action.layer_action, Some(LayerHistoryOp::Text { .. }))
             && action.tiles.is_empty() =>
@@ -948,7 +952,9 @@ impl History {
                 Some(op.clone())
             }
             // (Swapped with the text, both ways.)
-            Some(op @ LayerHistoryOp::Settings(_)) => Some(op.clone()),
+            Some(op @ (LayerHistoryOp::Settings(_) | LayerHistoryOp::Guides(_))) => {
+                Some(op.clone())
+            }
             // Last done, first undone; returned in the order applied.
             Some(LayerHistoryOp::Batch(ops)) => Some(LayerHistoryOp::Batch(
                 ops.iter()
@@ -1116,7 +1122,9 @@ impl History {
                 Some(op.clone())
             }
             // (Swapped with the text, both ways.)
-            Some(op @ LayerHistoryOp::Settings(_)) => Some(op.clone()),
+            Some(op @ (LayerHistoryOp::Settings(_) | LayerHistoryOp::Guides(_))) => {
+                Some(op.clone())
+            }
             Some(LayerHistoryOp::Batch(ops)) => Some(LayerHistoryOp::Batch(
                 ops.iter()
                     .filter_map(|op| {

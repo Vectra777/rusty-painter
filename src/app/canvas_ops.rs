@@ -322,6 +322,7 @@ impl PainterApp {
 
     /// Merge the selected layer into the one below (Ctrl+Alt+E).
     pub(crate) fn merge_down(&mut self) {
+        crate::app::tools::transform::commit_floating_layer(self);
         let idx = self.canvas.active_layer_idx;
         self.apply_merge(move |canvas| canvas.plan_merge_down(idx));
     }
@@ -329,6 +330,7 @@ impl PainterApp {
     /// Merge the rows picked in the layers panel into one, or the selected
     /// layer down when only one is picked.
     pub(crate) fn merge_selected(&mut self) {
+        crate::app::tools::transform::commit_floating_layer(self);
         let picked = self.selected_indices();
         if picked.len() < 2 {
             return self.merge_down();
@@ -379,6 +381,28 @@ impl PainterApp {
         self.release_canvas();
     }
 
+    /// Where the layer a transform's floating layer was lifted from is.
+    pub(crate) fn floating_source(&self) -> Option<usize> {
+        let session = self.layer_state.float_session.as_ref()?;
+        self.canvas.layer_index_of(session.source_id)
+    }
+
+    /// Put a transform being made down before the layer list changes (its
+    /// floating layer is in the list), and how to find an entry's index
+    /// afterwards from the one it had: the floating layer goes, so those
+    /// above it move down one, and it stands for the layer it came from.
+    pub(crate) fn put_transform_down(&mut self) -> impl Fn(usize) -> usize + use<> {
+        let float = self.layer_state.floating_layer_idx;
+        let source = self.layer_state.float_session.as_ref().map(|s| s.source_id);
+        crate::app::tools::transform::commit_floating_layer(self);
+        let source = source.and_then(|id| self.canvas.layer_index_of(id));
+        move |i| match float {
+            Some(f) if i == f => source.unwrap_or(f.saturating_sub(1)),
+            Some(f) if i > f => i - 1,
+            _ => i,
+        }
+    }
+
     /// Put `swap` in (entries taken out, others put in) as one undo step.
     pub(crate) fn apply_swap(&mut self, mut swap: crate::canvas::storage::LayerSwap, label: &str) {
         self.canvas_mut().swap_layers(&mut swap);
@@ -414,11 +438,11 @@ impl PainterApp {
     /// Delete the picked rows (with their contents and masks) as one undo
     /// step; or the selected layer alone.
     pub(crate) fn delete_picked(&mut self) {
+        self.settle_layers();
         let roots = self.selected_roots();
         if roots.len() < 2 {
             return self.delete_selected_layer();
         }
-        self.settle_layers();
         let doomed = self.with_contents(&roots);
         let below = (0..doomed[0])
             .rev()
@@ -618,6 +642,8 @@ impl PainterApp {
     /// stays at the bottom, and a folder can't move into itself.
     pub(crate) fn move_layer(&mut self, from: usize, to: usize, parent: Option<LayerId>) {
         self.quick_mask_leave();
+        let at = self.put_transform_down();
+        let (from, to) = (at(from), at(to));
         let len = self.canvas.layers.len();
         if from == 0 || from >= len {
             return;
@@ -676,9 +702,15 @@ impl PainterApp {
     }
 
     /// The layers panel row standing for the selected entry: a mask's
-    /// layer, a drawing's animated layer, or the entry itself.
+    /// layer, a drawing's animated layer, the layer a transform lifted its
+    /// floating layer from, or the entry itself.
     pub(crate) fn active_row(&self) -> usize {
         let active = self.canvas.active_layer_idx;
+        if self.layer_state.floating_layer_idx == Some(active)
+            && let Some(source) = self.floating_source()
+        {
+            return source;
+        }
         match self
             .canvas
             .layers
@@ -851,6 +883,7 @@ impl PainterApp {
     /// Put the picked rows into a new folder where the topmost of them was,
     /// in their order, as one undo step (Ctrl+G).
     pub(crate) fn group_selected(&mut self) {
+        crate::app::tools::transform::commit_floating_layer(self);
         let roots = self.selected_roots();
         let Some(&top) = roots.last() else {
             self.report("The background can't go in a folder".to_string());
@@ -874,6 +907,8 @@ impl PainterApp {
     /// Move layer `from` (as [`Self::move_layer`]) with the other picked
     /// rows, which stay next to it in their order, as one undo step.
     pub(crate) fn move_selected(&mut self, from: usize, to: usize, parent: Option<LayerId>) {
+        let at = self.put_transform_down();
+        let (from, to) = (at(from), at(to));
         let roots = self.selected_roots();
         let Some(dragged) = self.canvas.layer_id_at(from) else {
             return;
@@ -928,8 +963,11 @@ impl PainterApp {
     /// moves `canvas.layers` itself inside `History::undo`/`redo` and can't
     /// also reach into `LayerState`/`RenderCache` from there.
     pub(crate) fn reorder_layer_state(&mut self, from: usize, to: usize) {
-        let ui_color = self.layer_state.layer_ui_colors.remove(from);
-        self.layer_state.layer_ui_colors.insert(to, ui_color);
+        let colors = &mut self.layer_state.layer_ui_colors;
+        if from < colors.len() {
+            let ui_color = colors.remove(from);
+            colors.insert(to.min(colors.len()), ui_color);
+        }
         self.debug_assert_layer_state_in_sync();
     }
 
@@ -1182,6 +1220,7 @@ impl PainterApp {
     /// and select it.
     pub(crate) fn add_layer_and_select(&mut self) {
         self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
         let (index, parent) = self.insertion_point(true);
         let name = self.next_layer_name("Layer");
         self.insert_entry(index, name, LayerKind::Paint, parent, true);
@@ -1192,6 +1231,7 @@ impl PainterApp {
     /// pixels don't show (add a mask to limit where it applies).
     pub(crate) fn add_adjustment_layer(&mut self, filter: crate::canvas::filters::Filter) {
         self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
         let (index, parent) = self.insertion_point(true);
         let name = filter.name().to_string();
         let idx = self.insert_entry_with(index, name, LayerKind::Paint, parent, true, |l| {
@@ -1206,6 +1246,7 @@ impl PainterApp {
     /// can't be painted on (a mask or clipping says where it shows).
     pub(crate) fn add_fill_layer(&mut self, fill: crate::canvas::layer_style::LayerFill) {
         self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
         let (index, parent) = self.insertion_point(true);
         let name = self.next_layer_name(fill.name());
         let idx = self.insert_entry_with(index, name, LayerKind::Paint, parent, true, |l| {
@@ -1264,6 +1305,7 @@ impl PainterApp {
     /// Add an empty folder above the selected layer and select it.
     pub(crate) fn add_folder(&mut self) {
         self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
         let (index, parent) = self.insertion_point(false);
         let name = self.next_layer_name("Folder");
         self.insert_entry(index, name, LayerKind::Group, parent, true);
@@ -1273,6 +1315,7 @@ impl PainterApp {
     /// the mask for painting; selects the existing mask if there is one.
     pub(crate) fn add_mask_to_active(&mut self) {
         self.quick_mask_leave();
+        crate::app::tools::transform::commit_floating_layer(self);
         let active = self.canvas.active_layer_idx;
         let Some(layer) = self.canvas.layers.get(active) else {
             return;
@@ -1297,6 +1340,7 @@ impl PainterApp {
     /// Delete the selected layer (with undo): a drawing's whole animated
     /// layer, as the layers panel shows it. Not the background.
     pub(crate) fn delete_selected_layer(&mut self) {
+        crate::app::tools::transform::commit_floating_layer(self);
         let active = self.canvas.active_layer_idx;
         let Some(layer) = self.canvas.layers.get(active) else {
             return;
@@ -1318,6 +1362,7 @@ impl PainterApp {
 
     pub(crate) fn remove_layer(&mut self, idx: usize) {
         self.quick_mask_leave();
+        let idx = self.put_transform_down()(idx);
         let len = self.canvas.layers.len();
         if idx == 0 || idx >= len || len <= 1 {
             return;

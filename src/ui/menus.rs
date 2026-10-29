@@ -694,6 +694,7 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         crate::ui::symmetry_menu::symmetry_controls(app, ui);
     });
     crate::ui::shape_menu::ruler_controls(app, ui);
+    crate::ui::shape_menu::edit_helpers_toggle(app, ui);
     ui.menu_button("Assistants", |ui| {
         crate::ui::shape_menu::assistant_controls(app, ui);
     });

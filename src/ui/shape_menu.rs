@@ -100,6 +100,21 @@ pub(crate) fn assistant_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
 }
 
 /// The ruler's switches.
+/// The guides locked (strokes paint on their handles) or being edited.
+pub(crate) fn edit_helpers_toggle(app: &mut PainterApp, ui: &mut egui::Ui) {
+    let mut editing = app.workspace.guides.editing;
+    if ui
+        .checkbox(&mut editing, "Edit Helpers")
+        .on_hover_text(
+            "Drag the ruler, assistants and mirror: a point moves that point, anywhere else on \
+             one moves all of it. Off, they're locked and strokes paint over them (Shift+R)",
+        )
+        .changed()
+    {
+        app.set_editing_guides(editing);
+    }
+}
+
 pub(crate) fn ruler_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
     let mut enabled = app.workspace.guides.ruler.enabled;
     if ui
@@ -145,6 +160,7 @@ pub fn show(app: &mut PainterApp, ctx: &egui::Context, anchor: egui::Rect) {
         ui.separator();
         ui.label(RichText::new("RULER").small().strong().color(TEXT_DIM));
         ruler_controls(app, ui);
+        edit_helpers_toggle(app, ui);
         ui.separator();
         ui.label(RichText::new("ASSISTANTS").small().strong().color(TEXT_DIM));
         assistant_controls(app, ui);

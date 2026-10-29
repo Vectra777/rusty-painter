@@ -348,6 +348,7 @@ impl PainterApp {
     /// layer, if it's a drawing), with a blank drawing at the frame
     /// showing, selected to draw on.
     pub(crate) fn new_animation_layer(&mut self) {
+        crate::app::tools::transform::commit_floating_layer(self);
         let (index, parent) = self.sibling_insertion_point();
         let name = self.next_layer_name("Animation");
         let time = self.canvas.time;

@@ -582,6 +582,7 @@ pub(super) enum StoredLayerHistoryOp {
     Batch(Vec<StoredLayerHistoryOp>),
     /// Layers' settings on the other side of the step.
     Settings(Vec<(u64, StoredLayerSettings)>),
+    Guides(crate::app::tools::guides::GuidePlaces),
 }
 
 /// Mirrors `LayerSettings`.
@@ -662,6 +663,9 @@ impl From<&LayerHistoryOp> for StoredLayerHistoryOp {
                 unreachable!("a merge step is saved as StoredUndoAction::merge")
             }
             LayerHistoryOp::Batch(ops) => Self::Batch(ops.iter().map(Self::from).collect()),
+            LayerHistoryOp::Guides(places) => {
+                Self::Guides(places.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            }
             LayerHistoryOp::Settings(layers) => Self::Settings(
                 layers
                     .iter()
@@ -841,6 +845,9 @@ impl StoredLayerHistoryOp {
                     })
                     .collect(),
             ),
+            Self::Guides(places) => {
+                LayerHistoryOp::Guides(std::sync::Arc::new(std::sync::Mutex::new(places)))
+            }
         }
     }
 }

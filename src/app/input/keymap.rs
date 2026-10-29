@@ -24,6 +24,7 @@ pub enum Action {
     Gradient,
     Pen,
     Ruler,
+    EditHelpers,
     Transform,
     Animate,
     Eyedropper,
@@ -264,6 +265,13 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Show / hide the ruler",
         "Tools",
         &[b!(NONE, R)],
+    ),
+    info(
+        Action::EditHelpers,
+        "edit_helpers",
+        "Edit the ruler, assistants and mirror (locked otherwise)",
+        "Tools",
+        &[b!(SHIFT, R)],
     ),
     info(
         Action::Transform,

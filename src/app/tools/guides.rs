@@ -1,15 +1,21 @@
 //! On-canvas guides with draggable handles: the mirror-painting axes, the
 //! ruler and the drawing assistants (see [`crate::app::tools::assistants`]).
 //!
-//! A press on a handle is the guide's, not the active tool's: it moves the
-//! symmetry centre, turns its axes, or moves the ruler.
+//! The guides are locked unless being edited (View → Edit Helpers,
+//! Shift+R): locked, every press paints, even on a handle. Being edited, a
+//! press on a handle is the guide's, not the active tool's: it moves the
+//! symmetry centre, turns its axes, or moves a ruler end or an assistant's
+//! point; a press on a guide's body moves the whole guide. Each move is an
+//! undo step.
 //!
 //! The ruler straightens freehand strokes: a stroke starting near it runs
 //! along it, one starting elsewhere runs parallel to it (like sliding a pen
 //! along a real ruler).
 
 use crate::app::PainterApp;
-use crate::app::tools::assistants::{Assistant, AssistantKind, Constraint, Lock};
+use crate::app::tools::assistants::{
+    Assistant, AssistantKind, Constraint, Lock, nearest_on_polyline,
+};
 use crate::app::view::render::ScreenMap;
 use crate::brush_engine::symmetry::SymmetryMode;
 use eframe::egui::{self, Color32, Pos2, Stroke, Vec2};
@@ -39,6 +45,14 @@ enum Drag {
     Assistant {
         index: usize,
         handle: usize,
+    },
+    /// The whole of assistant `index`.
+    AssistantMove {
+        index: usize,
+        last: Vec2,
+    },
+    CurveMove {
+        last: Vec2,
     },
 }
 
@@ -167,6 +181,64 @@ impl StoredGuides {
     }
 }
 
+/// Where the guides are: what editing them moves, and an undo step puts
+/// back (the side of the step it isn't on). Showing, hiding, adding and
+/// removing them isn't a step.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct GuidePlaces {
+    ruler: [[f32; 2]; 2],
+    assistants: Vec<(AssistantKind, [[f32; 2]; 4])>,
+    curve_ruler: Vec<[f32; 2]>,
+    symmetry_center: [f32; 2],
+    symmetry_angle: f32,
+}
+
+impl GuidePlaces {
+    pub(crate) fn of(app: &PainterApp) -> Self {
+        let g = &app.workspace.guides;
+        let s = &app.workspace.symmetry;
+        Self {
+            ruler: [[g.ruler.a.x, g.ruler.a.y], [g.ruler.b.x, g.ruler.b.y]],
+            assistants: g.assistants.iter().map(|a| (a.kind, a.points)).collect(),
+            curve_ruler: g
+                .curve_ruler
+                .as_ref()
+                .map_or(Vec::new(), |c| c.iter().map(|p| [p.x, p.y]).collect()),
+            symmetry_center: [s.center.x, s.center.y],
+            symmetry_angle: s.angle,
+        }
+    }
+
+    /// Move the guides here. Assistants (or a curve ruler) added or removed
+    /// since are left where they are.
+    pub(crate) fn put(&self, app: &mut PainterApp) {
+        let g = &mut app.workspace.guides;
+        g.end_drag();
+        [g.ruler.a, g.ruler.b] = self.ruler.map(|p| Vec2::new(p[0], p[1]));
+        if g.assistants.len() == self.assistants.len() {
+            for (a, &(kind, points)) in g.assistants.iter_mut().zip(&self.assistants) {
+                if a.kind == kind {
+                    a.points = points;
+                }
+            }
+        }
+        if let Some(curve) = &mut g.curve_ruler
+            && curve.len() == self.curve_ruler.len()
+        {
+            *curve = std::sync::Arc::new(
+                self.curve_ruler
+                    .iter()
+                    .map(|p| Vec2::new(p[0], p[1]))
+                    .collect(),
+            );
+        }
+        let s = &mut app.workspace.symmetry;
+        s.center = Vec2::new(self.symmetry_center[0], self.symmetry_center[1]);
+        s.angle = self.symmetry_angle;
+    }
+}
+
 /// Within this distance of the ruler (screen points), a stroke runs along
 /// the ruler itself.
 const RULER_SNAP: f32 = 28.0;
@@ -174,6 +246,10 @@ const RULER_SNAP: f32 = 28.0;
 #[derive(Default)]
 pub struct GuideState {
     drag: Option<Drag>,
+    /// Where the guides were when the drag began (for its undo step).
+    drag_from: Option<GuidePlaces>,
+    /// Their handles show and can be dragged; otherwise every press paints.
+    pub editing: bool,
     /// Show the mirror axes (and their handles) while mirror painting.
     pub hide_symmetry: bool,
     pub ruler: Ruler,
@@ -194,6 +270,7 @@ impl GuideState {
     /// Let go of any handle being dragged.
     pub(crate) fn end_drag(&mut self) {
         self.drag = None;
+        self.drag_from = None;
         self.lock = None;
         self.last_on_curve = None;
     }
@@ -237,6 +314,8 @@ impl PainterApp {
         let ruler = &mut self.workspace.guides.ruler;
         ruler.enabled = enabled;
         if enabled && ruler.a == ruler.b {
+            self.workspace.guides.editing = true;
+            let ruler = &mut self.workspace.guides.ruler;
             let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
             ruler.a = Vec2::new(w * 0.2, h * 0.5);
             ruler.b = Vec2::new(w * 0.8, h * 0.5);
@@ -383,44 +462,74 @@ impl PainterApp {
             .guides
             .assistants
             .push(Assistant::new(kind, w, h));
+        // Ready to be put in place.
+        self.workspace.guides.editing = true;
+    }
+
+    /// Start or stop editing the guides (a drag going on is let go).
+    pub(crate) fn set_editing_guides(&mut self, editing: bool) {
+        let g = &mut self.workspace.guides;
+        if g.drag.is_some() {
+            self.guides_release();
+        }
+        self.workspace.guides.editing = editing;
     }
 
     /// Which handle (if any) is under canvas point `pos`.
+    /// Which handle (if any) is under canvas point `pos`, or else which
+    /// guide's body; none while the guides are locked.
     fn guide_hit(&self, pos: Vec2) -> Option<Drag> {
+        let guides = &self.workspace.guides;
+        if !guides.editing {
+            return None;
+        }
         let hit = HANDLE_HIT / self.viewport.zoom.max(0.01);
-        for (index, a) in self.workspace.guides.assistants.iter().enumerate() {
-            if !a.enabled {
-                continue;
-            }
+        let assistants = || {
+            guides
+                .assistants
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.enabled)
+        };
+        for (index, a) in assistants() {
             for handle in 0..a.kind.handles() {
                 if (pos - a.point(handle)).length() <= hit {
                     return Some(Drag::Assistant { index, handle });
                 }
             }
         }
-        let ruler = self.workspace.guides.ruler;
+        let ruler = guides.ruler;
         if ruler.enabled {
             for (i, end) in [ruler.a, ruler.b].into_iter().enumerate() {
                 if (pos - end).length() <= hit {
                     return Some(Drag::RulerEnd(i));
                 }
             }
-            // The middle handle moves it (strokes start along its body).
-            if (pos - (ruler.a + ruler.b) * 0.5).length() <= hit {
-                return Some(Drag::RulerMove { last: pos });
+        }
+        if self.symmetry_guides_shown() {
+            let center = self.workspace.symmetry.center;
+            if (pos - center).length() <= hit {
+                return Some(Drag::SymmetryCenter { grab: pos - center });
+            }
+            if (pos - self.rotate_handle()).length() <= hit {
+                return Some(Drag::SymmetryAngle);
             }
         }
-        if !self.symmetry_guides_shown() {
-            return None;
+        // Not on a handle: on a guide's body, which moves all of it.
+        if ruler.enabled && nearest_on_polyline(&[ruler.a, ruler.b], pos).1 <= hit {
+            return Some(Drag::RulerMove { last: pos });
         }
-        let center = self.workspace.symmetry.center;
-        if (pos - center).length() <= hit {
-            return Some(Drag::SymmetryCenter { grab: pos - center });
+        if guides.curve_enabled
+            && let Some(curve) = &guides.curve_ruler
+            && nearest_on_polyline(curve, pos).1 <= hit
+        {
+            return Some(Drag::CurveMove { last: pos });
         }
-        if (pos - self.rotate_handle()).length() <= hit {
-            return Some(Drag::SymmetryAngle);
-        }
-        None
+        // The topmost (last added) first, as they're drawn.
+        let mut on_body = assistants().rev().filter(|(_, a)| a.covers(pos, hit));
+        on_body
+            .next()
+            .map(|(index, _)| Drag::AssistantMove { index, last: pos })
     }
 
     /// Whether canvas point `pos` is over a guide handle.
@@ -431,8 +540,11 @@ impl PainterApp {
     /// A press at canvas point `pos`: grab a guide handle under it. Returns
     /// whether the press was the guide's.
     pub(crate) fn guides_press(&mut self, pos: Vec2) -> bool {
-        self.workspace.guides.drag = self.guide_hit(pos);
-        self.workspace.guides.drag.is_some()
+        let drag = self.guide_hit(pos);
+        let from = drag.map(|_| GuidePlaces::of(self));
+        let g = &mut self.workspace.guides;
+        (g.drag, g.drag_from) = (drag, from);
+        drag.is_some()
     }
 
     /// Drag the grabbed handle to `pos`; `snap` (Shift) keeps the angle to
@@ -483,6 +595,20 @@ impl PainterApp {
                 ruler.b += pos - last;
                 self.workspace.guides.drag = Some(Drag::RulerMove { last: pos });
             }
+            Drag::AssistantMove { index, last } => {
+                if let Some(a) = self.workspace.guides.assistants.get_mut(index) {
+                    a.move_by(pos - last);
+                }
+                self.workspace.guides.drag = Some(Drag::AssistantMove { index, last: pos });
+            }
+            Drag::CurveMove { last } => {
+                let g = &mut self.workspace.guides;
+                if let Some(curve) = &mut g.curve_ruler {
+                    let d = pos - last;
+                    *curve = std::sync::Arc::new(curve.iter().map(|&p| p + d).collect());
+                }
+                g.drag = Some(Drag::CurveMove { last: pos });
+            }
             Drag::SymmetryAngle => {
                 let s = &mut self.workspace.symmetry;
                 let d = pos - s.center;
@@ -506,9 +632,25 @@ impl PainterApp {
         true
     }
 
-    /// Let go of the handle. Returns whether one was being dragged.
+    /// Let go of the handle: where the guides went is an undo step.
+    /// Returns whether one was being dragged.
     pub(crate) fn guides_release(&mut self) -> bool {
-        self.workspace.guides.drag.take().is_some()
+        let g = &mut self.workspace.guides;
+        let was = g.drag.take().is_some();
+        if let Some(from) = g.drag_from.take()
+            && from != GuidePlaces::of(self)
+        {
+            use crate::canvas::history::{LayerHistoryOp, UndoAction};
+            self.layer_state.history.push_action(UndoAction {
+                tiles: Vec::new(),
+                selection: None,
+                transform: None,
+                layer_action: Some(LayerHistoryOp::Guides(std::sync::Arc::new(
+                    std::sync::Mutex::new(from),
+                ))),
+            });
+        }
+        was
     }
 
     pub(crate) fn guides_dragging(&self) -> bool {
@@ -566,6 +708,10 @@ pub(crate) fn draw_guides(app: &PainterApp, painter: &egui::Painter, map: &Scree
         if let Some((a, b)) = clip_to_canvas(s.center, dir, t0, far, w, h) {
             line(a, b);
         }
+    }
+    // Locked: no handles to grab.
+    if !app.workspace.guides.editing {
+        return;
     }
     let handle = |p: Pos2, filled: bool| {
         painter.circle_filled(p, HANDLE_RADIUS + 1.5, Color32::BLACK);
@@ -663,8 +809,10 @@ fn draw_assistants(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
                 line(a.point(0), a.point(2), Stroke::new(1.0_f32, GUIDE_COLOR));
             }
         }
-        for i in 0..a.kind.handles() {
-            handle(a.point(i));
+        if app.workspace.guides.editing {
+            for i in 0..a.kind.handles() {
+                handle(a.point(i));
+            }
         }
     }
 }
@@ -712,11 +860,14 @@ fn draw_ruler(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
         let size = if i % 4 == 0 { band } else { band * 0.5 };
         painter.line_segment([p, p + normal * size], Stroke::new(1.0_f32, GUIDE_COLOR));
     }
+    if !app.workspace.guides.editing {
+        return;
+    }
     for end in [a, b] {
         painter.circle_filled(end, HANDLE_RADIUS + 1.5, Color32::BLACK);
         painter.circle_filled(end, HANDLE_RADIUS, GUIDE_COLOR);
     }
-    // The move handle: a square in the middle.
+    // The middle: a square (dragging the ruler anywhere along it moves it).
     let mid = egui::Rect::from_center_size(
         a + (b - a) * 0.5,
         egui::vec2(HANDLE_RADIUS, HANDLE_RADIUS) * 2.0,
@@ -813,6 +964,11 @@ mod tests {
         app.workspace.symmetry.mode = SymmetryMode::Vertical;
         app.centre_symmetry();
         assert!(
+            !app.guides_press(Vec2::new(101.0, 50.0)),
+            "locked: the press paints"
+        );
+        app.set_editing_guides(true);
+        assert!(
             app.guides_press(Vec2::new(101.0, 50.0)),
             "grabbed the centre handle"
         );
@@ -826,6 +982,57 @@ mod tests {
         assert_eq!(app.workspace.symmetry.center, Vec2::new(100.0, 50.0));
         // Away from the handles a press is the tool's.
         assert!(!app.guides_press(Vec2::new(20.0, 20.0)));
+    }
+
+    #[test]
+    fn a_guide_is_moved_whole_from_its_body_and_undo_puts_it_back() {
+        let mut app = assistant_app();
+        app.viewport.zoom = 1.0;
+        app.add_assistant(AssistantKind::Perspective);
+        assert!(app.workspace.guides.editing, "a new one is ready to place");
+        let before = app.workspace.guides.assistants[0].points;
+        // Inside the plane, away from its corners: all of it moves.
+        assert!(app.guides_press(Vec2::new(128.0, 128.0)));
+        app.guides_drag(Vec2::new(138.0, 148.0), false);
+        assert!(app.guides_release());
+        let after = app.workspace.guides.assistants[0].points;
+        for (p, q) in before.iter().zip(&after) {
+            assert_eq!([q[0] - p[0], q[1] - p[1]], [10.0, 20.0]);
+        }
+        // A corner moves alone.
+        let corner = app.workspace.guides.assistants[0].point(0);
+        assert!(app.guides_press(corner));
+        app.guides_drag(corner + Vec2::new(5.0, 0.0), false);
+        app.guides_release();
+        assert_eq!(app.workspace.guides.assistants[0].points[1], after[1]);
+        assert_eq!(app.layer_state.history.labels().0, ["Move helper"; 2]);
+
+        app.apply_history_now(false);
+        assert_eq!(app.workspace.guides.assistants[0].points, after);
+        app.apply_history_now(false);
+        assert_eq!(app.workspace.guides.assistants[0].points, before);
+        app.apply_history_now(true);
+        assert_eq!(app.workspace.guides.assistants[0].points, after);
+
+        // Locked, a stroke starting on it paints instead.
+        app.set_editing_guides(false);
+        assert!(!app.guides_press(Vec2::new(128.0, 128.0)));
+        assert!(!app.guides_press(corner));
+    }
+
+    #[test]
+    fn the_ruler_moves_from_anywhere_along_it() {
+        let mut app = assistant_app();
+        app.viewport.zoom = 1.0;
+        app.set_ruler(true);
+        let ruler = app.workspace.guides.ruler;
+        let along = ruler.a + (ruler.b - ruler.a) * 0.2;
+        assert!(app.guides_press(along));
+        app.guides_drag(along + Vec2::new(0.0, 30.0), false);
+        app.guides_release();
+        let moved = app.workspace.guides.ruler;
+        assert_eq!(moved.a, ruler.a + Vec2::new(0.0, 30.0));
+        assert_eq!(moved.b, ruler.b + Vec2::new(0.0, 30.0));
     }
 
     #[test]

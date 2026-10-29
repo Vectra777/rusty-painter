@@ -231,6 +231,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let pen = on(Action::Pen);
     let shapes = on(Action::Shapes);
     let ruler = on(Action::Ruler);
+    let edit_helpers = on(Action::EditHelpers);
     let delete = on(Action::DeletePixels);
     let transform = on(Action::Transform);
     let eyedropper = on(Action::Eyedropper);
@@ -433,6 +434,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     if ruler {
         let on = !app.workspace.guides.ruler.enabled;
         app.set_ruler(on);
+        repaint = true;
+    }
+    if edit_helpers {
+        let on = !app.workspace.guides.editing;
+        app.set_editing_guides(on);
         repaint = true;
     }
     if select_all {
