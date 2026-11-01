@@ -22,4 +22,4 @@ Content-aware fill of the selection from its surroundings (PatchMatch, `Shift+F5
 
 ## Fill
 
-`G` fills; press it again for enclose fill and lasso delete. Fills read the layers marked as [reference](layers.md).
+`G` fills; press it again for enclose fill (fills the areas the line art closes off inside a lasso), lasso fill (fills all of the lasso) and lasso delete. The lassos take the selection lasso's smoothing. Fills read the layers marked as [reference](layers.md).

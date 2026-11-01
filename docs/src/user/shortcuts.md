@@ -14,7 +14,7 @@ The defaults, with QWERTY names:
 | `K` (hold), right-click | Pop-up brush palette |
 | `S` | Smudge / blur |
 | `I` | Eyedropper |
-| `G` | Fill (again: enclose, lasso delete) |
+| `G` | Fill (again: enclose, lasso fill, lasso delete) |
 | `Shift+G` | Gradient |
 | `U` | Shapes |
 | `R` | Ruler |

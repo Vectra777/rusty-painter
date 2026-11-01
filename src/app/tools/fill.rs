@@ -1,5 +1,5 @@
-//! The Fill tool: bucket fill (click), enclose-and-fill (lasso) and lasso
-//! delete (erase what the lasso encloses). Also deleting the selected
+//! The Fill tool: bucket fill (click), enclose-and-fill (lasso), lasso fill
+//! (fill all the lasso encloses) and lasso delete (erase what it encloses). Also deleting the selected
 //! pixels (the Delete key).
 
 use crate::PainterApp;
@@ -18,6 +18,8 @@ pub enum FillMode {
     Bucket,
     /// Draw around areas to fill everything enclosed.
     Enclose,
+    /// Draw a shape to fill all of it, whatever lines it crosses.
+    Lasso,
     /// Draw around an area to erase it.
     LassoDelete,
 }
@@ -27,7 +29,8 @@ impl FillMode {
     pub fn next(self) -> Self {
         match self {
             FillMode::Bucket => FillMode::Enclose,
-            FillMode::Enclose => FillMode::LassoDelete,
+            FillMode::Enclose => FillMode::Lasso,
+            FillMode::Lasso => FillMode::LassoDelete,
             FillMode::LassoDelete => FillMode::Bucket,
         }
     }
@@ -52,8 +55,13 @@ pub struct FillToolState {
     pub mode: FillMode,
     pub source: FillSource,
     pub settings: FillSettings,
-    /// The enclose lasso being drawn.
+    /// The lasso being drawn (smoothed).
     pub path: Vec<Vec2>,
+    /// Smoothing of the lasso (the selection lasso's strength), and the last
+    /// smoothed and raw input; the lasso ends at the raw one.
+    stabilizer: crate::brush_engine::stabilizer::Stabilizer,
+    smooth_last: Option<Vec2>,
+    raw_last: Option<Vec2>,
 }
 
 impl Default for FillToolState {
@@ -65,6 +73,9 @@ impl Default for FillToolState {
             source: FillSource::AllVisible,
             settings: FillSettings::default(),
             path: Vec::new(),
+            stabilizer: Default::default(),
+            smooth_last: None,
+            raw_last: None,
         }
     }
 }
@@ -102,21 +113,32 @@ impl PainterApp {
                     )
                 });
             }
-            FillMode::Enclose | FillMode::LassoDelete => {
-                self.workspace.fill.path.clear();
-                self.workspace.fill.path.push(pos);
+            FillMode::Enclose | FillMode::Lasso | FillMode::LassoDelete => {
+                let fill = &mut self.workspace.fill;
+                fill.path.clear();
+                fill.path.push(pos);
+                fill.stabilizer = Default::default();
+                fill.smooth_last = Some(pos);
+                fill.raw_last = Some(pos);
             }
         }
     }
 
     pub(crate) fn fill_drag(&mut self, pos: Vec2) {
         let min_step = 1.5 / self.viewport.zoom.max(0.01);
-        let path = &mut self.workspace.fill.path;
-        if self.workspace.fill.mode.is_lasso()
-            && !path.is_empty()
-            && path
-                .last()
-                .is_none_or(|last| (*last - pos).length() >= min_step)
+        let smoothing = self.selection_manager.smoothing;
+        let fill = &mut self.workspace.fill;
+        if !fill.mode.is_lasso() || fill.path.is_empty() {
+            return;
+        }
+        fill.raw_last = Some(pos);
+        let settings = crate::brush_engine::stabilizer::StabilizerSettings::simple(smoothing);
+        let pos = fill.stabilizer.step(&settings, fill.smooth_last, pos);
+        fill.smooth_last = Some(pos);
+        let path = &mut fill.path;
+        if path
+            .last()
+            .is_none_or(|last| (*last - pos).length() >= min_step)
         {
             path.push(pos);
         }
@@ -127,11 +149,18 @@ impl PainterApp {
         if !mode.is_lasso() {
             return;
         }
-        let path = std::mem::take(&mut self.workspace.fill.path);
+        let mut path = std::mem::take(&mut self.workspace.fill.path);
+        self.workspace.fill.smooth_last = None;
+        // A smoothed lasso lags the pen: finish where the pen stopped.
+        if let Some(raw) = self.workspace.fill.raw_last.take()
+            && path.last() != Some(&raw)
+        {
+            path.push(raw);
+        }
         if path.len() < 3 {
             return;
         }
-        if mode == FillMode::LassoDelete {
+        if matches!(mode, FillMode::Lasso | FillMode::LassoDelete) {
             let lasso = crate::selection::new_lasso_shape(path);
             let Some(bounds) = crate::selection::shape_bounds(&lasso).map(|b| self.pixel_bounds(b))
             else {
@@ -140,7 +169,11 @@ impl PainterApp {
             let mask = SelectionMask::rasterize(bounds, |y, x0, out| {
                 crate::selection::shape_row_coverage(&lasso, y, x0, out)
             });
-            self.erase_under(mask, true);
+            if mode == FillMode::Lasso {
+                self.run_fill(move |_, _, _| Some(mask));
+            } else {
+                self.erase_under(mask, true);
+            }
             return;
         }
         self.run_fill(move |canvas, source, settings| {
@@ -435,6 +468,31 @@ mod tests {
     }
 
     #[test]
+    fn lasso_fill_fills_all_it_encloses_inside_the_selection() {
+        let mut app = app();
+        select_rect(&mut app, 0.0, 0.0, 128.0, 64.0);
+        app.delete_selection_contents();
+        select_rect(&mut app, 0.0, 0.0, 30.0, 64.0);
+        app.selection_manager.smoothing = 0.6;
+        app.workspace.fill.mode = FillMode::Lasso;
+        app.fill_press(Vec2::new(5.0, 5.0));
+        for p in [(60.0, 5.0), (60.0, 60.0), (5.0, 60.0)] {
+            for _ in 0..20 {
+                app.fill_drag(Vec2::new(p.0, p.1));
+            }
+        }
+        app.fill_release();
+        assert_eq!(alpha(&app, 20, 30), 255, "in the lasso and the selection");
+        assert_eq!(
+            alpha(&app, 40, 30),
+            0,
+            "in the lasso, outside the selection"
+        );
+        assert_eq!(alpha(&app, 2, 2), 0, "in the selection, outside the lasso");
+        assert_eq!(app.layer_state.history.stacks().0.len(), 2);
+    }
+
+    #[test]
     fn nothing_is_erased_on_a_transparency_locked_layer() {
         let mut app = app();
         app.canvas_mut().layers[1].alpha_locked = true;
@@ -448,13 +506,18 @@ mod tests {
     fn g_cycles_through_the_fill_modes() {
         let mut mode = FillMode::Bucket;
         let mut seen = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             mode = mode.next();
             seen.push(mode);
         }
         assert_eq!(
             seen,
-            [FillMode::Enclose, FillMode::LassoDelete, FillMode::Bucket]
+            [
+                FillMode::Enclose,
+                FillMode::Lasso,
+                FillMode::LassoDelete,
+                FillMode::Bucket
+            ]
         );
     }
 }

@@ -297,7 +297,7 @@ pub const ACTIONS: &[ActionInfo] = &[
     info(
         Action::Fill,
         "fill",
-        "Fill (again: bucket / enclose / lasso delete)",
+        "Fill (again: bucket / enclose / lasso / lasso delete)",
         "Tools",
         &[b!(NONE, G)],
     ),

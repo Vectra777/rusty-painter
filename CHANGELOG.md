@@ -37,6 +37,10 @@
 - The Navigator is a second view for painting zoomed in. It's drawn from the canvas view's GPU textures, so it follows each stroke as it's painted, and the parts of the canvas off screen are brought up to date for it. Its window can be made any size. It can be mirrored, and has its own check view.
 - Check view (View → Check View, `Shift+H`): the canvas shown in grey of the same lightness, in 2 to 8 flat steps of lightness, or as how saturated its colours are. Only the view changes. The key switches between colour and the mode last chosen.
 
+### Fill
+- Lasso fill (Fill tool, `G` until Lasso): draw a shape and all of it is filled, whatever lines it crosses (inside the selection, if any). Enclose still fills only what the line art closes off.
+- The Fill tool's lassos (enclose, lasso fill, lasso delete) are smoothed like the selection lasso, by the same Smoothing slider, shown in the Fill options too.
+
 ### Interface
 - Slimmer floating windows: their title bars are about a third shorter, with less room between the title and the contents, and rows are a little tighter. Touch mode keeps its larger spacing.
 - Windows and the layers dropdown are only as tall as what's in them (they took the screen's whole height before, most of it empty on a phone).

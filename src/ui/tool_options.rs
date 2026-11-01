@@ -916,14 +916,43 @@ pub(crate) fn fill_options(app: &mut PainterApp, ui: &mut egui::Ui, compact: boo
         &[
             (FillMode::Bucket, "Bucket"),
             (FillMode::Enclose, "Enclose"),
+            (FillMode::Lasso, "Lasso"),
             (FillMode::LassoDelete, "Lasso delete"),
         ],
         compact,
     );
-    // Lasso delete erases exactly what it encloses: none of the rest apply.
-    if f.mode == FillMode::LassoDelete {
-        return "Draw around what to erase from the layer (inside the selection, if any)  ·  \
-                G: next mode  ·  Delete key: erase the selection";
+    if f.mode.is_lasso() {
+        if compact {
+            vdivider(ui);
+            ui.label(RichText::new("Smoothing").color(TEXT_DIM));
+            ui.add(crate::ui::widgets::reset(
+                &mut app.selection_manager.smoothing,
+                |v| BarSlider::new(v, 0.0..=1.0).show_value(true),
+            ))
+            .on_hover_text("Steadies the lasso (shared with the selection lasso)");
+        } else {
+            crate::ui::widgets::slider_row(
+                ui,
+                "Smoothing",
+                crate::ui::widgets::reset(&mut app.selection_manager.smoothing, |v| {
+                    BarSlider::new(v, 0.0..=1.0)
+                }),
+            )
+            .on_hover_text("Steadies the lasso (shared with the selection lasso)");
+        }
+    }
+    let f = &mut app.workspace.fill;
+    // Lasso fill and delete take exactly what they enclose: none of the rest apply.
+    match f.mode {
+        FillMode::Lasso => {
+            return "Draw a shape to fill all of it (inside the selection, if any)  ·  \
+                    G: next mode (Lasso delete)";
+        }
+        FillMode::LassoDelete => {
+            return "Draw around what to erase from the layer (inside the selection, if any)  ·  \
+                    G: next mode  ·  Delete key: erase the selection";
+        }
+        _ => {}
     }
     if compact {
         vdivider(ui);
@@ -985,9 +1014,7 @@ pub(crate) fn fill_options(app: &mut PainterApp, ui: &mut egui::Ui, compact: boo
     ui.checkbox(&mut s.antialias, "Smooth edge");
     match f.mode {
         FillMode::Bucket => "Click an area to fill it  ·  G: next mode (Enclose)",
-        FillMode::Enclose | FillMode::LassoDelete => {
-            "Draw around the areas to fill, even across lines  ·  G: next mode (Lasso delete)"
-        }
+        _ => "Draw around the areas to fill, even across lines  ·  G: next mode (Lasso)",
     }
 }
 
