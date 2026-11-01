@@ -56,6 +56,12 @@ pub struct LibraryFile {
     pub next_id: u64,
     pub installed_packs: Vec<String>,
     pub pack_presets: BTreeMap<String, String>,
+    /// The installed pack's stamp (its manifest's `content`): when the
+    /// pack shipped changes, its brushes not edited since are refreshed.
+    pub pack_content: String,
+    /// The pack's brushes (library names) changed by the user: a new pack
+    /// leaves them alone.
+    pub pack_edited: std::collections::BTreeSet<String>,
     pub selected_folder: Option<FolderId>,
     /// The pack's category tags were given out (once: ones the user
     /// removes stay removed).
@@ -75,6 +81,8 @@ impl Default for LibraryFile {
             next_id: 1,
             installed_packs: Vec::new(),
             pack_presets: BTreeMap::new(),
+            pack_content: String::new(),
+            pack_edited: Default::default(),
             selected_folder: None,
             pack_tags_installed: false,
         }
@@ -888,6 +896,7 @@ mod tests {
                     brushes: vec!["source ink".into()],
                 },
             ],
+            content: String::new(),
         };
         lib.install_pack_tags(&manifest);
         assert_eq!(lib.tags("New Pencil"), ["Personal", "Sketching", "Pencil"]);

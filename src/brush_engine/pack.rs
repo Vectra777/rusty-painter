@@ -25,6 +25,11 @@ pub struct Manifest {
     /// The `.rpbrush` file, beside the manifest.
     pub file: String,
     pub collections: Vec<Collection>,
+    /// The `.rpbrush` file's CRC-32 (hex): a new pack is a new manifest, so
+    /// Android unpacks it again and installed brushes are refreshed from it
+    /// (`update_local_pack`). Keep it in step with the file (a test checks).
+    #[serde(default)]
+    pub content: String,
 }
 
 /// Where the pack is: the data folder's (`brushes`), else the one shipped
@@ -44,8 +49,8 @@ pub fn root(brushes: &Path) -> Option<PathBuf> {
         .find(|root| root.join("manifest.json").is_file())
 }
 
-/// The manifest and every collection's presets, in its order.
-pub fn load(root: &Path) -> Result<(Manifest, Vec<BrushPreset>), String> {
+/// The pack's manifest alone.
+pub fn manifest(root: &Path) -> Result<Manifest, String> {
     let manifest: Manifest = serde_json::from_slice(
         &std::fs::read(root.join("manifest.json")).map_err(|e| e.to_string())?,
     )
@@ -53,6 +58,12 @@ pub fn load(root: &Path) -> Result<(Manifest, Vec<BrushPreset>), String> {
     if manifest.version != VERSION || manifest.id != PACK_ID {
         return Err("Unsupported brush pack".into());
     }
+    Ok(manifest)
+}
+
+/// The manifest and every collection's presets, in its order.
+pub fn load(root: &Path) -> Result<(Manifest, Vec<BrushPreset>), String> {
+    let manifest = manifest(root)?;
     if Path::new(&manifest.file).components().count() != 1 {
         return Err("Invalid brush pack file".into());
     }
@@ -107,6 +118,7 @@ mod tests {
                     brushes: vec!["A".into(), "B".into()],
                 },
             ],
+            content: String::new(),
         };
         let write = |m: &Manifest| {
             std::fs::write(dir.join("manifest.json"), serde_json::to_vec(m).unwrap()).unwrap()
@@ -119,5 +131,22 @@ mod tests {
         write(&manifest);
         assert!(load(&dir).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The shipped pack's stamp is its file's (skipped where the file is
+    /// only its Git LFS pointer).
+    #[test]
+    fn the_shipped_pack_s_stamp_matches_its_file() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/brush-pack/default-v1");
+        let manifest = manifest(&root).unwrap();
+        let bytes = std::fs::read(root.join(&manifest.file)).unwrap();
+        if bytes.starts_with(b"version https://git-lfs") {
+            return;
+        }
+        assert_eq!(
+            manifest.content,
+            format!("{:08x}", crc32fast::hash(&bytes)),
+            "update the manifest's content after changing the pack"
+        );
     }
 }

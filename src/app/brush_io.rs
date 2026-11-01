@@ -411,6 +411,7 @@ impl PainterApp {
             .iter()
             .any(|id| id == pack::PACK_ID)
         {
+            self.update_local_pack();
             return;
         }
         let Some(root) = pack::root(&self.brush_state.brushes_path) else {
@@ -523,6 +524,7 @@ impl PainterApp {
         lib.file.pack_presets.extend(mapped.clone());
         lib.file.install_pack_tags(&manifest);
         lib.file.installed_packs.push(pack::PACK_ID.into());
+        lib.file.pack_content = manifest.content.clone();
         lib.dirty = true;
         if fresh
             && let Some(name) = first.as_ref().and_then(|n| mapped.get(n))
@@ -534,6 +536,92 @@ impl PainterApp {
         {
             self.apply_preset(index);
         }
+    }
+
+    /// A new pack shipped (its stamp changed): its brushes the user hasn't
+    /// edited take its settings, and the ones it no longer has are removed.
+    /// Ones installed before edits were tracked count as unedited.
+    fn update_local_pack(&mut self) {
+        use crate::brush_engine::pack;
+        let Some(root) = pack::root(&self.brush_state.brushes_path) else {
+            return;
+        };
+        let lib = &self.brush_state.library.file;
+        match pack::manifest(&root) {
+            Ok(m) if m.content != lib.pack_content => {}
+            _ => return,
+        }
+        let (manifest, presets) = match pack::load(&root) {
+            Ok(pack) => pack,
+            Err(error) => {
+                self.report(format!("Couldn't load brush pack: {error}"));
+                return;
+            }
+        };
+        let shipped: std::collections::HashSet<String> =
+            presets.iter().map(|p| p.name.clone()).collect();
+        // Collection files to write again, whole, once all is changed.
+        let mut files = Vec::new();
+        for preset in presets {
+            let lib = &self.brush_state.library.file;
+            let Some(name) = lib.pack_presets.get(&preset.name).cloned() else {
+                continue;
+            };
+            if lib.pack_edited.contains(&name) {
+                continue;
+            }
+            let Some(index) = self.brush_state.presets.iter().position(|p| p.name == name) else {
+                continue;
+            };
+            self.brush_state.presets[index].brush = preset.brush;
+            self.forget_preset_preview(&name);
+            if self.brush_state.active_preset.as_deref() == Some(name.as_str()) {
+                self.apply_preset(index);
+            }
+            files.push(self.brush_state.presets[index].file.clone());
+        }
+        // The old pack's brushes this one dropped go with it, unless edited.
+        let lib = &mut self.brush_state.library.file;
+        let dropped: Vec<(String, String)> = (lib.pack_presets.iter())
+            .filter(|(source, name)| !shipped.contains(*source) && !lib.pack_edited.contains(*name))
+            .map(|(s, n)| (s.clone(), n.clone()))
+            .collect();
+        for (source, name) in &dropped {
+            lib.pack_presets.remove(source);
+            lib.forget(name);
+        }
+        let dropped: std::collections::HashSet<String> =
+            dropped.into_iter().map(|(_, name)| name).collect();
+        let bs = &mut self.brush_state;
+        for preset in bs.presets.iter().filter(|p| dropped.contains(&p.name)) {
+            // The brush in hand (or one parked) may be painting with its tips.
+            preset_file::load_from_file(preset);
+            files.push(preset.file.clone());
+        }
+        bs.presets.retain(|p| !dropped.contains(&p.name));
+        let parked = bs.parked.iter_mut().flatten().map(|(_, p)| p);
+        for active in parked.chain([&mut bs.active_preset]) {
+            if active.as_ref().is_some_and(|n| dropped.contains(n)) {
+                *active = None;
+            }
+        }
+        for name in &dropped {
+            self.forget_preset_preview(name);
+        }
+        files.sort();
+        files.dedup();
+        for file in files.into_iter().flatten() {
+            match (self.brush_state.presets.iter()).position(|p| p.file.as_ref() == Some(&file)) {
+                Some(index) => self.save_preset(index),
+                None => {
+                    crate::app::jobs::flush_writes();
+                    let _ = std::fs::remove_file(&file);
+                }
+            }
+        }
+        let lib = &mut self.brush_state.library;
+        lib.file.pack_content = manifest.content;
+        lib.dirty = true;
     }
 
     pub(crate) fn install_default_presets(&mut self) {
@@ -669,6 +757,8 @@ impl PainterApp {
                 .find(|p| p.name == *source)
         });
         let Some(default) = default else { return };
+        self.brush_state.library.file.pack_edited.remove(&name);
+        self.brush_state.library.dirty = true;
         self.brush_state.presets[index].brush = default.brush;
         self.forget_preset_preview(&name);
         self.save_preset(index);
@@ -743,6 +833,10 @@ impl PainterApp {
         let name = self.brush_state.presets[index].name.clone();
         self.forget_preset_preview(&name);
         self.brush_state.presets[index].brush = brush;
+        let lib = &mut self.brush_state.library;
+        if lib.file.pack_presets.values().any(|n| *n == name) && lib.file.pack_edited.insert(name) {
+            lib.dirty = true;
+        }
         self.save_preset(index);
     }
 
@@ -1099,6 +1193,7 @@ mod tests {
                 name: "Pens".into(),
                 brushes: vec!["Mine".into(), "Nib".into()],
             }],
+            content: String::new(),
         };
         std::fs::write(
             root.join("manifest.json"),
@@ -1144,6 +1239,99 @@ mod tests {
         assert!(!app.brush_state.presets.iter().any(|p| p.name == "Nib"));
         app.restore_default_presets();
         assert!(app.brush_state.presets.iter().any(|p| p.name == "Nib"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_pack_refreshes_the_installed_brushes_not_edited_since_and_drops_the_old() {
+        use crate::brush_engine::pack::{Collection, Manifest, PACK_ID};
+        use crate::canvas::Canvas;
+        let dir = std::env::temp_dir().join(format!("rp-pack-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.brush_state.brushes_path = dir.join("brushes");
+        app.brush_state.presets.clear();
+        let root = app.brush_state.brushes_path.join("packs").join(PACK_ID);
+        std::fs::create_dir_all(&root).unwrap();
+        let ship = |size: f32, content: &str, names: &[&str]| {
+            let preset = |name: &str| BrushPreset {
+                name: name.into(),
+                brush: crate::brush_engine::brush::Brush::new(size, 80.0, Color32::BLACK, 10.0),
+                file: None,
+            };
+            std::fs::write(
+                root.join("test.rpbrush"),
+                preset_file::encode(&names.iter().map(|n| preset(n)).collect::<Vec<_>>()).unwrap(),
+            )
+            .unwrap();
+            let manifest = Manifest {
+                version: 2,
+                id: PACK_ID.into(),
+                file: "test.rpbrush".into(),
+                collections: vec![Collection {
+                    name: "Pens".into(),
+                    brushes: names.iter().map(|n| n.to_string()).collect(),
+                }],
+                content: content.into(),
+            };
+            std::fs::write(
+                root.join("manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+        };
+        let size = |app: &PainterApp, name: &str| {
+            (app.brush_state.presets.iter())
+                .find(|p| p.name == name)
+                .unwrap()
+                .brush
+                .brush_options
+                .diameter
+        };
+        ship(20.0, "a", &["Pen", "Nib", "Old", "Kept"]);
+        app.install_default_presets();
+        // The user changes Nib and Kept.
+        for name in ["Nib", "Kept"] {
+            let i = (app.brush_state.presets.iter())
+                .position(|p| p.name == name)
+                .unwrap();
+            app.apply_preset(i);
+            app.brush_state.brush.brush_options.diameter = 30.0;
+            app.save_active_preset(false);
+        }
+        ship(40.0, "b", &["Pen", "Nib"]);
+        app.install_default_presets();
+        assert_eq!(size(&app, "Pen"), 40.0, "unedited: the new pack's");
+        assert_eq!(size(&app, "Nib"), 30.0, "edited: the user's");
+        assert_eq!(size(&app, "Kept"), 30.0, "dropped but edited: kept");
+        assert!(!app.brush_state.presets.iter().any(|p| p.name == "Old"));
+        assert!(!app.brush_state.library.file.preset_ids.contains_key("Old"));
+        crate::app::jobs::flush_writes();
+        let pen = app
+            .brush_state
+            .presets
+            .iter()
+            .find(|p| p.name == "Pen")
+            .unwrap();
+        let on_disk =
+            preset_file::decode(&std::fs::read(pen.file.as_ref().unwrap()).unwrap()).unwrap();
+        let disk_size = |name: &str| {
+            (on_disk.iter().find(|p| p.name == name).unwrap())
+                .brush
+                .brush_options
+                .diameter
+        };
+        assert_eq!((disk_size("Pen"), disk_size("Nib")), (40.0, 30.0));
+        assert!(!on_disk.iter().any(|p| p.name == "Old"));
+        let nib = app
+            .brush_state
+            .presets
+            .iter()
+            .position(|p| p.name == "Nib")
+            .unwrap();
+        app.reset_preset(nib);
+        assert_eq!(size(&app, "Nib"), 40.0);
+        assert!(!app.brush_state.library.file.pack_edited.contains("Nib"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -36,12 +36,16 @@ pub fn extract_pack(dest: &std::path::Path) -> Result<(), String> {
     source
         .read_to_end(&mut manifest)
         .map_err(|e| e.to_string())?;
-    if std::fs::read(dest.join("manifest.json")).ok().as_deref() == Some(&manifest[..]) {
-        return Ok(());
-    }
     let file = serde_json::from_slice::<Manifest>(&manifest)
         .map_err(|e| e.to_string())?
         .file;
+    // (The size too: a pack whose manifest didn't change with it.)
+    let size = asset(&file)?.length() as u64;
+    if std::fs::read(dest.join("manifest.json")).ok().as_deref() == Some(&manifest[..])
+        && std::fs::metadata(dest.join(&file)).is_ok_and(|m| m.len() == size)
+    {
+        return Ok(());
+    }
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(dest.join("manifest.json"));
     let part = dest.join(format!("{file}.part"));

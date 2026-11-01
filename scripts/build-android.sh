@@ -31,9 +31,16 @@ if [[ -z "${ANDROID_NDK_ROOT:-}" && -z "${ANDROID_NDK_HOME:-}" ]]; then
   exit 1
 fi
 
-# The APK's assets: the default brush pack, if one was put there
-# (release.yml does); a build without it simply has no default brushes.
-mkdir -p "$(dirname "$0")/../target/android-assets"
+# The APK's assets: the repo's default brush pack (when Git LFS has pulled
+# it, not just its pointer), so a local build never ships a stale copy; a
+# build without it simply has no default brushes.
+ROOT="$(dirname "$0")/.."
+mkdir -p "$ROOT/target/android-assets"
+if [[ -f "$ROOT/assets/brush-pack/default-v1/brushes.rpbrush" ]] &&
+  ! head -c 40 "$ROOT/assets/brush-pack/default-v1/brushes.rpbrush" | grep -q '^version https://git-lfs'; then
+  rm -rf "$ROOT/target/android-assets/default-v1"
+  cp -R "$ROOT/assets/brush-pack/." "$ROOT/target/android-assets/"
+fi
 
 case "${MODE}" in
   release)
