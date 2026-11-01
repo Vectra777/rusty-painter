@@ -14,7 +14,8 @@
 
 use crate::app::PainterApp;
 use crate::app::tools::assistants::{
-    Assistant, AssistantKind, Constraint, Lock, nearest_on_polyline,
+    AREA_HANDLE, Assistant, AssistantKind, Constraint, Ellipse, Lock, clip_to_canvas,
+    nearest_on_polyline, point_along, points_between,
 };
 use crate::app::view::render::ScreenMap;
 use crate::brush_engine::symmetry::SymmetryMode;
@@ -102,6 +103,8 @@ pub(crate) struct StoredGuides {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     curve_ruler: Vec<[f32; 2]>,
     curve_enabled: bool,
+    /// [`GuideState::looseness`].
+    looseness: f32,
 }
 
 impl StoredGuides {
@@ -133,6 +136,7 @@ impl StoredGuides {
                 .as_ref()
                 .map_or(Vec::new(), |c| c.iter().map(|p| [p.x, p.y]).collect()),
             curve_enabled: g.curve_enabled,
+            looseness: g.looseness,
         }
     }
 
@@ -146,6 +150,8 @@ impl StoredGuides {
             parallel: self.ruler_parallel,
         };
         g.assistants = self.assistants;
+        g.assistants.iter_mut().for_each(Assistant::upgrade);
+        g.looseness = self.looseness.clamp(0.0, 1.0);
         g.curve_ruler = (self.curve_ruler.len() >= 2).then(|| {
             std::sync::Arc::new(
                 self.curve_ruler
@@ -189,6 +195,8 @@ impl StoredGuides {
 pub struct GuidePlaces {
     ruler: [[f32; 2]; 2],
     assistants: Vec<(AssistantKind, [[f32; 2]; 4])>,
+    /// Each assistant's area, if it's local.
+    areas: Vec<Option<[[f32; 2]; 2]>>,
     curve_ruler: Vec<[f32; 2]>,
     symmetry_center: [f32; 2],
     symmetry_angle: f32,
@@ -201,6 +209,7 @@ impl GuidePlaces {
         Self {
             ruler: [[g.ruler.a.x, g.ruler.a.y], [g.ruler.b.x, g.ruler.b.y]],
             assistants: g.assistants.iter().map(|a| (a.kind, a.points)).collect(),
+            areas: g.assistants.iter().map(|a| a.area).collect(),
             curve_ruler: g
                 .curve_ruler
                 .as_ref()
@@ -220,6 +229,13 @@ impl GuidePlaces {
             for (a, &(kind, points)) in g.assistants.iter_mut().zip(&self.assistants) {
                 if a.kind == kind {
                     a.points = points;
+                    a.upgrade();
+                }
+            }
+            // Areas still there (made local since, or no longer: left so).
+            for (a, area) in g.assistants.iter_mut().zip(&self.areas) {
+                if a.area.is_some() && area.is_some() {
+                    a.area = *area;
                 }
             }
         }
@@ -259,11 +275,17 @@ pub struct GuideState {
     /// strokes started near it run along it.
     pub curve_ruler: Option<std::sync::Arc<Vec<Vec2>>>,
     pub curve_enabled: bool,
+    /// How loosely strokes follow the guides: 0 puts them on (the
+    /// default), 1 leaves them free; between, each point goes that share of
+    /// the way back from the guide towards the pen (Krita's magnetism,
+    /// upside down).
+    pub looseness: f32,
     /// What the current stroke follows (a ruler line, an assistant).
     lock: Option<Lock>,
-    /// The current stroke's last point on an ellipse, and its pressure: the
-    /// next sample is joined to it round the curve.
-    last_on_curve: Option<(Vec2, f32)>,
+    /// The current stroke's last point on an ellipse, its pressure, and how
+    /// far off the ellipse looseness left it: the next sample is joined to
+    /// it round the curve.
+    last_on_curve: Option<(Vec2, f32, Vec2)>,
 }
 
 impl GuideState {
@@ -280,6 +302,22 @@ impl GuideState {
 /// further round is joined to the last through points in between, so the
 /// stroke follows the curve rather than cutting across it.
 const CURVE_STEP: f32 = 3.0;
+
+/// The points round ellipse `e` strictly between `from` and `to` (both on
+/// it), the short way round, at most [`CURVE_STEP`] degrees apart.
+fn arc_between(e: &Ellipse, from: Vec2, to: Vec2) -> Vec<Vec2> {
+    let t0 = e.theta(from);
+    let mut turn = e.theta(to) - t0;
+    if turn > std::f32::consts::PI {
+        turn -= std::f32::consts::TAU;
+    } else if turn < -std::f32::consts::PI {
+        turn += std::f32::consts::TAU;
+    }
+    let steps = (turn.abs().to_degrees() / CURVE_STEP).ceil().max(1.0) as usize;
+    (1..steps)
+        .map(|i| e.at(t0 + turn * i as f32 / steps as f32))
+        .collect()
+}
 
 impl PainterApp {
     fn symmetry_guides_shown(&self) -> bool {
@@ -353,31 +391,46 @@ impl PainterApp {
             let off = pos - ruler.a;
             (off.x * dir.y - off.y * dir.x).abs() <= snap
         });
-        let enabled = || guides.assistants.iter().filter(|a| a.enabled);
+        let enabled = || guides.assistants.iter().filter(|a| a.enabled && a.snap);
         let near_ellipse = enabled()
             .filter(|a| a.kind == AssistantKind::Ellipse)
             .filter_map(|a| a.ellipse())
             .filter(|e| e.distance(pos) <= snap)
             .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
-        let concentric = enabled()
-            .filter(|a| a.kind == AssistantKind::Concentric)
-            .find_map(|a| a.ellipse());
-        // Lines through the start towards the vanishing points (and
-        // upright, with a perspective plane).
-        let mut dirs: Vec<Vec2> = enabled()
-            .flat_map(|a| a.vanishing_points())
-            .filter(|vp| (*vp - pos).length() > 1.0)
-            .map(|vp| (vp - pos).normalized())
-            .collect();
-        if !dirs.is_empty() && enabled().any(|a| a.kind == AssistantKind::Perspective) {
-            dirs.push(Vec2::new(0.0, 1.0));
+        // The nearest of the curve ruler and the splines, if near enough.
+        let splines = enabled()
+            .filter(|a| a.kind == AssistantKind::Spline)
+            .map(|a| std::sync::Arc::new(a.spline_points()));
+        let near_curve = guides
+            .curve_ruler
+            .clone()
+            .filter(|_| guides.curve_enabled)
+            .into_iter()
+            .chain(splines)
+            .map(|c| (nearest_on_polyline(&c, pos).1, c))
+            .filter(|(dist, _)| *dist <= snap)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, c)| c);
+        // Lines through the start towards the vanishing points, along the
+        // planes it starts on, upright or level, as each assistant allows;
+        // then curves through it round fisheyes and concentric ellipses.
+        let mut dirs: Vec<Vec2> = Vec::new();
+        for d in enabled().flat_map(|a| a.snap_dirs(pos)) {
+            if !dirs.iter().any(|e| e.dot(d).abs() > 0.9999) {
+                dirs.push(d);
+            }
         }
-        let near_curve = guides.curve_ruler.clone().filter(|c| {
-            guides.curve_enabled
-                && crate::app::tools::assistants::nearest_on_polyline(c, pos).1 <= snap
-        });
-        guides.lock = if let Some(curve) = near_curve {
-            Some(Lock::Curve(curve))
+        let options: Vec<Constraint> = dirs
+            .into_iter()
+            .map(|dir| Constraint::Line { origin: pos, dir })
+            .chain(enabled().filter_map(|a| a.curve_through(pos)))
+            .collect();
+        guides.lock = if let Some(points) = near_curve {
+            Some(Lock::Curve {
+                points,
+                at: None,
+                pen: None,
+            })
         } else if let (true, Some(dir)) = (near_ruler, ruler_dir) {
             Some(Lock::Fixed(Constraint::Line {
                 origin: ruler.a,
@@ -385,10 +438,8 @@ impl PainterApp {
             }))
         } else if let Some(e) = near_ellipse {
             Some(Lock::Fixed(Constraint::Ellipse(e)))
-        } else if let Some(e) = concentric {
-            Some(Lock::Fixed(Constraint::Ellipse(e.through(pos))))
-        } else if !dirs.is_empty() {
-            Some(Lock::Choosing { start: pos, dirs })
+        } else if let Some(lock) = Lock::among(pos, options) {
+            Some(lock)
         } else if let (true, Some(dir)) = (ruler.parallel, ruler_dir) {
             Some(Lock::Fixed(Constraint::Line { origin: pos, dir }))
         } else {
@@ -397,8 +448,15 @@ impl PainterApp {
         self.ruler_snap(pos)
     }
 
-    /// `pos` put on what the current stroke follows, if anything.
+    /// `pos` put on what the current stroke follows, if anything, then let
+    /// go of by the looseness.
     pub(crate) fn ruler_snap(&mut self, pos: Vec2) -> Vec2 {
+        let on = self.snap_on_guide(pos);
+        on + (pos - on) * self.workspace.guides.looseness
+    }
+
+    /// `pos` put on what the current stroke follows, if anything.
+    fn snap_on_guide(&mut self, pos: Vec2) -> Vec2 {
         let far = crate::app::tools::assistants::CHOOSE_AFTER / self.viewport.zoom.max(0.01);
         match self.workspace.guides.lock.as_mut() {
             Some(lock) => lock.snap(pos, far),
@@ -407,32 +465,54 @@ impl PainterApp {
     }
 
     /// The points a stroke sample at `pos` (with `pressure`) becomes: on
-    /// what the stroke follows, and round an ellipse, joined to the last
-    /// point through the points in between.
+    /// what the stroke follows, and along a curve (an ellipse, a spline,
+    /// the curve ruler), joined to the last point through the points in
+    /// between, so it follows the curve rather than cutting across.
     pub(crate) fn guide_samples(&mut self, pos: Vec2, pressure: f32) -> Vec<(Vec2, f32)> {
-        let p = self.ruler_snap(pos);
+        let before = match &self.workspace.guides.lock {
+            Some(Lock::Curve { at, .. }) => *at,
+            _ => None,
+        };
+        let p = self.snap_on_guide(pos);
         let guides = &mut self.workspace.guides;
-        let Some(e) = guides.lock.as_ref().and_then(Lock::ellipse) else {
-            return vec![(p, pressure)];
+        let off = (pos - p) * guides.looseness;
+        let from = guides.last_on_curve.replace((p, pressure, off));
+        let between = match (&guides.lock, from, before) {
+            (Some(Lock::Fixed(Constraint::Ellipse(e))), Some((last, ..)), _) => {
+                arc_between(e, last, p)
+            }
+            (
+                Some(Lock::Curve {
+                    points,
+                    at: Some(at),
+                    ..
+                }),
+                Some(_),
+                Some(before),
+            ) => points_between(points, before, *at),
+            _ => Vec::new(),
         };
-        let from = guides.last_on_curve.replace((p, pressure));
-        let Some((last, last_pressure)) = from else {
-            return vec![(p, pressure)];
+        let Some((last, last_pressure, last_off)) = from.filter(|_| !between.is_empty()) else {
+            return vec![(p + off, pressure)];
         };
-        let (t0, t1) = (e.theta(last), e.theta(p));
-        // The short way round.
-        let mut turn = t1 - t0;
-        if turn > std::f32::consts::PI {
-            turn -= std::f32::consts::TAU;
-        } else if turn < -std::f32::consts::PI {
-            turn += std::f32::consts::TAU;
+        // Pressure and looseness shared out by the distance along the way.
+        let path: Vec<Vec2> = between.into_iter().chain([p]).collect();
+        let mut walked = Vec::with_capacity(path.len());
+        let mut prev = last;
+        let mut total = 0.0;
+        for &q in &path {
+            total += (q - prev).length();
+            walked.push(total);
+            prev = q;
         }
-        let steps = (turn.abs().to_degrees() / CURVE_STEP).ceil().max(1.0) as usize;
-        (1..=steps)
-            .map(|i| {
-                let k = i as f32 / steps as f32;
-                let q = if i == steps { p } else { e.at(t0 + turn * k) };
-                (q, last_pressure + (pressure - last_pressure) * k)
+        path.into_iter()
+            .zip(walked)
+            .map(|(q, d)| {
+                let k = if total > 0.0 { d / total } else { 1.0 };
+                (
+                    q + last_off + (off - last_off) * k,
+                    last_pressure + (pressure - last_pressure) * k,
+                )
             })
             .collect()
     }
@@ -440,19 +520,26 @@ impl PainterApp {
     /// The start of a stroke on a curve: remember its first point.
     pub(crate) fn note_curve_start(&mut self, pos: Vec2, pressure: f32) {
         let guides = &mut self.workspace.guides;
-        if guides.lock.as_ref().and_then(Lock::ellipse).is_some() {
-            guides.last_on_curve = Some((pos, pressure));
-        }
+        let on = match &guides.lock {
+            Some(Lock::Fixed(Constraint::Ellipse(e))) => e.at(e.theta(pos)),
+            Some(Lock::Curve {
+                points,
+                at: Some(at),
+                ..
+            }) => point_along(points, *at),
+            _ => return,
+        };
+        // `pos` came loosened off the curve: keep the two apart.
+        guides.last_on_curve = Some((on, pressure, pos - on));
     }
 
-    /// Whether the current stroke goes round an ellipse.
+    /// Whether the current stroke goes along a curve (or may yet).
     pub(crate) fn stroke_on_curve(&self) -> bool {
         self.workspace
             .guides
             .lock
             .as_ref()
-            .and_then(Lock::ellipse)
-            .is_some()
+            .is_some_and(Lock::may_curve)
     }
 
     /// Add an assistant of `kind`, placed in the middle of the canvas.
@@ -464,6 +551,50 @@ impl PainterApp {
             .push(Assistant::new(kind, w, h));
         // Ready to be put in place.
         self.workspace.guides.editing = true;
+    }
+
+    /// Paint assistant `index`'s lines (rays, grid, horizon) onto the
+    /// selected layer with the brush, as the Shape tool paints a line: one
+    /// undo step; on a vector layer, as a vector shape.
+    pub(crate) fn paint_assistant_lines(&mut self, index: usize) {
+        let (w, h) = (self.canvas.width() as f32, self.canvas.height() as f32);
+        let Some(a) = self.workspace.guides.assistants.get(index) else {
+            return;
+        };
+        let lines = a.all_lines(w, h);
+        let curves = a.all_curves();
+        let layer_idx = self.canvas.active_layer_idx;
+        let Some(layer) = self.canvas.layers.get(layer_idx) else {
+            return;
+        };
+        if (lines.is_empty() && curves.is_empty())
+            || layer.locked
+            || layer.kind == crate::canvas::storage::LayerKind::Group
+        {
+            return;
+        }
+        if self.is_vector_layer(layer_idx) {
+            use crate::canvas::path::{Knot, Path, Subpath};
+            let path = Path {
+                subpaths: lines
+                    .iter()
+                    .map(|&(p, q)| vec![p, q])
+                    .chain(curves)
+                    .map(|points| Subpath {
+                        knots: points.into_iter().map(Knot::corner).collect(),
+                        closed: false,
+                    })
+                    .collect(),
+            };
+            self.add_vector_shape(layer_idx, path, false, true);
+            return;
+        }
+        let strokes: Vec<Vec<Vec2>> = lines
+            .into_iter()
+            .map(|(p, q)| vec![p, q])
+            .chain(curves)
+            .collect();
+        self.paint_outlines(layer_idx, &[], &strokes);
     }
 
     /// Start or stop editing the guides (a drag going on is let go).
@@ -492,8 +623,8 @@ impl PainterApp {
                 .filter(|(_, a)| a.enabled)
         };
         for (index, a) in assistants() {
-            for handle in 0..a.kind.handles() {
-                if (pos - a.point(handle)).length() <= hit {
+            for (handle, p) in a.handle_points() {
+                if (pos - p).length() <= hit {
                     return Some(Drag::Assistant { index, handle });
                 }
             }
@@ -658,24 +789,6 @@ impl PainterApp {
     }
 }
 
-/// The part of the line through `p` with direction `dir` (from `t0` to
-/// `t1` along it) inside the canvas, if any.
-fn clip_to_canvas(p: Vec2, dir: Vec2, t0: f32, t1: f32, w: f32, h: f32) -> Option<(Vec2, Vec2)> {
-    let (mut lo, mut hi) = (t0, t1);
-    for (pv, dv, max) in [(p.x, dir.x, w), (p.y, dir.y, h)] {
-        if dv.abs() < 1e-9 {
-            if pv < 0.0 || pv > max {
-                return None;
-            }
-            continue;
-        }
-        let (a, b) = ((0.0 - pv) / dv, (max - pv) / dv);
-        lo = lo.max(a.min(b));
-        hi = hi.min(a.max(b));
-    }
-    (lo < hi).then(|| (p + dir * lo, p + dir * hi))
-}
-
 /// Draw the guides over the canvas.
 pub(crate) fn draw_guides(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
     draw_ruler(app, painter, map);
@@ -734,7 +847,6 @@ pub(crate) fn draw_guides(app: &PainterApp, painter: &egui::Painter, map: &Scree
 
 fn draw_assistants(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
     let (w, h) = (app.canvas.width() as f32, app.canvas.height() as f32);
-    let far = w.hypot(h) * 2.0;
     let faint = Stroke::new(1.0_f32, GUIDE_COLOR.gamma_multiply(0.3));
     let line = |a: Vec2, b: Vec2, stroke: Stroke| {
         painter.line_segment([map.to_screen(a), map.to_screen(b)], stroke);
@@ -748,44 +860,49 @@ fn draw_assistants(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
         painter.circle_filled(p, HANDLE_RADIUS + 1.5, Color32::BLACK);
         painter.circle_filled(p, HANDLE_RADIUS, GUIDE_COLOR);
     };
+    let polyline = |points: &[Vec2], stroke: Stroke| {
+        let points: Vec<Pos2> = points.iter().map(|&p| map.to_screen(p)).collect();
+        painter.add(egui::Shape::line(points, stroke));
+    };
+    let editing = app.workspace.guides.editing;
     for a in app.workspace.guides.assistants.iter().filter(|a| a.enabled) {
+        for (p, q) in a.guide_lines(w, h) {
+            line(p, q, faint);
+        }
+        for curve in a.guide_curves() {
+            polyline(&curve, faint);
+        }
+        if editing && let Some((lo, hi)) = a.area_rect() {
+            let c = [lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y), lo];
+            polyline(&c, Stroke::new(1.0_f32, GUIDE_COLOR.gamma_multiply(0.6)));
+        }
+        if let Some((p, q)) = a.horizon_line(w, h) {
+            solid(p, q);
+        }
         match a.kind {
-            AssistantKind::VanishingPoint => {
-                // Rays out of the point.
-                let vp = a.point(0);
-                for i in 0..24 {
-                    let t = i as f32 / 24.0 * std::f32::consts::TAU;
-                    let dir = Vec2::new(t.cos(), t.sin());
-                    if let Some((p, q)) = clip_to_canvas(vp, dir, 0.0, far, w, h) {
-                        line(p, q, faint);
-                    }
-                }
+            AssistantKind::VanishingPoint | AssistantKind::TwoPoint | AssistantKind::ThreePoint => {
             }
             AssistantKind::Perspective => {
-                let p: Vec<Vec2> = (0..4).map(|i| a.point(i)).collect();
-                // A grid on the plane: lines between points along opposite
-                // sides (straight lines in perspective, near enough).
-                for k in 1..8 {
-                    let t = k as f32 / 8.0;
-                    let lerp = |u: Vec2, v: Vec2| u + (v - u) * t;
-                    line(lerp(p[0], p[1]), lerp(p[3], p[2]), faint);
-                    line(lerp(p[0], p[3]), lerp(p[1], p[2]), faint);
-                }
                 for i in 0..4 {
-                    solid(p[i], p[(i + 1) % 4]);
+                    solid(a.point(i), a.point((i + 1) % 4));
                 }
-                // The sides carried on to the vanishing points.
-                for vp in a.vanishing_points() {
-                    for q in &p {
-                        let d = vp - *q;
-                        if d.length() > 1.0
-                            && let Some((u, v)) =
-                                clip_to_canvas(*q, d.normalized(), 0.0, d.length(), w, h)
-                        {
-                            line(u, v, faint);
-                        }
-                    }
+            }
+            AssistantKind::Fisheye => {
+                solid(a.point(0), a.point(1));
+                if let Some(e) = a.fisheye_main() {
+                    let ring = e.polyline(96);
+                    polyline(&ring, Stroke::new(3.0_f32, Color32::from_black_alpha(140)));
+                    polyline(&ring, Stroke::new(1.0_f32, GUIDE_COLOR));
                 }
+            }
+            AssistantKind::Spline => {
+                if editing {
+                    line(a.point(0), a.point(1), faint);
+                    line(a.point(3), a.point(2), faint);
+                }
+                let curve = a.spline_points();
+                polyline(&curve, Stroke::new(3.0_f32, Color32::from_black_alpha(140)));
+                polyline(&curve, Stroke::new(1.0_f32, GUIDE_COLOR));
             }
             AssistantKind::Ellipse | AssistantKind::Concentric => {
                 let Some(e) = a.ellipse() else {
@@ -809,9 +926,19 @@ fn draw_assistants(app: &PainterApp, painter: &egui::Painter, map: &ScreenMap) {
                 line(a.point(0), a.point(2), Stroke::new(1.0_f32, GUIDE_COLOR));
             }
         }
-        if app.workspace.guides.editing {
-            for i in 0..a.kind.handles() {
-                handle(a.point(i));
+        if editing {
+            for (i, p) in a.handle_points() {
+                if i >= AREA_HANDLE {
+                    // An area corner: a square.
+                    let r = egui::Rect::from_center_size(
+                        map.to_screen(p),
+                        egui::vec2(HANDLE_RADIUS, HANDLE_RADIUS) * 1.6,
+                    );
+                    painter.rect_filled(r.expand(1.5), 0.0, Color32::BLACK);
+                    painter.rect_filled(r, 0.0, GUIDE_COLOR);
+                } else {
+                    handle(p);
+                }
             }
         }
     }
@@ -1139,7 +1266,7 @@ mod tests {
     fn a_perspective_stroke_picks_the_direction_it_starts_in() {
         let mut app = assistant_app();
         app.add_assistant(AssistantKind::Perspective);
-        let start = Vec2::new(128.0, 200.0);
+        let start = Vec2::new(128.0, 140.0);
         app.ruler_begin_stroke(start);
         // Straight up: the upright line, whatever the plane's sides do.
         let p = app.ruler_snap(Vec2::new(131.0, 150.0));
@@ -1153,6 +1280,84 @@ mod tests {
         let p = app.ruler_snap(start + dir * 40.0 + Vec2::new(dir.y, -dir.x) * 5.0);
         let off = p - start;
         assert!((off.x * dir.y - off.y * dir.x).abs() < 1e-2);
+        // Started off the plane: left alone.
+        app.workspace.guides.end_drag();
+        let outside = Vec2::new(128.0, 230.0);
+        app.ruler_begin_stroke(outside);
+        assert_eq!(
+            app.ruler_snap(Vec2::new(150.0, 200.0)),
+            Vec2::new(150.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn a_loose_guide_lets_the_pen_wander_and_it_saves() {
+        let mut app = assistant_app();
+        app.set_ruler(true);
+        app.workspace.guides.ruler.a = Vec2::new(20.0, 100.0);
+        app.workspace.guides.ruler.b = Vec2::new(180.0, 100.0);
+        app.workspace.guides.looseness = 0.25;
+        app.ruler_begin_stroke(Vec2::new(50.0, 108.0));
+        assert_eq!(
+            app.ruler_snap(Vec2::new(120.0, 80.0)),
+            Vec2::new(120.0, 95.0)
+        );
+        let stored = serde_json::to_string(&StoredGuides::from_app(&app)).unwrap();
+        let mut other = assistant_app();
+        serde_json::from_str::<StoredGuides>(&stored)
+            .unwrap()
+            .apply(&mut other);
+        assert_eq!(other.workspace.guides.looseness, 0.25);
+    }
+
+    #[test]
+    fn fisheye_and_vanishing_point_strokes_are_told_apart_by_where_they_go() {
+        let mut app = assistant_app();
+        app.viewport.zoom = 1.0;
+        app.add_assistant(AssistantKind::Fisheye);
+        app.add_assistant(AssistantKind::VanishingPoint);
+        let fish = app.workspace.guides.assistants[0];
+        let vp = app.workspace.guides.assistants[1].point(0);
+        let start = Vec2::new(128.0, 100.0);
+        let Some(Constraint::Ellipse(e)) = fish.fisheye_through(start) else {
+            panic!("an ellipse");
+        };
+        // Along the curve: round it, joined through the points between.
+        app.ruler_begin_stroke(start);
+        assert!(app.stroke_on_curve(), "no smoothing: it may go round");
+        app.note_curve_start(start, 1.0);
+        let along = e.at(e.theta(start) + 0.05);
+        app.guide_samples(along, 1.0);
+        let far = e.at(e.theta(start) + 0.6);
+        let samples = app.guide_samples(far + Vec2::new(0.0, 2.0), 1.0);
+        assert!(samples.len() > 2, "joined round the curve");
+        for (p, _) in samples {
+            assert!(e.distance(p) < 0.5, "{p:?}");
+        }
+        // Towards the vanishing point: the line to it.
+        app.workspace.guides.end_drag();
+        app.ruler_begin_stroke(start);
+        let dir = (vp - start).normalized();
+        let p = app.ruler_snap(start + dir * 30.0 + Vec2::new(dir.y, -dir.x));
+        let off = p - start;
+        assert!((off.x * dir.y - off.y * dir.x).abs() < 1e-2, "{p:?}");
+    }
+
+    #[test]
+    fn a_local_area_moves_with_undo() {
+        let mut app = assistant_app();
+        app.viewport.zoom = 1.0;
+        app.add_assistant(AssistantKind::VanishingPoint);
+        app.workspace.guides.assistants[0].set_local(true, 256.0, 256.0);
+        let corner = Vec2::new(64.0, 64.0);
+        assert!(app.guides_press(corner));
+        app.guides_drag(Vec2::new(20.0, 30.0), false);
+        app.guides_release();
+        let corner_of =
+            |app: &crate::PainterApp| app.workspace.guides.assistants[0].area.unwrap()[0];
+        assert_eq!(corner_of(&app), [20.0, 30.0]);
+        app.apply_history_now(false);
+        assert_eq!(corner_of(&app), [64.0, 64.0]);
     }
 
     #[test]

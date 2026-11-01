@@ -71,10 +71,30 @@ pub(crate) fn assistant_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
             if ui
                 .button(format!("+ {}", kind.label()))
                 .on_hover_text(match kind {
-                    AssistantKind::VanishingPoint => "Strokes run towards the point",
+                    AssistantKind::VanishingPoint => {
+                        "One-point perspective: strokes run towards the point"
+                    }
+                    AssistantKind::TwoPoint => {
+                        "Two-point perspective: two points on a horizon; strokes run towards \
+                         either, or upright. The point between them is the centre of vision: \
+                         it sets the ground grid's squares"
+                    }
+                    AssistantKind::ThreePoint => {
+                        "Three-point perspective: two points on a horizon and one above or \
+                         below for the uprights"
+                    }
                     AssistantKind::Perspective => {
-                        "Drag the corners onto a rectangle seen at an angle: strokes run towards \
-                         its two vanishing points, or upright"
+                        "Drag the corners onto a rectangle seen at an angle: strokes starting on \
+                         it run along its sides' directions, or upright"
+                    }
+                    AssistantKind::Fisheye => {
+                        "Fisheye: two points on an axis; strokes run round the ellipse through \
+                         both and where they start. Add two, square to each other, and a 1-point \
+                         between for a full fisheye view"
+                    }
+                    AssistantKind::Spline => {
+                        "A curve set by its ends and two control points: strokes started near \
+                         it run along it"
                     }
                     AssistantKind::Ellipse => "Strokes started near it run round it",
                     AssistantKind::Concentric => "Strokes run round ellipses of its shape",
@@ -85,7 +105,28 @@ pub(crate) fn assistant_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
             }
         }
     });
+    let g = &mut app.workspace.guides;
+    let mut strength = 1.0 - g.looseness;
+    ui.horizontal(|ui| {
+        ui.label("Strength");
+        if ui
+            .add(
+                egui::Slider::new(&mut strength, 0.0..=1.0)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+            )
+            .on_hover_text(
+                "How hard the ruler and assistants pull strokes onto their lines (100%: right \
+                 on them; lower lets the pen wander)",
+            )
+            .changed()
+        {
+            g.looseness = 1.0 - strength;
+        }
+    });
     let mut remove = None;
+    let mut paint = None;
+    let (w, h) = (app.canvas.width() as f32, app.canvas.height() as f32);
+    let mut placing = false;
     for (i, a) in app.workspace.guides.assistants.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             ui.checkbox(&mut a.enabled, a.kind.label());
@@ -93,6 +134,75 @@ pub(crate) fn assistant_controls(app: &mut PainterApp, ui: &mut egui::Ui) {
                 remove = Some(i);
             }
         });
+        if !a.enabled {
+            continue;
+        }
+        ui.indent(("assistant", i), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut a.snap, "Snap")
+                    .on_hover_text("Strokes follow it (off: it only shows lines)");
+                if a.kind.has_line_count() {
+                    let mut n = a.line_count();
+                    let label = if a.kind == AssistantKind::Perspective {
+                        "Grid"
+                    } else {
+                        "Lines"
+                    };
+                    ui.label(label);
+                    if ui
+                        .add(egui::DragValue::new(&mut n).range(1..=360))
+                        .on_hover_text(match a.kind {
+                            AssistantKind::Perspective => "How many squares across its grid has",
+                            AssistantKind::TwoPoint => "How fine its ground grid is",
+                            AssistantKind::Fisheye => "How many curves it shows round each cell",
+                            _ => "How many lines it shows round each vanishing point",
+                        })
+                        .changed()
+                    {
+                        a.lines = n;
+                    }
+                }
+                if a.kind.has_horizon() {
+                    ui.checkbox(&mut a.horizon, "Horizon");
+                }
+                if a.kind.has_upright() {
+                    ui.checkbox(&mut a.upright, "Upright")
+                        .on_hover_text("Strokes may also run upright (and level, in one-point)");
+                }
+                if a.kind.can_be_local() {
+                    let mut local = a.area.is_some();
+                    if ui
+                        .checkbox(&mut local, "Local")
+                        .on_hover_text(
+                            "Only guide strokes starting inside an area (drag its square \
+                             corners), and show its lines only there",
+                        )
+                        .changed()
+                    {
+                        a.set_local(local, w, h);
+                        placing |= local;
+                    }
+                }
+                if a.kind.has_lines()
+                    && ui
+                        .small_button("Paint lines")
+                        .on_hover_text(
+                            "Paint its lines onto the selected layer with the brush, as the \
+                             Shape tool does",
+                        )
+                        .clicked()
+                {
+                    paint = Some(i);
+                }
+            });
+        });
+    }
+    if placing {
+        // Ready to be put in place.
+        app.set_editing_guides(true);
+    }
+    if let Some(i) = paint {
+        app.paint_assistant_lines(i);
     }
     if let Some(i) = remove {
         app.workspace.guides.assistants.remove(i);
