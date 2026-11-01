@@ -539,7 +539,8 @@ impl PainterApp {
     }
 
     /// A new pack shipped (its stamp changed): its brushes the user hasn't
-    /// edited take its settings, and the ones it no longer has are removed.
+    /// edited take its settings, the ones it no longer has are removed, and
+    /// its brushes go in its collections' folders.
     /// Ones installed before edits were tracked count as unedited.
     fn update_local_pack(&mut self) {
         use crate::brush_engine::pack;
@@ -620,6 +621,15 @@ impl PainterApp {
             }
         }
         let lib = &mut self.brush_state.library;
+        lib.file.sort_pack(&manifest);
+        if let crate::app::brush_library::Shelf::Folder(id) = lib.shelf
+            && !lib.file.folders.iter().any(|f| f.id == id)
+        {
+            lib.shelf = (lib.file.selected_folder).map_or(
+                crate::app::brush_library::Shelf::default(),
+                crate::app::brush_library::Shelf::Folder,
+            );
+        }
         lib.file.pack_content = manifest.content;
         lib.dirty = true;
     }
@@ -1276,8 +1286,8 @@ mod tests {
     }
 
     #[test]
-    fn a_new_pack_refreshes_the_installed_brushes_not_edited_since_and_drops_the_old() {
-        use crate::brush_engine::pack::{Collection, Manifest, PACK_ID};
+    fn a_new_pack_refreshes_unedited_brushes_drops_old_ones_and_sorts_its_folders() {
+        use crate::brush_engine::pack::{Collection, LIBRARY_NAME, Manifest, PACK_ID};
         use crate::canvas::Canvas;
         let dir = std::env::temp_dir().join(format!("rp-pack-update-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1286,7 +1296,7 @@ mod tests {
         app.brush_state.presets.clear();
         let root = app.brush_state.brushes_path.join("packs").join(PACK_ID);
         std::fs::create_dir_all(&root).unwrap();
-        let ship = |size: f32, content: &str, names: &[&str]| {
+        let ship = |size: f32, content: &str, names: &[&str], folder: &str| {
             let preset = |name: &str| BrushPreset {
                 name: name.into(),
                 brush: crate::brush_engine::brush::Brush::new(size, 80.0, Color32::BLACK, 10.0),
@@ -1302,7 +1312,7 @@ mod tests {
                 id: PACK_ID.into(),
                 file: "test.rpbrush".into(),
                 collections: vec![Collection {
-                    name: "Pens".into(),
+                    name: folder.into(),
                     brushes: names.iter().map(|n| n.to_string()).collect(),
                 }],
                 content: content.into(),
@@ -1321,7 +1331,7 @@ mod tests {
                 .brush_options
                 .diameter
         };
-        ship(20.0, "a", &["Pen", "Nib", "Old", "Kept"]);
+        ship(20.0, "a", &["Pen", "Nib", "Old", "Kept"], "Pens");
         app.install_default_presets();
         // The user changes Nib and Kept.
         for name in ["Nib", "Kept"] {
@@ -1332,7 +1342,10 @@ mod tests {
             app.brush_state.brush.brush_options.diameter = 30.0;
             app.save_active_preset(false);
         }
-        ship(40.0, "b", &["Pen", "Nib"]);
+        app.edit_library(|lib| {
+            lib.ensure_folder_path(&[LIBRARY_NAME.into(), "Old empty".into()]);
+        });
+        ship(40.0, "b", &["Pen", "Nib"], "Inking");
         app.install_default_presets();
         assert_eq!(size(&app, "Pen"), 40.0, "unedited: the new pack's");
         assert_eq!(size(&app, "Nib"), 30.0, "edited: the user's");
@@ -1356,6 +1369,13 @@ mod tests {
         };
         assert_eq!((disk_size("Pen"), disk_size("Nib")), (40.0, 30.0));
         assert!(!on_disk.iter().any(|p| p.name == "Old"));
+        // Its brushes in its folders; emptied ones gone, Kept's stays.
+        let lib = &app.brush_state.library.file;
+        for name in ["Pen", "Nib"] {
+            assert_eq!(lib.brush_folder(name), [LIBRARY_NAME, "Inking"], "{name}");
+        }
+        assert_eq!(lib.brush_folder("Kept"), [LIBRARY_NAME, "Pens"]);
+        assert!(!lib.folders.iter().any(|f| f.name == "Old empty"));
         let nib = app
             .brush_state
             .presets

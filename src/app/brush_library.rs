@@ -311,6 +311,60 @@ impl LibraryFile {
         }
     }
 
+    /// The pack's brushes still under the default brushes go in its
+    /// collections' folders, in its order (ones moved elsewhere stay), and
+    /// the folders left empty under the default brushes are removed.
+    pub fn sort_pack(&mut self, manifest: &crate::brush_engine::pack::Manifest) {
+        use crate::brush_engine::pack::LIBRARY_NAME;
+        for collection in &manifest.collections {
+            let Some(folder) =
+                self.ensure_folder_path(&[LIBRARY_NAME.into(), collection.name.clone()])
+            else {
+                continue;
+            };
+            for source in &collection.brushes {
+                let Some(name) = self.pack_presets.get(source).cloned() else {
+                    continue;
+                };
+                if self.brush_folder(&name).first().map(String::as_str) == Some(LIBRARY_NAME) {
+                    let id = self.preset_id(&name);
+                    self.move_brush(id, folder, None);
+                }
+            }
+        }
+        let Some(root) = (self.folders.iter())
+            .find(|f| f.parent.is_none() && f.name == LIBRARY_NAME)
+            .map(|f| f.id)
+        else {
+            return;
+        };
+        let under_root = |lib: &Self, mut id: FolderId| {
+            while let Some(parent) = lib
+                .folders
+                .iter()
+                .find(|f| f.id == id)
+                .and_then(|f| f.parent)
+            {
+                if parent == root {
+                    return true;
+                }
+                id = parent;
+            }
+            false
+        };
+        // Deepest first: a folder holding only empty ones empties too.
+        while let Some(empty) = (self.folders.iter())
+            .filter(|f| f.brushes.is_empty() && under_root(self, f.id))
+            .find(|f| !self.folders.iter().any(|c| c.parent == Some(f.id)))
+            .map(|f| f.id)
+        {
+            self.delete_folder(empty);
+        }
+        if (self.selected_folder).is_some_and(|id| !self.folders.iter().any(|f| f.id == id)) {
+            self.selected_folder = Some(root);
+        }
+    }
+
     pub fn reconcile(&mut self, presets: &[BrushPreset]) {
         self.version = VERSION;
         let root = self
