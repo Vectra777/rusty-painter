@@ -631,6 +631,9 @@ impl PainterApp {
             self.add_missing_defaults(&defaults);
             self.edit_library(|lib| lib.defaults_installed = true);
         }
+        if !self.brush_state.library.file.legacy_folder {
+            self.legacy_rusty_folder(&defaults);
+        }
         let rank = |p: &BrushPreset| {
             (defaults.iter())
                 .position(|d| d.name == p.name)
@@ -643,6 +646,36 @@ impl PainterApp {
             .library
             .file
             .reconcile(&self.brush_state.presets);
+    }
+
+    /// Once: the app's own brushes the pack spread into its kinds' folders
+    /// back in their own (Default brushes / Legacy Rusty), with the basics
+    /// added since. Ones the user moved elsewhere stay there.
+    fn legacy_rusty_folder(&mut self, defaults: &[BrushPreset]) {
+        use crate::app::brush_library::{NEW_BASICS, is_own_default};
+        let basics: Vec<_> = (defaults.iter())
+            .filter(|p| NEW_BASICS.contains(&p.name.as_str()))
+            .cloned()
+            .collect();
+        self.add_missing_defaults(&basics);
+        let own: Vec<String> = (defaults.iter())
+            .filter(|p| is_own_default(&p.name))
+            .filter(|p| self.brush_state.presets.iter().any(|q| q.name == p.name))
+            .map(|p| p.name.clone())
+            .collect();
+        self.edit_library(|lib| {
+            if !lib.installed_packs.is_empty() {
+                for name in &own {
+                    let folder = lib.brush_folder(name);
+                    if folder.first().map(String::as_str)
+                        == Some(crate::brush_engine::pack::LIBRARY_NAME)
+                    {
+                        place_default(lib, name);
+                    }
+                }
+            }
+            lib.legacy_folder = true;
+        });
     }
 
     /// Put back the presets that came with the app and were deleted.
@@ -1332,6 +1365,68 @@ mod tests {
         app.reset_preset(nib);
         assert_eq!(size(&app, "Nib"), 40.0);
         assert!(!app.brush_state.library.file.pack_edited.contains("Nib"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_app_s_own_brushes_go_back_in_legacy_rusty_once_with_the_new_basics() {
+        use crate::app::brush_library::{LEGACY_FOLDER, NEW_BASICS};
+        use crate::brush_engine::pack::{LIBRARY_NAME, PACK_ID};
+        use crate::canvas::Canvas;
+        let dir = std::env::temp_dir().join(format!("rp-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.brush_state.brushes_path = dir.join("brushes");
+        app.brush_state.presets.clear();
+        let defaults = PainterApp::default_brush_presets();
+        let krita = (defaults.iter())
+            .find(|p| !crate::app::brush_library::is_own_default(&p.name))
+            .unwrap()
+            .clone();
+        let own = defaults
+            .iter()
+            .find(|p| p.name == "Hard Round")
+            .unwrap()
+            .clone();
+        // A library from before: the pack spread the app's own by kind.
+        app.add_user_preset(own);
+        app.add_user_preset(krita.clone());
+        app.edit_library(|lib| {
+            lib.installed_packs.push(PACK_ID.into());
+            lib.defaults_installed = true;
+            let painting = lib
+                .ensure_folder_path(&[LIBRARY_NAME.into(), "Painting".into()])
+                .unwrap();
+            for name in ["Hard Round", krita.name.as_str()] {
+                let id = lib.preset_id(name);
+                lib.move_brush(id, painting, None);
+            }
+        });
+        app.install_default_presets();
+        let lib = &app.brush_state.library.file;
+        assert_eq!(
+            lib.brush_folder("Hard Round"),
+            [LIBRARY_NAME, LEGACY_FOLDER]
+        );
+        assert_eq!(lib.brush_folder(&krita.name), [LIBRARY_NAME, "Painting"]);
+        for name in NEW_BASICS {
+            assert_eq!(
+                lib.brush_folder(name),
+                [LIBRARY_NAME, LEGACY_FOLDER],
+                "{name}"
+            );
+        }
+        // Once: moved elsewhere, it stays.
+        app.edit_library(|lib| {
+            let mine = lib.ensure_folder_path(&["Mine".into()]).unwrap();
+            let id = lib.preset_id("Hard Round");
+            lib.move_brush(id, mine, None);
+        });
+        app.install_default_presets();
+        assert_eq!(
+            app.brush_state.library.file.brush_folder("Hard Round"),
+            ["Mine"]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

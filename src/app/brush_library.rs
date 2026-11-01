@@ -62,6 +62,9 @@ pub struct LibraryFile {
     /// The pack's brushes (library names) changed by the user: a new pack
     /// leaves them alone.
     pub pack_edited: std::collections::BTreeSet<String>,
+    /// The app's own brushes were moved into their own folder, and the
+    /// basics added since given to this library (once).
+    pub legacy_folder: bool,
     pub selected_folder: Option<FolderId>,
     /// The pack's category tags were given out (once: ones the user
     /// removes stay removed).
@@ -83,6 +86,7 @@ impl Default for LibraryFile {
             pack_presets: BTreeMap::new(),
             pack_content: String::new(),
             pack_edited: Default::default(),
+            legacy_folder: false,
             selected_folder: None,
             pack_tags_installed: false,
         }
@@ -602,12 +606,27 @@ pub fn collection_tags(category: &str) -> &'static [&'static str] {
     }
 }
 
-/// The folder under the default brushes a built-in preset goes in, by
-/// its first tag (with the pack's brushes of that kind).
+/// The folder under the default brushes the app's own brushes go in.
+pub const LEGACY_FOLDER: &str = "Legacy Rusty";
+
+/// The built-in presets added since libraries were first installed: added
+/// to existing ones once (see `legacy_rusty_folder`).
+pub const NEW_BASICS: [&str; 3] = ["Basic Round", "Basic Tapered", "Soft Round"];
+
+/// Whether built-in preset `name` is the app's own (not one of Krita's).
+pub fn is_own_default(name: &str) -> bool {
+    !default_tags(name).contains(&"Krita")
+}
+
+/// The folder under the default brushes a built-in preset goes in: the
+/// app's own in theirs, Krita's by its first tag (with the pack's brushes
+/// of that kind).
 pub fn default_folder(name: &str) -> &'static str {
     let tags = default_tags(name);
     let has = |tag: &str| tags.contains(&tag);
-    if has("Erasers") {
+    if is_own_default(name) {
+        LEGACY_FOLDER
+    } else if has("Erasers") {
         "Erasers"
     } else if has("Pixel") {
         "Pixel"
@@ -630,7 +649,8 @@ pub fn default_tags(name: &str) -> &'static [&'static str] {
         "Pencil (Sketch)" | "Sketchy Pencil" => &["Sketching"],
         "Ink Pen" | "Calligraphy" => &["Inking"],
         "Cross Hatch" => &["Inking", "Sketching"],
-        "Hard Round" => &["Painting", "Inking"],
+        "Hard Round" | "Basic Round" | "Basic Tapered" => &["Painting", "Inking"],
+        "Soft Round" => &["Painting"],
         "Soft Airbrush" | "Multiply Marker" | "Watercolour" | "Oil Bristle" => &["Painting"],
         "Dry Bristles" | "Dry Media" | "Dry Brush" => &["Painting", "Texture"],
         "Chalk" | "Charcoal" | "Two-Tone Chalk" => &["Sketching", "Texture"],
