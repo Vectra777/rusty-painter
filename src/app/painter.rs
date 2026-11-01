@@ -552,6 +552,12 @@ impl PainterApp {
         // Overlays follow the canvas exactly (zoom, pan and rotation).
         let map = render::screen_map(self, view);
         let panel = view.response.rect;
+        // Above everything (panels included): it follows the pen anywhere.
+        let top = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new("pick_ring"),
+        ));
+        self.draw_pick_ring(ctx, &top);
         crate::app::view::sharp::draw_sharp(self, ui.painter(), &map);
         crate::app::playback::draw_cached_frame(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::view::grid::draw_grid(self, ui.painter(), &map, panel);
@@ -570,6 +576,7 @@ impl PainterApp {
                 .draw_overlay(ui.painter(), map.zoom(), &|p| map.to_screen(p)),
         }
         crate::app::tools::select::draw_magnetic(self, ui.painter(), &|p| map.to_screen(p));
+        crate::ui::selection_bar::selection_bar(self, ctx, &map, panel);
         crate::app::tools::guides::draw_guides(self, ui.painter(), &map);
         crate::app::stroke_ops::draw_string(self, ui.painter(), &map);
         crate::app::collab::draw_others(self, ui.painter(), &map);

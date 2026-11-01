@@ -546,6 +546,7 @@ fn handle_primary_press(
 }
 
 fn handle_primary_release(app: &mut PainterApp) {
+    app.workspace.eyedropper.before = None;
     if app.guide_lines_release() || app.guides_release() {
         return;
     }

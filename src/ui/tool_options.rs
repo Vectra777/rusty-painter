@@ -1363,7 +1363,7 @@ fn bone_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     }
 }
 
-fn eyedropper_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
+pub(crate) fn eyedropper_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
     tool_title(ui, "Eyedropper");
     let color = app.brush_state.brush.brush_options.color;
     crate::ui::widgets::color_swatch(ui, color, egui::vec2(36.0, 18.0));
@@ -1373,5 +1373,22 @@ fn eyedropper_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'static str {
             .monospace()
             .color(TEXT),
     );
-    "Click or drag on the canvas to sample the visible color"
+    let s = &mut app.workspace.eyedropper.settings;
+    vdivider(ui);
+    use crate::app::tools::eyedropper::{PickFrom, SIZES};
+    segmented(
+        ui,
+        &mut s.from,
+        &[(PickFrom::Visible, "Visible"), (PickFrom::Layer, "Layer")],
+        true,
+    );
+    vdivider(ui);
+    ui.label(RichText::new("Sample").color(TEXT_DIM));
+    segmented(ui, &mut s.size, &SIZES, true);
+    match s.from {
+        PickFrom::Visible => {
+            "Click or drag to pick the colour you see  ·  Alt+click picks with the brush"
+        }
+        PickFrom::Layer => "Click or drag to pick from the active layer only",
+    }
 }

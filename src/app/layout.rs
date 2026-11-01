@@ -546,6 +546,12 @@ fn brush_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
                 ui::tool_options::gradient_options(app, ui, false);
             });
         }
+        Tool::Eyedropper => {
+            panel_title(ui, "EYEDROPPER");
+            ui.horizontal_wrapped(|ui| {
+                ui::tool_options::eyedropper_options(app, ui);
+            });
+        }
         Tool::Liquify => {
             panel_title(ui, "LIQUIFY");
             egui::ScrollArea::vertical().show(ui, |ui| {

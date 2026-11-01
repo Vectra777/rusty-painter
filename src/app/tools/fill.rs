@@ -182,6 +182,31 @@ impl PainterApp {
         });
     }
 
+    /// Fill the selection with the brush colour (soft edges fade).
+    pub(crate) fn fill_selection(&mut self) {
+        let Some(bounds) = self
+            .selection_manager
+            .get_bounds()
+            .filter(|_| self.selection_manager.has_selection())
+            .map(|b| self.pixel_bounds(b))
+        else {
+            return;
+        };
+        // All of the bounds: the fill keeps to the selection itself.
+        let [x0, y0, x1, y1] = bounds;
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let mask = SelectionMask::new(
+            x0,
+            y0,
+            (x1 - x0) as usize,
+            (y1 - y0) as usize,
+            vec![255; ((x1 - x0) * (y1 - y0)) as usize],
+        );
+        self.run_fill(move |_, _, _| Some(mask));
+    }
+
     /// Delete the selected pixels of the active layer (Delete key). The
     /// selection stays. Mid-transform, the transform ends first (what was
     /// lifted goes back, then is erased): no box is left around nothing.
@@ -293,7 +318,8 @@ impl PainterApp {
             drop(canvas);
             Box::new(move |app: &mut PainterApp| {
                 if let Some(rect) = changed {
-                    app.push_undo(action);
+                    // "Fill" whichever tool is active (the selection bar fills too).
+                    app.labelled("Fill", |app| app.push_undo(action));
                     app.mark_tiles_in_bounds_dirty(rect);
                 }
             })

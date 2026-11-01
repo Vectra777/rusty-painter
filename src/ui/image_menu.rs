@@ -47,32 +47,12 @@ pub fn image_menu(
             smooth: true,
         });
     }
-    let crop = app
-        .selection_manager
-        .get_bounds()
-        .filter(|_| app.selection_manager.has_selection());
+    let can_crop = app.selection_manager.has_selection();
     if ui
-        .add_enabled_ui(crop.is_some(), |ui| item(ui, "Crop to Selection"))
+        .add_enabled_ui(can_crop, |ui| item(ui, "Crop to Selection"))
         .inner
-        && let Some(b) = crop
     {
-        let [x0, y0, x1, y1] = [
-            b.min.x.floor() as i32,
-            b.min.y.floor() as i32,
-            b.max.x.ceil() as i32,
-            b.max.y.ceil() as i32,
-        ];
-        // Within the canvas: cropping never grows it.
-        let (x0, y0) = (x0.max(0), y0.max(0));
-        let (x1, y1) = (x1.min(w as i32), y1.min(h as i32));
-        if x1 > x0 && y1 > y0 {
-            app.apply_image_op(ImageOp::Reframe {
-                x: x0,
-                y: y0,
-                w: (x1 - x0) as usize,
-                h: (y1 - y0) as usize,
-            });
-        }
+        crop_to_selection(app);
     }
     ui.separator();
     for (label, op) in [
@@ -299,5 +279,33 @@ pub fn view_color_items(app: &mut PainterApp, ui: &mut egui::Ui) {
     if ui.button(format!("Print Profile ({print})…")).clicked() {
         app.pick_open(OpenFor::Profile(ProfileUse::Print));
         ui.close_menu();
+    }
+}
+
+/// Crop the canvas to the selection's bounds (never growing it).
+pub(crate) fn crop_to_selection(app: &mut PainterApp) {
+    let Some(b) = app
+        .selection_manager
+        .get_bounds()
+        .filter(|_| app.selection_manager.has_selection())
+    else {
+        return;
+    };
+    let (w, h) = (app.canvas.width() as i32, app.canvas.height() as i32);
+    let (x0, y0) = (
+        (b.min.x.floor() as i32).max(0),
+        (b.min.y.floor() as i32).max(0),
+    );
+    let (x1, y1) = (
+        (b.max.x.ceil() as i32).min(w),
+        (b.max.y.ceil() as i32).min(h),
+    );
+    if x1 > x0 && y1 > y0 {
+        app.apply_image_op(ImageOp::Reframe {
+            x: x0,
+            y: y0,
+            w: (x1 - x0) as usize,
+            h: (y1 - y0) as usize,
+        });
     }
 }

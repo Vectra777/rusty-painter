@@ -627,6 +627,8 @@ pub struct WorkspaceState {
     pub select_type: crate::selection::SelectionType,
     /// Fill tool mode and settings.
     pub fill: crate::app::tools::fill::FillToolState,
+    /// Eyedropper settings, and the colour before a pick in progress.
+    pub eyedropper: crate::app::tools::eyedropper::EyedropperState,
     /// Liquify brush mode and settings.
     pub liquify: crate::app::tools::liquify::LiquifySettings,
     /// Puppet Warp mode and mesh.
@@ -764,6 +766,7 @@ impl WorkspaceState {
             screen_size: None,
             select_type: crate::selection::SelectionType::Rectangle,
             fill: Default::default(),
+            eyedropper: Default::default(),
             liquify: Default::default(),
             puppet: Default::default(),
             bone: Default::default(),

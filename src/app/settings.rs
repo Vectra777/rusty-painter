@@ -67,6 +67,7 @@ pub struct AppSettings {
     fill_mode: FillMode,
     fill_source: FillSource,
     fill: FillSettings,
+    eyedropper: crate::app::tools::eyedropper::EyedropperSettings,
     liquify: LiquifySettings,
     puppet: PuppetSettings,
     blend: BlendToolSettings,
@@ -263,6 +264,7 @@ impl AppSettings {
             fill_mode: ws.fill.mode,
             fill_source: ws.fill.source,
             fill: ws.fill.settings,
+            eyedropper: ws.eyedropper.settings,
             liquify: ws.liquify,
             puppet: ws.puppet,
             blend: ws.blend.clone(),
@@ -343,6 +345,7 @@ impl AppSettings {
         ws.fill.mode = self.fill_mode;
         ws.fill.source = self.fill_source;
         ws.fill.settings = self.fill;
+        ws.eyedropper.settings = self.eyedropper;
         ws.liquify = self.liquify;
         ws.puppet = self.puppet;
         ws.blend = self.blend;

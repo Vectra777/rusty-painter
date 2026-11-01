@@ -30,6 +30,7 @@ pub(crate) mod radial_palette;
 pub(crate) mod reference_window;
 pub(crate) mod select_dialog;
 pub(crate) mod select_menu;
+pub(crate) mod selection_bar;
 pub(crate) mod shader_editor;
 pub(crate) mod shape_menu;
 pub(crate) mod splash;
