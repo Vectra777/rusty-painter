@@ -147,6 +147,9 @@ impl PainterApp {
         };
 
         app.workspace.shaders.gpu = cc.wgpu_render_state.clone();
+        if let Some(state) = cc.wgpu_render_state.as_ref() {
+            crate::canvas::gpu_ops::initialize(state.device.clone(), state.queue.clone());
+        }
         if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             let name = |a: &eframe::wgpu::Adapter| {
                 let info = a.get_info();

@@ -689,3 +689,20 @@ fn colour_filters_work_at_full_depth() {
         );
     }
 }
+
+/// The frame loop calls `gradient_commit` every frame outside the Gradient
+/// tool; with no gradient it mustn't end the stroke being drawn.
+#[test]
+fn a_stroke_over_many_frames_is_one_undo_step() {
+    let mut app = app();
+    let before = app.layer_state.history.stacks().0.len();
+    app.start_stroke_with_pressure(Vec2::new(10.0, 64.0), 1.0);
+    for i in 1..=20 {
+        app.add_stroke_point(Vec2::new(10.0 + i as f32 * 10.0, 64.0), 1.0);
+        app.gradient_commit();
+        assert!(app.brush_state.is_drawing, "frame {i} ended the stroke");
+    }
+    app.finish_stroke();
+    app.release_canvas();
+    assert_eq!(app.layer_state.history.stacks().0.len(), before + 1);
+}

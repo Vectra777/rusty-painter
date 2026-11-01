@@ -267,6 +267,11 @@ pub struct Brush {
     /// Airbrush: dabs per second added where the pen is while it's down,
     /// so paint builds up when it's held still (0 = off).
     pub airbrush_rate: f32,
+    /// Lay every dab the spacing asks for, even on a big tip (see
+    /// [`Brush::spacing_stretch`]): for a brush whose dabs differ one by
+    /// one, or whose tip is a detailed picture, so fewer of them would
+    /// show.
+    pub every_dab: bool,
     /// Dual brush: a second tip that masks this one; `None` for none.
     pub dual: Option<crate::brush_engine::dual::DualTip>,
     /// Watercolour edges: how much the middle of a stroke thins when the
@@ -319,6 +324,8 @@ pub struct Brush {
 
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
 struct BatchCtx<'a> {
+    /// The brush painting (its spacing stretch, per dab).
+    brush: &'a Brush,
     canvas: &'a Canvas,
     selection: Option<&'a SelectionManager>,
     dabs: &'a [PlacedDab],
@@ -687,6 +694,36 @@ impl Brush {
         k.max(0.0)
     }
 
+    /// [`BrushOptions::spacing_stretch`] for this brush's dabs: only a
+    /// plain dab brush's (a hair, a ribbon, sketch or hatching lines draw
+    /// continuously), or one mixing paint this app's way (each dab then
+    /// mixes and lays as the skipped ones would: see
+    /// `BlendSession::krita_smudge_dab`; Krita's engines and a brush kept
+    /// dirty work otherwise).
+    pub fn spacing_stretch(&self, diameter: f32, factor: f32) -> f32 {
+        let plain = self.brush_type == BrushType::Soft
+            && !self.is_ribbon()
+            && self
+                .mixing
+                .is_none_or(|m| m.krita.is_none() && !m.keep_dirty)
+            && self.airbrush_rate <= 0.0
+            && !self.every_dab;
+        if plain {
+            // The tip's thinnest side's share of its length: a picture's,
+            // squashed by its roundness.
+            let (w, h) = match &self.brush_options.pixel_shape {
+                PixelBrushShape::Custom(tip) => (tip.width as f32, tip.height as f32),
+                _ => (1.0, 1.0),
+            };
+            let ratio = self.dynamics.tip.ratio;
+            let thin = (w.min(h) / w.max(h).max(1.0)) * ratio.min(1.0 / ratio.max(1e-3));
+            self.brush_options
+                .spacing_stretch(diameter, factor, thin.clamp(0.0, 1.0))
+        } else {
+            1.0
+        }
+    }
+
     pub fn varies_per_dab(&self) -> bool {
         self.has_dynamics()
             || self.brush_options.tip_count() > 1
@@ -773,6 +810,7 @@ impl Brush {
             texture: None,
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
+            every_dab: false,
             dual: None,
             wet_edge: 0.0,
             wet_edge_width: 6.0,
@@ -814,6 +852,7 @@ impl Brush {
             texture: None,
             paint_blend: LayerBlend::Normal,
             airbrush_rate: 0.0,
+            every_dab: false,
             dual: None,
             wet_edge: 0.0,
             wet_edge_width: 6.0,

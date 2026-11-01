@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Default brushes and the brush library
+- New default brushes: 96 textured pencils, inks, markers, pastels, paints, watercolours, charcoals, lettering and effects brushes join the app's own, all under one Default brushes folder by kind (Sketching, Inking, Painting, Textures, Effects, Erasers, Pixel). They ship beside the program (in the APK on Android) and are copied into the library on the first start.
+- Brush folders: the presets window shows one folder at a time, with its subfolders; brushes and folders are dragged to reorder or move them (hold the grip on touch), and folders are created, renamed, moved and deleted from their menus. Exported brushes keep their folder.
+- Every brush has a star: starred brushes come first in their folder, and Favorites lists them all. Search and the tag filter look through the folder and those inside it.
+- Grains can lie on the tip (Brush → Grain → On the tip): the grain marks the tip itself, so a light stroke keeps its texture, as Procreate's does. Imported Procreate brushes use it.
+
+### Brushes, faster
+- Big brushes at a very fine spacing lay fewer dabs, at least 2% of the tip apart, each laying what the skipped ones would: the stroke builds up the same, several times faster. A dual brush's second tip too, and this app's colour mixing. Lay every dab turns it off for a brush whose dabs differ one by one or whose tip is a detailed picture.
+- Watercolour and burnt edges no longer redraw the whole stroke after every pen sample: once a frame, and once when the pen lifts.
+- Shapes and the Pen's paths are painted in the background: applying one with a big brush no longer freezes the window.
+
+### Procreate brushes, closer
+- Wet Mix as Procreate mixes it: dilution thins the brush colour each dab mixes in, charge adds more at the start of the stroke and wears off along it, and attack keeps some always (less, pressing lightly). Strokes no longer fade out or run dry, and a brush with no dilution is an ordinary brush.
+- Mixing brushes spend their paint by the distance travelled, whatever their spacing, and a lighter dab lays less of its colour rather than a thinner one. They follow the pen's tilt, barrel rotation and timing, and the iPad's measured pressure.
+- StreamLine and corrected strokes take the iPad's measured pressure rather than keeping its first estimate.
+
+### Filters and gradients on the GPU
+- Blur, sharpen, hue/saturation and the other colour filters run on the GPU when it's faster (measured the first time each is used): blur and sharpen several times faster on a big canvas. 16-bit and 32-bit documents, and devices without a suitable GPU, keep the CPU.
+- Gradients are painted in the background.
+
 ### Painting together
 - File → Paint Together (also on the Projects screen): host the open canvas and share its invite code, or join someone's. Everyone paints on the same canvas at once and sees the others' cursors with their names.
 - Others' strokes are painted as they paint them, with their own brush; when they lift the pen, their exact pixels replace it, so every canvas stays the same. Smudge, blur, mixing, wet and impasto brushes, vector strokes, fills and filters show when they're done.

@@ -283,7 +283,9 @@ impl BlendSession {
             placing.dynamics.taper.end = 0.0;
             placing.dual = None;
             placing.wet_edge = 0.0;
-            let seed = rand::random();
+            // (Tests may give every stroke the same.)
+            let seed =
+                crate::brush_engine::stroke_worker::tests_seed().unwrap_or_else(rand::random);
             let stroke = crate::brush_engine::stroke::StrokeState::with_seed(seed);
             let correcting = placing.stabilizer_algorithm
                 == crate::brush_engine::brush::StabilizerAlgorithm::PostCorrection
@@ -301,7 +303,14 @@ impl BlendSession {
                 seed,
                 pressure,
                 samples: correcting.then(Vec::new),
-                first: (pos, pressure),
+                first: crate::brush_engine::stroke_worker::PenSample {
+                    pos,
+                    pressure,
+                    time: 0.0,
+                    tilt: None,
+                    barrel: Default::default(),
+                },
+                first_from_pen: false,
             })
         });
         // A dirty brush starts with what it carried.
@@ -339,6 +348,8 @@ impl BlendSession {
                 smudge_last: Vec::new(),
                 carries_at_start: carries,
                 spent: 0.0,
+                distance: 0.0,
+                moved: 0.0,
                 symmetry: Default::default(),
                 copies: crate::brush_engine::symmetry::Symmetry::default().copies(),
                 filtered: HashMap::new(),
@@ -397,9 +408,13 @@ struct Dabber {
     /// Post-correction: the samples so far, to smudge again along the
     /// smoothed path when the pen lifts.
     samples: Option<Vec<crate::brush_engine::stroke_worker::PenSample>>,
-    /// Where the pen went down, and its pressure (the stroke's first dab,
-    /// smudged again too).
-    first: (Vec2, f32),
+    /// Where the pen went down, its pressure and all the pen gave (the
+    /// stroke's first dab, smudged again too).
+    first: crate::brush_engine::stroke_worker::PenSample,
+    /// The first dab waits for the stroke's first pen sample (its lean,
+    /// barrel, time and measured pressure) rather than being placed when
+    /// the stroke starts.
+    first_from_pen: bool,
 }
 
 /// A dab placed by the brush, for one smudge dab.
@@ -429,6 +444,12 @@ struct BlendStroke {
     carries_at_start: Vec<Option<Carry>>,
     /// Brush widths of colour spent (a paint load).
     spent: f32,
+    /// Canvas pixels the dabs have come along the stroke (Procreate's
+    /// charge wears off with it).
+    distance: f32,
+    /// How far the dab placer last moved along the stroke (canvas pixels),
+    /// for the paint its dabs spend.
+    moved: f32,
     /// Mirror painting for this stroke.
     symmetry: crate::brush_engine::symmetry::Symmetry,
     copies: Vec<crate::brush_engine::symmetry::Copy2>,
@@ -457,18 +478,14 @@ struct BlendStroke {
 }
 
 impl BlendStroke {
-    /// The share of a paint load left for a dab of the stroke (1 without
-    /// one), counting the brush widths of a dab `spacing`% apart as spent.
-    fn paint_left(&mut self, copy: usize, spacing: f32) -> f32 {
+    /// The share of a paint load left for the stroke's next dab (1
+    /// without one). (Spent by the brush widths travelled, see
+    /// [`BlendSession::lay`].)
+    fn paint_left(&self) -> f32 {
         if self.mix.load <= 0.0 {
             return 1.0;
         }
-        let left = (1.0 - self.spent / self.mix.load).max(0.0);
-        // (Mirror copies share the stroke's.)
-        if copy == 0 {
-            self.spent += spacing.max(1.0) / 100.0;
-        }
-        left
+        (1.0 - self.spent / self.mix.load).max(0.0)
     }
 }
 
@@ -1133,8 +1150,10 @@ impl PainterApp {
         session.idx = idx;
         session.stroke.symmetry = self.workspace.symmetry;
         session.stroke.copies = self.workspace.symmetry.copies();
+        let placed_by_pen = session.dabber.is_some();
         if let Some(dabber) = &mut session.dabber {
             dabber.stroke.view_scale = self.viewport.zoom;
+            dabber.first_from_pen = true;
         }
         self.brush_state.blend_stroke = Some(ActiveBlend {
             from_brush: session.stroke.mix.from_brush,
@@ -1143,6 +1162,10 @@ impl PainterApp {
         // Painted on the stroke worker, like a brush stroke: a big tip
         // never holds up the frame.
         self.stroke_worker.begin_sequential(Box::new(session));
+        // The first dab as a pen sample, with all the pen gave.
+        if placed_by_pen {
+            self.blend_sample(pos, pressure);
+        }
     }
 
     pub(crate) fn blend_drag(&mut self, pos: Vec2, pressure: f32) {
@@ -1150,7 +1173,21 @@ impl PainterApp {
             return;
         }
         let pos = self.ruler_snap(pos);
-        self.stroke_worker.sample(pos, pressure);
+        self.blend_sample(pos, pressure);
+    }
+
+    /// A pen sample to the blend stroke, as a brush stroke's go: its lean,
+    /// barrel and time, and whether its pressure is an estimate.
+    fn blend_sample(&mut self, pos: Vec2, pressure: f32) {
+        let touch = &mut self.viewport.touch;
+        self.stroke_worker.sample_awaiting(
+            pos,
+            pressure,
+            touch.pen_tilt,
+            touch.pen_barrel,
+            touch.pen_time,
+            touch.pen_awaiting.take(),
+        );
     }
 
     /// End the blend stroke; the worker files its undo step once it has
@@ -1177,7 +1214,10 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
             );
         }
         let pressure = self.stroke.last_pressure;
-        if self.dabber.is_some() {
+        if let Some(d) = &self.dabber {
+            if d.first_from_pen {
+                return;
+            }
             let dabs = self.place(|stroke, brush, context| {
                 stroke.add_sample(brush, pos, pressure, None, context)
             });
@@ -1192,7 +1232,9 @@ impl crate::brush_engine::stroke_worker::SequentialStroke for BlendSession {
             return self.drag(s.pos, s.pressure);
         };
         dabber.pressure = s.pressure;
-        if let Some(samples) = dabber.samples.as_mut() {
+        if std::mem::take(&mut dabber.first_from_pen) {
+            dabber.first = s;
+        } else if let Some(samples) = dabber.samples.as_mut() {
             samples.push(s);
         }
         let dabs = self.place(|stroke, brush, context| {
@@ -1352,16 +1394,23 @@ impl BlendSession {
             undo,
             tiles,
         );
+        let from = stroke.travelled();
         f(stroke, brush, &mut context);
+        self.stroke.moved = stroke.travelled() - from;
         tiles.collect.replace(Vec::new()).unwrap_or_default()
     }
 
     /// Smudge with each of `dabs`, and their mirror copies, in turn.
     fn lay(&mut self, dabs: Vec<crate::brush_engine::stroke::CollectedDab>) {
         let pressure = self.dabber.as_ref().map_or(1.0, |d| d.pressure);
+        // A paint load is spent by the brush widths travelled, shared out
+        // over the dabs on the way: however many there are (the spacing,
+        // several dabs a step), it lasts as many widths as it says.
+        let share = self.stroke.moved / dabs.len().max(1) as f32;
         let pool = Arc::clone(&self.pool);
         pool.install(|| {
             for c in dabs {
+                let width = (c.dab.r * 2.0).max(1.0);
                 let stroke = &self.stroke;
                 let positions = stroke.symmetry.positions(&stroke.copies, c.dab.center);
                 let turns: Vec<Option<[f32; 4]>> = (positions.iter())
@@ -1385,6 +1434,9 @@ impl BlendSession {
                     };
                     self.blend_dab(p, pressure, copy, Some(&placed));
                 }
+                // (Mirror copies share the stroke's paint.)
+                self.stroke.spent += share / width;
+                self.stroke.distance += share;
             }
         });
     }
@@ -1401,8 +1453,8 @@ impl BlendSession {
         if samples.len() < 3 {
             return;
         }
-        let (first, first_pressure) = d.first;
-        let points: Vec<Vec2> = std::iter::once(first)
+        let first = d.first;
+        let points: Vec<Vec2> = std::iter::once(first.pos)
             .chain(samples.iter().map(|s| s.pos))
             .collect();
         let modes = d.brush.stabilizer_modes;
@@ -1441,17 +1493,21 @@ impl BlendSession {
         self.stroke.carries = self.stroke.carries_at_start.clone();
         self.stroke.smudge_last.clear();
         self.stroke.spent = 0.0;
+        self.stroke.distance = 0.0;
+        self.stroke.moved = 0.0;
         self.stroke.krita_last.clear();
         self.stroke.precise.clear();
         self.stroke.random = 0x9e37_79b9;
         // The first dab, as `start` placed it, then the rest.
         let mut smoothed = smoothed.into_iter();
-        let start = smoothed.next().unwrap_or(first);
+        let start = smoothed.next().unwrap_or(first.pos);
         if let Some(d) = self.dabber.as_mut() {
-            d.pressure = first_pressure;
+            d.pressure = first.pressure;
         }
         let dabs = self.place(|stroke, brush, context| {
-            stroke.add_sample(brush, start, first_pressure, None, context)
+            stroke.tilt = first.tilt;
+            stroke.barrel = first.barrel;
+            stroke.add_sample(brush, start, first.pressure, Some(first.time), context)
         });
         self.lay(dabs);
         for (s, pos) in samples.into_iter().zip(smoothed) {
@@ -1648,7 +1704,7 @@ impl BlendSession {
         };
         // A mixing brush's inputs scale its smudge length and colour rate.
         let (by_length, by_rate) = placed.map_or((1.0, 1.0), |p| (p.dab.smudge, p.dab.color_rate));
-        let left = self.stroke.paint_left(copy, o.spacing);
+        let left = self.stroke.paint_left();
         let mix = &self.stroke.mix;
         let by_pressure = |on: bool| if on { pressure.clamp(0.0, 1.0) } else { 1.0 };
         // (Per dab: the dabs overlapping pick up again the paint the brush
@@ -2233,7 +2289,9 @@ impl BlendSession {
     /// colour rate² × opacity (by the brush's blend mode); the result put
     /// down through the tip. Krita's older engine copies what it picks up
     /// whole, adds less colour and puts the result down at the smudge
-    /// rate. The stroke's first dab only says where it is.
+    /// rate. The stroke's first dab only says where it is. (This app's own
+    /// mixing brushes mix as Procreate's stamps do: the smudge length and
+    /// the colour rate whole, the result put down at the dab's opacity.)
     fn krita_smudge_dab(&mut self, center: Vec2, pressure: f32, copy: usize, placed: &Placed) {
         let brush = &self.brush;
         let r = placed.dab.r;
@@ -2253,27 +2311,44 @@ impl BlendSession {
         let legacy = k.legacy && !brush.lays_lightness();
         let by = |on: bool| if on { p } else { 1.0 };
         let rate = m.smudge_length * by(m.pressure_length) * placed.dab.smudge;
-        let left = self.stroke.paint_left(copy, brush.brush_options.spacing);
-        let color_rate = m.color_rate * by(m.pressure_color) * placed.dab.color_rate * left;
+        let left = self.stroke.paint_left();
+        // (Procreate's attack follows the opacity's pressure response.)
+        let opacity_by_pressure = brush.brush_options.pressure_opacity
+            || (brush.inputs.iter()).any(|i| {
+                i.sensor == crate::brush_engine::dynamics::Sensor::Pressure
+                    && i.setting == crate::brush_engine::dynamics::DabSetting::Opacity
+            });
+        let color_rate = m.color_rate_at(self.stroke.distance, by(opacity_by_pressure))
+            * by(m.pressure_color)
+            * placed.dab.color_rate
+            * left;
         // How much of what's picked up goes over the layer, how much brush
         // colour then, and how much of the result is put down.
         let (smear, colour, laid) = if native {
-            // The smudge length as the smudge rate; the colour rate per
-            // brush width travelled, whatever the spacing (per dab, the
-            // share that compounds to it over one width).
-            let o = &brush.brush_options;
-            let spacing = o.spacing_factor(pressure)
-                * brush
-                    .pressure_scale(crate::brush_engine::dynamics::DabSetting::Spacing, pressure)
-                    .max(0.05);
-            let d = (r * 2.0).max(1.0);
-            let gap = (o.spacing_px(d, spacing).max(1.0) / d).min(1.0);
-            let per_dab = 1.0 - (1.0 - color_rate.clamp(0.0, 1.0)).powf(gap);
-            (
-                (rate * opacity).clamp(0.0, 1.0),
-                (per_dab * opacity).clamp(0.0, 1.0),
-                1.0,
-            )
+            // Procreate's stamp: the paint carried takes up what's there
+            // (the smudge length of it kept), then the brush colour at the
+            // colour rate, each dab; the result goes down at the dab's
+            // strength (its pressure, opacity and flow, through the brush's
+            // own mappings). So a dab still lays its colour rate of the
+            // brush colour, and a lighter one lays less of the mix rather
+            // than a mix thinned toward the bare layer. (Picking up and
+            // mixing per dab alike, how much paint the carry settles on
+            // doesn't depend on the spacing.)
+            let mixed = (rate.clamp(0.0, 1.0), color_rate.clamp(0.0, 1.0), opacity);
+            // A big tip's dabs spread further apart than asked: each moves
+            // the paint toward what it picked up, the brush colour and the
+            // layer as far as the ones skipped would have.
+            let k = brush.spacing_stretch(placed.dab.r * 2.0, 1.0);
+            if k > 1.0 {
+                use crate::brush_engine::brush_options::stacked;
+                (
+                    stacked(mixed.0, k),
+                    stacked(mixed.1, k),
+                    stacked(mixed.2, k),
+                )
+            } else {
+                mixed
+            }
         } else if legacy {
             // The brush colour at most what the most smudge leaves (at
             // least a fifth).
@@ -2346,7 +2421,8 @@ impl BlendSession {
                 );
                 let mut h = (i as u32 ^ seed).wrapping_mul(0x9E37_79B9);
                 let sa = s[3] * smear / 255.0;
-                let m = mask[i].min(1.0);
+                // (Put down at the dab's strength, as below.)
+                let m = mask[i].min(1.0) * laid;
                 let v: [u8; 4] = std::array::from_fn(|c| {
                     let v = if copied {
                         u[c] + (s[c] - u[c]) * smear

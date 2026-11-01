@@ -12,6 +12,7 @@ pub mod fill;
 mod filter_quality;
 pub mod filters;
 pub mod geometry;
+pub mod gpu_ops;
 pub mod gradient;
 pub mod history;
 pub mod impasto;

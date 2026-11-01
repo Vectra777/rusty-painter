@@ -12,6 +12,7 @@ pub mod hardness;
 pub mod hatching;
 pub mod import;
 pub(crate) mod masks;
+pub mod pack;
 pub mod preset_file;
 pub mod preview;
 pub mod sketch;

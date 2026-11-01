@@ -542,6 +542,14 @@ fn brush_settings_contents(
             o.auto_spacing = auto.then_some(1.0);
             changed = true;
         }
+        changed |= ui
+            .checkbox(&mut brush.every_dab, "Lay every dab")
+            .on_hover_text(
+                "Big brushes at a very fine spacing lay fewer dabs, each laying what the \
+                 skipped ones would, so they paint faster and look the same. Tick this for a \
+                 brush whose dabs differ one by one, or whose tip is a detailed picture.",
+            )
+            .changed();
         changed |= slider_row(
             ui,
             "Jitter",
@@ -675,8 +683,8 @@ fn brush_settings_contents(
             }),
         )
         .on_hover_text(
-            "How much brush colour goes in per brush width travelled (0: a blender with no \
-             colour of its own).",
+            "How much brush colour goes into the paint it carries, each dab (per brush width \
+             travelled when kept dirty; 0: a blender with no colour of its own).",
         )
         .changed();
         property_row(ui, "Pressure", |ui| {
@@ -2404,10 +2412,20 @@ fn texture_section(
                  sharing one sheet of it: a stamped look.",
             )
             .changed();
+        if t.krita.is_none() {
+            changed |= ui
+                .checkbox(&mut t.on_tip, "On the tip")
+                .on_hover_text(
+                    "The grain marks the tip's shape itself, before pressure, flow and \
+                     opacity: light strokes keep their texture (as Procreate's grain does).",
+                )
+                .changed();
+        }
         ui.label(
             egui::RichText::new(match t.mode {
                 _ if t.krita.is_some() => "Krita's texturing, as Krita paints it.",
                 TextureMode::Multiply => "The grain darkens the stroke evenly.",
+                _ if t.on_tip => "The grain is part of the tip: pressure doesn't change it.",
                 TextureMode::Subtract => "Low spots lose paint first; heavy strokes fill in.",
                 TextureMode::Height => {
                     "Light pressure only catches the peaks; press harder to fill the valleys."

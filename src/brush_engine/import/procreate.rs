@@ -122,7 +122,20 @@ fn bundled_image(name: &str) -> Option<image::DynamicImage> {
 
 /// [`bundled_image`] from folder `dir`.
 fn bundled_image_in(dir: &std::path::Path, name: &str) -> Option<image::DynamicImage> {
-    let bytes = std::fs::read(dir.join(name)).ok()?;
+    if name.is_empty()
+        || name.contains('\\')
+        || std::path::Path::new(name)
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let root = dir.canonicalize().ok()?;
+    let path = dir.join(name).canonicalize().ok()?;
+    if !path.starts_with(root) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
     image::load_from_memory(&bytes).ok()
 }
 
@@ -298,12 +311,19 @@ fn rendering(s: &Settings) -> (bool, bool, bool) {
     }
 }
 
+/// A dilution this small mixes in no water: no Wet Mix (see [`wet_mix`]).
+pub(crate) const DRY: f32 = 0.01;
+
 /// Procreate's Wet Mix as this engine's colour mixing, `None` without it:
-/// dilution (how much water) is the inverse of the colour rate, charge how
-/// long the brush's colour lasts, pull how far it drags the paint under it.
+/// dilution (how much water) thins the brush colour each stamp mixes in,
+/// charge adds more at the start of the stroke, attack keeps some always,
+/// pull is how far the paint under it is dragged.
 fn wet_mix(s: &Settings) -> Option<crate::brush_engine::brush_options::Mixing> {
-    let (dilution, charge) = (s.num("dynamicsMix"), s.num("dynamicsLoad"));
-    if dilution <= 0.0 && charge <= 0.0 {
+    let dilution = s.num("dynamicsMix");
+    // Without dilution each stamp's paint is the brush colour itself
+    // (Procreate mixes the carried paint toward it by 1 - dilution): an
+    // ordinary brush, whatever the charge (often only its stored default).
+    if dilution <= DRY {
         return None;
     }
     let pull = s.num_or(
@@ -312,8 +332,13 @@ fn wet_mix(s: &Settings) -> Option<crate::brush_engine::brush_options::Mixing> {
     );
     Some(crate::brush_engine::brush_options::Mixing {
         smudge_length: pull.clamp(0.0, 1.0),
-        color_rate: (1.0 - dilution).clamp(0.0, 1.0),
-        pressure_color: s.num("dynamicsPressureMix") > 0.0,
+        // Procreate's stamp mixture: (1 - dilution)^2.4 of the brush
+        // colour, plus the charge wearing off, at least the attack (see
+        // `Mixing::color_rate_at`). The dab's opacity carries the pressure.
+        color_rate: (1.0 - dilution.clamp(0.0, 1.0)).powf(2.4),
+        charge: s.num_or("dynamicsLoad", 0.5).clamp(0.0, 1.0),
+        attack: s.num("dynamicsPressureMix").clamp(0.0, 1.0),
+        falloff: s.num("dynamicsFalloff").clamp(0.0, 1.0),
         gamma_correct: s.flag("blendGammaCorrect"),
         // Blur: the paint picked up is softened. Krita's dulling (one
         // colour averaged over that much of the dab) is the nearest; it
@@ -325,13 +350,7 @@ fn wet_mix(s: &Settings) -> Option<crate::brush_engine::brush_options::Mixing> {
                 ..Default::default()
             }
         }),
-        // Charge 1 never runs dry; less runs out after that many tens of
-        // brush widths.
-        load: if charge >= 1.0 {
-            0.0
-        } else {
-            (charge * 40.0).max(1.0)
-        },
+        // (The charge wears off over the stroke; nothing runs dry.)
         ..Default::default()
     })
 }
@@ -375,6 +394,8 @@ fn grain_of(
         },
         strength: s.num_or("grainDepth", 1.0).clamp(0.0, 1.0),
         invert: s.flag("textureInverted"),
+        // Procreate's grain is laid on the stamp's coverage.
+        on_tip: true,
         placement: GrainPlacement {
             // Movement: rolling (1) is paper the stroke passes over, glide
             // (0) the grain held in the dab.
@@ -821,10 +842,31 @@ mod tests {
             ("dynamicsWetAccumulation", 0.75),
         ]);
         let mix = wet.mixing.expect("wet mix");
-        assert!((mix.color_rate - 0.4).abs() < 1e-6);
+        assert!((mix.color_rate - 0.4f32.powf(2.4)).abs() < 1e-6);
         assert!((mix.smudge_length - 0.75).abs() < 1e-6);
-        assert!(mix.load > 0.0, "charge below 1 runs dry");
+        assert_eq!((mix.charge, mix.load), (0.5, 0.0), "charge, not a load");
         assert!(mix.krita.is_none(), "no blur: smeared");
+        // The charge wears off along the stroke down to the colour rate,
+        // never below it: the paint doesn't run dry.
+        assert!(mix.color_rate_at(0.0, 1.0) > 0.99);
+        assert!(mix.color_rate_at(100.0, 1.0) > mix.color_rate_at(500.0, 1.0));
+        assert!((mix.color_rate_at(1e6, 1.0) - mix.color_rate).abs() < 1e-6);
+        // Full dilution: only the charge, then the attack.
+        let watered = brush(&[("dynamicsMix", 1.0), ("dynamicsPressureMix", 0.3)]);
+        let watered = watered.mixing.expect("wet mix");
+        assert_eq!(watered.color_rate, 0.0);
+        assert!(
+            (watered.color_rate_at(1e6, 1.0) - 0.3).abs() < 1e-6,
+            "the attack stays"
+        );
+        assert!(
+            (watered.color_rate_at(1e6, 0.5) - 0.15).abs() < 1e-6,
+            "less, pressing lightly"
+        );
+        // Charge without dilution: the brush colour every stamp, so no
+        // mixing (it would only run dry).
+        let charged = brush(&[("dynamicsMix", 0.0), ("dynamicsLoad", 0.5)]);
+        assert!(charged.mixing.is_none());
         let blurred = brush(&[
             ("dynamicsMix", 0.5),
             ("dynamicsBlur", 0.5),
@@ -869,6 +911,7 @@ mod tests {
             "G",
             &[
                 ("grainBlendMode", 27.0),
+                ("dynamicsMix", 0.5),
                 ("dynamicsLoad", 0.5),
                 ("dynamicsWetnessJitter", 0.3),
             ],
@@ -879,6 +922,7 @@ mod tests {
             grain.mode,
             crate::brush_engine::texture::TextureMode::Height
         );
+        assert!(grain.on_tip, "Procreate grains the stamp's coverage");
         let b = brush_from(&s, None, &mut 0);
         use crate::brush_engine::dynamics::{DabSetting, Sensor};
         assert!(b.inputs.iter().any(|m| m.sensor == Sensor::RandomDab

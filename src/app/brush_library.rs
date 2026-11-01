@@ -16,7 +16,23 @@ pub const MAX_RECENT: usize = 8;
 pub const MAX_PALETTE: usize = 12;
 /// The library file, in `brushes/presets/`.
 pub const LIBRARY_FILE: &str = "library.json";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+pub type FolderId = u64;
+pub type PresetId = u64;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BrushFolder {
+    pub id: FolderId,
+    pub name: String,
+    pub parent: Option<FolderId>,
+    pub brushes: Vec<PresetId>,
+}
+
+#[derive(Clone, Debug)]
+pub enum LibraryDrag {
+    Brush(PresetId),
+    Folder(FolderId),
+}
 /// A right press that moves less than this (in points) before its release is
 /// a click (the pop-up palette), not a pan.
 const CLICK_SLOP: f32 = 5.0;
@@ -35,6 +51,15 @@ pub struct LibraryFile {
     /// The presets that come with the app were copied into the library
     /// (once: the ones deleted since stay deleted).
     pub defaults_installed: bool,
+    pub preset_ids: BTreeMap<String, PresetId>,
+    pub folders: Vec<BrushFolder>,
+    pub next_id: u64,
+    pub installed_packs: Vec<String>,
+    pub pack_presets: BTreeMap<String, String>,
+    pub selected_folder: Option<FolderId>,
+    /// The pack's category tags were given out (once: ones the user
+    /// removes stay removed).
+    pub pack_tags_installed: bool,
 }
 
 impl Default for LibraryFile {
@@ -45,11 +70,257 @@ impl Default for LibraryFile {
             favourites: Vec::new(),
             recent: Vec::new(),
             defaults_installed: false,
+            preset_ids: BTreeMap::new(),
+            folders: Vec::new(),
+            next_id: 1,
+            installed_packs: Vec::new(),
+            pack_presets: BTreeMap::new(),
+            selected_folder: None,
+            pack_tags_installed: false,
         }
     }
 }
 
 impl LibraryFile {
+    pub fn folder_indices(
+        &self,
+        presets: &[BrushPreset],
+        folder: FolderId,
+        recursive: bool,
+    ) -> Vec<usize> {
+        // Built once per call: a lookup per brush was quadratic, every frame.
+        let index: std::collections::HashMap<PresetId, usize> = presets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| Some((*self.preset_ids.get(&p.name)?, i)))
+            .collect();
+        let mut pending = vec![folder];
+        let mut visited = std::collections::BTreeSet::new();
+        let mut indices = Vec::new();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            if let Some(folder) = self.folders.iter().find(|f| f.id == id) {
+                indices.extend(
+                    folder
+                        .brushes
+                        .iter()
+                        .filter_map(|id| index.get(id).copied()),
+                );
+                if recursive {
+                    pending.extend(
+                        self.folders
+                            .iter()
+                            .rev()
+                            .filter(|f| f.parent == Some(id))
+                            .map(|f| f.id),
+                    );
+                }
+            }
+        }
+        indices
+    }
+
+    /// Tag the pack's brushes by their collection, once, keeping the
+    /// user's own tags.
+    pub fn install_pack_tags(&mut self, manifest: &crate::brush_engine::pack::Manifest) {
+        if self.pack_tags_installed {
+            return;
+        }
+        for collection in &manifest.collections {
+            for source in &collection.brushes {
+                if let Some(name) = self.pack_presets.get(source).cloned() {
+                    for tag in collection_tags(&collection.name) {
+                        self.add_tag(&name, tag);
+                    }
+                }
+            }
+        }
+        self.pack_tags_installed = true;
+    }
+
+    fn allocate_id(&mut self) -> u64 {
+        self.next_id = self
+            .next_id
+            .max(1)
+            .max(self.preset_ids.values().copied().max().unwrap_or(0) + 1)
+            .max(self.folders.iter().map(|f| f.id).max().unwrap_or(0) + 1);
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    pub fn preset_id(&mut self, name: &str) -> PresetId {
+        if let Some(&id) = self.preset_ids.get(name) {
+            return id;
+        }
+        let id = self.allocate_id();
+        self.preset_ids.insert(name.into(), id);
+        id
+    }
+
+    pub fn create_folder(&mut self, name: &str, parent: Option<FolderId>) -> FolderId {
+        let id = self.allocate_id();
+        self.folders.push(BrushFolder {
+            id,
+            name: name.into(),
+            parent,
+            brushes: Vec::new(),
+        });
+        id
+    }
+
+    pub fn brush_folder(&self, name: &str) -> Vec<String> {
+        let Some(id) = self.preset_ids.get(name) else {
+            return Vec::new();
+        };
+        let mut current = self
+            .folders
+            .iter()
+            .find(|f| f.brushes.contains(id))
+            .map(|f| f.id);
+        let mut names = Vec::new();
+        for _ in 0..self.folders.len() {
+            let Some(f) = current.and_then(|id| self.folders.iter().find(|f| f.id == id)) else {
+                break;
+            };
+            names.push(f.name.clone());
+            current = f.parent;
+        }
+        names.reverse();
+        names
+    }
+
+    pub fn ensure_folder_path(&mut self, names: &[String]) -> Option<FolderId> {
+        let mut parent = None;
+        for name in names.iter().filter(|n| !n.trim().is_empty()) {
+            parent = Some(
+                self.folders
+                    .iter()
+                    .find(|f| f.parent == parent && f.name == *name)
+                    .map(|f| f.id)
+                    .unwrap_or_else(|| self.create_folder(name, parent)),
+            );
+        }
+        parent
+    }
+
+    pub fn folder_path(&self, id: FolderId) -> String {
+        let mut names = Vec::new();
+        let mut current = Some(id);
+        for _ in 0..self.folders.len() {
+            let Some(folder) = current.and_then(|id| self.folders.iter().find(|f| f.id == id))
+            else {
+                break;
+            };
+            names.push(folder.name.as_str());
+            current = folder.parent;
+        }
+        names.reverse();
+        names.join(" / ")
+    }
+
+    pub fn move_brush(&mut self, id: PresetId, destination: FolderId, before: Option<PresetId>) {
+        if !self.folders.iter().any(|f| f.id == destination) || before == Some(id) {
+            return;
+        }
+        for folder in &mut self.folders {
+            folder.brushes.retain(|&b| b != id);
+        }
+        if let Some(folder) = self.folders.iter_mut().find(|f| f.id == destination) {
+            let at = before
+                .and_then(|b| folder.brushes.iter().position(|&v| v == b))
+                .unwrap_or(folder.brushes.len());
+            folder.brushes.insert(at, id);
+        }
+    }
+
+    pub fn move_folder(
+        &mut self,
+        id: FolderId,
+        parent: Option<FolderId>,
+        before: Option<FolderId>,
+    ) -> bool {
+        let mut ancestor = parent;
+        for _ in 0..=self.folders.len() {
+            let Some(a) = ancestor else { break };
+            if a == id {
+                return false;
+            }
+            let Some(folder) = self.folders.iter().find(|f| f.id == a) else {
+                return false;
+            };
+            ancestor = folder.parent;
+        }
+        if ancestor.is_some() {
+            return false;
+        }
+        let Some(at) = self.folders.iter().position(|f| f.id == id) else {
+            return false;
+        };
+        let mut folder = self.folders.remove(at);
+        folder.parent = parent;
+        let at = before
+            .and_then(|id| self.folders.iter().position(|f| f.id == id))
+            .unwrap_or(self.folders.len());
+        self.folders.insert(at, folder);
+        true
+    }
+
+    pub fn delete_folder(&mut self, id: FolderId) {
+        let Some(at) = self.folders.iter().position(|f| f.id == id) else {
+            return;
+        };
+        let folder = self.folders.remove(at);
+        for child in &mut self.folders {
+            if child.parent == Some(id) {
+                child.parent = folder.parent;
+            }
+        }
+        if let Some(parent) = folder
+            .parent
+            .and_then(|id| self.folders.iter_mut().find(|f| f.id == id))
+        {
+            parent.brushes.extend(folder.brushes);
+        } else if !folder.brushes.is_empty() {
+            let root = self
+                .folders
+                .iter()
+                .find(|f| f.name == "My brushes" && f.parent.is_none())
+                .map(|f| f.id)
+                .unwrap_or_else(|| self.create_folder("My brushes", None));
+            self.folders
+                .iter_mut()
+                .find(|f| f.id == root)
+                .unwrap()
+                .brushes
+                .extend(folder.brushes);
+        }
+    }
+
+    pub fn reconcile(&mut self, presets: &[BrushPreset]) {
+        self.version = VERSION;
+        let root = self
+            .folders
+            .iter()
+            .find(|f| f.name == "My brushes" && f.parent.is_none())
+            .map(|f| f.id)
+            .unwrap_or_else(|| self.create_folder("My brushes", None));
+        // Runs every frame the presets window is open: one set, not a scan
+        // of every folder per preset.
+        let placed: std::collections::HashSet<PresetId> = self
+            .folders
+            .iter()
+            .flat_map(|f| f.brushes.iter().copied())
+            .collect();
+        for preset in presets {
+            let id = self.preset_id(&preset.name);
+            if !placed.contains(&id) {
+                self.move_brush(id, root, None);
+            }
+        }
+    }
     pub fn tags(&self, name: &str) -> &[String] {
         self.tags.get(name).map_or(&[], Vec::as_slice)
     }
@@ -96,6 +367,11 @@ impl LibraryFile {
 
     /// A preset was deleted: drop what was kept for it.
     pub fn forget(&mut self, name: &str) {
+        if let Some(id) = self.preset_ids.remove(name) {
+            for folder in &mut self.folders {
+                folder.brushes.retain(|&b| b != id);
+            }
+        }
         self.tags.remove(name);
         self.favourites.retain(|f| f != name);
         self.recent.retain(|r| r != name);
@@ -122,7 +398,7 @@ pub enum Shelf {
     Favourites,
     /// The recent list, newest first.
     Recent,
-    Tag(String),
+    Folder(FolderId),
 }
 
 /// The library, plus the presets window's filters and the pop-up palette.
@@ -138,6 +414,9 @@ pub struct BrushLibrary {
     pub radial: Option<RadialPalette>,
     /// Where the right button went down on the canvas.
     pub secondary_press: Option<egui::Pos2>,
+    pub drag: Option<LibraryDrag>,
+    pub folder_name: String,
+    pub tag_filter: Option<String>,
 }
 
 /// The pop-up palette: brushes in a ring around where it opened.
@@ -184,11 +463,42 @@ pub fn shown_presets(
             .filter(|&i| lib.is_favourite(&presets[i].name))
             .collect(),
         Shelf::Recent => by_name(presets, &lib.recent),
-        Shelf::Tag(tag) => (0..presets.len())
-            .filter(|&i| (lib.tags(&presets[i].name).iter()).any(|t| t.eq_ignore_ascii_case(tag)))
-            .collect(),
+        Shelf::Folder(id) => lib.folder_indices(presets, *id, !search.trim().is_empty()),
     };
-    indices.into_iter().filter(found).collect()
+    let mut shown: Vec<_> = indices.into_iter().filter(found).collect();
+    if matches!(shelf, Shelf::Folder(_)) {
+        shown.sort_by_key(|&i| !lib.is_favourite(&presets[i].name));
+    }
+    shown
+}
+
+/// Search/tag filters retain folder scope and can find brushes in descendants.
+pub fn filtered_presets(
+    presets: &[BrushPreset],
+    lib: &LibraryFile,
+    shelf: &Shelf,
+    search: &str,
+    tag: Option<&str>,
+) -> Vec<usize> {
+    let mut shown = if let Shelf::Folder(id) = shelf
+        && tag.is_some()
+    {
+        lib.folder_indices(presets, *id, true)
+    } else {
+        shown_presets(presets, lib, shelf, search)
+    };
+    shown.retain(|&i| {
+        matches_search(&presets[i].name, lib.tags(&presets[i].name), search)
+            && tag.is_none_or(|tag| {
+                lib.tags(&presets[i].name)
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(tag))
+            })
+    });
+    if matches!(shelf, Shelf::Folder(_)) {
+        shown.sort_by_key(|&i| !lib.is_favourite(&presets[i].name));
+    }
+    shown
 }
 
 /// The indices of the presets called `names`, in that order (names no
@@ -249,6 +559,61 @@ pub fn slice_direction(n: usize, count: usize) -> egui::Vec2 {
     let angle =
         n as f32 * std::f32::consts::TAU / count.max(1) as f32 - std::f32::consts::FRAC_PI_2;
     egui::vec2(angle.cos(), angle.sin())
+}
+
+/// Source categories describe the imported brushes more reliably than their names.
+pub fn collection_tags(category: &str) -> &'static [&'static str] {
+    match category {
+        "Pencils" => &["Sketching", "Pencil"],
+        "Sketching" => &["Sketching"],
+        "Pens" | "Inks" | "Inking" => &["Inking"],
+        "Markers" => &["Painting", "Marker"],
+        "Pastels" => &["Sketching", "Pastel", "Texture"],
+        "Oils" => &["Painting", "Oil"],
+        "Paints" | "Painting" => &["Painting"],
+        "Gouache" => &["Painting", "Gouache"],
+        "Watercolors" | "Water" => &["Painting", "Watercolor"],
+        "Charcoals" => &["Sketching", "Charcoal", "Texture"],
+        "Basics" => &["Painting", "Basic"],
+        "Lettering" | "Calligraphy" => &["Inking", "Lettering"],
+        "Comics" => &["Inking", "Comics"],
+        "Design" => &["Design"],
+        "Grunge" | "Textures" | "Materials" => &["Texture"],
+        "Street Art" | "Spraypaints" => &["Texture", "Spray"],
+        "Digital" => &["Painting", "Digital"],
+        "Airbrushing" => &["Painting", "Airbrush"],
+        "Creative" | "Artistic" => &["Painting", "Effects"],
+        "Drawing" => &["Sketching", "Painting"],
+        "Abstract" | "Effects" => &["Effects"],
+        "Elements" => &["Nature", "Effects"],
+        "Vintage" => &["Vintage", "Texture"],
+        "Luminance" => &["Light", "Effects"],
+        "Industrial" => &["Industrial", "Texture"],
+        "Organic" | "Earth" => &["Nature", "Texture"],
+        _ => &[],
+    }
+}
+
+/// The folder under the default brushes a built-in preset goes in, by
+/// its first tag (with the pack's brushes of that kind).
+pub fn default_folder(name: &str) -> &'static str {
+    let tags = default_tags(name);
+    let has = |tag: &str| tags.contains(&tag);
+    if has("Erasers") {
+        "Erasers"
+    } else if has("Pixel") {
+        "Pixel"
+    } else if has("3D") || (has("Effects") && !has("Texture") && !has("Sketching")) {
+        "Effects"
+    } else if has("Sketching") {
+        "Sketching"
+    } else if has("Inking") {
+        "Inking"
+    } else if has("Texture") {
+        "Textures"
+    } else {
+        "Painting"
+    }
 }
 
 /// The tags a built-in preset starts with.
@@ -345,12 +710,22 @@ impl PainterApp {
             }),
             Err(_) => LibraryFile::default(),
         };
+        let loaded = file.clone();
         for preset in &self.brush_state.presets {
             if !file.tags.contains_key(&preset.name) {
                 let tags = default_tags(&preset.name).iter().map(|t| t.to_string());
                 file.tags.insert(preset.name.clone(), tags.collect());
             }
         }
+        file.reconcile(&self.brush_state.presets);
+        if let Some(id) = file
+            .selected_folder
+            .filter(|id| file.folders.iter().any(|f| f.id == *id))
+        {
+            self.brush_state.library.shelf = Shelf::Folder(id);
+        }
+        // Written back only when a migration or new preset changed it.
+        self.brush_state.library.dirty = file != loaded;
         self.brush_state.library.file = file;
     }
 
@@ -454,6 +829,123 @@ mod tests {
     }
 
     #[test]
+    fn favorites_pin_in_their_folder_and_reference_the_original_brush() {
+        let ps = presets(&["A", "B", "C"]);
+        let mut lib = LibraryFile::default();
+        lib.reconcile(&ps);
+        let folder = lib.folders[0].id;
+        let original = lib.folders[0].brushes.clone();
+        lib.toggle_favourite("B");
+        assert_eq!(
+            shown_presets(&ps, &lib, &Shelf::Folder(folder), ""),
+            [1, 0, 2]
+        );
+        assert_eq!(shown_presets(&ps, &lib, &Shelf::Favourites, ""), [1]);
+        assert_eq!(
+            lib.folders[0].brushes, original,
+            "pinning doesn't move or duplicate the brush"
+        );
+        let mut loaded: LibraryFile =
+            serde_json::from_slice(&serde_json::to_vec(&lib).unwrap()).unwrap();
+        assert_eq!(shown_presets(&ps, &loaded, &Shelf::Favourites, ""), [1]);
+        loaded.toggle_favourite("B");
+        assert_eq!(
+            shown_presets(&ps, &loaded, &Shelf::Folder(folder), ""),
+            [0, 1, 2]
+        );
+        assert!(shown_presets(&ps, &loaded, &Shelf::Favourites, "").is_empty());
+    }
+
+    #[test]
+    fn category_tags_seed_once_and_filter_descendants_without_leaving_the_folder() {
+        use crate::brush_engine::pack::{Collection, Manifest, PACK_ID};
+        let ps = presets(&["New Pencil", "New Ink", "Unrelated"]);
+        let mut lib = LibraryFile::default();
+        lib.reconcile(&ps);
+        let root = lib.create_folder("Default brushes", None);
+        let pencils = lib.create_folder("Pencils", Some(root));
+        let inks = lib.create_folder("Inking", Some(root));
+        let a = lib.preset_id("New Pencil");
+        let b = lib.preset_id("New Ink");
+        lib.move_brush(a, pencils, None);
+        lib.move_brush(b, inks, None);
+        lib.pack_presets
+            .insert("source pencil".into(), "New Pencil".into());
+        lib.pack_presets
+            .insert("source ink".into(), "New Ink".into());
+        lib.add_tag("New Pencil", "Personal");
+        let manifest = Manifest {
+            version: 2,
+            id: PACK_ID.into(),
+            file: "pack.rpbrush".into(),
+            collections: vec![
+                Collection {
+                    name: "Pencils".into(),
+                    brushes: vec!["source pencil".into()],
+                },
+                Collection {
+                    name: "Inking".into(),
+                    brushes: vec!["source ink".into()],
+                },
+            ],
+        };
+        lib.install_pack_tags(&manifest);
+        assert_eq!(lib.tags("New Pencil"), ["Personal", "Sketching", "Pencil"]);
+        assert_eq!(
+            filtered_presets(&ps, &lib, &Shelf::Folder(root), "", Some("Pencil")),
+            [0]
+        );
+        assert_eq!(shown_presets(&ps, &lib, &Shelf::Folder(root), "ink"), [1]);
+        assert!(
+            filtered_presets(&ps, &lib, &Shelf::Folder(pencils), "", Some("Inking")).is_empty()
+        );
+        lib.remove_tag("New Pencil", "Pencil");
+        lib.install_pack_tags(&manifest);
+        assert_eq!(
+            lib.tags("New Pencil"),
+            ["Personal", "Sketching"],
+            "removed default tags stay removed"
+        );
+    }
+
+    #[test]
+    fn folder_moves_preserve_identity_order_and_reject_cycles() {
+        let mut lib = LibraryFile::default();
+        let ps = presets(&["A", "B", "C"]);
+        lib.reconcile(&ps);
+        let a = lib.preset_id("A");
+        let b = lib.preset_id("B");
+        let root = lib.create_folder("Library", None);
+        let child = lib.create_folder("Inks", Some(root));
+        lib.move_brush(a, child, None);
+        lib.move_brush(b, child, Some(a));
+        assert_eq!(shown_presets(&ps, &lib, &Shelf::Folder(child), ""), [1, 0]);
+        assert!(!lib.move_folder(root, Some(child), None));
+        assert_eq!(lib.folder_path(child), "Library / Inks");
+        lib.delete_folder(child);
+        assert_eq!(shown_presets(&ps, &lib, &Shelf::Folder(root), ""), [1, 0]);
+        let saved = serde_json::to_vec(&lib).unwrap();
+        let mut restored: LibraryFile = serde_json::from_slice(&saved).unwrap();
+        restored.reconcile(&ps);
+        assert_eq!(restored, lib);
+        assert_eq!(restored.preset_id("A"), a);
+    }
+
+    #[test]
+    fn old_library_migration_keeps_tags_stars_and_recent() {
+        let mut lib: LibraryFile = serde_json::from_str(
+            r#"{"version":1,"tags":{"A":["Ink"]},"favourites":["A"],"recent":["A"]}"#,
+        )
+        .unwrap();
+        lib.reconcile(&presets(&["A", "B"]));
+        assert_eq!(lib.tags("A"), ["Ink"]);
+        assert!(lib.is_favourite("A"));
+        assert_eq!(lib.recent, ["A"]);
+        assert_eq!(lib.preset_ids.len(), 2);
+        assert_eq!(lib.folders[0].brushes.len(), 2);
+    }
+
+    #[test]
     fn search_matches_name_and_tags_ignoring_case() {
         let ps = presets(&["Ink Pen", "Chalk", "Leaf"]);
         let lib = library();
@@ -471,7 +963,7 @@ mod tests {
     fn shelves_filter_by_tag_favourite_and_recent() {
         let ps = presets(&["Ink Pen", "Chalk", "Leaf"]);
         let mut lib = library();
-        let tag = |lib: &LibraryFile, t: &str| shown_presets(&ps, lib, &Shelf::Tag(t.into()), "");
+        let tag = |lib: &LibraryFile, t: &str| filtered_presets(&ps, lib, &Shelf::All, "", Some(t));
         assert_eq!(tag(&lib, "texture"), vec![1], "tags ignore case");
         assert_eq!(tag(&lib, "Nothing"), Vec::<usize>::new());
         lib.toggle_favourite("Leaf");
@@ -644,6 +1136,7 @@ mod tests {
             meta.push(crate::brush_engine::preset_file::PresetMeta {
                 tags: krita_tags(&file),
                 favourite: false,
+                folder: Vec::new(),
             });
             presets.push(preset);
         }
@@ -839,6 +1332,7 @@ mod tests {
         let meta = PresetMeta {
             tags: vec!["Comics".into()],
             favourite: true,
+            folder: Vec::new(),
         };
         let bytes = encode_with_meta(&presets(&["Mine", "Other"]), &[meta]).unwrap();
         app.import_brushes_bytes("set.rpbrush", &bytes).unwrap();

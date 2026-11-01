@@ -237,6 +237,38 @@ fn an_image_tip_keeps_its_proportions_and_turns() {
 }
 
 #[test]
+fn a_grain_on_the_tip_keeps_a_light_strokes_texture() {
+    use crate::brush_engine::texture::{BrushTexture, TextureMode, builtin};
+    let stroke = |on_tip: bool| {
+        let mut b = brush(BrushDynamics::default());
+        b.brush_options.hardness = 80.0;
+        b.brush_options.opacity = 0.3;
+        let mut grain = BrushTexture::new(builtin()[1].clone());
+        grain.mode = TextureMode::Subtract;
+        grain.strength = 1.0;
+        grain.on_tip = on_tip;
+        b.texture = Some(grain);
+        let (canvas, _) = paint(&mut b, &line(64.0, 1.0), 1, true);
+        (40..220)
+            .map(|x| alpha(&canvas, x, 64))
+            .collect::<Vec<u8>>()
+    };
+    // Off (this app's Subtract): a light stroke loses its low spots and
+    // much of the rest; on the tip, its dabs keep the grain at their
+    // strength.
+    let (off, on) = (stroke(false), stroke(true));
+    let mean = |r: &[u8]| r.iter().map(|&a| a as f32).sum::<f32>() / r.len() as f32;
+    assert!(
+        mean(&on) > 2.0 * mean(&off),
+        "{} vs {}",
+        mean(&on),
+        mean(&off)
+    );
+    let (lo, hi) = (on.iter().min().unwrap(), on.iter().max().unwrap());
+    assert!(hi - lo > 20, "still grainy: {lo}..{hi}");
+}
+
+#[test]
 fn a_texture_leaves_grain_and_does_nothing_at_no_strength() {
     use crate::brush_engine::texture::{BrushTexture, TextureMode, builtin};
     let stroke = |texture: Option<BrushTexture>| {

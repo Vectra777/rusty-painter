@@ -313,6 +313,8 @@ impl StrokeWorker {
                 // Strokes begun, the one being painted's number.
                 let mut begun = 0u64;
                 let mut sequential: Option<Box<dyn SequentialStroke>> = None;
+                // Its samples waiting for their measured pressure.
+                let mut seq_waiting: VecDeque<Waiting> = VecDeque::new();
                 loop {
                     // An airbrush keeps painting between samples, and wet
                     // paint flowing: wake up when its next dab (or step) is
@@ -345,6 +347,11 @@ impl StrokeWorker {
                                                 session.airbrush(&thread_shared, now);
                                                 session.flow_wet(&thread_shared, now);
                                             } else if let Some(stroke) = sequential.as_mut() {
+                                                settle_sequential(
+                                                    stroke.as_mut(),
+                                                    &mut seq_waiting,
+                                                    false,
+                                                );
                                                 stroke.airbrush(now);
                                                 hand_over_damage(stroke.as_mut(), &thread_shared);
                                             }
@@ -372,13 +379,19 @@ impl StrokeWorker {
                     ) && thread_skip.load(std::sync::atomic::Ordering::Relaxed) == begun;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if !skip {
-                            run_job(&mut session, &mut sequential, job, &thread_shared)
+                            run_job(
+                                &mut session,
+                                (&mut sequential, &mut seq_waiting),
+                                job,
+                                &thread_shared,
+                            )
                         }
                     }));
                     if result.is_err() {
                         log::error!("stroke worker panicked; dropping the current stroke");
                         session = None;
                         sequential = None;
+                        seq_waiting.clear();
                     }
                     let mut state = thread_shared.lock();
                     // (Counted even if it panicked: it's over either way.)
@@ -660,7 +673,8 @@ struct Session {
     provisional: Option<(StrokeState, Brush)>,
 }
 
-/// A sample drawn for now, kept once its measured pressure arrives.
+/// A sample drawn for now (held back, by a stroke that can't take it
+/// back), kept once its measured pressure arrives.
 struct Waiting {
     /// The index its measured values come with; `None` once they have
     /// (or for one only waiting behind another).
@@ -688,7 +702,7 @@ struct LiveCorrection {
 #[cfg(test)]
 static TEST_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn tests_seed() -> Option<u64> {
+pub(crate) fn tests_seed() -> Option<u64> {
     #[cfg(test)]
     {
         let seed = TEST_SEED.load(std::sync::atomic::Ordering::Relaxed);
@@ -719,7 +733,10 @@ enum Event {
 
 fn run_job(
     session: &mut Option<Session>,
-    sequential: &mut Option<Box<dyn SequentialStroke>>,
+    (sequential, waiting): (
+        &mut Option<Box<dyn SequentialStroke>>,
+        &mut VecDeque<Waiting>,
+    ),
     job: Job,
     shared: &Shared,
 ) {
@@ -732,19 +749,43 @@ fn run_job(
                 time,
                 tilt,
                 barrel,
-                ..
+                awaiting,
             } => {
-                stroke.sample(PenSample {
+                let sample = Sample {
                     pos,
                     pressure,
                     time,
                     tilt,
                     barrel,
-                });
+                };
+                // It paints for good, so one whose pressure is an estimate
+                // waits for the measured one (nothing is drawn for now),
+                // and those behind it wait too.
+                if awaiting.is_some() || !waiting.is_empty() {
+                    waiting.push_back(Waiting {
+                        index: awaiting,
+                        sample,
+                        since: std::time::Instant::now(),
+                    });
+                } else {
+                    stroke.sample(sample.into());
+                }
+                settle_sequential(stroke.as_mut(), waiting, false);
+                hand_over_damage(stroke.as_mut(), shared);
+                return;
+            }
+            Job::Update { index, pressure } => {
+                if let Some(w) = waiting.iter_mut().find(|w| w.index == Some(index)) {
+                    w.sample.pressure = pressure;
+                    w.index = None;
+                }
+                settle_sequential(stroke.as_mut(), waiting, false);
                 hand_over_damage(stroke.as_mut(), shared);
                 return;
             }
             Job::End => {
+                // What waited is kept as it is.
+                settle_sequential(stroke.as_mut(), waiting, true);
                 if let Some(mut stroke) = sequential.take() {
                     stroke.lift();
                     hand_over_damage(stroke.as_mut(), shared);
@@ -756,10 +797,13 @@ fn run_job(
                 return;
             }
             // A sequential stroke draws nothing ahead.
-            Job::Predict(_) | Job::Update { .. } => return,
+            Job::Predict(_) => return,
             // A new stroke: this one is left as it is (a stroke always
             // ends first).
-            Job::Begin(_) | Job::BeginSequential(_) => *sequential = None,
+            Job::Begin(_) | Job::BeginSequential(_) => {
+                *sequential = None;
+                waiting.clear();
+            }
             // (Tasks come after a stroke has ended.)
             Job::Task(task) => return run_task(task, shared),
         }
@@ -833,11 +877,9 @@ fn run_job(
             session.drop_provisional(shared);
             // A real sample: the predictions before it are past.
             session.predicted.clear();
-            if !session.draws_ahead() {
-                session.commit(shared, sample);
-                return;
-            }
             // Kept in order: one behind a sample still waiting waits too.
+            // (A stroke that can't draw for now, a correction's or wet
+            // paint's, shows them once they're kept.)
             if awaiting.is_some() || !session.waiting.is_empty() {
                 session.waiting.push_back(Waiting {
                     index: awaiting,
@@ -908,6 +950,34 @@ fn run_task(task: Task, shared: &Shared) {
             .unwrap_or_else(|| "it stopped".to_string())
     });
     shared.lock().finished.push(Finished::Task(result));
+}
+
+/// A sequential stroke's waiting samples that are ready, oldest first (as
+/// [`Session::settle`] keeps them).
+fn settle_sequential(
+    stroke: &mut dyn SequentialStroke,
+    waiting: &mut VecDeque<Waiting>,
+    all: bool,
+) {
+    while let Some(w) = waiting.front() {
+        if !(all || w.index.is_none() || w.since.elapsed() >= WAIT_FOR_UPDATE) {
+            break;
+        }
+        let w = waiting.pop_front().expect("front was there");
+        stroke.sample(w.sample.into());
+    }
+}
+
+impl From<Sample> for PenSample {
+    fn from(s: Sample) -> Self {
+        PenSample {
+            pos: s.pos,
+            pressure: s.pressure,
+            time: s.time,
+            tilt: s.tilt,
+            barrel: s.barrel,
+        }
+    }
 }
 
 /// A sequential stroke's painted rectangles to the UI, as tile-local
@@ -1018,7 +1088,10 @@ impl Session {
     /// by [`Self::drop_provisional`]; not while more samples queue up
     /// (they'd be taken back straight away).
     fn show_provisional(&mut self, shared: &Shared) {
-        if (self.waiting.is_empty() && self.predicted.is_empty()) || shared.lock().pending > 1 {
+        if (self.waiting.is_empty() && self.predicted.is_empty())
+            || !self.draws_ahead()
+            || shared.lock().pending > 1
+        {
             return;
         }
         self.provisional = Some((self.stroke.clone(), self.setup.brush.clone()));
@@ -1688,6 +1761,97 @@ mod tests {
         let (kept, _) = paint_steps(brush, &steps);
         assert!(tiles_of(&kept) == tiles_of(&estimated));
         assert!(tiles_of(&kept) != tiles_of(&measured), "the estimates show");
+    }
+
+    #[test]
+    fn corrected_strokes_take_the_measured_pressures_too() {
+        // StreamLine and post-correction (live or at pen-up) keep their
+        // own record of the stroke: the estimates are replaced there too.
+        let path = samples();
+        let mut streamline = Brush::new(12.0, 80.0, Color32::from_rgb(20, 40, 200), 10.0);
+        streamline.brush_options.pressure_size = true;
+        streamline.brush_options.pressure_min_size = 0.1;
+        let mut corrected = streamline.clone();
+        streamline.stabilizer_algorithm = StabilizerAlgorithm::StreamLine;
+        streamline.stabilizer_modes.streamline = 0.7;
+        corrected.stabilizer_algorithm = StabilizerAlgorithm::PostCorrection;
+        corrected.stabilizer_modes.correction = 0.7;
+        let mut live = corrected.clone();
+        live.stabilizer_modes.correction_live = true;
+        for brush in [streamline, corrected, live] {
+            let (measured, _) = paint_on_worker_paced(brush.clone(), &path, true);
+            let mut steps = Vec::new();
+            for (i, &(p, _)) in path.iter().enumerate() {
+                steps.push(Step::Sample(p, 0.05, Some(i as u64)));
+                if i > 0 {
+                    steps.push(Step::Update(i as u64 - 1, path[i - 1].1));
+                }
+            }
+            steps.push(Step::Update(path.len() as u64 - 1, path[path.len() - 1].1));
+            let (updated, strokes) = paint_steps(brush, &steps);
+            assert!(tiles_of(&updated) == tiles_of(&measured));
+            assert_eq!(strokes.len(), 1, "one undo step");
+        }
+    }
+
+    #[test]
+    fn a_sequential_stroke_gets_the_pen_s_data_and_measured_pressures() {
+        // What a smudge or mixing brush's engine is given, in order.
+        struct Records(Arc<Canvas>, Arc<Mutex<Vec<PenSample>>>);
+        impl SequentialStroke for Records {
+            fn start(&mut self) {}
+            fn drag(&mut self, _: Vec2, _: f32) {}
+            fn sample(&mut self, sample: PenSample) {
+                self.1.lock().unwrap().push(sample);
+            }
+            fn take_damage(&mut self) -> Vec<[i32; 4]> {
+                Vec::new()
+            }
+            fn canvas(&self) -> &Canvas {
+                &self.0
+            }
+            fn layer_idx(&self) -> usize {
+                1
+            }
+            fn finish(self: Box<Self>) -> Option<UndoAction> {
+                None
+            }
+        }
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let canvas = Arc::new(Canvas::new(128, 128, Color32::TRANSPARENT, 64));
+        let worker = StrokeWorker::new();
+        worker.begin_sequential(Box::new(Records(canvas, Arc::clone(&got))));
+        let tilt = Some(PenTilt {
+            lean: 0.5,
+            direction: 1.0,
+        });
+        let barrel = PenBarrel {
+            rotation: Some(0.25),
+            wheel: None,
+        };
+        // An estimate, one behind it, the measured value, then one that
+        // never gets its own (kept as it is at the end).
+        let at = |x: f32| Vec2::new(x, 10.0);
+        worker.sample_awaiting(at(10.0), 0.05, tilt, barrel, Some(5.0), Some(0));
+        worker.sample_awaiting(at(20.0), 0.6, tilt, barrel, Some(5.01), None);
+        worker.wait_idle();
+        assert!(
+            got.lock().unwrap().is_empty(),
+            "held for the measured value"
+        );
+        worker.update(0, 0.8);
+        worker.sample_awaiting(at(30.0), 0.05, tilt, barrel, Some(5.02), Some(1));
+        worker.end();
+        worker.wait_idle();
+        let got = got.lock().unwrap();
+        let pressures: Vec<f32> = got.iter().map(|s| s.pressure).collect();
+        assert_eq!(pressures, [0.8, 0.6, 0.05]);
+        assert!(
+            got.iter()
+                .all(|s| s.tilt == tilt && s.barrel.rotation == Some(0.25))
+        );
+        // The pen's own times, spacing kept.
+        assert!((got[1].time - got[0].time - 0.01).abs() < 1e-6);
     }
 
     #[test]

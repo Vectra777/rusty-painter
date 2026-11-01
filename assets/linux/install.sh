@@ -14,6 +14,13 @@ if [ "${1:-}" = "--uninstall" ]; then
 fi
 mkdir -p "$(dirname "$BIN")" "$APPS" "$ICONS"
 install -m 755 rusty-painter "$BIN"
+# The default brushes, where the app looks for them (it copies them into
+# the brush library on its first start).
+if [ -d brushes ]; then
+  PACKS="${XDG_DATA_HOME:-$HOME/.local/share}/rusty-painter/brushes/packs"
+  mkdir -p "$PACKS"
+  cp -R brushes/. "$PACKS/"
+fi
 install -m 644 rusty-painter.png "$ICONS/io.vectra.rustypainter.png"
 # The full path, in case ~/.local/bin isn't on the menu's PATH.
 sed "s|^Exec=rusty-painter|Exec=$BIN|" io.vectra.rustypainter.desktop > "$APPS/io.vectra.rustypainter.desktop"

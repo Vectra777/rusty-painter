@@ -2,6 +2,7 @@
 //! bands, and resolving the stroke into the layer.
 
 use super::*;
+use crate::brush_engine::brush_options::stacked;
 use crate::canvas::blend::{DeepStroke, resolve_stroke_deep};
 use crate::canvas::history::SnapshotPixels;
 
@@ -165,9 +166,10 @@ fn paint_batch(
         let sharpness = ctx.sharpness;
         let sharp = sharpness > 0.0;
         let post_row = sharp || ctx.hatch.is_some() || ctx.chalk.is_some() || ctx.texture.is_some();
-        // An imported texture (textures the shape before the strength) and
-        // wash (alpha darken), likewise once per tile.
-        let krita_texture = ctx.texture.is_some_and(|t| t.krita.is_some());
+        // A grain on the tip (an imported brush's: it textures the shape
+        // before the strength) and wash (alpha darken), likewise once per
+        // tile.
+        let grain_on_tip = ctx.texture.is_some_and(|t| t.krita.is_some() || t.on_tip);
         let wash = ctx.wash;
 
         // The dabs over canvas rows `rows` of the tile: `coverage`,
@@ -191,6 +193,9 @@ fn paint_batch(
                 }
                 let overlap = tile_overlap(&dab.bounds, tile_x0, tile_y0, tile_size);
                 let width = overlap.max_x - overlap.min_x + 1;
+                // A big tip's dabs spread further apart than asked: each
+                // lays what the ones skipped would have.
+                let stretch = ctx.brush.spacing_stretch(dab.r * 2.0, 1.0);
                 for gy in overlap.min_y.max(rows.start)..=overlap.max_y.min(rows.end - 1) {
                     let alphas = &mut alpha_row[..width];
                     // The round dab only covers part of its rectangle's row.
@@ -250,9 +255,9 @@ fn paint_batch(
                         }
                         if let Some(texture) = ctx.texture {
                             let (x, row) = (overlap.min_x + first, &mut alphas[span.clone()]);
-                            // An imported texture textures the tip's shape, before flow and
+                            // A grain on the tip textures its shape, before flow and
                             // opacity (a wash's stamps are the shape already).
-                            let full = if krita_texture {
+                            let full = if grain_on_tip {
                                 (ctx.strength * dab.strength).min(1.0)
                             } else {
                                 1.0
@@ -283,6 +288,11 @@ fn paint_batch(
                             .zip(&sel[in_tile + first..=in_tile + last])
                         {
                             *alpha *= s;
+                        }
+                    }
+                    if stretch > 1.0 && wash.is_none() {
+                        for a in &mut alphas[span.clone()] {
+                            *a = stacked(*a, stretch);
                         }
                     }
                     // Wash: the colour goes on at the dab's opacity over its
@@ -330,7 +340,8 @@ fn paint_batch(
                             // The alphas carry the opacity already when the
                             // dabs differ in colour (above).
                             let carried = colors.is_some();
-                            alpha_darken(covered, &alphas[span], dab, flow * dab.flow, carried);
+                            let flow = flow * dab.flow;
+                            alpha_darken(covered, &alphas[span], dab, flow, carried, stretch);
                         }
                         None => {
                             for (cov, &alpha) in covered.zip(&alphas[span]) {
@@ -446,6 +457,9 @@ fn merge_spans(pending: &mut Option<Vec<(usize, usize)>>, spans: &[(usize, usize
 /// stroke's average opacity holds it up while pressure eases. With
 /// `carried` the alphas carry the dab's opacity already. Out of line: the
 /// usual build-up loop stays small.
+///
+/// `stretch` (see [`Brush::spacing_stretch`]): the dab stands for that
+/// many, its move toward the opacity compounded as theirs would be.
 #[inline(never)]
 fn alpha_darken<'a>(
     coverage: impl Iterator<Item = &'a mut f32>,
@@ -453,6 +467,7 @@ fn alpha_darken<'a>(
     dab: &PlacedDab,
     flow: f32,
     carried: bool,
+    stretch: f32,
 ) {
     let (op, avg) = (dab.opacity, dab.average);
     let inv_op = if carried { 1.0 / op.max(1e-6) } else { 1.0 };
@@ -467,9 +482,19 @@ fn alpha_darken<'a>(
                 dst
             }
         } else if op > dst {
+            if stretch > 1.0 {
+                // (The move is (op - dst) * m * flow: compounded whole.)
+                *cov = dst + (op - dst) * stacked(m * flow, stretch);
+                continue;
+            }
             dst + (op - dst) * m
         } else {
             dst
+        };
+        let flow = if stretch > 1.0 {
+            stacked(flow, stretch)
+        } else {
+            flow
         };
         *cov = dst + (full - dst) * flow;
     }
@@ -1176,6 +1201,7 @@ impl Brush {
         let colored = self.varies_color();
         let wash = o.painting_mode == PaintingMode::Wash;
         BatchCtx {
+            brush: self,
             canvas,
             selection,
             dabs,

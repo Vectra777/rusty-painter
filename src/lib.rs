@@ -123,6 +123,7 @@ pub fn android_main(app: AndroidApp) {
     if let Some(dir) = app.internal_data_path() {
         let _ = ANDROID_DATA.set(dir);
     }
+    let _ = android::APP.set(app.clone());
     app::tune_malloc();
     if let Err(err) = android::guard_back() {
         log::error!("Back: {err}");

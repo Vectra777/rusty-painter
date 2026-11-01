@@ -952,7 +952,7 @@ impl Filter {
 
     /// A colour filter on unmultiplied sRGB values (0..1), unclamped; `None`
     /// for filters that aren't one.
-    fn rgb(&self, rgb: [f32; 3]) -> Option<[f32; 3]> {
+    pub(crate) fn rgb(&self, rgb: [f32; 3]) -> Option<[f32; 3]> {
         Some(match *self {
             Filter::BrightnessContrast {
                 brightness,
@@ -1231,7 +1231,7 @@ fn noise(c: Color32, x: i32, y: i32, amount: f32, mono: bool, size: f32) -> Colo
 
 /// Three box blurs approximate a Gaussian of standard deviation `sigma`
 /// (the box widths from Kovesi, "Fast almost-Gaussian filtering").
-fn box_radii(sigma: f32) -> [usize; 3] {
+pub(crate) fn box_radii(sigma: f32) -> [usize; 3] {
     let n = 3.0;
     let ideal = (12.0 * sigma * sigma / n + 1.0).sqrt();
     let mut wl = ideal.floor() as i32;

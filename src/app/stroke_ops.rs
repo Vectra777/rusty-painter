@@ -498,8 +498,11 @@ impl PainterApp {
     /// Where the pen is predicted to go next (canvas points, pressures
     /// already curved): drawn ahead of the brush stroke and taken back by
     /// its next sample. Not for strokes whose samples are reshaped (a
-    /// guide, a ruler, a pulled string) or not painted by the stroke
-    /// worker (vector lines, smudging).
+    /// guide, a ruler, a pulled string), not painted by the stroke worker
+    /// (vector lines), or that can't take their dabs back (smudging and
+    /// mixing brushes: each dab picks up what the last laid, so undoing
+    /// one means putting back the layer and the paint carried, and their
+    /// dabs are already the slowest to paint twice).
     pub(crate) fn predict_stroke(
         &mut self,
         predicted: &[crate::brush_engine::stroke_worker::PredictedSample],
@@ -1163,8 +1166,10 @@ mod tests {
         brush.brush_options.diameter = 20.0;
         brush.brush_options.hardness = 100.0;
         brush.brush_options.pressure_size = false;
+        // (A little colour each dab: a stroke's worth of dabs over a pixel
+        // leaves some of the red.)
         brush.mixing = Some(Mixing {
-            color_rate: 0.3,
+            color_rate: 0.05,
             ..Default::default()
         });
         app.release_canvas();

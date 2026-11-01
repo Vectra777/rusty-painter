@@ -25,6 +25,31 @@ A few of the built-in brushes:
 
 ![One stroke from each of 24 built-in brush presets](docs/src/brushes.png)
 
+## Architecture
+One library crate (`src/lib.rs`); the arrows point at what a module uses.
+
+```mermaid
+flowchart TD
+    entry(["main.rs · android_main · iOS"]) --> app
+    app["<b>app</b> · PainterApp<br/>frame loop, input, tools, GPU view"]
+    ui["<b>ui</b><br/>egui panels and dialogs"]
+    ui <--> app
+    app --> project["<b>project</b><br/>.rpainter, PSD / KRA / CLIP / Procreate, export"]
+    app --> brush["<b>brush_engine</b><br/>tips, dynamics, stroke worker thread"]
+    app --> selection["<b>selection</b><br/>shapes, masks, magnetic lasso"]
+    app --> tablet["<b>tablet</b><br/>pen pressure and tilt"]
+    project --> canvas
+    project --> brush
+    brush --> canvas
+    brush --> selection
+    selection <--> canvas
+    canvas["<b>canvas</b><br/>layers of 64 px tiles, undo history, compositing, filters"]
+    app -.-> egui(["eframe / egui + wgpu"])
+    tablet -.-> winit(["vendor-winit (patched for pen samples) · octotablet"])
+```
+
+Details (data model, invariants, the frame and stroke pipelines) are in the [architecture guide](https://vectra777.github.io/rusty-painter/dev/architecture.html).
+
 ## Install
 Download a release from the [releases page](https://github.com/Vectra777/rusty-painter/releases) (Linux tarball or Flatpak, Windows zip, Android APK), or build it (stable Rust 1.88 or newer; on Windows, the MSVC toolchain):
 

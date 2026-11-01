@@ -1,0 +1,2 @@
+# The default brush pack: hundreds of MB, kept in Git LFS.
+assets/brush-pack/**/*.rpbrush filter=lfs diff=lfs merge=lfs -text

@@ -469,6 +469,7 @@ fn texture_of(
         scale: scale.clamp(0.05, 16.0),
         strength: (num("textureDepth").unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0),
         invert: flag("InvT"),
+        on_tip: false,
         placement: GrainPlacement {
             per_dab: flag("TxtC"),
             ..Default::default()

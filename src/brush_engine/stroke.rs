@@ -99,6 +99,9 @@ pub struct StrokeTiles {
     /// before anyone sees them. [`crate::brush_engine::brush::Brush::flush_resolves`]
     /// resolves them.
     pub(crate) defer_resolve: bool,
+    /// Tiles painted while resolving was deferred whose live watercolour
+    /// or burnt edges are still to be shown (with the next resolve).
+    pub(crate) edges_due: HashSet<(usize, usize)>,
 }
 
 /// A dab as the brush would paint it, for a stroke that lays its dabs down
@@ -440,11 +443,22 @@ impl<'a> StrokeContext<'a> {
 
     /// Watercolour edges on what was just painted, as they'll be when the
     /// pen lifts (so nothing changes then).
+    /// While resolving is deferred, only noted: redone after every sample,
+    /// over each tile a big brush reaches, they'd cost far more than the
+    /// dabs.
     fn wet_edges_live(&mut self, brush: &Brush) {
-        if brush.edge_pass() {
-            // (They show the stroke's coverage resolved their way.)
-            self.flush_resolves(brush);
+        if !brush.edge_pass() {
+            return;
         }
+        let tiles = &mut *self.stroke_tiles;
+        if tiles.defer_resolve {
+            tiles.edges_due.extend(tiles.dirty.iter().copied());
+            return;
+        }
+        let due = std::mem::take(&mut tiles.edges_due);
+        tiles.dirty.extend(due);
+        // (They show the stroke's coverage resolved their way.)
+        self.flush_resolves(brush);
         brush.wet_edges_live(self.pool, self.canvas, self.selection, self.stroke_tiles);
     }
 
@@ -604,8 +618,9 @@ impl Sizing {
     /// spacing of its actual size.
     fn spacing_at(&self, brush: &Brush, pressure: f32, var: &DabVar) -> f32 {
         let o = &brush.brush_options;
-        let diameter = self.original.0 * pressure_size_factor(o, pressure) * var.scale;
-        o.spacing_px(diameter.max(0.5), o.spacing_factor(pressure) * var.spacing)
+        let diameter = (self.original.0 * pressure_size_factor(o, pressure) * var.scale).max(0.5);
+        let factor = o.spacing_factor(pressure) * var.spacing;
+        o.painted_spacing(diameter, factor) * brush.spacing_stretch(diameter, factor)
     }
 }
 
@@ -732,6 +747,11 @@ pub struct StrokeState {
 }
 
 impl StrokeState {
+    /// How far the stroke has gone along its path, canvas pixels.
+    pub(crate) fn travelled(&self) -> f32 {
+        self.travel
+    }
+
     /// Create an empty stroke state.
     pub fn new() -> Self {
         Self::with_seed(rand::random())
@@ -1235,7 +1255,11 @@ impl StrokeState {
         let (Some(dual), Some(to)) = (&brush.dual, self.last_pos) else {
             return;
         };
-        let step = dual.step(diameter);
+        let mut mask_brush = dual.brush(brush, diameter);
+        // A big second tip spreads its dabs too, each laying what the
+        // skipped ones would (see `Brush::spacing_stretch`).
+        let tip = mask_brush.brush_options.diameter;
+        let step = dual.step(diameter) * mask_brush.spacing_stretch(tip, 1.0);
         let mut centers = Vec::new();
         match self.mask_last {
             None => centers.push(to),
@@ -1256,7 +1280,6 @@ impl StrokeState {
         if centers.is_empty() {
             return;
         }
-        let mut mask_brush = dual.brush(brush, diameter);
         let count = dual.count.clamp(1, 16);
         let mut points = Vec::with_capacity(centers.len() * count as usize);
         let mut vars = Vec::with_capacity(points.capacity());
@@ -1817,9 +1840,8 @@ impl StrokeState {
             // Short segments, so the ribbon bends smoothly.
             (brush.brush_options.diameter * 0.15).clamp(1.0, 6.0)
         } else {
-            brush
-                .brush_options
-                .spacing_px(brush.brush_options.diameter, spacing)
+            let o = &brush.brush_options;
+            o.painted_spacing(o.diameter, spacing) * brush.spacing_stretch(o.diameter, spacing)
         };
         let spaced_by_tip = !brush.is_ribbon()
             && brush.brush_type != crate::brush_engine::brush::BrushType::Bristle;

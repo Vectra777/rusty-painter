@@ -1,0 +1,128 @@
+{
+  "version": 2,
+  "id": "default-v1",
+  "file": "brushes.rpbrush",
+  "collections": [
+    {
+      "name": "Sketching",
+      "brushes": [
+        "Pencil Tapered Soft Fine",
+        "Pencil Soft Fine 3",
+        "Pastel Soft",
+        "Pastel Bloom Soft",
+        "6B Pencil",
+        "Technical Pencil",
+        "Studio Pencil",
+        "Evolve",
+        "Little Pine",
+        "Copperhead",
+        "4B Compressed",
+        "Vine Charcoal",
+        "Willow Charcoal"
+      ]
+    },
+    {
+      "name": "Inking",
+      "brushes": [
+        "Pen Soft Fine",
+        "Pen Tapered Hard Fine",
+        "Pen Tapered Flat",
+        "Ink Hard Fine",
+        "Ink Stamped Fine",
+        "Ink Bloom Soft",
+        "Lettering Smooth Hard",
+        "Lettering Flat Hard",
+        "Lettering Smooth Flat",
+        "Comic Smooth Soft Fine",
+        "Comic Scatter Stamped",
+        "Comic Wash Stamped",
+        "Design Hard Fine",
+        "Design Tapered Fine",
+        "Design Stamped Smooth",
+        "Fine Tip",
+        "Gel Pen",
+        "Studio Pen",
+        "Odeon",
+        "Monoline",
+        "Script"
+      ]
+    },
+    {
+      "name": "Painting",
+      "brushes": [
+        "Marker Hard 2",
+        "Marker Soft",
+        "Oil Flat Hard",
+        "Paint Wet Soft",
+        "Paint Soft",
+        "Gouache Tapered Soft",
+        "Watercolor Wash Bloom",
+        "Basic Tapered Hard",
+        "Basic Hard Fine",
+        "Basic Light Soft Broad 2",
+        "Digital Wash Flat",
+        "Digital Soft 2",
+        "Digital Hard 2",
+        "Nikko Rull",
+        "Spectra",
+        "Tamar",
+        "Aurora",
+        "Leatherwood",
+        "Wild Light",
+        "Medium Brush",
+        "Medium Hard Airbrush",
+        "Soft Brush"
+      ]
+    },
+    {
+      "name": "Textures",
+      "brushes": [
+        "Grunge Scatter Stamped",
+        "Grunge Scatter Flat",
+        "Street Soft",
+        "Street Hard Broad",
+        "Cubes",
+        "Rosette",
+        "Grunge",
+        "Fat Nozzle",
+        "Drip",
+        "Ultrafine Nozzle",
+        "Blackwood",
+        "Tawny",
+        "Furneaux",
+        "Honeyeater",
+        "Disco",
+        "Wedge Tail",
+        "Rusted Decay",
+        "Stone Wall",
+        "Twisted Tree",
+        "Rainforest",
+        "Paper Daisy",
+        "Cotton",
+        "Smoky Quartz",
+        "Palm Husk",
+        "Flourish"
+      ]
+    },
+    {
+      "name": "Effects",
+      "brushes": [
+        "Creative Hard Broad",
+        "Creative Stamped Hard",
+        "Creative Scatter Stamped",
+        "Stickman",
+        "Triangulum",
+        "Storm Bay",
+        "Smoke",
+        "Flames",
+        "Clouds",
+        "Lightbrush",
+        "Glimmer",
+        "Nebula",
+        "Mad Splashes",
+        "Wash",
+        "Water Drip"
+      ]
+    }
+  ]
+}

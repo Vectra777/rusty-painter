@@ -64,6 +64,8 @@ struct StoredPreset {
     tags: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     favourite: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folder: Vec<String>,
 }
 
 /// What the brush library keeps about a preset (not part of its settings),
@@ -72,6 +74,7 @@ struct StoredPreset {
 pub struct PresetMeta {
     pub tags: Vec<String>,
     pub favourite: bool,
+    pub folder: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -187,6 +190,9 @@ struct StoredBrushTexture {
     /// An imported brush's own texturing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     krita: Option<crate::brush_engine::texture::KritaTexturing>,
+    /// The grain on the tip's shape (see `BrushTexture::on_tip`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    on_tip: bool,
 }
 
 /// Where the colour comes from, a pattern by number.
@@ -259,6 +265,8 @@ struct StoredBrush {
     /// A [`LayerBlend::key`].
     paint_blend: String,
     airbrush_rate: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    every_dab: bool,
     dual: Option<StoredDual>,
     wet_edge: f32,
     wet_edge_width: f32,
@@ -380,9 +388,11 @@ impl StoredBrush {
                 invert: t.invert,
                 placement: t.placement,
                 krita: t.krita,
+                on_tip: t.on_tip,
             }),
             paint_blend: b.paint_blend.key().to_string(),
             airbrush_rate: b.airbrush_rate,
+            every_dab: b.every_dab,
             dual: b.dual.as_ref().map(|d| StoredDual::from_dual(d, res)),
             wet_edge: b.wet_edge,
             wet_edge_width: b.wet_edge_width,
@@ -487,10 +497,12 @@ impl StoredBrush {
                 invert: t.invert,
                 placement: t.placement,
                 krita: t.krita,
+                on_tip: t.on_tip,
             }),
         };
         b.paint_blend = LayerBlend::from_key(&self.paint_blend).unwrap_or_default();
         b.airbrush_rate = self.airbrush_rate;
+        b.every_dab = self.every_dab;
         b.dual = self.dual.map(|d| d.into_dual(res)).transpose()?;
         b.wet_edge = self.wet_edge;
         b.wet_edge_width = self.wet_edge_width;
@@ -557,6 +569,7 @@ pub fn encode_with_meta(presets: &[BrushPreset], meta: &[PresetMeta]) -> Result<
                 brush: StoredBrush::from_brush(&p.brush, &mut res),
                 tags: meta.tags,
                 favourite: meta.favourite,
+                folder: meta.folder,
             }
         })
         .collect();
@@ -836,6 +849,7 @@ fn decode_from(
             let meta = PresetMeta {
                 tags: p.tags,
                 favourite: p.favourite,
+                folder: p.folder,
             };
             Ok((preset, meta))
         })
@@ -976,6 +990,7 @@ mod tests {
         let meta = PresetMeta {
             tags: vec!["Comics".into(), "Ink".into()],
             favourite: true,
+            folder: vec!["Inks".into(), "Pens".into()],
         };
         let bytes =
             encode_with_meta(&[preset("A"), preset("B")], std::slice::from_ref(&meta)).unwrap();
@@ -1097,6 +1112,9 @@ mod tests {
             keep_dirty: true,
             sample_all: true,
             gamma_correct: true,
+            charge: 0.6,
+            attack: 0.2,
+            falloff: 0.1,
         };
         brush.mixing = Some(mixing);
         brush.antialias_width = 3.0;

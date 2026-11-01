@@ -366,6 +366,10 @@ pub struct BrushTexture {
     pub placement: GrainPlacement,
     /// An imported brush's own texturing, instead of `mode`.
     pub krita: Option<KritaTexturing>,
+    /// The grain works on the tip's shape, before the dab's strength
+    /// (opacity, flow, pressure): light strokes keep their texture, as
+    /// Procreate's grain does. Off, Subtract and Height react to pressure.
+    pub on_tip: bool,
 }
 
 impl BrushTexture {
@@ -378,6 +382,7 @@ impl BrushTexture {
             invert: false,
             placement: GrainPlacement::default(),
             krita: None,
+            on_tip: false,
         }
     }
 

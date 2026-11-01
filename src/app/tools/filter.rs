@@ -219,7 +219,12 @@ fn apply_to(
         let [x0, y0, x1, y1] = original.bounds;
         let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
         let src = original.pixels(canvas.tile_size());
-        let out = filter.apply(&src, w, h, (x0, y0));
+        let out = if canvas.depth().is_deep() {
+            None
+        } else {
+            crate::canvas::gpu_ops::filter(&filter, &src, w, h)
+        }
+        .unwrap_or_else(|| filter.apply(&src, w, h, (x0, y0)));
         canvas.replace_region(layer, original, &out, coverage);
     }
 }
@@ -373,7 +378,13 @@ impl PainterApp {
                 let row = (v - sv0) as usize * sw + (u0 - su0) as usize;
                 src.extend_from_slice(&source.pixels[row..row + w]);
             }
-            let out = session.filter.shrunk(block).apply(&src, w, h, (u0, v0));
+            let filter = session.filter.shrunk(block);
+            let out = if canvas.depth().is_deep() {
+                None
+            } else {
+                crate::canvas::gpu_ops::filter(&filter, &src, w, h)
+            }
+            .unwrap_or_else(|| filter.apply(&src, w, h, (u0, v0)));
             let at = |u: i32, v: i32| -> Option<usize> {
                 ((u0..u1).contains(&u) && (v0..v1).contains(&v))
                     .then(|| (v - v0) as usize * w + (u - u0) as usize)

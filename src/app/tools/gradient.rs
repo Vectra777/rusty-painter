@@ -61,7 +61,7 @@ pub struct GradientSession {
     layer: usize,
     /// The area's tiles before the gradient, captured when it's first
     /// painted; every repaint composites over them.
-    original: Option<crate::canvas::storage::Region>,
+    original: Option<std::sync::Arc<crate::canvas::storage::Region>>,
     /// The selection's coverage over the area, rasterized once.
     coverage: Option<SelectionMask>,
     bounds: [i32; 4],
@@ -95,6 +95,7 @@ pub struct GradientToolState {
     /// frames to upload); repainting before then would show bands of old
     /// and new gradient.
     uploading: bool,
+    running: bool,
 }
 
 /// The Gradient Editor's state: which user gradient it edits.
@@ -319,7 +320,7 @@ impl PainterApp {
             .session
             .as_ref()
             .is_some_and(|s| s.dirty && (s.end - s.start).length() > 0.5);
-        if dirty && !state.uploading {
+        if dirty && !state.uploading && !state.running {
             self.gradient_paint();
             self.workspace.gradient.uploading = true;
         }
@@ -451,7 +452,10 @@ impl PainterApp {
         let (layer, bounds) = (session.layer, session.bounds);
         let original = session
             .original
-            .get_or_insert_with(|| pool.install(|| canvas.capture_region(layer, bounds)));
+            .get_or_insert_with(|| {
+                std::sync::Arc::new(pool.install(|| canvas.capture_region(layer, bounds)))
+            })
+            .clone();
         let gradient = Gradient {
             shape: settings.shape,
             repeat: settings.repeat,
@@ -459,54 +463,64 @@ impl PainterApp {
             end: session.end,
             reverse: settings.reverse,
         };
-        let coverage = session.coverage.as_ref();
+        let coverage = session.coverage.clone();
+        session.dirty = false;
+        self.workspace.gradient.running = true;
         let dither = settings.dither;
-        thread_local! {
-            static POSITIONS: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
-        let row = |x0: i32, y: i32, out: &mut [Color32]| {
-            POSITIONS.with_borrow_mut(|t| {
-                t.resize(out.len(), 0.0);
-                gradient.row_positions(x0, y, t);
-                for (i, (o, &t)) in out.iter_mut().zip(t.iter()).enumerate() {
-                    let x = x0 + i as i32;
-                    let cov = coverage.map_or(255, |m| m.value(x, y));
-                    *o = if cov == 0 {
-                        Color32::TRANSPARENT
-                    } else {
-                        let noise = dither
-                            .then(|| crate::canvas::blend_modes::pixel_noise(x as u32, y as u32));
-                        ramp.pixel_covered(t, noise, cov)
-                    };
-                }
-            });
-        };
-        if canvas.depth().is_deep() {
-            // At full depth: no rounding, so no dither needed.
-            let row = |x0: i32, y: i32, out: &mut [[f32; 4]]| {
+        let canvas_id = std::sync::Arc::as_ptr(&canvas) as usize;
+        self.run_on_worker("Gradient…", move || {
+            // (On the CPU: its rows are made in parallel straight into the
+            // tiles, which a GPU round trip couldn't beat.)
+            let coverage = coverage.as_ref();
+            thread_local! {
+                static POSITIONS: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+            }
+            let row = |x0: i32, y: i32, out: &mut [Color32]| {
                 POSITIONS.with_borrow_mut(|t| {
                     t.resize(out.len(), 0.0);
                     gradient.row_positions(x0, y, t);
                     for (i, (o, &t)) in out.iter_mut().zip(t.iter()).enumerate() {
-                        let cov = coverage.map_or(255, |m| m.value(x0 + i as i32, y));
+                        let x = x0 + i as i32;
+                        let cov = coverage.map_or(255, |m| m.value(x, y));
                         *o = if cov == 0 {
-                            [0.0; 4]
+                            Color32::TRANSPARENT
                         } else {
-                            ramp.linear_covered(t, cov as f32 / 255.0)
+                            let noise = dither
+                                .then(|| crate::canvas::blend_modes::pixel_noise(x as u32, y as u32));
+                            ramp.pixel_covered(t, noise, cov)
                         };
                     }
                 });
             };
-            pool.install(|| canvas.paint_over_region_deep(layer, original, settings.blend, row));
-        } else {
-            pool.install(|| canvas.paint_over_region(layer, original, settings.blend, row));
-        }
-        session.dirty = false;
-        drop(canvas);
-        if let Some(area) = self.gradient_area() {
-            self.mark_tiles_in_bounds_dirty(area);
-        }
-        self.layer_state.thumbnails_dirty = true;
+            if canvas.depth().is_deep() {
+                // At full depth: no rounding, so no dither needed.
+                let row = |x0: i32, y: i32, out: &mut [[f32; 4]]| {
+                    POSITIONS.with_borrow_mut(|t| {
+                        t.resize(out.len(), 0.0);
+                        gradient.row_positions(x0, y, t);
+                        for (i, (o, &t)) in out.iter_mut().zip(t.iter()).enumerate() {
+                            let cov = coverage.map_or(255, |m| m.value(x0 + i as i32, y));
+                            *o = if cov == 0 {
+                                [0.0; 4]
+                            } else {
+                                ramp.linear_covered(t, cov as f32 / 255.0)
+                            };
+                        }
+                    });
+                };
+                pool.install(|| canvas.paint_over_region_deep(layer, &original, settings.blend, row));
+            } else {
+                pool.install(|| canvas.paint_over_region(layer, &original, settings.blend, row));
+            }
+            drop(canvas);
+            Box::new(move |app: &mut PainterApp| {
+                app.workspace.gradient.running = false;
+                if std::sync::Arc::as_ptr(&app.canvas) as usize == canvas_id {
+                    app.mark_tiles_in_bounds_dirty(egui::Rect::from_min_max(egui::pos2(bounds[0] as f32,bounds[1] as f32),egui::pos2(bounds[2] as f32,bounds[3] as f32)));
+                    app.layer_state.thumbnails_dirty = true;
+                }
+            })
+        });
     }
 
     /// Keep the gradient as one undo step.
@@ -520,6 +534,12 @@ impl PainterApp {
         {
             self.gradient_paint();
         }
+        // Called every frame outside the Gradient tool: only wait on the
+        // worker when there's a gradient (releasing ends the stroke drawn).
+        if self.workspace.gradient.session.is_none() {
+            return;
+        }
+        self.release_canvas();
         let Some(session) = self.workspace.gradient.session.take() else {
             return;
         };

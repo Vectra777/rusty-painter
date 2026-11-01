@@ -31,6 +31,10 @@ if [[ -z "${ANDROID_NDK_ROOT:-}" && -z "${ANDROID_NDK_HOME:-}" ]]; then
   exit 1
 fi
 
+# The APK's assets: the default brush pack, if one was put there
+# (release.yml does); a build without it simply has no default brushes.
+mkdir -p "$(dirname "$0")/../target/android-assets"
+
 case "${MODE}" in
   release)
     cargo apk build --lib --target "${TARGET}" --release

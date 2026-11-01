@@ -41,6 +41,8 @@ env:
   BIN_NAME: rusty-painter
   # From the form, or the tag without its leading "v".
   VERSION: ${{ inputs.version || github.ref_name }}
+  # The default brushes (Git LFS, pulled through a cache by the jobs that ship them).
+  BRUSH_PACK: assets/brush-pack
 
 permissions:
   contents: read
@@ -75,6 +77,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The brush pack from the Actions cache when it's unchanged (keyed by
+      # its LFS pointers, which name its content): only a new pack is
+      # downloaded from LFS, sparing the LFS bandwidth quota.
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs/objects
+          key: brush-pack-${{ runner.os }}-${{ hashFiles('assets/brush-pack/**') }}
+      - name: Pull the default brushes
+        run: git lfs pull --include "assets/brush-pack/**"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -85,8 +96,10 @@ jobs:
           set -euo pipefail
           V="${VERSION#v}"
           NAME="rusty-painter-${V}-linux-x86_64"
-          mkdir -p "dist/${NAME}"
+          mkdir -p "dist/${NAME}/brushes"
           cp "target/release/${BIN_NAME}" README.md assets/linux/install.sh assets/linux/io.vectra.rustypainter.desktop "dist/${NAME}/"
+          # Beside the program (and copied to the data folder by install.sh).
+          cp -R "$BRUSH_PACK/." "dist/${NAME}/brushes/"
           cp assets/icon/icon-256.png "dist/${NAME}/rusty-painter.png"
           if [ -f LICENSE ]; then cp LICENSE "dist/${NAME}/"; fi
           tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
@@ -127,6 +140,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # The brush pack from the Actions cache when it's unchanged (keyed by
+      # its LFS pointers, which name its content): only a new pack is
+      # downloaded from LFS, sparing the LFS bandwidth quota.
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs/objects
+          key: brush-pack-${{ runner.os }}-${{ hashFiles('assets/brush-pack/**') }}
+      - name: Pull the default brushes
+        run: git lfs pull --include "assets/brush-pack/**"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -144,6 +166,8 @@ jobs:
           $name = "rusty-painter-$v-windows-x86_64"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
           Copy-Item "target/release/$env:BIN_NAME.exe", README.md, ffmpeg/ffmpeg.exe "dist/$name/"
+          # Beside the program, where it looks for them.
+          Copy-Item -Recurse $env:BRUSH_PACK "dist/$name/brushes"
           if (Test-Path LICENSE) { Copy-Item LICENSE "dist/$name/" }
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
       - uses: actions/upload-artifact@v4
@@ -161,6 +185,15 @@ jobs:
       NDK_VERSION: "29.0.14206865"
     steps:
       - uses: actions/checkout@v4
+      # The brush pack from the Actions cache when it's unchanged (keyed by
+      # its LFS pointers, which name its content): only a new pack is
+      # downloaded from LFS, sparing the LFS bandwidth quota.
+      - uses: actions/cache@v4
+        with:
+          path: .git/lfs/objects
+          key: brush-pack-${{ runner.os }}-${{ hashFiles('assets/brush-pack/**') }}
+      - name: Pull the default brushes
+        run: git lfs pull --include "assets/brush-pack/**"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -203,6 +236,11 @@ jobs:
           # cargo-apk signs release builds with these.
           echo "CARGO_APK_RELEASE_KEYSTORE=$KS" >> "$GITHUB_ENV"
           echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+      - name: Default brushes
+        run: |
+          # The APK's assets (Cargo.toml); copied into the data folder on first start.
+          mkdir -p target/android-assets
+          cp -R "$BRUSH_PACK/." target/android-assets/
       - name: Build APK
         run: scripts/build-android.sh aarch64-linux-android release
       - name: Package

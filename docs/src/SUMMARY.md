@@ -25,6 +25,7 @@
 - [Architecture](dev/architecture.md)
 - [Making changes](dev/developer-guide.md)
 - [Performance](dev/performance.md)
+- [Brush packs and GPU operations](dev/brush-pack-and-gpu.md)
 - [Debugging on Windows](dev/windows-debugging.md)
 - [Roadmap](dev/roadmap.md)
 - [API reference](dev/api.md)

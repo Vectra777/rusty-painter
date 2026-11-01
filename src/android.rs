@@ -6,6 +6,52 @@ use jni::objects::{JObject, JString, JValue};
 #[cfg(target_os = "android")]
 use jni::sys::jobject;
 
+/// The app, kept at start-up for its APK assets (see [`extract_pack`]).
+#[cfg(target_os = "android")]
+pub static APP: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
+    std::sync::OnceLock::new();
+
+/// Copy the default brush pack out of the APK's assets into `dest`, unless
+/// this build's is there already (its manifest, written last, says so).
+/// A build without the pack has nothing to copy.
+#[cfg(target_os = "android")]
+pub fn extract_pack(dest: &std::path::Path) -> Result<(), String> {
+    use crate::brush_engine::pack::{Manifest, PACK_ID};
+    use std::io::Read;
+    let Some(app) = APP.get() else {
+        return Ok(());
+    };
+    let assets = app.asset_manager();
+    let asset = |name: &str| {
+        let path =
+            std::ffi::CString::new(format!("{PACK_ID}/{name}")).map_err(|e| e.to_string())?;
+        assets
+            .open(&path)
+            .ok_or_else(|| format!("{name} isn't in the APK"))
+    };
+    let Ok(mut source) = asset("manifest.json") else {
+        return Ok(());
+    };
+    let mut manifest = Vec::new();
+    source
+        .read_to_end(&mut manifest)
+        .map_err(|e| e.to_string())?;
+    if std::fs::read(dest.join("manifest.json")).ok().as_deref() == Some(&manifest[..]) {
+        return Ok(());
+    }
+    let file = serde_json::from_slice::<Manifest>(&manifest)
+        .map_err(|e| e.to_string())?
+        .file;
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(dest.join("manifest.json"));
+    let part = dest.join(format!("{file}.part"));
+    let mut out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+    std::io::copy(&mut asset(&file)?, &mut out).map_err(|e| e.to_string())?;
+    out.sync_all().map_err(|e| e.to_string())?;
+    std::fs::rename(&part, dest.join(&file)).map_err(|e| e.to_string())?;
+    crate::project::write_atomically(&dest.join("manifest.json"), &manifest)
+}
+
 #[derive(Clone, Debug)]
 pub struct PublishedFile {
     pub message: String,

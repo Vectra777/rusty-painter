@@ -150,8 +150,9 @@ pub struct Mixing {
     /// How much of the carried paint stays with the brush each dab
     /// (0 = barely drags, 1 = smears a colour a long way).
     pub smudge_length: f32,
-    /// How much brush colour is mixed into the carried paint per brush
-    /// width travelled (0 = a blender: no colour of its own).
+    /// How much brush colour is mixed into the carried paint: each dab
+    /// (as Procreate's stamps mix), or per brush width travelled by a
+    /// brush kept dirty (0 = a blender: no colour of its own).
     pub color_rate: f32,
     /// Pen pressure scales the smudge length.
     pub pressure_length: bool,
@@ -174,6 +175,42 @@ pub struct Mixing {
     /// Mix in linear light even in a document that blends stored values
     /// (Procreate's gamma-correct blending): mixes keep their brightness.
     pub gamma_correct: bool,
+    /// Procreate's charge (0..1): extra brush colour at the start of a
+    /// stroke that wears off with the distance travelled; the colour rate
+    /// stays under it, so the stroke never runs dry. 0: none.
+    pub charge: f32,
+    /// Procreate's attack (0..1): the least brush colour a dab mixes in
+    /// (pressing lightly, less, when the opacity follows the pressure).
+    pub attack: f32,
+    /// Procreate's falloff (0..1): the colour rate itself wearing off
+    /// with the distance travelled. 0: it doesn't.
+    pub falloff: f32,
+}
+
+impl Mixing {
+    /// The brush colour a dab mixes in `travelled` canvas pixels into
+    /// the stroke, before its inputs: the colour rate (worn off by the
+    /// falloff) plus what's left of the charge, at least the attack times
+    /// `attack_pressure` (the pressure, for a brush whose opacity follows
+    /// it; else 1): Procreate's stamp mixture.
+    pub fn color_rate_at(&self, travelled: f32, attack_pressure: f32) -> f32 {
+        // How far along a distance has worn off a share `amount`:
+        // Procreate's stroke length, ∛(amount³ · distance / 33).
+        let worn = |amount: f32| {
+            ((amount.powi(3) * travelled.max(0.0)) / 33.0)
+                .cbrt()
+                .min(1.0)
+        };
+        let charge = if self.charge > 0.0 {
+            1.0 - worn(1.0 - self.charge.min(1.0))
+        } else {
+            0.0
+        };
+        let base = self.color_rate * (1.0 - worn(self.falloff));
+        (base + charge)
+            .max(self.attack * attack_pressure)
+            .clamp(0.0, 1.0)
+    }
 }
 
 impl Default for Mixing {
@@ -188,6 +225,9 @@ impl Default for Mixing {
             sample_all: false,
             krita: None,
             gamma_correct: false,
+            charge: 0.0,
+            attack: 0.0,
+            falloff: 0.0,
         }
     }
 }
@@ -539,6 +579,21 @@ impl PressureCurves {
     }
 }
 
+/// Dabs are at least this % of a tip's thinnest side apart (see
+/// [`BrushOptions::spacing_stretch`]).
+pub const MIN_SPACING: f32 = 2.0;
+/// No two dabs closer than this, in canvas pixels.
+pub const MIN_SPACING_PX: f32 = 0.5;
+
+/// The alpha one dab lays for the `k` it stands for (each `a`), as `k`
+/// layers over one another would: 1 - (1 - a)^k. (`k` is whole, see
+/// [`BrushOptions::spacing_stretch`]: a few multiplications per pixel
+/// rather than a power.)
+#[inline]
+pub fn stacked(a: f32, k: f32) -> f32 {
+    1.0 - (1.0 - a.clamp(0.0, 1.0)).powi(k as i32)
+}
+
 impl BrushOptions {
     /// Dab spacing in canvas pixels for a tip `diameter` across, times
     /// `factor` (pressure, inputs).
@@ -550,6 +605,30 @@ impl BrushOptions {
             }
             None => self.spacing / 100.0 * diameter * factor,
         }
+    }
+
+    /// The dab spacing a tip `diameter` across is painted at, in canvas
+    /// pixels: [`Self::spacing_px`], never closer than half a pixel.
+    pub fn painted_spacing(&self, diameter: f32, factor: f32) -> f32 {
+        self.spacing_px(diameter, factor).max(MIN_SPACING_PX)
+    }
+
+    /// How many times further apart than [`Self::painted_spacing`] a tip's
+    /// dabs go: at least [`MIN_SPACING`]% of its thinnest side (`thin`:
+    /// that side's share of the diameter), so a brush at a fraction of a
+    /// percent doesn't lay hundreds of dabs over each pixel (and a flat
+    /// tip's dabs stay closer than it's thick). Each laid dab then stands
+    /// for the ones skipped (see [`stacked`]), so the stroke builds up the
+    /// same. Whole; 1 for auto spacing, and for a small tip (its share
+    /// is under the half-pixel least spacing).
+    pub fn spacing_stretch(&self, diameter: f32, factor: f32, thin: f32) -> f32 {
+        if self.auto_spacing.is_some() || self.spacing * factor <= 0.0 {
+            return 1.0;
+        }
+        let least = MIN_SPACING / 100.0 * diameter * thin;
+        (least / self.painted_spacing(diameter, factor))
+            .ceil()
+            .max(1.0)
     }
 
     /// The spacing's share at pressure `p` (1 without pressure spacing);
@@ -702,5 +781,72 @@ mod tip_mapping_tests {
         assert_eq!(g, red);
         let g = TipMapping::Gradient.map([1.0; 3], red, [0.0, 0.0, 1.0]);
         assert_eq!(g, [0.0, 0.0, 1.0]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn which_brushes_spread_their_dabs() {
+        use crate::brush_engine::brush::Brush;
+        let mut b = Brush::new(300.0, 80.0, Color32::BLACK, 0.5);
+        assert_eq!(b.spacing_stretch(300.0, 1.0), 4.0);
+        // This app's mixing spreads them too (each dab mixing as the
+        // skipped ones would); Krita's engines and a brush kept dirty don't.
+        b.mixing = Some(Mixing::default());
+        assert_eq!(b.spacing_stretch(300.0, 1.0), 4.0);
+        b.mixing = Some(Mixing {
+            krita: Some(KritaSmudge::default()),
+            ..Default::default()
+        });
+        assert_eq!(b.spacing_stretch(300.0, 1.0), 1.0);
+        b.mixing = Some(Mixing {
+            keep_dirty: true,
+            ..Default::default()
+        });
+        assert_eq!(b.spacing_stretch(300.0, 1.0), 1.0);
+        // Lay every dab: none spread, its second tip's neither.
+        b.mixing = None;
+        b.every_dab = true;
+        assert_eq!(b.spacing_stretch(300.0, 1.0), 1.0);
+        let dual = crate::brush_engine::dual::DualTip {
+            size: 1.0,
+            spacing: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(dual.brush(&b, 300.0).spacing_stretch(300.0, 1.0), 1.0);
+        b.every_dab = false;
+        assert_eq!(dual.brush(&b, 300.0).spacing_stretch(300.0, 1.0), 4.0);
+    }
+
+    #[test]
+    fn big_tips_spread_their_dabs_and_each_lays_what_the_skipped_ones_would() {
+        let mut o =
+            crate::brush_engine::brush::Brush::new(300.0, 80.0, Color32::BLACK, 0.5).brush_options;
+        // Small tips (2% of them is under half a pixel), and a flat tip's
+        // thin side, lay every dab painted now.
+        assert_eq!(o.spacing_stretch(20.0, 1.0, 1.0), 1.0);
+        assert_eq!(o.spacing_stretch(300.0, 1.0, 0.2), 1.0);
+        assert_eq!(o.spacing_stretch(300.0, 1.0, 0.5), 2.0);
+        // A big round one: at least 2% apart (0.5% asked: 4 times).
+        assert_eq!(o.spacing_stretch(300.0, 1.0, 1.0), 4.0);
+        // Measured from the half-pixel floor a small tip is painted at.
+        assert_eq!(o.spacing_stretch(60.0, 1.0, 1.0), 3.0);
+        o.spacing = 5.0;
+        assert_eq!(
+            o.spacing_stretch(300.0, 1.0, 1.0),
+            1.0,
+            "already far enough"
+        );
+        // One dab standing for k lays what k layered would.
+        for a in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            let mut cov = 0.0f32;
+            for _ in 0..4 {
+                cov += a * (1.0 - cov);
+            }
+            assert!((stacked(a, 4.0) - cov).abs() < 1e-5, "{a}");
+        }
     }
 }

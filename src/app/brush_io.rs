@@ -380,7 +380,18 @@ impl PainterApp {
                 self.export_state.message = Some(format!("Couldn't save the preset: {err}"));
             }
         }
+        let name = preset.name.clone();
         self.brush_state.presets.push(preset);
+        let folder = match self.brush_state.library.shelf {
+            crate::app::brush_library::Shelf::Folder(id) => Some(id),
+            _ => None,
+        };
+        self.edit_library(|lib| {
+            let id = lib.preset_id(&name);
+            if let Some(folder) = folder {
+                lib.move_brush(id, folder, None);
+            }
+        });
     }
 
     fn write_library_file(&self, preset: &BrushPreset) -> Result<std::path::PathBuf, String> {
@@ -390,7 +401,143 @@ impl PainterApp {
     /// First start: copy the presets that come with the app into the
     /// library, where they're kept and changed like the user's own. Then
     /// list those first, in their order.
+    fn install_local_pack(&mut self) {
+        use crate::brush_engine::pack;
+        if self
+            .brush_state
+            .library
+            .file
+            .installed_packs
+            .iter()
+            .any(|id| id == pack::PACK_ID)
+        {
+            return;
+        }
+        let Some(root) = pack::root(&self.brush_state.brushes_path) else {
+            return;
+        };
+        let (manifest, presets) = match pack::load(&root) {
+            Ok(pack) => pack,
+            Err(error) => {
+                self.report(format!("Couldn't load brush pack: {error}"));
+                return;
+            }
+        };
+        let fresh = !self.brush_state.library.file.defaults_installed
+            && self.brush_state.active_preset.is_none();
+        // The app's own presets join the pack's, by kind.
+        let old: Vec<_> = self
+            .brush_state
+            .presets
+            .iter()
+            .filter(|p| Self::is_default_preset(&p.name))
+            .map(|p| p.name.clone())
+            .collect();
+        for name in old {
+            place_default(&mut self.brush_state.library.file, &name);
+        }
+        let first = presets.first().map(|p| p.name.clone());
+        let mut mapped = std::collections::BTreeMap::new();
+        let mut remaining = presets.into_iter();
+        let mut installed = Vec::new();
+        for (i, collection) in manifest.collections.iter().enumerate() {
+            // Each collection a file of its own: changing a brush rewrites
+            // its collection, not the whole pack.
+            let destination = self
+                .presets_dir()
+                .join(format!("default-collection-{i:03}.rpbrush"));
+            let mut group: Vec<_> = remaining.by_ref().take(collection.brushes.len()).collect();
+            if destination.exists() {
+                let previous: Vec<_> = self
+                    .brush_state
+                    .presets
+                    .iter()
+                    .filter(|p| p.file.as_ref() == Some(&destination))
+                    .collect();
+                if previous.len() != group.len() {
+                    self.report(format!(
+                        "Existing brush collection {} could not be resumed",
+                        destination.display()
+                    ));
+                    return;
+                }
+                for (source, existing) in group.iter().zip(previous) {
+                    mapped.insert(source.name.clone(), existing.name.clone());
+                }
+                continue;
+            }
+            for preset in &mut group {
+                let source = preset.name.clone();
+                let name = self.unique_preset_name(&preset.name);
+                preset.name = name;
+                mapped.insert(source, preset.name.clone());
+                preset.file = Some(destination.clone());
+            }
+            let saved = (|| -> Result<Vec<BrushPreset>, String> {
+                std::fs::create_dir_all(self.presets_dir()).map_err(|e| e.to_string())?;
+                let bytes = preset_file::encode(&group)?;
+                crate::project::write_atomically(&destination, &bytes)?;
+                let mut copied = preset_file::decode_file(&destination, &bytes)?;
+                for preset in &mut copied {
+                    preset.file = Some(destination.clone());
+                }
+                Ok(copied)
+            })();
+            match saved {
+                Ok(copied) => installed.extend(copied),
+                Err(error) => {
+                    self.report(format!("Couldn't install brush collection: {error}"));
+                    return;
+                }
+            }
+        }
+        self.brush_state.presets.extend(installed);
+        let mut first_folder = None;
+        for collection in &manifest.collections {
+            let lib = &mut self.brush_state.library.file;
+            let parent = lib
+                .folders
+                .iter()
+                .find(|f| f.parent.is_none() && f.name == pack::LIBRARY_NAME)
+                .map(|f| f.id)
+                .unwrap_or_else(|| lib.create_folder(pack::LIBRARY_NAME, None));
+            let folder = lib
+                .folders
+                .iter()
+                .find(|f| f.name == collection.name && f.parent == Some(parent))
+                .map(|f| f.id)
+                .unwrap_or_else(|| lib.create_folder(&collection.name, Some(parent)));
+            first_folder.get_or_insert(folder);
+            for name in &collection.brushes {
+                if let Some(name) = mapped.get(name) {
+                    let id = lib.preset_id(name);
+                    lib.move_brush(id, folder, None);
+                }
+            }
+        }
+        let lib = &mut self.brush_state.library;
+        lib.file.selected_folder = first_folder;
+        if let Some(id) = first_folder {
+            lib.shelf = crate::app::brush_library::Shelf::Folder(id);
+        }
+        lib.file.pack_presets.extend(mapped.clone());
+        lib.file.install_pack_tags(&manifest);
+        lib.file.installed_packs.push(pack::PACK_ID.into());
+        lib.dirty = true;
+        if fresh
+            && let Some(name) = first.as_ref().and_then(|n| mapped.get(n))
+            && let Some(index) = self
+                .brush_state
+                .presets
+                .iter()
+                .position(|p| &p.name == name)
+        {
+            self.apply_preset(index);
+        }
+    }
+
     pub(crate) fn install_default_presets(&mut self) {
+        self.install_local_pack();
         let defaults = Self::default_brush_presets();
         if !self.brush_state.library.file.defaults_installed {
             self.add_missing_defaults(&defaults);
@@ -401,14 +548,58 @@ impl PainterApp {
                 .position(|d| d.name == p.name)
                 .unwrap_or(usize::MAX)
         };
-        self.brush_state.presets.sort_by_key(rank);
+        if self.brush_state.library.file.installed_packs.is_empty() {
+            self.brush_state.presets.sort_by_key(rank);
+        }
+        self.brush_state
+            .library
+            .file
+            .reconcile(&self.brush_state.presets);
     }
 
     /// Put back the presets that came with the app and were deleted.
     pub(crate) fn restore_default_presets(&mut self) {
         let defaults = Self::default_brush_presets();
         self.add_missing_defaults(&defaults);
+        self.restore_pack_presets();
         self.install_default_presets();
+    }
+
+    fn restore_pack_presets(&mut self) {
+        let Some(Ok((manifest, presets))) =
+            crate::brush_engine::pack::root(&self.brush_state.brushes_path)
+                .map(|root| crate::brush_engine::pack::load(&root))
+        else {
+            return;
+        };
+        for mut preset in presets {
+            if let Some(name) = self.brush_state.library.file.pack_presets.get(&preset.name) {
+                preset.name = name.clone();
+            }
+            if !self
+                .brush_state
+                .presets
+                .iter()
+                .any(|p| p.name == preset.name)
+            {
+                self.add_user_preset(preset);
+            }
+        }
+        for c in manifest.collections {
+            let lib = &mut self.brush_state.library.file;
+            let folder = lib
+                .ensure_folder_path(&[crate::brush_engine::pack::LIBRARY_NAME.into(), c.name])
+                .unwrap();
+            for source in c.brushes {
+                if let Some(name) = lib.pack_presets.get(&source).cloned() {
+                    let id = lib.preset_id(&name);
+                    if !lib.folders.iter().any(|f| f.brushes.contains(&id)) {
+                        lib.move_brush(id, folder, None);
+                    }
+                }
+            }
+        }
+        self.brush_state.library.dirty = true;
     }
 
     fn add_missing_defaults(&mut self, defaults: &[BrushPreset]) {
@@ -422,6 +613,9 @@ impl PainterApp {
                 continue;
             }
             self.add_user_preset(preset.clone());
+            if !self.brush_state.library.file.installed_packs.is_empty() {
+                self.edit_library(|lib| place_default(lib, &preset.name));
+            }
             let tags = crate::app::brush_library::default_tags(&preset.name);
             self.edit_library(|lib| {
                 (lib.tags.entry(preset.name.clone()))
@@ -458,9 +652,23 @@ impl PainterApp {
             return;
         };
         let defaults = Self::default_brush_presets();
-        let Some(default) = defaults.into_iter().find(|d| d.name == name) else {
-            return;
-        };
+        let default = defaults.into_iter().find(|d| d.name == name).or_else(|| {
+            let source = self
+                .brush_state
+                .library
+                .file
+                .pack_presets
+                .iter()
+                .find(|(_, n)| **n == name)?
+                .0;
+            let root = crate::brush_engine::pack::root(&self.brush_state.brushes_path)?;
+            crate::brush_engine::pack::load(&root)
+                .ok()?
+                .1
+                .into_iter()
+                .find(|p| p.name == *source)
+        });
+        let Some(default) = default else { return };
         self.brush_state.presets[index].brush = default.brush;
         self.forget_preset_preview(&name);
         self.save_preset(index);
@@ -483,6 +691,11 @@ impl PainterApp {
                     .collect();
                 // Encoded and written on the file writer's thread.
                 crate::app::jobs::write_later(path.clone(), "brush preset", move || {
+                    // A collection's offsets change on rewrite. Keep resources
+                    // still referenced by the other brushes alive first.
+                    for preset in &in_file {
+                        preset_file::load_from_file(preset);
+                    }
                     preset_file::encode(&in_file)
                 });
                 Ok(())
@@ -546,9 +759,32 @@ impl PainterApp {
         crate::app::jobs::flush_writes();
         // The brush in hand (or one parked) may be painting with its tips.
         preset_file::load_from_file(preset);
-        if let Err(err) = std::fs::remove_file(&path)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
+        let remaining: Vec<_> = self
+            .brush_state
+            .presets
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| *i != index && p.file.as_ref() == Some(&path))
+            .map(|(_, p)| p.clone())
+            .collect();
+        let deleted = if remaining.is_empty() {
+            std::fs::remove_file(&path)
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|e| e.to_string())
+        } else {
+            for p in &remaining {
+                preset_file::load_from_file(p);
+            }
+            preset_file::encode(&remaining)
+                .and_then(|bytes| crate::project::write_atomically(&path, &bytes))
+        };
+        if let Err(err) = deleted {
             self.export_state.message = Some(format!("Couldn't delete the preset: {err}"));
             return;
         }
@@ -642,6 +878,10 @@ impl PainterApp {
             let meta = meta.get(i).cloned().unwrap_or_default();
             if let Some(name) = name {
                 self.edit_library(|lib| {
+                    if let Some(folder) = lib.ensure_folder_path(&meta.folder) {
+                        let id = lib.preset_id(&name);
+                        lib.move_brush(id, folder, None);
+                    }
                     lib.tags.remove(&name);
                     for tag in &meta.tags {
                         lib.add_tag(&name, tag);
@@ -714,6 +954,7 @@ pub(crate) fn export_presets_bytes(
                 .cloned()
                 .collect(),
             favourite: lib.is_favourite(&p.name),
+            folder: lib.brush_folder(&p.name),
         })
         .collect();
     Some(preset_file::encode_with_meta(&presets, &meta))
@@ -774,6 +1015,19 @@ impl ImportedBrushes {
     }
 }
 
+/// Built-in preset `name` into its kind's folder under the default brushes.
+fn place_default(lib: &mut crate::app::brush_library::LibraryFile, name: &str) {
+    use crate::app::brush_library::default_folder;
+    let path = [
+        crate::brush_engine::pack::LIBRARY_NAME.to_string(),
+        default_folder(name).to_string(),
+    ];
+    if let Some(folder) = lib.ensure_folder_path(&path) {
+        let id = lib.preset_id(name);
+        lib.move_brush(id, folder, None);
+    }
+}
+
 /// `name`, or `name 2`, `name 3`… if it's `taken`.
 fn unique_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(name) {
@@ -805,6 +1059,93 @@ fn write_preset_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pack_migration_preserves_custom_brushes_and_deleting_one_keeps_its_collection() {
+        use crate::brush_engine::pack::{Collection, Manifest, PACK_ID};
+        let dir = std::env::temp_dir().join(format!("rp-pack-migration-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = crate::project::tests::test_app_pub(crate::canvas::Canvas::new(
+            64,
+            64,
+            Color32::WHITE,
+            64,
+        ));
+        app.brush_state.brushes_path = dir.join("brushes");
+        app.brush_state.presets.clear();
+        app.brush_state.library.file.defaults_installed = false;
+        let preset = |name: &str| BrushPreset {
+            name: name.into(),
+            brush: crate::brush_engine::brush::Brush::new(20.0, 80.0, Color32::BLACK, 10.0),
+            file: None,
+        };
+        app.add_user_preset(preset("Mine"));
+        app.edit_library(|lib| {
+            lib.add_tag("Mine", "Personal");
+            lib.toggle_favourite("Mine");
+        });
+        let root = app.brush_state.brushes_path.join("packs").join(PACK_ID);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("test.rpbrush"),
+            preset_file::encode(&[preset("Mine"), preset("Nib")]).unwrap(),
+        )
+        .unwrap();
+        let manifest = Manifest {
+            version: 2,
+            id: PACK_ID.into(),
+            file: "test.rpbrush".into(),
+            collections: vec![Collection {
+                name: "Pens".into(),
+                brushes: vec!["Mine".into(), "Nib".into()],
+            }],
+        };
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        app.install_default_presets();
+        assert_eq!(
+            app.brush_state.presets.len(),
+            3 + PainterApp::default_brush_presets().len()
+        );
+        let pens = app
+            .brush_state
+            .library
+            .file
+            .folders
+            .iter()
+            .find(|f| f.name == "Pens")
+            .unwrap();
+        assert_eq!(
+            pens.brushes.len(),
+            2,
+            "the app's own go in their kind's folder"
+        );
+        assert!(app.brush_state.library.file.is_favourite("Mine"));
+        assert_eq!(app.brush_state.library.file.tags("Mine"), ["Personal"]);
+        assert_eq!(
+            app.brush_state.library.file.brush_folder("Mine 2"),
+            ["Default brushes", "Pens"]
+        );
+        let nib = app
+            .brush_state
+            .presets
+            .iter()
+            .position(|p| p.name == "Nib")
+            .unwrap();
+        let collection = app.brush_state.presets[nib].file.clone().unwrap();
+        app.delete_user_preset(nib);
+        let survivors = preset_file::decode(&std::fs::read(collection).unwrap()).unwrap();
+        assert_eq!(survivors.len(), 1);
+        assert_eq!(survivors[0].name, "Mine 2");
+        app.install_default_presets();
+        assert!(!app.brush_state.presets.iter().any(|p| p.name == "Nib"));
+        app.restore_default_presets();
+        assert!(app.brush_state.presets.iter().any(|p| p.name == "Nib"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn an_added_picture_is_a_paper_texture_and_a_bad_one_is_reported() {

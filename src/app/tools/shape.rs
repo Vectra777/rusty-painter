@@ -746,7 +746,9 @@ impl PainterApp {
     /// On layer `layer_idx`, as one undo step: `fills`' insides in the
     /// brush colour, then `strokes` with the brush (steady: no stabilizer
     /// lag at corners), each mirrored by mirror painting, within the
-    /// selection. The Shape tool's and the Pen's paths alike.
+    /// selection. The Shape tool's and the Pen's paths alike. Painted on
+    /// the stroke worker: a big brush along a long outline can take
+    /// seconds, which the window shouldn't wait for.
     pub(crate) fn paint_outlines(
         &mut self,
         layer_idx: usize,
@@ -754,94 +756,108 @@ impl PainterApp {
         strokes: &[Vec<Vec2>],
     ) {
         self.release_canvas();
-        let mut undo = UndoAction {
-            tiles: Vec::new(),
-            selection: None,
-            transform: None,
-            layer_action: None,
-        };
         let symmetry = self.workspace.symmetry;
         let copies = symmetry.copies();
-        let mut changed: Option<egui::Rect> = None;
-        let mut grow = |r: egui::Rect| changed = Some(changed.map_or(r, |c| c.union(r)));
-
-        // The inside first, so the outline paints over its edge.
         let eraser = self.brush_state.brush.brush_options.blend_mode == BlendMode::Eraser;
+        let color = self.brush_state.brush.brush_options.color;
+        // The insides' coverage here (it needs the selection); painted
+        // first, so the outline paints over their edge.
+        let mut masks = Vec::new();
         if !eraser {
-            let color = self.brush_state.brush.brush_options.color;
             for outline in fills {
                 let mut polygons = vec![outline.clone()];
                 for copy in &copies {
                     polygons.push(outline.iter().map(|&p| symmetry.map(copy, p)).collect());
                 }
-                for polygon in polygons {
-                    if let Some(mask) = self.shape_fill_mask(polygon)
-                        && let Some(rect) =
-                            self.canvas.paint_mask(layer_idx, &mask, color, &mut undo)
-                    {
-                        grow(rect);
-                    }
+                masks.extend(polygons.into_iter().filter_map(|p| self.shape_fill_mask(p)));
+            }
+        }
+        let mut brush = self.brush_state.brush.clone();
+        brush.stabilizer_algorithm = StabilizerAlgorithm::None;
+        let selection = (!strokes.is_empty() && self.selection_manager.has_selection())
+            .then(|| SelectionManager::with_shape(self.layer_selection_shape()));
+        if !strokes.is_empty() && !eraser {
+            self.brush_state.remember_color(color);
+        }
+        let strokes = strokes.to_vec();
+        let canvas = std::sync::Arc::clone(&self.canvas);
+        let canvas_id = std::sync::Arc::as_ptr(&canvas) as usize;
+        let pool = std::sync::Arc::clone(&self.workspace.pool);
+        self.run_on_worker("Applying the shape…", move || {
+            let mut undo = UndoAction {
+                tiles: Vec::new(),
+                selection: None,
+                transform: None,
+                layer_action: None,
+            };
+            let mut changed: Option<egui::Rect> = None;
+            let mut grow = |r: egui::Rect| changed = Some(changed.map_or(r, |c| c.union(r)));
+            for mask in &masks {
+                if let Some(rect) = canvas.paint_mask(layer_idx, mask, color, &mut undo) {
+                    grow(rect);
                 }
             }
-        }
-
-        if !strokes.is_empty() {
-            let mut brush = self.brush_state.brush.clone();
-            brush.stabilizer_algorithm = StabilizerAlgorithm::None;
-            let selection = self
-                .selection_manager
-                .has_selection()
-                .then(|| SelectionManager::with_shape(self.layer_selection_shape()));
-            let mut tiles = StrokeTiles::default();
-            let pool = std::sync::Arc::clone(&self.workspace.pool);
-            {
-                let canvas = &*self.canvas;
-                let mut context =
-                    StrokeContext::new(&pool, canvas, selection.as_ref(), &mut undo, &mut tiles)
-                        .with_symmetry(&symmetry, &copies);
-                pool.install(|| {
-                    for outline in strokes {
-                        let mut stroke = StrokeState::new();
-                        // In steps of a couple of pixels: samples far apart
-                        // are joined by a curve (a fast stroke's), which
-                        // would bow a straight side at a gentle corner.
-                        let steps = outline.first().into_iter().copied().chain(
-                            outline.windows(2).flat_map(|w| {
-                                let n = ((w[1] - w[0]).length() / 2.0).ceil().max(1.0) as usize;
-                                (1..=n).map(move |i| w[0] + (w[1] - w[0]) * (i as f32 / n as f32))
-                            }),
-                        );
-                        for p in steps {
-                            stroke.add_point(&mut brush, p, 1.0, &mut context);
+            if !strokes.is_empty() {
+                let mut tiles = StrokeTiles::default();
+                {
+                    let mut context = StrokeContext::new(
+                        &pool,
+                        &canvas,
+                        selection.as_ref(),
+                        &mut undo,
+                        &mut tiles,
+                    )
+                    .with_symmetry(&symmetry, &copies);
+                    pool.install(|| {
+                        for outline in &strokes {
+                            let mut stroke = StrokeState::new();
+                            // Nobody sees it until it's done: resolved
+                            // (and its edges drawn) once, when it ends.
+                            context.defer_resolves(true);
+                            // In steps of a couple of pixels: samples far
+                            // apart are joined by a curve (a fast stroke's),
+                            // which would bow a straight side at a gentle
+                            // corner.
+                            let steps = outline.first().into_iter().copied().chain(
+                                outline.windows(2).flat_map(|w| {
+                                    let n = ((w[1] - w[0]).length() / 2.0).ceil().max(1.0) as usize;
+                                    (1..=n)
+                                        .map(move |i| w[0] + (w[1] - w[0]) * (i as f32 / n as f32))
+                                }),
+                            );
+                            for p in steps {
+                                stroke.add_point(&mut brush, p, 1.0, &mut context);
+                            }
+                            stroke.finish(&mut brush, &mut context);
                         }
-                        stroke.finish(&mut brush, &mut context);
-                    }
-                });
+                    });
+                }
+                let ts = canvas.tile_size() as f32;
+                for &(tx, ty) in tiles.buffers.keys() {
+                    grow(egui::Rect::from_min_size(
+                        egui::pos2(tx as f32 * ts, ty as f32 * ts),
+                        egui::vec2(ts, ts),
+                    ));
+                }
             }
-            let ts = self.canvas.tile_size() as f32;
-            for &(tx, ty) in tiles.buffers.keys() {
-                grow(egui::Rect::from_min_size(
-                    egui::pos2(tx as f32 * ts, ty as f32 * ts),
-                    egui::vec2(ts, ts),
-                ));
-            }
-            if !eraser {
-                let color = self.brush_state.brush.brush_options.color;
-                self.brush_state.remember_color(color);
-            }
-        }
-
-        // A tile painted by both keeps only its first (original) snapshot.
-        let mut seen = std::collections::HashSet::new();
-        undo.tiles.retain(|t| seen.insert((t.layer_id, t.tx, t.ty)));
-        if undo.tiles.is_empty() {
-            return;
-        }
-        self.push_undo(undo);
-        if let Some(rect) = changed {
-            self.mark_tiles_in_bounds_dirty(rect);
-        }
-        self.layer_state.thumbnails_dirty = true;
+            // A tile painted by both keeps only its first (original) snapshot.
+            let mut seen = std::collections::HashSet::new();
+            undo.tiles.retain(|t| seen.insert((t.layer_id, t.tx, t.ty)));
+            drop(canvas);
+            Box::new(move |app: &mut PainterApp| {
+                // (Another document by now: its history isn't this one's.)
+                if undo.tiles.is_empty()
+                    || std::sync::Arc::as_ptr(&app.canvas) as usize != canvas_id
+                {
+                    return;
+                }
+                app.push_undo(undo);
+                if let Some(rect) = changed {
+                    app.mark_tiles_in_bounds_dirty(rect);
+                }
+                app.layer_state.thumbnails_dirty = true;
+            })
+        });
     }
 
     /// Coverage of `polygon`'s inside, clipped to the selection.
@@ -1029,6 +1045,74 @@ mod tests {
                 "side {i} bows out"
             );
         }
+    }
+
+    #[test]
+    fn applying_a_shape_paints_on_the_worker_without_holding_up_the_frame() {
+        let mut app = app();
+        app.workspace.jobs.defer = true;
+        app.workspace.shapes.settings.style = ShapeStyle::Both;
+        drag(
+            &mut app,
+            ShapeKind::Rectangle,
+            Vec2::new(20.0, 20.0),
+            Vec2::new(100.0, 80.0),
+            ShapeMods::default(),
+        );
+        app.shape_commit();
+        assert!(
+            app.workspace.jobs.blocking_label().is_some(),
+            "queued, not painted in the frame"
+        );
+        for _ in 0..10_000 {
+            app.sync_stroke_worker();
+            if app.workspace.jobs.blocking_label().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(painted(&app, 20, 50) && painted(&app, 60, 50));
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one step");
+    }
+
+    /// Resolving (and drawing watercolour edges) once at the end paints
+    /// exactly what resolving after every sample does.
+    #[test]
+    fn a_deferred_stroke_with_wet_edges_paints_the_same_pixels() {
+        use crate::brush_engine::stroke::{StrokeContext, StrokeState, StrokeTiles};
+        let run = |defer: bool| {
+            let app = app();
+            let mut brush = crate::brush_engine::brush::Brush::new(40.0, 60.0, Color32::BLACK, 3.0);
+            brush.wet_edge = 0.6;
+            let pool = std::sync::Arc::clone(&app.workspace.pool);
+            let mut undo = UndoAction {
+                tiles: Vec::new(),
+                selection: None,
+                transform: None,
+                layer_action: None,
+            };
+            let mut tiles = StrokeTiles::default();
+            let canvas = std::sync::Arc::clone(&app.canvas);
+            {
+                let mut context = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+                let mut stroke = StrokeState::with_seed(7);
+                context.defer_resolves(defer);
+                for i in 0..=60 {
+                    let p = Vec2::new(20.0 + 3.0 * i as f32, 60.0 + (i as f32 * 0.2).sin() * 20.0);
+                    stroke.add_point(&mut brush, p, 1.0, &mut context);
+                }
+                stroke.finish(&mut brush, &mut context);
+            }
+            let layer = app.canvas.active_layer_idx;
+            let mut keys = app.canvas.layer_tile_keys(layer);
+            keys.sort_unstable();
+            keys.into_iter()
+                .filter_map(|(x, y)| app.canvas.get_layer_tile_data(layer, x, y))
+                .collect::<Vec<_>>()
+        };
+        let each = run(false);
+        assert!(each.iter().flatten().any(|p| p.a() > 0), "it painted");
+        assert!(each == run(true));
     }
 
     #[test]

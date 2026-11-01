@@ -276,6 +276,49 @@ fn a_mixing_brush_s_colour_rate_follows_its_inputs() {
 }
 
 #[test]
+fn a_mixing_brush_gets_the_pen_s_lean_and_its_measured_pressure() {
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, PenTilt, Sensor};
+    // Its size follows the lean and the pressure, as a brush's would.
+    let stroke = |tilt: Option<PenTilt>, estimate: Option<f32>| {
+        let mut app = app(None);
+        pure_mixing(&mut app);
+        app.brush_state.brush.inputs = [Sensor::Tilt, Sensor::Pressure]
+            .map(|sensor| InputMapping {
+                sensor,
+                setting: DabSetting::Size,
+                ..Default::default()
+            })
+            .to_vec();
+        app.viewport.touch.pen_tilt = tilt;
+        // The first sample's pressure an estimate, its measured value
+        // after it.
+        app.viewport.touch.pen_awaiting = estimate.map(|_| 0);
+        app.start_stroke_with_pressure(Vec2::new(10.0, 32.0), estimate.unwrap_or(1.0));
+        if estimate.is_some() {
+            app.stroke_worker.update(0, 1.0);
+        }
+        for i in 1..=20 {
+            app.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), 1.0);
+        }
+        app.finish_stroke();
+        app.settle_strokes();
+        layer(&app)
+    };
+    let lean = |lean| {
+        Some(PenTilt {
+            lean,
+            direction: 0.0,
+        })
+    };
+    let upright = stroke(lean(0.0), None);
+    assert!(stroke(lean(1.0), None) != upright, "the lean shows");
+    assert!(
+        stroke(lean(0.0), Some(0.05)) == upright,
+        "the measured pressure"
+    );
+}
+
+#[test]
 fn a_lightness_tip_lays_relief_that_undoes_saves_and_bakes() {
     use crate::brush_engine::brush_options::{KritaSmudge, Mixing, PixelBrushShape, TipMapping};
     // A colour tip: dark on its top half, light on its bottom (along
@@ -1071,6 +1114,68 @@ fn a_mixing_brush_with_a_paint_load_runs_dry() {
     // Two brush widths of colour: painted at the start, dry by the end.
     assert!(loaded.a() > 100, "{loaded:?}");
     assert!(dry.a() < 20, "ran dry: {dry:?}");
+}
+
+#[test]
+fn a_paint_load_lasts_its_brush_widths_whatever_the_spacing_and_dab_count() {
+    use crate::brush_engine::brush_options::Mixing;
+    // Three brush widths (60 px) of colour, from x = 10 (none smeared on
+    // past them).
+    let at = |spacing: f32, count: u32| {
+        let mut app = app(None);
+        app.active_tool = crate::app::tools::Tool::Brush;
+        app.brush_state.brush.mixing = Some(Mixing {
+            smudge_length: 0.0,
+            color_rate: 0.6,
+            load: 3.0,
+            ..Default::default()
+        });
+        app.brush_state.brush.brush_options.spacing = spacing;
+        app.brush_state.brush.dynamics.random.count = count;
+        brush_drag(&mut app, 10.0, 110.0);
+        (pixel(&app, 40), pixel(&app, 90))
+    };
+    for (spacing, count) in [(10.0, 1), (1.0, 1), (1.0, 4)] {
+        let (half, past) = at(spacing, count);
+        // Half way through the load: still painting.
+        assert!(half.a() > 100, "{spacing}% x{count}: {half:?}");
+        assert!(past.a() < 20, "{spacing}% x{count} ran dry: {past:?}");
+    }
+}
+
+#[test]
+fn a_lighter_mixing_dab_lays_less_paint_not_thinned_paint() {
+    use crate::brush_engine::brush_options::Mixing;
+    use crate::brush_engine::dynamics::{DabSetting, InputMapping, Sensor};
+    // A watery brush (a third brush colour each dab) on an empty layer:
+    // the paper it picks up doesn't wash its colour out, and lighter
+    // pressure (on its opacity) lays less, as a brush without mixing.
+    let middle = |pressure: f32, mixing: bool| {
+        let mut app = app(None);
+        app.active_tool = crate::app::tools::Tool::Brush;
+        let b = &mut app.brush_state.brush;
+        b.mixing = mixing.then(|| Mixing {
+            smudge_length: 0.6,
+            color_rate: 0.3,
+            ..Default::default()
+        });
+        b.inputs = vec![InputMapping {
+            sensor: Sensor::Pressure,
+            setting: DabSetting::Opacity,
+            ..Default::default()
+        }];
+        app.start_stroke_with_pressure(Vec2::new(10.0, 32.0), pressure);
+        for i in 1..=20 {
+            app.add_stroke_point(Vec2::new(10.0 + i as f32 * 5.0, 32.0), pressure);
+        }
+        app.finish_stroke();
+        app.settle_strokes();
+        pixel(&app, 60).a()
+    };
+    let (full, light) = (middle(1.0, true), middle(0.6, true));
+    assert!(full > 200, "{full}");
+    assert!(light >= middle(0.6, false) / 2, "{light}");
+    assert!(light > 120 && light <= full, "{light} vs {full}");
 }
 
 #[test]

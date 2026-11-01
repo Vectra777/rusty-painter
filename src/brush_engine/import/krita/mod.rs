@@ -1025,6 +1025,7 @@ fn read_kpp(
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0),
                     invert: yes("Texture/Pattern/Invert"),
+                    on_tip: false,
                     placement: crate::brush_engine::texture::GrainPlacement {
                         random_offset: yes("Texture/Pattern/isRandomOffsetX")
                             || yes("Texture/Pattern/isRandomOffsetY"),

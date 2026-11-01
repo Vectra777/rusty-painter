@@ -122,6 +122,8 @@ impl DualTip {
         );
         b.anti_aliasing = main.anti_aliasing;
         b.antialias_width = main.antialias_width;
+        // (Its dabs spread on a big tip as the brush's do, or not.)
+        b.every_dab = main.every_dab;
         let o = &mut b.brush_options;
         o.pixel_shape = self.shape.clone();
         o.blend_mode = BlendMode::Normal;

@@ -29,12 +29,13 @@ env_logger = "0.11"
 log = "0.4"
 rand = "0.9"
 rayon = "1.9"
+bytemuck = "1.24"
 rustc-hash = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff", "gif", "webp"] }
 wide = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-zstd = "0.13"
+zstd = "0.14"
 # TIFF written directly (an ICC profile, CMYK): the version `image` uses.
 tiff = "0.10"
 crc32fast = "1.5"
@@ -145,6 +146,9 @@ winresource = "0.1"
 [package.metadata.android]
 package = "io.vectra.rustypainter"
 build_targets = ["aarch64-linux-android"]
+# APK assets: the default brush pack (default-v1/), put here by the release
+# build; empty otherwise (scripts/build-android.sh creates it).
+assets = "target/android-assets"
 # Launcher icons (scripts/make-icons.sh).
 resources = "android/res"
 
