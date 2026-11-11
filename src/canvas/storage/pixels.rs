@@ -485,25 +485,49 @@ impl Canvas {
         if bx1 <= bx0 || by1 <= by0 {
             return None;
         }
-        let mut cells = Vec::new();
-        for ty in by0 / ts..=(by1 - 1) / ts {
-            for tx in bx0 / ts..=(bx1 - 1) / ts {
-                if let Some(cell) = self.ensure_layer_tile(layer_idx, tx, ty) {
-                    cells.push(((tx, ty), cell));
-                }
-            }
-        }
+        // The part of tile `(tx, ty)` the mask covers, in tile pixels
+        // (`[lx0, ly0, lx1, ly1)`), and the mask row under each of its rows.
+        let mx1 = mask.x0 + mask.w as i32;
+        let my1 = mask.y0 + mask.h as i32;
+        let part = |tx: i32, ty: i32| {
+            let lx0 = (mask.x0 - tx * ts).max(0);
+            let ly0 = (mask.y0 - ty * ts).max(0);
+            let lx1 = (mx1 - tx * ts).min(ts);
+            let ly1 = (my1 - ty * ts).min(ts);
+            (lx1 > lx0 && ly1 > ly0).then_some([lx0, ly0, lx1, ly1])
+        };
+        let mask_row = |tx: i32, ty: i32, [lx0, _, lx1, _]: [i32; 4], ly: i32| {
+            let (x, y) = (tx * ts + lx0 - mask.x0, ty * ts + ly - mask.y0);
+            let at = y as usize * mask.w + x as usize;
+            &mask.data[at..at + (lx1 - lx0) as usize]
+        };
+        // Only tiles the mask touches (an ellipse's corners make none).
+        let keys: Vec<(i32, i32)> = (by0 / ts..=(by1 - 1) / ts)
+            .flat_map(|ty| (bx0 / ts..=(bx1 - 1) / ts).map(move |tx| (tx, ty)))
+            .collect();
+        let keys: Vec<(i32, i32)> = keys
+            .into_par_iter()
+            .filter(|&(tx, ty)| {
+                part(tx, ty).is_some_and(|p| {
+                    (p[1]..p[3]).any(|ly| mask_row(tx, ty, p, ly).iter().any(|&c| c != 0))
+                })
+            })
+            .collect();
+        let cells = self.ensure_layer_tiles(layer_idx, keys);
         let tile_len = (ts * ts) as usize;
+        // What an empty tile is kept as for undo (compressed once).
+        let transparent = SnapshotPixels::transparent(tile_len);
         let snapshots: Vec<TileSnapshot> = cells
             .par_iter()
             .filter_map(|&((tx, ty), ref cell)| {
+                let p = part(tx, ty)?;
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
                 if let (data, Some(deep)) = cell.deep_parts(self.depth, tile_len) {
                     let before = deep.clone();
                     let mut changed = false;
-                    for ly in 0..ts {
-                        for lx in 0..ts {
-                            let cov = mask.value(tx * ts + lx, ty * ts + ly);
+                    for ly in p[1]..p[3] {
+                        let row = mask_row(tx, ty, p, ly);
+                        for (lx, &cov) in (p[0]..p[2]).zip(row) {
                             if cov == 0 {
                                 continue;
                             }
@@ -531,19 +555,22 @@ impl Canvas {
                     });
                 }
                 let data = cell.data_or_insert(tile_len);
-                let before = data.clone();
+                let was_clear = data.iter().all(|&p| p == Color32::TRANSPARENT);
+                let before = (!was_clear).then(|| data.clone());
                 let mut changed = false;
-                for ly in 0..ts {
-                    for lx in 0..ts {
-                        let cov = mask.value(tx * ts + lx, ty * ts + ly);
+                for ly in p[1]..p[3] {
+                    let row = mask_row(tx, ty, p, ly);
+                    let base = (ly * ts) as usize;
+                    for (px, &cov) in data[base + p[0] as usize..base + p[2] as usize]
+                        .iter_mut()
+                        .zip(row)
+                    {
                         if cov == 0 {
                             continue;
                         }
-                        let i = (ly * ts + lx) as usize;
-                        let dst = data[i];
-                        let out = apply(dst, cov);
-                        changed |= out != dst;
-                        data[i] = out;
+                        let out = apply(*px, cov);
+                        changed |= out != *px;
+                        *px = out;
                     }
                 }
                 if !changed {
@@ -558,7 +585,7 @@ impl Canvas {
                     y0: 0,
                     width: tile_len / ts as usize,
                     height: ts as usize,
-                    data: before.into(),
+                    data: before.map_or_else(|| transparent.clone(), SnapshotPixels::from),
                 })
             })
             .collect();
@@ -594,14 +621,11 @@ impl Canvas {
         if bx1 <= bx0 || by1 <= by0 {
             return None;
         }
-        let mut cells = Vec::new();
-        for ty in by0 / ts..=(by1 - 1) / ts {
-            for tx in bx0 / ts..=(bx1 - 1) / ts {
-                if let Some(cell) = self.ensure_layer_tile(layer_idx, tx, ty) {
-                    cells.push(((tx, ty), cell));
-                }
-            }
-        }
+        let cells = self.ensure_layer_tiles(
+            layer_idx,
+            (by0 / ts..=(by1 - 1) / ts)
+                .flat_map(|ty| (bx0 / ts..=(bx1 - 1) / ts).map(move |tx| (tx, ty))),
+        );
         let tile_len = (ts * ts) as usize;
         let snapshots: Vec<TileSnapshot> = cells
             .par_iter()
@@ -672,10 +696,7 @@ impl Canvas {
             }
         }
         let tile_len = (ts * ts) as usize;
-        let cells: Vec<_> = keys
-            .iter()
-            .filter_map(|&(tx, ty)| Some(((tx, ty), self.ensure_layer_tile(layer_idx, tx, ty)?)))
-            .collect();
+        let cells = self.ensure_layer_tiles(layer_idx, keys);
         let depth = self.depth;
         let tiles = cells
             .into_par_iter()
@@ -750,7 +771,15 @@ impl Canvas {
                 let (tx, ty) = (*tx, *ty);
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
                 let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
-                let mut out = original.clone();
+                // Into the tile's own buffer (no new one a tile a frame).
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                match cell.data_mut() {
+                    Some(data) if data.len() == original.len() => data.copy_from_slice(original),
+                    _ => cell.set_data(Some(original.clone())),
+                }
+                let Some(out) = cell.data_mut() else {
+                    return;
+                };
                 let mut src = vec![Color32::TRANSPARENT; (lx1 - lx0).max(0) as usize];
                 for ly in ly0..ly1 {
                     row(tx * ts + lx0, ty * ts + ly, &mut src);
@@ -771,9 +800,8 @@ impl Canvas {
                         out[i] = px;
                     }
                 }
-                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                cell.is_empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
-                cell.set_data(Some(out));
+                let empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
+                cell.is_empty = empty;
             });
     }
 
@@ -1052,6 +1080,8 @@ impl Canvas {
             return Vec::new();
         };
         let (layer_id, ts) = (layer.id, self.tile_size);
+        // What an empty tile is kept as (compressed once).
+        let transparent = SnapshotPixels::transparent(ts * ts);
         region
             .tiles
             .par_iter()
@@ -1070,6 +1100,9 @@ impl Canvas {
                     height: ts,
                     data: match deep {
                         Some(deep) => SnapshotPixels::Deep(deep.clone()),
+                        None if original.iter().all(|&p| p == Color32::TRANSPARENT) => {
+                            transparent.clone()
+                        }
                         None => original.clone().into(),
                     },
                 })

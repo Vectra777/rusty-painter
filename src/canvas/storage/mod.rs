@@ -1062,24 +1062,61 @@ impl Canvas {
                 .clone()
         };
 
-        {
-            let mut guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.data().is_none() {
-                let fill_color = if layer_idx == 0 {
-                    self.clear_color
-                } else if matches!(layer.kind, LayerKind::Mask { .. }) {
-                    // A mask starts out showing everything.
-                    Color32::WHITE
-                } else {
-                    Color32::TRANSPARENT
-                };
-
-                let data = vec![fill_color; self.tile_size * self.tile_size];
-                guard.is_empty = fill_color == Color32::TRANSPARENT;
-                guard.set_data(Some(data));
-            }
-        }
+        self.init_tile(
+            layer_idx,
+            &mut tile_arc.lock().unwrap_or_else(|e| e.into_inner()),
+        );
         Some(tile_arc)
+    }
+
+    /// `ensure_layer_tile` for many tiles: the tile map is locked
+    /// once, and the new tiles' pixels are made in parallel (one at a time,
+    /// tens of thousands of them took longer than painting them).
+    pub(crate) fn ensure_layer_tiles(
+        &self,
+        layer_idx: usize,
+        keys: impl IntoIterator<Item = (i32, i32)>,
+    ) -> Vec<(TileKey, SharedCell)> {
+        use rayon::prelude::*;
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return Vec::new();
+        };
+        let cells: Vec<_> = {
+            let mut tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
+            keys.into_iter()
+                .map(|key| {
+                    let cell = tiles
+                        .entry(key)
+                        .or_insert_with(|| Arc::new(Mutex::new(TileCell::new(None, true))));
+                    (key, Arc::clone(cell))
+                })
+                .collect()
+        };
+        cells.par_iter().for_each(|(_, cell)| {
+            self.init_tile(
+                layer_idx,
+                &mut cell.lock().unwrap_or_else(|e| e.into_inner()),
+            );
+        });
+        cells
+    }
+
+    /// Give a tile of layer `layer_idx` without pixels its empty colour.
+    fn init_tile(&self, layer_idx: usize, tile: &mut TileCell) {
+        if tile.data().is_some() {
+            return;
+        }
+        let fill_color = if layer_idx == 0 {
+            self.clear_color
+        } else if matches!(self.layers[layer_idx].kind, LayerKind::Mask { .. }) {
+            // A mask starts out showing everything.
+            Color32::WHITE
+        } else {
+            Color32::TRANSPARENT
+        };
+        let data = vec![fill_color; self.tile_size * self.tile_size];
+        tile.is_empty = fill_color == Color32::TRANSPARENT;
+        tile.set_data(Some(data));
     }
 
     /// Ensure the active layer has storage for the given tile.

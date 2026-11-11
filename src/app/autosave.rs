@@ -31,7 +31,7 @@ pub struct AutosaveState {
     /// A file left by the last session, offered for recovery.
     pub recovery: Option<PathBuf>,
     /// The window had the focus last frame (iOS: the app was in front).
-    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
     focused: bool,
     /// Which autosave file is this document's: each tab has its own.
     slot: usize,
@@ -174,7 +174,7 @@ impl PainterApp {
 
     /// Once a frame: autosave when there are changes and the app is idle.
     pub(crate) fn autosave_tick(&mut self, ctx: &eframe::egui::Context) {
-        #[cfg(target_os = "ios")]
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         self.save_on_leaving(ctx);
         let now = Instant::now();
         let active = ctx.input(|i| !i.events.is_empty() || i.pointer.any_down());
@@ -207,10 +207,10 @@ impl PainterApp {
         self.autosave_in_background();
     }
 
-    /// iOS ends apps in the background without warning (no `on_exit`):
-    /// what quitting writes is written as the app leaves the front, the
-    /// window losing the focus (the patched winit's doing).
-    #[cfg(target_os = "ios")]
+    /// iOS and Android end apps in the background without warning (no
+    /// `on_exit`, or a low-memory kill): what quitting writes is written as
+    /// the app leaves the front, the window losing the focus.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     fn save_on_leaving(&mut self, ctx: &eframe::egui::Context) {
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         if !std::mem::replace(&mut self.workspace.autosave.focused, focused) || focused {
@@ -234,7 +234,9 @@ impl PainterApp {
         state.last_write = Some(Instant::now());
         self.spawn_job(None, move || {
             // A crash mid-write keeps the last one.
-            let result = snapshot.write(&path);
+            let result = snapshot
+                .encode_data_only()
+                .and_then(|bytes| crate::project::write_atomically(&path, &bytes));
             write_autosave_source(&path, project.as_deref());
             Box::new(move |_: &mut PainterApp| {
                 if let Err(err) = result {
@@ -262,7 +264,8 @@ impl PainterApp {
         self.release_canvas();
         let path = self.autosave_path();
         // A crash mid-write keeps the last one.
-        let result = crate::project::encode_project(self)
+        let result = crate::project::ProjectSnapshot::capture(self)
+            .encode_data_only()
             .and_then(|bytes| crate::project::write_atomically(&path, &bytes));
         if let Err(err) = result {
             log::error!("Autosave failed: {err}");
@@ -424,6 +427,8 @@ mod tests {
         let mut app = app(&dir);
         assert!(!app.has_unsaved_work());
         change(&mut app);
+        let red = vec![Color32::RED; 64 * 64];
+        app.canvas.set_layer_tile_data(1, 0, 0, red.clone());
         assert!(app.has_unsaved_work());
         app.autosave_on_exit();
         let path = app.autosave_path();
@@ -434,6 +439,8 @@ mod tests {
         assert!(next.workspace.autosave.recovery.is_some(), "offered");
         next.recover_autosave();
         next.run_jobs();
+        // Pixels come back from the project-only file.
+        assert_eq!(next.canvas.get_layer_tile_data(1, 0, 0), Some(red));
         assert!(
             next.has_unsaved_work(),
             "recovered work isn't saved anywhere yet"

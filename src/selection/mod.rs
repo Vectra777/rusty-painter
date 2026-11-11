@@ -218,13 +218,18 @@ fn add_span_samples(a: f32, b: f32, x0: usize, s: usize, counts: &mut [u32]) {
         return;
     }
     let s = s as i64;
-    let mut k = k_min;
-    while k <= k_max {
-        let pixel = k / s;
-        let pixel_end = (pixel + 1) * s - 1;
-        let upto = pixel_end.min(k_max);
-        counts[(pixel - x0 as i64) as usize] += (upto - k + 1) as u32;
-        k = upto + 1;
+    // Samples are never negative (`k_min >= first >= 0`).
+    let (p0, p1) = (k_min / s, k_max / s);
+    let at = |p: i64| (p - x0 as i64) as usize;
+    if p0 == p1 {
+        counts[at(p0)] += (k_max - k_min + 1) as u32;
+        return;
+    }
+    // Partly covered end pixels; every pixel between holds all `s` samples.
+    counts[at(p0)] += ((p0 + 1) * s - k_min) as u32;
+    counts[at(p1)] += (k_max - p1 * s + 1) as u32;
+    for c in &mut counts[at(p0) + 1..at(p1)] {
+        *c += s as u32;
     }
 }
 
@@ -453,7 +458,9 @@ impl SelectionManager {
                 (SelectionMode::Intersect, None) => return,
                 _ => mask,
             };
-            self.current_shape = mask.cropped().map(|m| SelectionShape::Mask(Arc::new(m)));
+            self.current_shape = mask
+                .into_cropped()
+                .map(|m| SelectionShape::Mask(Arc::new(m)));
             return;
         }
         let Some(shape) = self.current_shape.take() else {
@@ -472,9 +479,9 @@ impl SelectionManager {
                     rasterize_shape(&base, self.canvas_size),
                     rasterize_shape(&shape, self.canvas_size),
                 ) {
-                    (Some(a), Some(b)) => a.combine(&b, self.drag_mode).cropped(),
-                    (None, Some(b)) if self.drag_mode == SelectionMode::Add => b.cropped(),
-                    (Some(a), _) => a.cropped(),
+                    (Some(a), Some(b)) => a.combine(&b, self.drag_mode).into_cropped(),
+                    (None, Some(b)) if self.drag_mode == SelectionMode::Add => b.into_cropped(),
+                    (Some(a), _) => a.into_cropped(),
                     _ => None,
                 };
                 combined.map(|m| SelectionShape::Mask(Arc::new(m)))
@@ -491,9 +498,9 @@ impl SelectionManager {
             .filter(|_| mode != SelectionMode::Replace)
             .and_then(|s| rasterize_shape(&s, self.canvas_size));
         let combined = match (current, mode) {
-            (_, SelectionMode::Replace) | (None, SelectionMode::Add) => mask.cropped(),
+            (_, SelectionMode::Replace) | (None, SelectionMode::Add) => mask.into_cropped(),
             (None, _) => None,
-            (Some(current), mode) => current.combine(&mask, mode).cropped(),
+            (Some(current), mode) => current.combine(&mask, mode).into_cropped(),
         };
         self.current_shape = combined.map(|m| SelectionShape::Mask(Arc::new(m)));
     }
@@ -555,7 +562,7 @@ impl SelectionManager {
             }),
             Some(current) => all
                 .combine(&current, SelectionMode::Subtract)
-                .cropped()
+                .into_cropped()
                 .map(|m| SelectionShape::Mask(Arc::new(m))),
         };
     }

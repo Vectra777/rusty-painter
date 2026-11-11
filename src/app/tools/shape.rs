@@ -869,7 +869,8 @@ impl PainterApp {
         let Some(crate::selection::SelectionShape::Mask(mask)) = manager.current_shape else {
             return None;
         };
-        let mask = (*mask).clone();
+        // The manager is gone: its mask has no other owner (no copy).
+        let mask = std::sync::Arc::unwrap_or_clone(mask);
         if !self.selection_manager.has_selection() {
             return Some(mask);
         }
@@ -881,7 +882,8 @@ impl PainterApp {
         ];
         let sel = &self.layer_selection();
         let selection = SelectionMask::rasterize(bounds, |y, x0, out| sel.row_coverage(y, x0, out));
-        mask.combine(&selection, SelectionMode::Intersect).cropped()
+        mask.combine(&selection, SelectionMode::Intersect)
+            .into_cropped()
     }
 }
 

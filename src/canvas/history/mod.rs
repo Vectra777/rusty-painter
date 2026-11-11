@@ -56,6 +56,14 @@ impl From<Vec<Color32>> for SnapshotPixels {
 }
 
 impl SnapshotPixels {
+    /// `len` transparent pixels, compressed straight away (a few bytes, not
+    /// 16 KiB a tile: what a big fill over empty canvas keeps for undo).
+    pub fn transparent(len: usize) -> Self {
+        let mut pixels = Self::Raw(vec![Color32::TRANSPARENT; len]);
+        pixels.compress();
+        pixels
+    }
+
     /// Number of pixels.
     pub fn len(&self) -> usize {
         match self {
@@ -369,8 +377,13 @@ pub struct UndoAction {
 static MAX_UNDO_BYTES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(DEFAULT_UNDO_MB << 20);
 
-/// The undo memory budget unless changed in Settings, in MiB.
-pub const DEFAULT_UNDO_MB: usize = 512;
+/// The undo memory budget unless changed in Settings, in MiB: less on
+/// phones and tablets, where the system ends an app that holds too much.
+pub const DEFAULT_UNDO_MB: usize = if cfg!(any(target_os = "android", target_os = "ios")) {
+    256
+} else {
+    512
+};
 
 /// The undo memory budget in MiB (Settings); a lower one trims at the
 /// next step.
@@ -452,19 +465,33 @@ fn snapshot_bytes(action: &UndoAction) -> usize {
 /// the one before the newest has any left raw: the rest are passed over
 /// without handing each to the thread pool (which, with hundreds of steps,
 /// made every new step slower than the last).
+///
+/// The newest is compressed too when it holds more than
+/// [`NEWEST_RAW_BYTES`] raw: a fill across a big canvas otherwise kept its
+/// whole layer uncompressed (400 MB at 10000²), what ended the app on a
+/// tablet. It would be compressed at the next step anyway.
 fn compress_older_actions(stack: &mut [UndoAction]) {
     use rayon::iter::{IntoParallelIterator, ParallelIterator};
-    let Some((_, older)) = stack.split_last_mut() else {
+    let Some((newest, older)) = stack.split_last_mut() else {
         return;
     };
+    let newest_raw: usize = (newest.tiles.iter())
+        .filter(|tile| matches!(tile.data, SnapshotPixels::Raw(_)))
+        .map(|tile| tile.data.held_bytes())
+        .sum();
+    let newest = (newest_raw > NEWEST_RAW_BYTES).then_some(newest);
     let raw: Vec<&mut SnapshotPixels> = older
         .iter_mut()
+        .chain(newest)
         .flat_map(|action| action.tiles.iter_mut())
         .map(|tile| &mut tile.data)
         .filter(|data| matches!(data, SnapshotPixels::Raw(_)))
         .collect();
     raw.into_par_iter().for_each(|data| data.compress());
 }
+
+/// Raw pixels the newest step may keep uncompressed (fast to undo).
+const NEWEST_RAW_BYTES: usize = 64 << 20;
 
 /// Drop the oldest actions until the stack fits in `max_bytes`, always
 /// keeping the newest one. Returns how many were dropped.
@@ -1164,9 +1191,8 @@ impl History {
             std::mem::swap(stored_transform, current_transform);
         }
 
-        let mut affected = Vec::new();
-        for snapshot in &mut action.tiles {
-            let tile_size = canvas.tile_size();
+        let tile_size = canvas.tile_size();
+        let swap = |snapshot: &mut TileSnapshot| -> Option<(i32, i32)> {
             // (Tiles may sit off the canvas, at negative coordinates: pixels
             // moved past its edge are kept.)
             // (Checked: a damaged file's numbers mustn't wrap round.)
@@ -1181,7 +1207,7 @@ impl History {
                     snapshot.tx,
                     snapshot.ty
                 );
-                continue;
+                return None;
             }
             // Resolve by stable id: the layer may have been reordered since
             // this snapshot was recorded, so its position may have changed.
@@ -1190,7 +1216,7 @@ impl History {
                     "Skipping undo snapshot for a layer that no longer exists ({:?})",
                     snapshot.layer_id
                 );
-                continue;
+                return None;
             };
             if let Some(tile_arc) = canvas.ensure_layer_tile(layer_idx, snapshot.tx, snapshot.ty) {
                 let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
@@ -1201,7 +1227,7 @@ impl History {
                 let stored = snapshot.data.to_vec();
                 if stored.len() != snapshot.width * snapshot.height {
                     log::error!("Skipping undo snapshot that failed to decompress");
-                    continue;
+                    return None;
                 }
                 let block = (snapshot.x0, snapshot.y0, snapshot.width, snapshot.height);
                 let current_deep = deep.as_deref().map(|d| d.block(tile_size, block));
@@ -1246,10 +1272,23 @@ impl History {
                     Some(deep) => SnapshotPixels::Deep(deep),
                     None => current_region.into(),
                 };
-                affected.push((snapshot.tx, snapshot.ty));
+                return Some((snapshot.tx, snapshot.ty));
             }
+            None
+        };
+        // Tiles in parallel, unless a tile comes more than once (each
+        // snapshot then goes back over the one before, in order).
+        let mut seen = std::collections::HashSet::new();
+        if action
+            .tiles
+            .iter()
+            .all(|s| seen.insert((s.layer_id, s.tx, s.ty)))
+        {
+            use rayon::prelude::*;
+            action.tiles.par_iter_mut().filter_map(swap).collect()
+        } else {
+            action.tiles.iter_mut().filter_map(swap).collect()
         }
-        affected
     }
 }
 

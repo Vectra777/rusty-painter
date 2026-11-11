@@ -741,7 +741,7 @@ pub(crate) fn layer_paint_mask(canvas: &Canvas, idx: usize) -> Option<SelectionM
                 }
             }
         });
-    SelectionMask::new(x0 as i32, y0 as i32, mw, y1 - y0, data).cropped()
+    SelectionMask::new(x0 as i32, y0 as i32, mw, y1 - y0, data).into_cropped()
 }
 
 /// Draw the magnetic outline in progress.

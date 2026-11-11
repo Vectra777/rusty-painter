@@ -2,7 +2,7 @@
 //! a flattened image and a thumbnail, so file managers and other painting
 //! apps can show it), holding the project data as one extra entry: a
 //! versioned header (JSON) plus a blob area for tiles and undo history.
-//! [`encode_project`] and [`decode_project`] are the two ends; save/open on
+//! [`ProjectSnapshot::encode`] and [`decode_project`] are the two ends; save/open on
 //! the app wrap them. Older saves are the bare project data, still read.
 
 use crate::canvas::blend_modes::{BlendSpace, LayerBlend};
@@ -131,6 +131,13 @@ impl ProjectSnapshot {
     /// Encode and write it to `path` (a whole file or nothing).
     pub(crate) fn write(&self, path: &Path) -> Result<(), String> {
         write_atomically(path, &self.encode()?).map_err(|err| format!("Save failed: {err}"))
+    }
+
+    /// The project entry alone, no flattened picture or thumbnail (read back
+    /// by [`decode_project`] as well): autosaves, where flattening a big
+    /// canvas at full size was what ran out of memory.
+    pub(crate) fn encode_data_only(&self) -> Result<Vec<u8>, String> {
+        encode_project_data(self)
     }
 }
 
@@ -392,6 +399,7 @@ pub(crate) fn encode_shared(app: &PainterApp, pixels: bool) -> Result<Vec<u8>, S
     })
 }
 
+#[cfg(any(test, feature = "bench"))]
 pub(crate) fn encode_project(app: &PainterApp) -> Result<Vec<u8>, String> {
     ProjectSnapshot::capture(app).encode()
 }

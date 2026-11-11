@@ -498,3 +498,24 @@ fn undo_restores_both_layers_after_merge_down() {
         Some(bottom_before)
     );
 }
+
+#[test]
+fn a_huge_newest_step_is_compressed_at_once() {
+    // Over 64 MiB of tiles (16 KiB each).
+    let tiles = (64 << 20) / (64 * 64 * 4) + 1;
+    let mut history = History::new();
+    let mut action = action_with_tile_pixels(4096, 1);
+    let tile = action.tiles.remove(0);
+    action.tiles = (0..tiles)
+        .map(|i| TileSnapshot {
+            tx: i,
+            ..tile.clone()
+        })
+        .collect();
+    history.push_action(action);
+    let (undo, _) = history.stacks();
+    assert!(matches!(
+        undo[0].tiles[0].data,
+        SnapshotPixels::Compressed { .. }
+    ));
+}

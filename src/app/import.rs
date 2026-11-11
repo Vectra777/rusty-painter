@@ -51,20 +51,27 @@ pub(crate) fn decode_image_in(
     let from = (decoder.icc_profile().ok().flatten())
         .and_then(|icc| ColorProfile::from_icc(icc, "Picture's profile").ok())
         .unwrap_or_default();
+    // `into_`: no second copy of a big photo when it's RGBA already.
     let mut img = image::DynamicImage::from_decoder(decoder)
         .map_err(failed)?
-        .to_rgba8();
+        .into_rgba8();
     if &from != to
         && let Ok(t) = RgbTransform::new(&from, to, RenderingIntent::Perceptual)
     {
-        let mut rgb: Vec<[f32; 3]> = img
-            .pixels()
-            .map(|p| [p[0], p[1], p[2]].map(|v| v as f32 / 255.0))
-            .collect();
-        t.convert(&mut rgb);
-        for (p, c) in img.pixels_mut().zip(rgb) {
-            let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-            p.0 = [r, g, b, p[3]];
+        // A row band at a time: the whole picture as floats was 24 bytes
+        // a pixel more, what made big photos run out of memory.
+        let mut rgb = Vec::new();
+        for band in img.chunks_mut(4 * 65536) {
+            rgb.clear();
+            rgb.extend(
+                band.chunks(4)
+                    .map(|p| [p[0], p[1], p[2]].map(|v| v as f32 / 255.0)),
+            );
+            t.convert(&mut rgb);
+            for (p, c) in band.chunks_mut(4).zip(&rgb) {
+                let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+                p[..3].copy_from_slice(&[r, g, b]);
+            }
         }
     }
     Ok(img)

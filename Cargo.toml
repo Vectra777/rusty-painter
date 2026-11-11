@@ -226,6 +226,10 @@ required-features = ["bench"]
 name = "brush_showcase"
 required-features = ["bench"]
 
+[[example]]
+name = "big_canvas_tools"
+required-features = ["bench"]
+
 [[bench]]
 name = "app_bench"
 harness = false

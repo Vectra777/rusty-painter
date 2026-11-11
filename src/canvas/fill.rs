@@ -128,28 +128,30 @@ impl Grid {
     }
 
     /// Scanline flood fill from `seed` through pixels where `open` holds,
-    /// into `region` (set to `label`). Returns the pixel count.
-    fn flood(
+    /// into `region` (set to `label`; zero is unfilled). Returns the pixel
+    /// count.
+    fn flood<T: Copy + PartialEq + Default>(
         &self,
         seed: usize,
         open: &dyn Fn(usize) -> bool,
-        region: &mut [u32],
-        label: u32,
+        region: &mut [T],
+        label: T,
     ) -> usize {
+        let empty = T::default();
         let w = self.w;
         let mut count = 0;
         let mut stack = vec![seed];
         while let Some(i) = stack.pop() {
-            if region[i] != 0 || !open(i) {
+            if region[i] != empty || !open(i) {
                 continue;
             }
             let y = i / w;
             let row = y * w;
             let (mut l, mut r) = (i, i);
-            while l > row && region[l - 1] == 0 && open(l - 1) {
+            while l > row && region[l - 1] == empty && open(l - 1) {
                 l -= 1;
             }
-            while r + 1 < row + w && region[r + 1] == 0 && open(r + 1) {
+            while r + 1 < row + w && region[r + 1] == empty && open(r + 1) {
                 r += 1;
             }
             region[l..=r].fill(label);
@@ -162,7 +164,7 @@ impl Grid {
                 let mut in_run = false;
                 for x in (l - row)..=(r - row) {
                     let j = base + x;
-                    let ok = region[j] == 0 && open(j);
+                    let ok = region[j] == empty && open(j);
                     if ok && !in_run {
                         stack.push(j);
                     }
@@ -181,16 +183,20 @@ impl Grid {
             return;
         }
         let (w, h) = (self.w, self.h);
-        let mut frontier: Vec<usize> = (0..w * h)
+        // Row by row (in order), without a division per pixel.
+        let filled: &[u8] = region;
+        let mut frontier: Vec<usize> = (0..h)
             .into_par_iter()
-            .filter(|&i| {
-                region[i] != 0 && {
-                    let (x, y) = (i % w, i / w);
-                    (x > 0 && region[i - 1] == 0)
-                        || (x + 1 < w && region[i + 1] == 0)
-                        || (y > 0 && region[i - w] == 0)
-                        || (y + 1 < h && region[i + w] == 0)
-                }
+            .flat_map_iter(|y| {
+                (y * w..(y + 1) * w).filter(move |&i| {
+                    filled[i] != 0 && {
+                        let x = i - y * w;
+                        (x > 0 && filled[i - 1] == 0)
+                            || (x + 1 < w && filled[i + 1] == 0)
+                            || (y > 0 && filled[i - w] == 0)
+                            || (y + 1 < h && filled[i + w] == 0)
+                    }
+                })
             })
             .collect();
         for ring in 0..radius {
@@ -236,45 +242,41 @@ impl Grid {
     /// cropped to its content.
     fn into_mask(self, region: &[u8], antialias: bool) -> Option<SelectionMask> {
         let (w, h) = (self.w, self.h);
-        let data: Vec<u8> = if antialias {
-            // Filled neighbours in each 3×3 block, as a row sum then a
-            // column sum (separable: two reads a pixel instead of nine).
-            let mut across = vec![0u8; w * h];
-            across
-                .par_chunks_mut(w.max(1))
-                .zip(region.par_chunks(w.max(1)))
-                .for_each(|(out, row)| {
-                    let at = |x: usize| (row[x] != 0) as u8;
-                    for (x, o) in out.iter_mut().enumerate() {
-                        let left = if x > 0 { at(x - 1) } else { 0 };
-                        let right = if x + 1 < w { at(x + 1) } else { 0 };
-                        *o = left + at(x) + right;
-                    }
-                });
-            let mut data = vec![0u8; w * h];
+        // Written over the barrier map, no longer needed: no more
+        // canvas-sized buffers than that.
+        let mut data = self.barrier;
+        let at = |i: usize| (region[i] != 0) as u8;
+        if antialias {
+            // Filled neighbours in each 3×3 block, as a column sum then a
+            // row sum (separable: six reads a pixel instead of nine).
             data.par_chunks_mut(w.max(1))
                 .enumerate()
                 .for_each(|(y, out)| {
+                    let row = y * w;
+                    let column: Vec<u8> = (0..w)
+                        .map(|x| {
+                            let up = if y > 0 { at(row + x - w) } else { 0 };
+                            let down = if y + 1 < h { at(row + x + w) } else { 0 };
+                            up + at(row + x) + down
+                        })
+                        .collect();
                     for (x, o) in out.iter_mut().enumerate() {
-                        let i = y * w + x;
-                        if region[i] != 0 {
+                        if region[row + x] != 0 {
                             *o = 255;
                             continue;
                         }
-                        let up = if y > 0 { across[i - w] } else { 0 };
-                        let down = if y + 1 < h { across[i + w] } else { 0 };
-                        let n = (up + across[i] + down) as u32;
+                        let left = if x > 0 { column[x - 1] } else { 0 };
+                        let right = if x + 1 < w { column[x + 1] } else { 0 };
+                        let n = (left + column[x] + right) as u32;
                         *o = (n * 255 / 9) as u8;
                     }
                 });
-            data
         } else {
-            region
-                .iter()
-                .map(|&r| if r != 0 { 255 } else { 0 })
-                .collect()
-        };
-        SelectionMask::new(self.x0, self.y0, w, h, data).cropped()
+            data.par_iter_mut()
+                .zip(region.par_iter())
+                .for_each(|(o, &r)| *o = if r != 0 { 255 } else { 0 });
+        }
+        SelectionMask::new(self.x0, self.y0, w, h, data).into_cropped()
     }
 
     /// Where gap closing may flood: far enough from any line.
@@ -282,9 +284,11 @@ impl Grid {
         if gap == 0 {
             return None;
         }
-        let dist = self.barrier_distance();
+        let mut pass = self.barrier_distance();
         let min = (gap as u16 * UNIT / 2).min(254) as u8;
-        Some(dist.iter().map(|&d| (d > min) as u8).collect())
+        // In place: no second canvas-sized buffer.
+        pass.par_iter_mut().for_each(|d| *d = (*d > min) as u8);
+        Some(pass)
     }
 
     /// Grow the flooded area back up to the lines, then under them.
@@ -411,15 +415,11 @@ impl<'a> LazyBarrier<'a> {
                 let y = i / w;
                 let row = y * w;
                 let state = &mut self.state;
-                let (mut l, mut r) = (i, i);
-                while l > row && state[l - 1] == OPEN {
-                    l -= 1;
-                }
+                let line = &state[row..row + w];
+                let l = row + skip_back(line, i - row, |v| v != OPEN);
+                let r = row + skip(line, i - row + 1, |v| v != OPEN) - 1;
                 if l > row && state[l - 1] == UNKNOWN {
                     blocked.push(l - 1);
-                }
-                while r + 1 < row + w && state[r + 1] == OPEN {
-                    r += 1;
                 }
                 if r + 1 < row + w && state[r + 1] == UNKNOWN {
                     blocked.push(r + 1);
@@ -435,18 +435,24 @@ impl<'a> LazyBarrier<'a> {
                     if ny >= h {
                         continue;
                     }
+                    // A seed at the start of each open run; every unknown
+                    // pixel waits for its block.
                     let base = ny * w;
-                    let mut in_run = false;
                     let start = base + (l - row);
-                    for (j, &v) in (start..).zip(&state[start..=base + (r - row)]) {
-                        if v == UNKNOWN {
-                            blocked.push(j);
+                    let seg = &state[start..=base + (r - row)];
+                    let mut k = 0;
+                    loop {
+                        k = skip(seg, k, |v| v == OPEN || v == UNKNOWN);
+                        if k >= seg.len() {
+                            break;
                         }
-                        let open = v == OPEN;
-                        if open && !in_run {
-                            stack.push(j);
+                        if seg[k] == UNKNOWN {
+                            blocked.push(start + k);
+                            k += 1;
+                        } else {
+                            stack.push(start + k);
+                            k = skip(seg, k + 1, |v| v != OPEN);
                         }
-                        in_run = open;
                     }
                 }
             }
@@ -460,6 +466,34 @@ impl<'a> LazyBarrier<'a> {
         }
         bounds
     }
+}
+
+/// The first index from `k` on where `stop` holds (`s.len()` if none),
+/// checking 32 bytes at a time while none does (the flood's long runs).
+#[inline]
+fn skip(s: &[u8], mut k: usize, stop: impl Fn(u8) -> bool) -> usize {
+    while let Some(chunk) = s.get(k..k + 32) {
+        if chunk.iter().fold(false, |any, &v| any | stop(v)) {
+            break;
+        }
+        k += 32;
+    }
+    while k < s.len() && !stop(s[k]) {
+        k += 1;
+    }
+    k
+}
+
+/// `skip` leftwards: the smallest `l` with `stop` false over `s[l..k]`.
+#[inline]
+fn skip_back(s: &[u8], mut k: usize, stop: impl Fn(u8) -> bool) -> usize {
+    while k >= 32 && !s[k - 32..k].iter().fold(false, |any, &v| any | stop(v)) {
+        k -= 32;
+    }
+    while k > 0 && !stop(s[k - 1]) {
+        k -= 1;
+    }
+    k
 }
 
 /// Bucket fill at canvas pixel `seed` over a `width`×`height` canvas.
@@ -490,20 +524,26 @@ pub fn bucket_fill(
     lazy.ensure_rect(win);
     let (ww, wh) = (win[2] - win[0], win[3] - win[1]);
     let mut barrier = vec![0u8; ww * wh];
-    let mut region = vec![0u8; ww * wh];
-    let state = &lazy.state;
-    barrier
-        .par_chunks_mut(ww)
-        .zip(region.par_chunks_mut(ww))
-        .enumerate()
-        .for_each(|(y, (b, r))| {
-            let src = &state[(win[1] + y) * width + win[0]..][..ww];
-            for ((b, r), &v) in b.iter_mut().zip(r.iter_mut()).zip(src) {
-                *b = (v == LINE) as u8;
-                *r = (v == FILLED) as u8;
-            }
-        });
+    barrier.par_chunks_mut(ww).enumerate().for_each(|(y, b)| {
+        let src = &lazy.state[(win[1] + y) * width + win[0]..][..ww];
+        for (b, &v) in b.iter_mut().zip(src) {
+            *b = (v == LINE) as u8;
+        }
+    });
+    // The region is the canvas-wide state cropped to the window in place
+    // (each row moves to an index no later than its own): two buffers
+    // the canvas' size at most, not three.
+    let mut region = std::mem::take(&mut lazy.state);
     drop(lazy);
+    for y in 0..wh {
+        let from = (win[1] + y) * width + win[0];
+        region.copy_within(from..from + ww, y * ww);
+    }
+    region.truncate(ww * wh);
+    region.shrink_to_fit();
+    region
+        .par_iter_mut()
+        .for_each(|v| *v = (*v == FILLED) as u8);
     let grid = Grid {
         x0: win[0] as i32,
         y0: win[1] as i32,
@@ -518,9 +558,14 @@ pub fn bucket_fill(
         let local_seed = (sy as usize - win[1]) * ww + (sx as usize - win[0]);
         if let Some(start) = nearest_open(&grid, local_seed, settings.gap as usize * 2, &pass) {
             let barrier = &grid.barrier;
-            let mut labels = vec![0u32; ww * wh];
-            grid.flood(start, &|j| pass[j] != 0 && barrier[j] == 0, &mut labels, 1);
-            region = labels.iter().map(|&l| (l != 0) as u8).collect();
+            // Flooded again from scratch, into the same buffer.
+            region.fill(0);
+            grid.flood(
+                start,
+                &|j| pass[j] != 0 && barrier[j] == 0,
+                &mut region,
+                1u8,
+            );
             gap = settings.gap;
         }
         // Otherwise the seed sits in a nook narrower than the gap: keep
@@ -611,33 +656,45 @@ pub fn enclose_fill(
         }
     });
 
-    // The "paper": the most common colour inside the lasso.
-    let mut pixels = vec![Color32::TRANSPARENT; ww * wh];
-    pixels
+    // The window is rendered a strip at a time, twice (once for the
+    // paper, once for the lines) rather than kept whole: 4 bytes a pixel
+    // was over a gigabyte for a canvas-wide lasso.
+    let strip = |i: usize| {
+        let rows = BLOCK.min(wh - i * BLOCK);
+        reference.render(win[0], win[1] + (i * BLOCK) as i32, ww, rows)
+    };
+    let strips = wh.div_ceil(BLOCK);
+    // The "paper": the most common colour inside the lasso (a sample of
+    // every 7th pixel inside it).
+    let sample: Vec<Color32> = (0..strips)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let inside = &inside[i * BLOCK * ww..];
+            let picked: Vec<Color32> = (strip(i).into_iter().zip(inside))
+                .filter(|(_, i)| **i != 0)
+                .map(|(p, _)| p)
+                .step_by(7)
+                .collect();
+            picked
+        })
+        .collect();
+    let paper = most_common(sample.into_iter())?;
+    let mut barrier = vec![0u8; ww * wh];
+    barrier
         .par_chunks_mut(ww * BLOCK)
         .enumerate()
-        .for_each(|(i, strip)| {
-            let rows = strip.len() / ww;
-            strip.copy_from_slice(&reference.render(win[0], win[1] + (i * BLOCK) as i32, ww, rows));
+        .for_each(|(i, out)| {
+            for (o, p) in out.iter_mut().zip(strip(i)) {
+                *o = (diff(p, paper) > settings.tolerance) as u8;
+            }
         });
-    let paper = most_common(
-        pixels
-            .iter()
-            .zip(&inside)
-            .filter(|(_, i)| **i != 0)
-            .map(|(p, _)| *p),
-    )?;
     let grid = Grid {
-        barrier: pixels
-            .iter()
-            .map(|&p| (diff(p, paper) > settings.tolerance) as u8)
-            .collect(),
+        barrier,
         x0: win[0],
         y0: win[1],
         w: ww,
         h: wh,
     };
-    drop(pixels);
 
     let passable = grid.passable(settings.gap);
     let barrier = &grid.barrier;
@@ -773,16 +830,16 @@ pub fn select_color(
                 };
             }
         });
-    SelectionMask::new(0, 0, width, height, data).cropped()
+    SelectionMask::new(0, 0, width, height, data).into_cropped()
 }
 
 fn most_common(pixels: impl Iterator<Item = Color32>) -> Option<Color32> {
     // A flat table over 5-bit-per-channel buckets (4 MB) beats hashing
-    // millions of pixels; a spread-out sample finds the same winner.
+    // millions of pixels; callers pass a spread-out sample.
     let mut counts = vec![0u32; 1 << 20];
     let mut example = std::collections::HashMap::new();
     let mut any = false;
-    for p in pixels.step_by(7) {
+    for p in pixels {
         let key = (p.r() as usize >> 3) << 15
             | (p.g() as usize >> 3) << 10
             | (p.b() as usize >> 3) << 5

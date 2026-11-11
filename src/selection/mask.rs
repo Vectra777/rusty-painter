@@ -104,11 +104,24 @@ impl SelectionMask {
 
     /// The same selection cropped to its content (`None` if nothing is selected).
     pub fn cropped(&self) -> Option<Self> {
-        let [x0, y0, x1, y1] = self.content_bounds()?;
+        let bounds = self.content_bounds()?;
+        Some(self.crop_to(bounds).unwrap_or_else(|| self.clone()))
+    }
+
+    /// [`Self::cropped`], keeping this mask as it is when it is already
+    /// tight (no copy of what may be a canvas-sized mask).
+    pub fn into_cropped(self) -> Option<Self> {
+        let bounds = self.content_bounds()?;
+        Some(self.crop_to(bounds).unwrap_or(self))
+    }
+
+    /// A copy of canvas area `[x0, y0, x1, y1)` (inside the mask), or `None`
+    /// when that is the whole mask.
+    fn crop_to(&self, [x0, y0, x1, y1]: [i32; 4]) -> Option<Self> {
         let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
         let (ox, oy) = ((x0 - self.x0) as usize, (y0 - self.y0) as usize);
         if (ox, oy, w, h) == (0, 0, self.w, self.h) {
-            return Some(self.clone());
+            return None;
         }
         let mut data = Vec::with_capacity(w * h);
         for y in 0..h {
@@ -231,7 +244,7 @@ impl SelectionMask {
                 (n * 255 / 9) as u8
             })
             .collect();
-        Self::new(x0, y0, w, h, data).cropped()
+        Self::new(x0, y0, w, h, data).into_cropped()
     }
 
     /// The selection with its edge blurred over `radius` pixels either side:
@@ -283,7 +296,7 @@ impl SelectionMask {
                 (t[x * h + y] + 0.5).clamp(0.0, 255.0) as u8
             })
             .collect();
-        Self::new(self.x0 - pad as i32, self.y0 - pad as i32, w, h, data).cropped()
+        Self::new(self.x0 - pad as i32, self.y0 - pad as i32, w, h, data).into_cropped()
     }
 
     /// A band `width` pixels wide along the selection's edge, half outside
@@ -293,11 +306,11 @@ impl SelectionMask {
         let (outer, inner) = (width.div_ceil(2) as i32, (width / 2) as i32);
         let grown = self.grown(outer)?;
         match self.grown(-inner) {
-            Some(core) if inner > 0 => grown.combine(&core, SelectionMode::Subtract).cropped(),
+            Some(core) if inner > 0 => grown.combine(&core, SelectionMode::Subtract).into_cropped(),
             // Too thin to have an inside: the band is all of it.
             _ if inner > 0 => Some(grown),
             // Only the outer half: take the selection itself away.
-            _ => grown.combine(self, SelectionMode::Subtract).cropped(),
+            _ => grown.combine(self, SelectionMode::Subtract).into_cropped(),
         }
     }
 
@@ -330,7 +343,7 @@ impl SelectionMask {
             let start = (oy + y) * self.w + ox;
             data.extend_from_slice(&self.data[start..start + cw]);
         }
-        Self::new(x0, y0, cw, ch, data).cropped()
+        Self::new(x0, y0, cw, ch, data).into_cropped()
     }
 
     /// Paint a soft round dab into the mask (growing nothing: the mask must

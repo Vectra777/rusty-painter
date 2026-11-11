@@ -811,7 +811,27 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 if row_response.secondary_clicked() && !is_active && !is_picked {
                     pick_click = Some((i, egui::Modifiers::NONE));
                 }
-                row_response.context_menu(|ui| {
+                // A press held still on the row (finger or pen, any input
+                // mode) opens the same menu as a popup: egui's context menu
+                // closes again at once while the finger stays down.
+                let menu_id = ui.id().with(("layer_menu", id));
+                let held_since = ui.input(|inp| {
+                    let p = &inp.pointer;
+                    let still = p.primary_down()
+                        && p.press_origin().zip(p.interact_pos()).is_some_and(|(o, now)| {
+                            row.contains(o) && !opacity_rect.expand(6.0).contains(o) && o.distance(now) < 8.0
+                        });
+                    p.press_start_time().filter(|&t| still && inp.time - t > 0.5)
+                });
+                let press_key = menu_id.with("press");
+                if let Some(t) = held_since
+                    && ui.data(|d| d.get_temp::<f64>(press_key)) != Some(t)
+                {
+                    ui.data_mut(|d| d.insert_temp(press_key, t));
+                    app.layer_state.layer_dragging = None;
+                    ui.memory_mut(|mem| mem.open_popup(menu_id));
+                }
+                let layer_menu = |ui: &mut egui::Ui| {
                     if i != 0 {
                         let label = if is_picked {
                             format!("Group {} layers into folder", picked.len())
@@ -963,7 +983,18 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                             ui.close_menu();
                         }
                     }
-                });
+                };
+                if ui.memory(|mem| mem.is_popup_open(menu_id)) {
+                    egui::popup_below_widget(
+                        ui,
+                        menu_id,
+                        &row_response,
+                        egui::PopupCloseBehavior::CloseOnClick,
+                        layer_menu,
+                    );
+                } else {
+                    row_response.context_menu(layer_menu);
+                }
 
                 // The picked layers' opacities as a drag on one of them
                 // started: they keep their proportions to it.

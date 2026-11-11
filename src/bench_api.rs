@@ -416,6 +416,24 @@ pub fn import_image(app: &mut PainterApp, bytes: &[u8]) {
     app.import_image_bytes("bench", bytes).expect("import");
 }
 
+/// A digest of the active layer's pixels (missing tiles count as
+/// transparent): to check two builds paint the same.
+pub fn layer_digest(app: &PainterApp) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let c = &app.canvas;
+    let ts = c.tile_size();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for ty in 0..c.height().div_ceil(ts) as i32 {
+        for tx in 0..c.width().div_ceil(ts) as i32 {
+            let data = c.get_layer_tile_data(c.active_layer_idx, tx, ty);
+            for p in data.unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts]) {
+                p.to_array().hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
 /// Undo steps on the active layer.
 pub fn undo_depth(app: &PainterApp) -> usize {
     app.layer_state.history.stacks().0.len()
