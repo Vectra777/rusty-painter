@@ -32,7 +32,7 @@ use std::sync::Mutex;
 
 mod render;
 use render::srgb_to_linear;
-pub(crate) use render::{RibbonSeg, SoftTip};
+pub(crate) use render::{RibbonSeg, SmallDabs, SoftTip};
 
 /// Available shapes for how a brush applies paint.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -322,6 +322,25 @@ pub struct Brush {
     pub wash_opacity: f32,
 }
 
+/// What a dab brings of its own to [`Brush::dabs_oriented`] (see
+/// [`PlacedDab::spacing`] and [`PlacedDab::pressured`]): the spacing factor
+/// it was placed at, and what pressure made of the brush's diameter,
+/// opacity, flow and wash opacity for it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DabExtra {
+    pub spacing: f32,
+    pub pressured: Option<[f32; 4]>,
+}
+
+impl Default for DabExtra {
+    fn default() -> Self {
+        Self {
+            spacing: 1.0,
+            pressured: None,
+        }
+    }
+}
+
 /// Shared inputs for painting one batch of dabs into the stroke buffers.
 struct BatchCtx<'a> {
     /// The brush painting (its spacing stretch, per dab).
@@ -384,6 +403,8 @@ struct BatchCtx<'a> {
     /// Watercolour edges from the round dabs' depth, applied as the stroke
     /// is resolved.
     rim: Option<crate::brush_engine::wet_edge::WetRim>,
+    /// Small dabs' coverage kept for the stroke (see [`SmallDabs`]).
+    small: Option<&'a render::SmallMap>,
 }
 
 /// Where a batch of dabs accumulates.
@@ -487,7 +508,7 @@ impl Brush {
                 }
             }
             if so_far {
-                buffer.original = shown;
+                buffer.original = shown.into();
                 buffer.coverage.fill(0.0);
                 buffer.colors = None;
             }
@@ -554,7 +575,7 @@ impl Brush {
         for &(key, _) in &stepped.fresh {
             crate::canvas::wet::record_undo(undo_action, layer.id, key, None);
         }
-        Self::snapshot_tiles(canvas, &regions, undo_action, stroke_tiles, false);
+        Self::snapshot_tiles(canvas, None, &regions, undo_action, stroke_tiles, false);
         for ((tx, ty), pixels) in stepped.shown {
             let key = (tx as usize, ty as usize);
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
@@ -568,7 +589,7 @@ impl Brush {
             }
             if let Some(buffer) = stroke_tiles.buffers.get(&key) {
                 let mut buffer = buffer.lock().unwrap_or_else(|e| e.into_inner());
-                buffer.original = pixels;
+                buffer.original = pixels.into();
                 buffer.damage = Some([0, 0, ts, ts]);
             }
             stroke_tiles.dirty.insert(key);
@@ -879,6 +900,7 @@ impl Brush {
     /// stroke's coverage buffer in order, then its touched pixels are
     /// resolved once. The result is identical to painting the dabs one by
     /// one, with each tile locked once per batch.
+    #[cfg(test)]
     pub(crate) fn dabs(
         &self,
         pool: &ThreadPool,
@@ -894,13 +916,14 @@ impl Brush {
             selection,
             centers,
             None,
+            None,
             undo_action,
             stroke_tiles,
         );
     }
 
-    /// [`Self::dabs`] with a tip orientation per dab (mirror copies turn a
-    /// custom tip with them).
+    /// `Self::dabs` with a tip orientation per dab (mirror copies turn a
+    /// custom tip with them), and what each brings of its own (`extras`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn dabs_oriented(
         &self,
@@ -909,22 +932,27 @@ impl Brush {
         selection: Option<&SelectionManager>,
         centers: &[Vec2],
         orients: Option<&[[f32; 4]]>,
+        extras: Option<&[DabExtra]>,
         undo_action: &mut UndoAction,
         stroke_tiles: &mut StrokeTiles,
     ) {
-        let r = self.brush_options.diameter / 2.0;
+        let base_r = self.brush_options.diameter / 2.0;
         let (canvas_w, canvas_h) = (canvas.width() as i32, canvas.height() as i32);
         let tile_size = canvas.tile_size();
         let dabs: Vec<PlacedDab> = centers
             .iter()
             .enumerate()
             .filter_map(|(i, &center)| {
+                let extra = extras.and_then(|e| e.get(i)).copied().unwrap_or_default();
+                let r = extra.pressured.map_or(base_r, |p| p[0] / 2.0);
                 let bounds = calc_dab_bounds(center, r, canvas_w, canvas_h, tile_size)?;
                 let mut dab = PlacedDab::new(center, bounds, r);
                 if let Some(o) = orients.and_then(|o| o.get(i)) {
                     dab.orient = *o;
                     dab.rigid = is_rigid(*o);
                 }
+                dab.spacing = extra.spacing;
+                dab.pressured = extra.pressured.map(|[_, o, f, w]| [o, f, w]);
                 Some(dab)
             })
             .collect();
@@ -960,7 +988,12 @@ impl Brush {
         // A bristle brush: each dab is one small dab per hair.
         let hair_dabs;
         let (centers, vars, orients) = if self.brush_type == BrushType::Bristle {
+            let hairs = stroke_tiles
+                .hairs
+                .get_or_insert_with(|| std::sync::Arc::new(self.hairs()))
+                .clone();
             hair_dabs = self.hair_dabs(
+                &hairs,
                 centers,
                 vars,
                 orients,
@@ -995,6 +1028,7 @@ impl Brush {
             .enumerate()
             .filter_map(|(i, &center)| {
                 let var = vars.get(i % vars.len().max(1)).copied().unwrap_or_default();
+                let base_r = var.pressured.map_or(base_r, |p| p[0] / 2.0);
                 let radius = base_r * var.scale;
                 if var.strength <= 0.0 || radius < 0.005 {
                     return None;
@@ -1031,6 +1065,8 @@ impl Brush {
                 dab.smudge = var.smudge;
                 dab.color_rate = var.color_rate;
                 dab.thickness = var.thickness;
+                dab.spacing = var.spaced;
+                dab.pressured = var.pressured.map(|[_, o, f, w]| [o, f, w]);
                 if colored {
                     let own = var.base.map_or(self.brush_options.color, |c| {
                         let [r, g, b] = c.map(|v| (v * 255.0).round() as u8);
@@ -1096,12 +1132,26 @@ impl Brush {
         out
     }
 
-    /// A bristle brush's dabs, one per hair of each of `centers` (with its
-    /// variation and mirror copy): the hairs' centres and variations. A
-    /// brush that soaks takes each hair's colour from `canvas`'s active
-    /// layer under the stroke's first dab, kept in `soaked`.
+    /// A bristle brush's hairs (laid out once a stroke: from an image
+    /// tip, it's read for them).
+    fn hairs(&self) -> Vec<crate::brush_engine::bristle::Hair> {
+        let b = &self.bristles;
+        match &self.brush_options.pixel_shape {
+            PixelBrushShape::Custom(tip) if b.from_tip => {
+                b.hairs_from_mask(tip.width, tip.height, tip.pixels())
+            }
+            _ => b.hairs(),
+        }
+    }
+
+    /// A bristle brush's dabs, one per hair (`hairs`, see [`Self::hairs`])
+    /// of each of `centers` (with its variation and mirror copy): the
+    /// hairs' centres and variations. A brush that soaks takes each hair's
+    /// colour from `canvas`'s active layer under the stroke's first dab,
+    /// kept in `soaked`.
     fn hair_dabs(
         &self,
+        hairs: &[crate::brush_engine::bristle::Hair],
         centers: &[Vec2],
         vars: &[crate::brush_engine::dynamics::DabVar],
         orients: Option<&[[f32; 4]]>,
@@ -1110,12 +1160,6 @@ impl Brush {
     ) -> (Vec<Vec2>, Vec<crate::brush_engine::dynamics::DabVar>) {
         use crate::brush_engine::dynamics::{DabVar, IDENTITY, compose};
         let b = &self.bristles;
-        let hairs = match &self.brush_options.pixel_shape {
-            PixelBrushShape::Custom(tip) if b.from_tip => {
-                b.hairs_from_mask(tip.width, tip.height, tip.pixels())
-            }
-            _ => b.hairs(),
-        };
         let base_r = (self.brush_options.diameter / 2.0).max(0.25);
         let mut out_centers = Vec::with_capacity(centers.len() * hairs.len());
         let mut out_vars = Vec::with_capacity(out_centers.capacity());

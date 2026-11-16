@@ -67,6 +67,13 @@ fn u16_linear() -> &'static [f32] {
     })
 }
 
+/// sRGB-encoded value (0..1) → linear light, through [`u16_linear`]'s
+/// table (16-bit steps) rather than a `powf` a pixel.
+pub(crate) fn linear_from_gamma_lut() -> impl Fn(f32) -> f32 + Copy {
+    let lut = u16_linear();
+    move |v| lut[to_u16(v) as usize]
+}
+
 #[inline]
 fn to_u16(v: f32) -> u16 {
     (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16

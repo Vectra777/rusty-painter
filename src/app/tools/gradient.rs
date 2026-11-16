@@ -58,7 +58,9 @@ pub struct GradientSession {
     pub start: Vec2,
     pub end: Vec2,
     drag: Option<Drag>,
-    layer: usize,
+    /// The layer painted on, by id: layers added, removed or moved while
+    /// the gradient is placed don't change which it is.
+    layer: crate::canvas::storage::LayerId,
     /// The area's tiles before the gradient, captured when it's first
     /// painted; every repaint composites over them.
     original: Option<std::sync::Arc<crate::canvas::storage::Region>>,
@@ -215,7 +217,7 @@ impl PainterApp {
             start: pos,
             end: pos,
             drag: Some(Drag::End),
-            layer,
+            layer: l.id,
             original: None,
             coverage,
             bounds,
@@ -445,11 +447,19 @@ impl PainterApp {
         }
         let ramp = Ramp::new(&stops, self.canvas.blend_space, settings.opacity);
         let pool = std::sync::Arc::clone(&self.workspace.pool);
+        let Some(id) = self.workspace.gradient.session.as_ref().map(|s| s.layer) else {
+            return;
+        };
+        // Its layer was deleted: the gradient goes with it.
+        let Some(layer) = self.canvas.layer_index_of(id) else {
+            self.gradient_cancel();
+            return;
+        };
         let canvas = std::sync::Arc::clone(&self.canvas);
         let Some(session) = self.workspace.gradient.session.as_mut() else {
             return;
         };
-        let (layer, bounds) = (session.layer, session.bounds);
+        let bounds = session.bounds;
         let original = session
             .original
             .get_or_insert_with(|| {
@@ -546,8 +556,11 @@ impl PainterApp {
         let Some(original) = session.original else {
             return;
         };
+        let Some(layer) = self.canvas.layer_index_of(session.layer) else {
+            return;
+        };
         let pool = std::sync::Arc::clone(&self.workspace.pool);
-        let tiles = pool.install(|| self.canvas.region_snapshots(session.layer, &original));
+        let tiles = pool.install(|| self.canvas.region_snapshots(layer, &original));
         if tiles.is_empty() {
             return;
         }
@@ -736,6 +749,58 @@ mod tests {
         assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert_eq!(pixel(&app, 80, 10).a(), 0, "undone");
+    }
+
+    /// A gradient dragged from `from` to `to` across the middle, not kept.
+    fn place(app: &mut crate::PainterApp, from: f32, to: f32) {
+        app.gradient_press(Vec2::new(from, 32.0));
+        app.gradient_drag(Vec2::new(to, 32.0), false);
+        app.gradient_update();
+        app.gradient_uploaded(false);
+        app.gradient_release();
+    }
+
+    #[test]
+    fn undo_while_placing_a_gradient_takes_back_that_gradient() {
+        let mut app = app();
+        place(&mut app, 0.0, 128.0);
+        app.gradient_commit();
+        assert!(pixel(&app, 2, 10).r() < 50, "dark on the left");
+        // A second one, reversed, still being placed.
+        place(&mut app, 128.0, 0.0);
+        assert!(pixel(&app, 2, 10).r() > 200);
+        app.apply_history(false);
+        assert!(app.workspace.gradient.session.is_none());
+        assert!(pixel(&app, 2, 10).r() < 50, "the first gradient is back");
+        let (undo, redo) = app.layer_state.history.stacks();
+        assert_eq!((undo.len(), redo.len()), (1, 1));
+        app.apply_history(true);
+        assert!(pixel(&app, 2, 10).r() > 200, "and redo brings the second");
+    }
+
+    #[test]
+    fn a_gradient_keeps_its_layer_when_layers_are_added_under_it() {
+        let mut app = app();
+        let id = app.canvas.layers[1].id;
+        place(&mut app, 0.0, 128.0);
+        app.canvas_mut()
+            .insert_new_layer(1, "Under".into(), LayerKind::Paint, None);
+        app.gradient_commit();
+        let at = |app: &crate::PainterApp| app.canvas.layer_index_of(id).unwrap();
+        assert_eq!(at(&app), 2);
+        let alpha = |app: &crate::PainterApp| {
+            app.canvas
+                .get_layer_tile_data(at(app), 0, 0)
+                .map_or(0, |t| t[10 * 64 + 2].a())
+        };
+        assert_eq!(alpha(&app), 255);
+        app.apply_history(false);
+        assert_eq!(alpha(&app), 0, "undone on the gradient's own layer");
+        assert!(
+            app.canvas
+                .get_layer_tile_data(1, 0, 0)
+                .is_none_or(|t| t.iter().all(|p| p.a() == 0))
+        );
     }
 
     #[test]

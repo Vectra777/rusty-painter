@@ -4,16 +4,13 @@ import android.app.Activity;
 import android.app.Application;
 import android.app.Fragment;
 import android.content.ClipData;
-import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
 
 /**
  * The system file picker (Storage Access Framework) for the NativeActivity,
@@ -144,22 +141,15 @@ public class FilePicker extends Fragment {
         return last == null ? "file" : last;
     }
 
-    public static byte[] read(Context c, String uri) throws Exception {
-        try (InputStream in = c.getContentResolver().openInputStream(Uri.parse(uri))) {
-            if (in == null) throw new Exception("Couldn't open " + uri);
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[1 << 16];
-            for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
-            return out.toByteArray();
-        }
-    }
-
-    public static void write(Context c, String uri, byte[] data) throws Exception {
-        ContentResolver r = c.getContentResolver();
-        // "wt": truncate, should the picked file already have content.
-        try (OutputStream out = r.openOutputStream(Uri.parse(uri), "wt")) {
-            if (out == null) throw new Exception("Couldn't write " + uri);
-            out.write(data);
-        }
+    /**
+     * A file descriptor for `uri`, now the Rust side's to read or write
+     * (and close): `mode` "r" to read, "w" to write, "wt" to write over
+     * what's there. The bytes then go straight between the file and Rust,
+     * on a thread of its own, never through a Java array.
+     */
+    public static int openFd(Context c, String uri, String mode) throws Exception {
+        ParcelFileDescriptor fd = c.getContentResolver().openFileDescriptor(Uri.parse(uri), mode);
+        if (fd == null) throw new Exception("Couldn't open " + uri);
+        return fd.detachFd();
     }
 }

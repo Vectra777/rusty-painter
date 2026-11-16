@@ -1,6 +1,6 @@
 //! The selection bar: a small floating bar under the selection (above it
 //! when there's no room) with what's done to a selection most: deselect,
-//! invert, transform, copy, crop, fill and clear. Hidden while painting or
+//! invert, transform, copy, fill, clear and crop. Hidden while painting or
 //! drawing the selection, so it never gets in the way of a stroke.
 
 use crate::PainterApp;
@@ -135,9 +135,6 @@ fn buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32) {
     if icon_button(ui, Icon::Duplicate, size, false, "Copy (Ctrl+C)").clicked() {
         app.copy_selection(false);
     }
-    if icon_button(ui, Icon::Crop, size, false, "Crop the canvas to it").clicked() {
-        crate::ui::image_menu::crop_to_selection(app);
-    }
     divider(ui);
     let fill = icon_button(ui, Icon::Bucket, size, false, "Fill with the brush colour");
     // The colour it fills with, as a bar under the bucket.
@@ -157,6 +154,12 @@ fn buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32) {
     }
     if icon_button(ui, Icon::Trash, size, false, &clear).clicked() {
         app.delete_selection_contents();
+    }
+    // Last, on its own: it changes the whole canvas, and sat right beside
+    // Copy to be hit by mistake.
+    divider(ui);
+    if icon_button(ui, Icon::Crop, size, false, "Crop the canvas to it").clicked() {
+        crate::ui::image_menu::crop_to_selection(app);
     }
 }
 

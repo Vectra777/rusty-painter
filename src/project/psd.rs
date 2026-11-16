@@ -6,8 +6,13 @@
 //! document is written at 16 bits. Our text layers are written as their
 //! pixels.
 //!
-//! Not kept: adjustment, text and smart-object layers come in as the
-//! pixels Photoshop stored for them; 32-bit, CMYK and large (`.psb`) documents are refused.
+//! Text and smart-object layers come in as the pixels Photoshop stored for
+//! them, a solid colour fill layer as a colour fill layer. Adjustment and
+//! gradient or pattern fill layers, layer effects and vector masks have no
+//! form here: when a file has any, its flattened picture is added as a
+//! hidden top layer so the look isn't lost. 32-bit, CMYK and large
+//! (`.psb`) documents are refused. Our fill layers and layer styles
+//! (border, gradient overlay, impasto) are written as the pixels they show.
 
 use eframe::egui::Color32;
 
@@ -27,7 +32,8 @@ pub struct PsdDocument {
     pub width: usize,
     pub height: usize,
     pub layers: Vec<PsdLayer>,
-    /// The flattened picture, premultiplied.
+    /// The flattened picture, premultiplied (empty when not read: a
+    /// layered file's is only read when its layers don't show everything).
     pub composite: Vec<Color32>,
     /// Bits for each channel the layers' pixels came with (see
     /// [`PsdLayer::deep`]).
@@ -37,6 +43,8 @@ pub struct PsdDocument {
     pub composite_deep: Option<Vec<[f32; 4]>>,
     /// Which colours the pixels are (the file's embedded ICC profile).
     pub profile: crate::canvas::color_profile::ColorProfile,
+    /// What the user should hear about the import (parts left out).
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,6 +76,8 @@ pub struct PsdLayer {
     pub mask: Option<PsdMask>,
     /// A vector layer's lines and shapes (its pixels drawn from them).
     pub vector: Option<Box<crate::canvas::vector::VectorLayer>>,
+    /// A fill layer's colour or gradient (it shows everywhere its mask lets it).
+    pub fill: Option<crate::canvas::layer_style::LayerFill>,
 }
 
 /// A layer mask: grey levels (255 shows) over `rect`, `default` elsewhere.
@@ -143,6 +153,7 @@ impl PsdDocument {
             height: canvas.height(),
             layers,
             composite: flat.pixels,
+            notes: Vec::new(),
         }
     }
 
@@ -195,6 +206,7 @@ impl PsdDocument {
             rig: None,
             warps: Vec::new(),
             motion: None,
+            colorize: None,
             tiles: background.unwrap_or_default(),
         });
         // Folders being read: each GroupEnd opens one, its GroupStart closes it.
@@ -248,7 +260,10 @@ impl PsdDocument {
                 },
                 clipped: layer.clipped,
                 adjustment: None,
-                style: Default::default(),
+                style: crate::canvas::layer_style::LayerStyle {
+                    fill: layer.fill.filter(|_| !is_group),
+                    ..Default::default()
+                },
                 text: None,
                 vector: layer.vector.filter(|_| !is_group),
                 height: None,
@@ -260,6 +275,7 @@ impl PsdDocument {
                 rig: None,
                 warps: Vec::new(),
                 motion: None,
+                colorize: None,
                 tiles,
             });
             if let Some(mask) = layer.mask.filter(|_| !is_group) {
@@ -288,6 +304,7 @@ impl PsdDocument {
                     rig: None,
                     warps: Vec::new(),
                     motion: None,
+                    colorize: None,
                     tiles: mask_tiles(&mask, self.width, self.height, ts),
                 });
                 next_id += 1;
@@ -307,12 +324,10 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
         return;
     }
     for (i, layer) in canvas.layers.iter().enumerate() {
-        // Adjustment and fill layers have no PSD form here: the composite
-        // shows them.
+        // Adjustment layers have no PSD form here: the composite shows them.
         if layer.parent != parent
             || matches!(layer.kind, LayerKind::Mask { .. })
             || layer.adjustment.is_some()
-            || layer.style.fill.is_some()
         {
             continue;
         }
@@ -330,6 +345,7 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
             position_locked: layer.position_locked,
             mask: None,
             vector: None,
+            fill: None,
         };
         if layer.kind == LayerKind::Group {
             out.push(PsdLayer {
@@ -343,6 +359,7 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
                 visible: true,
                 opacity: 1.0,
                 vector: None,
+                fill: None,
                 ..base
             });
             push_children(canvas, Some(layer.id), out, depth + 1);
@@ -358,18 +375,21 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
         } else {
             Color32::TRANSPARENT
         };
+        // A fill layer, or a border, gradient overlay or impasto: written as
+        // the pixels it shows (Photoshop's own effects aren't written).
+        let styled = !layer.shown_style().is_plain();
         let (rect, pixels) = if i == 0 {
             let r = [0, 0, canvas.width() as i32, canvas.height() as i32];
-            (r, layer_area(canvas, i, r, fill))
+            (r, layer_area(canvas, i, r, fill, styled))
         } else {
-            match content_rect(canvas, i) {
-                Some(r) => (r, layer_area(canvas, i, r, fill)),
+            match content_rect(canvas, i, styled) {
+                Some(r) => (r, layer_area(canvas, i, r, fill, styled)),
                 None => ([0; 4], Vec::new()),
             }
         };
         let mask = canvas.mask_index_of(layer.id).map(|m| {
             let rect = [0, 0, canvas.width() as i32, canvas.height() as i32];
-            let data = layer_area(canvas, m, rect, Color32::WHITE)
+            let data = layer_area(canvas, m, rect, Color32::WHITE, false)
                 .iter()
                 .map(|&p| ((p.r() as u32 + p.g() as u32 + p.b() as u32) / 3) as u8)
                 .collect();
@@ -379,7 +399,8 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
                 default: 255,
             }
         });
-        let deep = (canvas.depth().is_deep() && rect[2] > rect[0])
+        // (A styled layer's look is made at 8 bits.)
+        let deep = (canvas.depth().is_deep() && rect[2] > rect[0] && !styled)
             .then(|| layer_area_deep(canvas, i, rect, fill));
         out.push(PsdLayer {
             rect,
@@ -399,15 +420,40 @@ fn push_children(canvas: &Canvas, parent: Option<LayerId>, out: &mut Vec<PsdLaye
     }
 }
 
-/// The painted tiles' extent, within the canvas.
-fn content_rect(canvas: &Canvas, idx: usize) -> Option<[i32; 4]> {
+/// Layer `idx`'s tile `(tx, ty)`: as painted, or `styled`, as it shows
+/// (its fill, border, overlay or impasto made into pixels).
+fn tile_pixels(
+    canvas: &Canvas,
+    idx: usize,
+    tx: i32,
+    ty: i32,
+    styled: bool,
+) -> Option<Vec<Color32>> {
+    if styled {
+        canvas.styled_tile(idx, tx, ty).map(|p| p.to_vec())
+    } else {
+        canvas.get_layer_tile_data(idx, tx, ty)
+    }
+}
+
+/// The painted tiles' extent (`styled`: the tiles that show anything),
+/// within the canvas.
+fn content_rect(canvas: &Canvas, idx: usize, styled: bool) -> Option<[i32; 4]> {
     let ts = canvas.tile_size() as i32;
     let (w, h) = (canvas.width() as i32, canvas.height() as i32);
     let mut r: Option<[i32; 4]> = None;
-    for (tx, ty) in canvas.layer_tile_keys(idx) {
-        let painted = canvas
-            .get_layer_tile_data(idx, tx, ty)
-            .is_some_and(|d| d.iter().any(|p| p.a() > 0));
+    // A fill or a border shows where nothing is painted: every tile is asked.
+    let keys = if styled {
+        let (tw, th) = ((w + ts - 1) / ts, (h + ts - 1) / ts);
+        (0..th)
+            .flat_map(|ty| (0..tw).map(move |tx| (tx, ty)))
+            .collect()
+    } else {
+        canvas.layer_tile_keys(idx)
+    };
+    for (tx, ty) in keys {
+        let painted =
+            tile_pixels(canvas, idx, tx, ty, styled).is_some_and(|d| d.iter().any(|p| p.a() > 0));
         if !painted {
             continue;
         }
@@ -451,15 +497,22 @@ fn layer_area_deep(canvas: &Canvas, idx: usize, rect: [i32; 4], fill: Color32) -
     out
 }
 
-/// Layer `idx`'s pixels over `rect`; unpainted areas read as `fill`.
-fn layer_area(canvas: &Canvas, idx: usize, rect: [i32; 4], fill: Color32) -> Vec<Color32> {
+/// Layer `idx`'s pixels over `rect` (`styled`: as it shows, see
+/// [`tile_pixels`]); unpainted areas read as `fill`.
+fn layer_area(
+    canvas: &Canvas,
+    idx: usize,
+    rect: [i32; 4],
+    fill: Color32,
+    styled: bool,
+) -> Vec<Color32> {
     let ts = canvas.tile_size() as i32;
     let [x0, y0, x1, y1] = rect;
     let w = (x1 - x0) as usize;
     let mut out = vec![fill; w * (y1 - y0) as usize];
     for ty in y0.div_euclid(ts)..=(y1 - 1).div_euclid(ts) {
         for tx in x0.div_euclid(ts)..=(x1 - 1).div_euclid(ts) {
-            let Some(data) = canvas.get_layer_tile_data(idx, tx, ty) else {
+            let Some(data) = tile_pixels(canvas, idx, tx, ty, styled) else {
                 continue;
             };
             let (ox, oy) = (tx * ts, ty * ts);
@@ -504,8 +557,8 @@ fn layer_tiles(
                 out.set_linear(((y - oy) * t + (x - ox)) as usize, deep[src]);
             }
         }
-        tile.data = out.narrow_all();
-        tile.deep = Some(out);
+        tile.data = std::sync::Arc::new(out.narrow_all());
+        tile.deep = Some(std::sync::Arc::new(out));
     }
     tiles
 }
@@ -542,7 +595,7 @@ fn tiles_of(
                 tiles.push(CanvasTileSnapshot {
                     tx,
                     ty,
-                    data,
+                    data: data.into(),
                     deep: None,
                 });
             }
@@ -553,21 +606,48 @@ fn tiles_of(
 
 /// A mask as whole-canvas tiles (white = shows, the default outside its
 /// rect), leaving out all-white tiles (a missing mask tile shows).
+/// Each tile is made by itself: no canvas-sized picture of the mask.
+/// (Past the canvas's edge a tile is transparent, as a painted one is.)
 fn mask_tiles(mask: &PsdMask, w: usize, h: usize, ts: usize) -> Vec<CanvasTileSnapshot> {
     let [x0, y0, x1, y1] = mask.rect;
     let mw = (x1 - x0).max(0) as usize;
+    if mask.data.len() != mw * (y1 - y0).max(0) as usize {
+        return Vec::new();
+    }
     let grey = |v: u8| Color32::from_rgb(v, v, v);
-    let full: Vec<Color32> = (0..w * h)
-        .map(|i| {
-            let (x, y) = ((i % w) as i32, (i / w) as i32);
-            if x >= x0 && x < x1 && y >= y0 && y < y1 {
-                grey(mask.data[(y - y0) as usize * mw + (x - x0) as usize])
-            } else {
-                grey(mask.default)
+    let (t, w, h) = (ts as i32, w as i32, h as i32);
+    let mut tiles = Vec::new();
+    for ty in 0..(h + t - 1) / t {
+        for tx in 0..(w + t - 1) / t {
+            let (ox, oy) = (tx * t, ty * t);
+            let (ex, ey) = ((ox + t).min(w), (oy + t).min(h));
+            let whole = ex - ox == t && ey - oy == t;
+            let touches = x0 < ex && x1 > ox && y0 < ey && y1 > oy;
+            if whole && !touches && mask.default == 255 {
+                continue;
             }
-        })
-        .collect();
-    tiles_of(&full, [0, 0, w as i32, h as i32], ts, Color32::WHITE)
+            let mut data = vec![Color32::TRANSPARENT; ts * ts];
+            for y in oy..ey {
+                let row = &mut data[((y - oy) * t) as usize..][..(ex - ox) as usize];
+                for (x, p) in (ox..ex).zip(row) {
+                    *p = if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                        grey(mask.data[(y - y0) as usize * mw + (x - x0) as usize])
+                    } else {
+                        grey(mask.default)
+                    };
+                }
+            }
+            if data.iter().any(|&p| p != Color32::WHITE) {
+                tiles.push(CanvasTileSnapshot {
+                    tx,
+                    ty,
+                    data: data.into(),
+                    deep: None,
+                });
+            }
+        }
+    }
+    tiles
 }
 
 // ---------------------------------------------------------------- writing
@@ -947,33 +1027,105 @@ fn unpackbits(src: &[u8], len: usize) -> Vec<u8> {
     out
 }
 
-/// A channel's `w`×`h` plane of `bytes`-byte samples (big endian): its
-/// compression, then raw, RLE or ZIP rows.
-fn read_plane(data: &[u8], w: usize, h: usize, bytes: usize) -> Result<Vec<u8>, String> {
-    if w == 0 || h == 0 {
+/// How much bigger than its compressed bytes a channel can honestly come
+/// out: PackBits turns 2 bytes into at most 128, zlib 1 into about 1032.
+const RLE_RATIO: usize = 128;
+const ZIP_RATIO: usize = 1100;
+
+/// Bytes of pixels decoding may still make. A damaged or hostile file must
+/// not turn kilobytes into gigabytes: every layer can claim the whole
+/// canvas with its channels missing, or as rows that are all padding.
+struct Budget(usize);
+
+impl Budget {
+    /// What a `len`-byte file could hold at best (pixels as 8-bit planes,
+    /// then as our pixels at full depth), with room for small files.
+    fn for_file(len: usize) -> Self {
+        Budget(len.saturating_mul(3 * ZIP_RATIO).max(256 << 20))
+    }
+
+    fn spend(&mut self, n: usize) -> Result<(), String> {
+        self.0 = (self.0.checked_sub(n))
+            .ok_or("The PSD's layers are bigger than its data could hold (a damaged file?)")?;
+        Ok(())
+    }
+}
+
+/// `rect` cut to a `w`×`h` canvas (empty: all zeros), and the same area in
+/// `rect`'s own pixels.
+fn clip_to_canvas(rect: [i32; 4], w: usize, h: usize) -> ([i32; 4], [usize; 4]) {
+    let r = [
+        rect[0].max(0),
+        rect[1].max(0),
+        rect[2].min(w as i32),
+        rect[3].min(h as i32),
+    ];
+    if r[2] <= r[0] || r[3] <= r[1] {
+        return ([0; 4], [0; 4]);
+    }
+    let local = |v: i32, from: i32| (v as i64 - from as i64) as usize;
+    (
+        r,
+        [
+            local(r[0], rect[0]),
+            local(r[1], rect[1]),
+            local(r[2], rect[0]),
+            local(r[3], rect[1]),
+        ],
+    )
+}
+
+/// A channel's plane of `bytes`-byte samples (big endian), `w`×`h` in the
+/// file but kept only over `crop` (`[x0, y0, x1, y1]` in its own pixels):
+/// its compression, then raw, RLE or ZIP rows. Data too short to hold that
+/// many pixels is refused rather than padded out.
+fn read_plane(
+    data: &[u8],
+    w: usize,
+    h: usize,
+    bytes: usize,
+    crop: [usize; 4],
+) -> Result<Vec<u8>, String> {
+    let [cx0, cy0, cx1, cy1] = crop;
+    if w == 0 || h == 0 || cx1 <= cx0 || cy1 <= cy0 || cx1 > w || cy1 > h {
         return Ok(Vec::new());
     }
+    let short = || "The PSD's pixel data is cut short".to_string();
     let row = w * bytes;
     let len = row * h;
+    let (from, to) = (cx0 * bytes, cx1 * bytes);
+    let kept = (to - from) * (cy1 - cy0);
+    let crop_rows = |plane: &[u8]| -> Vec<u8> {
+        let mut out = Vec::with_capacity(kept);
+        for y in cy0..cy1 {
+            out.extend_from_slice(&plane[y * row + from..y * row + to]);
+        }
+        out
+    };
     let mut r = In { b: data, pos: 0 };
     match r.u16()? {
-        0 => {
-            let mut p = r.take(len.min(data.len().saturating_sub(2)))?.to_vec();
-            p.resize(len, 0);
-            Ok(p)
-        }
+        0 => Ok(crop_rows(r.take(len).map_err(|_| short())?)),
         1 => {
+            if kept > data.len().saturating_mul(RLE_RATIO) {
+                return Err(short());
+            }
             let counts: Vec<usize> = (0..h)
                 .map(|_| r.u16().map(|c| c as usize))
                 .collect::<Result<_, _>>()?;
-            let mut plane = Vec::with_capacity(len);
-            for c in counts {
-                plane.extend(unpackbits(r.take(c)?, row));
+            let mut out = Vec::with_capacity(kept);
+            for (y, c) in counts.into_iter().enumerate().take(cy1) {
+                let src = r.take(c)?;
+                if y >= cy0 {
+                    out.extend_from_slice(&unpackbits(src, to)[from..]);
+                }
             }
-            Ok(plane)
+            Ok(out)
         }
         // ZIP, and ZIP with each row stored as differences.
         compression @ (2 | 3) => {
+            if len > data.len().saturating_mul(ZIP_RATIO) {
+                return Err(short());
+            }
             let mut plane =
                 miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&data[2..], len)
                     .map_err(|_| "Damaged ZIP data in the PSD")?;
@@ -981,7 +1133,11 @@ fn read_plane(data: &[u8], w: usize, h: usize, bytes: usize) -> Result<Vec<u8>, 
             if compression == 3 {
                 undo_prediction(&mut plane, w, bytes);
             }
-            Ok(plane)
+            Ok(if kept == len {
+                plane
+            } else {
+                crop_rows(&plane)
+            })
         }
         _ => Err("Unknown PSD compression".into()),
     }
@@ -1052,7 +1208,13 @@ fn from_planes(rgb: [&[u8]; 3], alpha: Option<&[u8]>, n: usize) -> Vec<Color32> 
 }
 
 pub fn decode_psd(bytes: &[u8]) -> Result<PsdDocument, String> {
-    let mut r = In { b: bytes, pos: 0 };
+    decode(bytes, false)
+}
+
+/// [`decode_psd`]; `want_composite`: read the flattened picture even when
+/// the layers show everything.
+fn decode(file: &[u8], want_composite: bool) -> Result<PsdDocument, String> {
+    let mut r = In { b: file, pos: 0 };
     if r.take(4)? != b"8BPS" {
         return Err("Not a Photoshop file".into());
     }
@@ -1082,14 +1244,20 @@ pub fn decode_psd(bytes: &[u8]) -> Result<PsdDocument, String> {
         _ => return Err("Only RGB and grayscale PSD files are supported".into()),
     };
     crate::app::document::validate_canvas_size(width, height)?;
+    let mut budget = Budget::for_file(file.len());
+    let format = Format {
+        gray,
+        bytes,
+        size: [width, height],
+    };
     r.block()?; // colour mode data
     let profile = read_profile(r.block()?);
     let mut section = r.block()?;
-    let mut layers = Vec::new();
+    let (mut layers, mut dropped) = (Vec::new(), Dropped::default());
     if !section.b.is_empty() {
         let mut info = section.block()?;
         if !info.b.is_empty() {
-            layers = read_layers(&mut info, gray, bytes)?;
+            (layers, dropped) = read_layers(&mut info, format, &mut budget)?;
         } else if bytes == 2 {
             // Photoshop keeps a 16-bit file's layers in a tagged block
             // after the global mask instead.
@@ -1102,37 +1270,50 @@ pub fn decode_psd(bytes: &[u8]) -> Result<PsdDocument, String> {
                 let key = section.take(4)?;
                 let mut data = section.block()?;
                 if key == b"Lr16" && !data.b.is_empty() {
-                    layers = read_layers(&mut data, gray, bytes)?;
+                    (layers, dropped) = read_layers(&mut data, format, &mut budget)?;
                     break;
                 }
             }
         }
     }
-    // The flattened picture.
-    let composite =
-        read_composite(&mut r, width, height, channels, gray, bytes).unwrap_or_default();
-    let composite = if composite.len() == width * height {
-        composite
+    // The flattened picture: only when the layers don't show it all (it's
+    // as big as the canvas, and slow to unpack).
+    let mut composite = if layers.is_empty() || dropped.any() || want_composite {
+        read_composite(&mut r, format, channels, &mut budget).unwrap_or_default()
     } else {
-        vec![Color32::TRANSPARENT; width * height]
+        Vec::new()
+    };
+    if composite.len() != width * height {
+        composite = Vec::new();
+    }
+    let full = [0, 0, width as i32, height as i32];
+    let mut notes = Vec::new();
+    let flat_layer = |name: &str, pixels: Vec<Color32>| PsdLayer {
+        name: name.into(),
+        rect: if pixels.is_empty() { [0; 4] } else { full },
+        pixels,
+        ..empty_layer()
     };
     if layers.is_empty() {
         // No layers: the picture is the one layer.
-        layers.push(PsdLayer {
-            deep: None,
-            name: "Layer 1".into(),
-            kind: PsdKind::Pixels,
-            rect: [0, 0, width as i32, height as i32],
-            pixels: composite.clone(),
-            opacity: 1.0,
-            visible: true,
-            blend: LayerBlend::Normal,
-            clipped: false,
-            alpha_locked: false,
-            position_locked: false,
-            mask: None,
-            vector: None,
-        });
+        let pixels = if want_composite {
+            composite.clone()
+        } else {
+            std::mem::take(&mut composite)
+        };
+        layers.push(flat_layer("Layer 1", pixels));
+    } else if dropped.any() {
+        notes.push(dropped.message(!composite.is_empty()));
+        if !composite.is_empty() {
+            let pixels = if want_composite {
+                composite.clone()
+            } else {
+                std::mem::take(&mut composite)
+            };
+            let mut flat = flat_layer("Photoshop's picture (parts not brought across)", pixels);
+            flat.visible = false;
+            layers.push(flat);
+        }
     }
     Ok(PsdDocument {
         depth: if bytes == 2 { Depth::U16 } else { Depth::U8 },
@@ -1142,7 +1323,90 @@ pub fn decode_psd(bytes: &[u8]) -> Result<PsdDocument, String> {
         height,
         layers,
         composite,
+        notes,
     })
+}
+
+/// A visible, normal pixel layer with nothing in it.
+fn empty_layer() -> PsdLayer {
+    PsdLayer {
+        deep: None,
+        name: String::new(),
+        kind: PsdKind::Pixels,
+        rect: [0; 4],
+        pixels: Vec::new(),
+        opacity: 1.0,
+        visible: true,
+        blend: LayerBlend::Normal,
+        clipped: false,
+        alpha_locked: false,
+        position_locked: false,
+        mask: None,
+        vector: None,
+        fill: None,
+    }
+}
+
+/// How a file's pixels are stored.
+#[derive(Clone, Copy)]
+struct Format {
+    gray: bool,
+    /// Per sample: 1 or 2.
+    bytes: usize,
+    /// The canvas, `[width, height]`.
+    size: [usize; 2],
+}
+
+/// What a file had that has no form here.
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+struct Dropped {
+    adjustment: bool,
+    /// Gradient or pattern fill layers.
+    fill: bool,
+    effects: bool,
+    vector_mask: bool,
+}
+
+impl Dropped {
+    fn any(self) -> bool {
+        self.adjustment || self.fill || self.effects || self.vector_mask
+    }
+
+    fn merge(&mut self, o: Dropped) {
+        self.adjustment |= o.adjustment;
+        self.fill |= o.fill;
+        self.effects |= o.effects;
+        self.vector_mask |= o.vector_mask;
+    }
+
+    /// A line for the user; `flattened`: the file's picture was added.
+    fn message(self, flattened: bool) -> String {
+        let what: Vec<&str> = [
+            (self.adjustment, "adjustment layers"),
+            (self.fill, "gradient or pattern fills"),
+            (self.effects, "layer effects"),
+            (self.vector_mask, "vector masks"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        let tail = if flattened {
+            "its flattened picture was added as a hidden top layer"
+        } else {
+            "the file has no flattened picture to show them"
+        };
+        format!("The PSD's {} have no form here: {tail}", what.join(", "))
+    }
+}
+
+/// A solid colour fill's colour (its `SoCo` descriptor's RGB, 0–255).
+fn solid_colour(b: &[u8]) -> Option<[u8; 3]> {
+    let get = |key: &[u8; 8]| {
+        let at = b.windows(8).position(|w| w == key)? + 8;
+        let v = f64::from_be_bytes(b.get(at..at + 8)?.try_into().ok()?);
+        v.is_finite().then(|| v.round().clamp(0.0, 255.0) as u8)
+    };
+    Some([get(b"Rd  doub")?, get(b"Grn doub")?, get(b"Bl  doub")?])
 }
 
 /// The colour profile among the image resources (1039, an ICC profile);
@@ -1179,9 +1443,25 @@ struct Record {
     channels: Vec<(i16, usize)>,
 }
 
-fn read_layers(r: &mut In<'_>, gray: bool, bytes: usize) -> Result<Vec<PsdLayer>, String> {
+/// A layer whose channel data is found, to be decoded.
+struct Pending<'a> {
+    layer: PsdLayer,
+    /// Its size in the file, and the part of that on the canvas.
+    size: [usize; 2],
+    crop: [usize; 4],
+    /// The same for its mask.
+    mask: Option<([usize; 2], [usize; 4])>,
+    channels: Vec<(i16, &'a [u8])>,
+}
+
+fn read_layers(
+    r: &mut In<'_>,
+    format: Format,
+    budget: &mut Budget,
+) -> Result<(Vec<PsdLayer>, Dropped), String> {
     let count = r.i16()?.unsigned_abs() as usize;
     let mut records = Vec::with_capacity(count);
+    let mut dropped = Dropped::default();
     for _ in 0..count {
         let top = r.i32()?;
         let left = r.i32()?;
@@ -1227,6 +1507,8 @@ fn read_layers(r: &mut In<'_>, gray: bool, bytes: usize) -> Result<Vec<PsdLayer>
         let mut kind = PsdKind::Pixels;
         let mut group_blend = None;
         let mut protection = 0u32;
+        let mut lost = Dropped::default();
+        let (mut colour, mut fill_opacity) = (None, None);
         while extra.b.len() - extra.pos >= 12 {
             let sig = extra.take(4)?;
             if sig != b"8BIM" && sig != b"8B64" {
@@ -1254,9 +1536,32 @@ fn read_layers(r: &mut In<'_>, gray: bool, bytes: usize) -> Result<Vec<PsdLayer>
                     }
                 }
                 b"lspf" => protection = data.u32()?,
+                b"SoCo" => match solid_colour(data.b) {
+                    Some(c) => colour = Some(c),
+                    None => lost.fill = true,
+                },
+                b"GdFl" | b"PtFl" => lost.fill = true,
+                b"levl" | b"curv" | b"hue2" | b"hue " | b"brit" | b"blnc" | b"selc" | b"mixr"
+                | b"grdm" | b"phfl" | b"expA" | b"vibA" | b"thrs" | b"post" | b"nvrt" | b"blwh"
+                | b"clrL" => lost.adjustment = true,
+                b"lfx2" | b"lrFX" | b"lmfx" => lost.effects = true,
+                b"vmsk" | b"vsms" => lost.vector_mask = true,
+                b"iOpa" => fill_opacity = Some(data.u8()?),
                 _ => {}
             }
         }
+        // Fill opacity fades the layer's own pixels but not its effects:
+        // without effects, it's the same as its opacity.
+        let opacity = match fill_opacity {
+            Some(f) if !lost.effects => opacity * f as f32 / 255.0,
+            _ => opacity,
+        };
+        // A shape layer is a colour fill cut by a vector mask: without the
+        // mask it isn't a fill everywhere, and the flattened picture shows it.
+        let fill = colour
+            .filter(|_| !lost.vector_mask)
+            .map(crate::canvas::layer_style::LayerFill::Colour);
+        dropped.merge(lost);
         records.push(Record {
             layer: PsdLayer {
                 deep: None,
@@ -1272,12 +1577,16 @@ fn read_layers(r: &mut In<'_>, gray: bool, bytes: usize) -> Result<Vec<PsdLayer>
                 position_locked: protection & 4 != 0,
                 mask,
                 vector: None,
+                fill,
             },
             channels,
         });
     }
-    // Channel data, layer by layer in the same order.
-    let mut layers = Vec::with_capacity(records.len());
+    // Channel data, layer by layer in the same order: found, sized and
+    // budgeted in turn, then decoded together.
+    let [cw, ch] = format.size;
+    let bytes = format.bytes;
+    let mut pending = Vec::with_capacity(records.len());
     for Record {
         mut layer,
         channels,
@@ -1285,60 +1594,97 @@ fn read_layers(r: &mut In<'_>, gray: bool, bytes: usize) -> Result<Vec<PsdLayer>
     {
         let [x0, y0, x1, y1] = layer.rect;
         let (w, h) = (span(x0, x1)?, span(y0, y1)?);
-        if w * h > crate::app::document::MAX_CANVAS_PIXELS
-            || (bytes == 2 && w * h > crate::project::kra::MAX_DEEP_PIXELS)
-        {
+        // (A ZIP channel is unpacked whole before it's cut to the canvas.)
+        if w * h > crate::app::document::MAX_CANVAS_PIXELS {
             return Err("Damaged PSD layer bounds".into());
         }
-        if let Some(m) = &layer.mask {
-            span(m.rect[0], m.rect[2])?;
-            span(m.rect[1], m.rect[3])?;
+        let (rect, crop) = clip_to_canvas(layer.rect, cw, ch);
+        layer.rect = rect;
+        let area = (crop[2] - crop[0]) * (crop[3] - crop[1]);
+        if bytes == 2 && area > crate::project::kra::MAX_DEEP_PIXELS {
+            return Err("Damaged PSD layer bounds".into());
         }
-        let mut planes: [Option<Vec<u8>>; 4] = Default::default();
-        for (id, len) in channels {
-            let data = r.take(len)?;
-            match id {
-                -1 => planes[3] = Some(read_plane(data, w, h, bytes)?),
-                0..=2 => planes[id as usize] = Some(read_plane(data, w, h, bytes)?),
-                -2 => {
-                    if let Some(m) = layer.mask.as_mut() {
-                        let mw = (m.rect[2] - m.rect[0]).max(0) as usize;
-                        let mh = (m.rect[3] - m.rect[1]).max(0) as usize;
-                        m.data = read_plane(data, mw, mh, bytes)?;
-                        if bytes == 2 {
-                            m.data = plane_to_8(&m.data);
-                        }
-                        if m.data.len() != mw * mh {
-                            m.data = vec![255; mw * mh];
-                        }
+        let mut mask = None;
+        if let Some(m) = layer.mask.as_mut() {
+            let (mw, mh) = (span(m.rect[0], m.rect[2])?, span(m.rect[1], m.rect[3])?);
+            if mw * mh > crate::app::document::MAX_CANVAS_PIXELS {
+                return Err("Damaged PSD layer mask bounds".into());
+            }
+            let (rect, crop) = clip_to_canvas(m.rect, cw, ch);
+            m.rect = rect;
+            mask = Some(([mw, mh], crop));
+        }
+        let mask_area = mask.map_or(0, |(_, c)| (c[2] - c[0]) * (c[3] - c[1]));
+        // The planes, our pixels (and at full depth), the mask.
+        let per_pixel = 4 * bytes + 4 + if bytes == 2 { 16 } else { 0 };
+        budget.spend(area * per_pixel + mask_area * (bytes + 1))?;
+        let channels = (channels.into_iter())
+            .map(|(id, len)| Ok((id, r.take(len)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        pending.push(Pending {
+            layer,
+            size: [w, h],
+            crop,
+            mask,
+            channels,
+        });
+    }
+    use rayon::prelude::*;
+    let layers = (pending.into_par_iter())
+        .map(|p| decode_layer(p, format))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((layers, dropped))
+}
+
+/// A layer's pixels (and mask) from its channels, on the canvas.
+fn decode_layer(p: Pending<'_>, format: Format) -> Result<PsdLayer, String> {
+    let Pending {
+        mut layer,
+        size: [w, h],
+        crop,
+        mask,
+        channels,
+    } = p;
+    let bytes = format.bytes;
+    let area = (crop[2] - crop[0]) * (crop[3] - crop[1]);
+    let mut planes: [Option<Vec<u8>>; 4] = Default::default();
+    for (id, data) in channels {
+        match id {
+            -1 => planes[3] = Some(read_plane(data, w, h, bytes, crop)?),
+            0..=2 => planes[id as usize] = Some(read_plane(data, w, h, bytes, crop)?),
+            -2 => {
+                if let (Some(m), Some(([mw, mh], mcrop))) = (layer.mask.as_mut(), mask) {
+                    // A damaged mask is left out; the layer still comes.
+                    m.data = read_plane(data, mw, mh, bytes, mcrop).unwrap_or_default();
+                    if bytes == 2 {
+                        m.data = plane_to_8(&m.data);
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
-        if let Some(m) = &layer.mask
-            && m.data.len()
-                != ((m.rect[2] - m.rect[0]).max(0) * (m.rect[3] - m.rect[1]).max(0)) as usize
-        {
-            layer.mask = None;
-        }
-        let empty = Vec::new();
-        let plane = |i: usize| planes[i].as_deref().unwrap_or(&empty);
-        let rgb = if gray {
-            [plane(0); 3]
-        } else {
-            [plane(0), plane(1), plane(2)]
-        };
-        if bytes == 2 {
-            let (pixels, deep) = from_planes16(rgb, planes[3].as_deref(), w * h);
-            layer.pixels = pixels;
-            layer.deep = Some(deep);
-        } else {
-            layer.pixels = from_planes(rgb, planes[3].as_deref(), w * h);
-        }
-        layers.push(layer);
     }
-    Ok(layers)
+    if let Some(m) = &layer.mask
+        && m.data.len()
+            != ((m.rect[2] - m.rect[0]).max(0) * (m.rect[3] - m.rect[1]).max(0)) as usize
+    {
+        layer.mask = None;
+    }
+    let empty = Vec::new();
+    let plane = |i: usize| planes[i].as_deref().unwrap_or(&empty);
+    let rgb = if format.gray {
+        [plane(0); 3]
+    } else {
+        [plane(0), plane(1), plane(2)]
+    };
+    if bytes == 2 {
+        let (pixels, deep) = from_planes16(rgb, planes[3].as_deref(), area);
+        layer.pixels = pixels;
+        layer.deep = Some(deep);
+    } else {
+        layer.pixels = from_planes(rgb, planes[3].as_deref(), area);
+    }
+    Ok(layer)
 }
 
 /// A layer's width or height from its edges, refusing absurd ones (a
@@ -1351,20 +1697,28 @@ fn span(from: i32, to: i32) -> Result<usize, String> {
     Ok(n)
 }
 
+/// The flattened picture's colour and alpha channels (the others are
+/// skipped), premultiplied.
 fn read_composite(
     r: &mut In<'_>,
-    w: usize,
-    h: usize,
+    format: Format,
     channels: usize,
-    gray: bool,
-    bytes: usize,
+    budget: &mut Budget,
 ) -> Result<Vec<Color32>, String> {
+    let Format { gray, bytes, .. } = format;
+    let [w, h] = format.size;
     let compression = r.u16()?;
     let n = w * h;
-    let mut planes = Vec::with_capacity(channels);
+    let color = if gray { 1 } else { 3 };
+    if channels < color {
+        return Err("The PSD has too few channels".into());
+    }
+    let wanted = channels.min(color + 1);
+    budget.spend(n * (wanted * bytes + 4))?;
+    let mut planes = Vec::with_capacity(wanted);
     match compression {
         0 => {
-            for _ in 0..channels {
+            for _ in 0..wanted {
                 planes.push(r.take(n * bytes)?.to_vec());
             }
         }
@@ -1372,7 +1726,11 @@ fn read_composite(
             let counts: Vec<usize> = (0..channels * h)
                 .map(|_| r.u16().map(|c| c as usize))
                 .collect::<Result<_, _>>()?;
-            for c in 0..channels {
+            // Rows that are all padding would make a picture from nothing.
+            if wanted * n * bytes > (r.b.len() - r.pos).saturating_mul(RLE_RATIO) {
+                return Err("The PSD's picture is cut short".into());
+            }
+            for c in 0..wanted {
                 let mut plane = Vec::with_capacity(n * bytes);
                 for &count in &counts[c * h..(c + 1) * h] {
                     plane.extend(unpackbits(r.take(count)?, w * bytes));
@@ -1384,10 +1742,6 @@ fn read_composite(
     }
     if bytes == 2 {
         planes = planes.iter().map(|p| plane_to_8(p)).collect();
-    }
-    let color = if gray { 1 } else { 3 };
-    if planes.len() < color {
-        return Err("The PSD has too few channels".into());
     }
     let rgb = if gray {
         [planes[0].as_slice(); 3]
@@ -1410,7 +1764,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/testdata/krita-layers-16bit.psd"
         );
-        let doc = decode_psd(&std::fs::read(path).unwrap()).unwrap();
+        let doc = decode(&std::fs::read(path).unwrap(), true).unwrap();
         assert_eq!(doc.depth, Depth::U16);
         let red = doc.layers.iter().find(|l| l.name == "Red square").unwrap();
         let deep = red.deep.as_ref().unwrap();
@@ -1511,7 +1865,7 @@ mod tests {
             .collect();
         let mut data = 3u16.to_be_bytes().to_vec();
         data.extend(miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6));
-        let plane = read_plane(&data, 2, 2, 2).unwrap();
+        let plane = read_plane(&data, 2, 2, 2, [0, 0, 2, 2]).unwrap();
         let values: Vec<u16> = plane
             .chunks(2)
             .map(|s| u16::from_be_bytes([s[0], s[1]]))
@@ -1520,7 +1874,10 @@ mod tests {
         // 8-bit ZIP without prediction.
         let mut data = 2u16.to_be_bytes().to_vec();
         data.extend(miniz_oxide::deflate::compress_to_vec_zlib(&[1, 2, 3, 4], 6));
-        assert_eq!(read_plane(&data, 2, 2, 1).unwrap(), [1, 2, 3, 4]);
+        assert_eq!(
+            read_plane(&data, 2, 2, 1, [0, 0, 2, 2]).unwrap(),
+            [1, 2, 3, 4]
+        );
     }
     use super::*;
 
@@ -1720,5 +2077,253 @@ mod tests {
                 canvas.flatten();
             }
         });
+    }
+
+    /// A layer for [`crafted`]: `[left, top, right, bottom]`, its channels
+    /// (id, data with its compression), its mask's rect, tagged blocks.
+    type Crafted = (
+        [i32; 4],
+        Vec<(i16, Vec<u8>)>,
+        Option<[i32; 4]>,
+        Vec<(&'static [u8; 4], Vec<u8>)>,
+    );
+
+    /// An 8-bit RGB file of `w`×`h` with `layers`, and `composite` (raw
+    /// R, G, B planes) as its flattened picture.
+    fn crafted(w: u32, h: u32, layers: &[Crafted], composite: &[u8]) -> Vec<u8> {
+        let mut o = Out(Vec::new());
+        o.bytes(b"8BPS");
+        o.u16(1);
+        o.bytes(&[0; 6]);
+        o.u16(3);
+        o.u32(h);
+        o.u32(w);
+        o.u16(8);
+        o.u16(3);
+        o.u32(0);
+        o.u32(0);
+        let section = o.len_slot();
+        let info = o.len_slot();
+        o.i16(layers.len() as i16);
+        for (rect, channels, mask, blocks) in layers {
+            for v in [rect[1], rect[0], rect[3], rect[2]] {
+                o.i32(v);
+            }
+            o.u16(channels.len() as u16);
+            for (id, data) in channels {
+                o.i16(*id);
+                o.u32(data.len() as u32);
+            }
+            o.bytes(b"8BIMnorm");
+            o.bytes(&[255, 0, 0, 0]);
+            let extra = o.len_slot();
+            match mask {
+                Some(m) => {
+                    o.u32(20);
+                    for v in [m[1], m[0], m[3], m[2]] {
+                        o.i32(v);
+                    }
+                    o.bytes(&[255, 0, 0, 0]);
+                }
+                None => o.u32(0),
+            }
+            o.u32(0);
+            pascal_name("L", &mut o);
+            for (key, data) in blocks {
+                o.bytes(b"8BIM");
+                o.bytes(*key);
+                o.u32(data.len() as u32);
+                o.bytes(data);
+            }
+            o.close_len(extra, 1);
+        }
+        for (_, channels, ..) in layers {
+            for (_, data) in channels {
+                o.bytes(data);
+            }
+        }
+        o.close_len(info, 2);
+        o.u32(0);
+        o.close_len(section, 1);
+        o.u16(0);
+        o.bytes(composite);
+        o.0
+    }
+
+    /// An RLE channel of `h` rows that are all padding (no bytes each).
+    fn padding_rows(h: usize) -> Vec<u8> {
+        let mut d = vec![0, 1];
+        d.extend(vec![0; 2 * h]);
+        d
+    }
+
+    fn rgba_padding(h: usize) -> Vec<(i16, Vec<u8>)> {
+        (-1..3).map(|id| (id, padding_rows(h))).collect()
+    }
+
+    #[test]
+    fn a_layer_far_past_the_canvas_is_cut_to_it_before_decoding() {
+        // 30 000 × 8 000 claimed, 64 × 64 on the canvas.
+        let layer = (
+            [-100, -100, 29_900, 7_900],
+            rgba_padding(8000),
+            None,
+            vec![],
+        );
+        let file = crafted(64, 64, &[layer], &[]);
+        assert!(file.len() < 70_000);
+        let doc = decode_psd(&file).unwrap();
+        assert_eq!(doc.layers[0].rect, [0, 0, 64, 64]);
+        assert_eq!(doc.layers[0].pixels.len(), 64 * 64);
+    }
+
+    #[test]
+    fn many_canvas_sized_layers_from_a_small_file_are_refused() {
+        // Each layer: 16 384² pixels from 4 × 32 KB of padding rows. Unchecked
+        // that's a gigabyte a layer.
+        let layers: Vec<Crafted> = (0..8)
+            .map(|_| ([0, 0, 16_384, 16_384], rgba_padding(16_384), None, vec![]))
+            .collect();
+        let file = crafted(16_384, 16_384, &layers, &[]);
+        let err = decode_psd(&file).err().expect("refused");
+        assert!(err.contains("bigger than its data"), "{err}");
+        // Even one has nothing like that in it: RLE can't make that much.
+        let one = crafted(16_384, 16_384, &layers[..1], &[]);
+        assert!(decode_psd(&one).is_err());
+    }
+
+    #[test]
+    fn a_huge_mask_is_refused_and_a_big_one_is_cut_to_the_canvas() {
+        let mask = |m: [i32; 4], data: Vec<u8>| -> Crafted {
+            let mut channels = rgba_padding(16);
+            channels.push((-2, data));
+            ([0, 0, 16, 16], channels, Some(m), vec![])
+        };
+        // Each side allowed, the two together not.
+        let huge = mask([0, 0, 40_000, 40_000], padding_rows(40_000));
+        assert!(decode_psd(&crafted(16, 16, &[huge], &[])).is_err());
+        let big = mask([-8, -8, 2_000, 2_000], padding_rows(2_008));
+        let doc = decode_psd(&crafted(16, 16, &[big], &[])).unwrap();
+        let m = doc.layers[0].mask.as_ref().expect("kept");
+        assert_eq!(m.rect, [0, 0, 16, 16]);
+        assert_eq!(m.data.len(), 16 * 16);
+    }
+
+    #[test]
+    fn short_raw_channels_are_refused_not_padded() {
+        let mut short = vec![0, 0];
+        short.extend(vec![9; 100]);
+        let layer = ([0, 0, 16, 16], vec![(0, short)], None, vec![]);
+        assert!(decode_psd(&crafted(16, 16, &[layer], &[])).is_err());
+        let mut whole = vec![0, 0];
+        whole.extend(vec![9; 256]);
+        let layer = ([0, 0, 16, 16], vec![(0, whole)], None, vec![]);
+        assert!(decode_psd(&crafted(16, 16, &[layer], &[])).is_ok());
+    }
+
+    #[test]
+    fn photoshop_layers_with_no_form_here_bring_the_flattened_picture() {
+        let picture: Vec<u8> = [200u8, 100, 50].iter().flat_map(|&v| vec![v; 64]).collect();
+        let plain = ([0, 0, 8, 8], rgba_padding(8), None, vec![]);
+        // Without them, the picture isn't even read.
+        let doc = decode_psd(&crafted(8, 8, std::slice::from_ref(&plain), &picture)).unwrap();
+        assert!(doc.notes.is_empty() && doc.composite.is_empty());
+        assert_eq!(doc.layers.len(), 1);
+        let levels: Crafted = ([0, 0, 0, 0], vec![], None, vec![(b"levl", vec![0; 8])]);
+        let doc = decode_psd(&crafted(8, 8, &[plain.clone(), levels], &picture)).unwrap();
+        assert_eq!(doc.notes.len(), 1, "{:?}", doc.notes);
+        assert!(doc.notes[0].contains("adjustment layers"));
+        let flat = doc.layers.last().unwrap();
+        assert!(!flat.visible);
+        assert_eq!(flat.rect, [0, 0, 8, 8]);
+        assert_eq!(flat.pixels[0], Color32::from_rgb(200, 100, 50));
+        // Effects too; a solid colour fill comes as a fill layer.
+        let fx: Crafted = (
+            [0, 0, 8, 8],
+            rgba_padding(8),
+            None,
+            vec![(b"lfx2", vec![0; 8])],
+        );
+        let doc = decode_psd(&crafted(8, 8, &[fx], &picture)).unwrap();
+        assert!(doc.notes[0].contains("layer effects"));
+        let mut soco = vec![0, 0, 0, 16];
+        for (key, v) in [(b"Rd  ", 10.0f64), (b"Grn ", 20.0), (b"Bl  ", 30.0)] {
+            soco.extend([0, 0, 0, 0]);
+            soco.extend(key);
+            soco.extend(b"doub");
+            soco.extend(v.to_be_bytes());
+        }
+        let fill: Crafted = ([0, 0, 0, 0], vec![], None, vec![(b"SoCo", soco)]);
+        let doc = decode_psd(&crafted(8, 8, &[plain, fill], &picture)).unwrap();
+        assert!(doc.notes.is_empty());
+        let canvas = doc.into_canvas().unwrap();
+        let top = canvas.layers.last().unwrap();
+        assert_eq!(
+            top.style.fill,
+            Some(crate::canvas::layer_style::LayerFill::Colour([10, 20, 30]))
+        );
+    }
+
+    #[test]
+    fn fill_layers_and_borders_are_written_as_they_show() {
+        use crate::canvas::layer_style::{Border, LayerFill};
+        let mut canvas = Canvas::new(100, 70, Color32::WHITE, 64);
+        let fill = canvas.insert_new_layer(2, "Fill".into(), LayerKind::Paint, None);
+        let fi = canvas.layer_index_of(fill).unwrap();
+        canvas.layers[fi].style.fill = Some(LayerFill::Colour([0, 0, 255]));
+        let mut tile = vec![Color32::TRANSPARENT; 64 * 64];
+        tile[20 * 64 + 20] = Color32::RED;
+        canvas.set_layer_tile_data(1, 0, 0, tile);
+        canvas.layers[1].style.border = Some(Border::default());
+        let bytes = encode_psd(&PsdDocument::from_canvas(&canvas)).unwrap();
+        let back = decode_psd(&bytes).unwrap();
+        let fill = back
+            .layers
+            .iter()
+            .find(|l| l.name == "Fill")
+            .expect("written");
+        assert_eq!(fill.rect, [0, 0, 100, 70]);
+        assert!(fill.pixels.iter().all(|&p| p == Color32::BLUE));
+        let bordered = back.layers.iter().find(|l| l.name == "Layer 1").unwrap();
+        let painted = bordered.pixels.iter().filter(|p| p.a() > 0).count();
+        assert!(painted > 1, "the border came along ({painted} pixels)");
+    }
+
+    #[test]
+    fn mask_tiles_are_as_from_a_whole_canvas_picture() {
+        // The old way: the whole canvas's mask, then cut into tiles.
+        let whole = |mask: &PsdMask, w: usize, h: usize| {
+            let [x0, y0, x1, y1] = mask.rect;
+            let mw = (x1 - x0).max(0) as usize;
+            let full: Vec<Color32> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as i32, (i / w) as i32);
+                    let v = if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                        mask.data[(y - y0) as usize * mw + (x - x0) as usize]
+                    } else {
+                        mask.default
+                    };
+                    Color32::from_rgb(v, v, v)
+                })
+                .collect();
+            tiles_of(&full, [0, 0, w as i32, h as i32], 64, Color32::WHITE)
+        };
+        for (rect, default) in [
+            ([10, 70, 150, 90], 255),
+            ([0, 0, 0, 0], 0),
+            ([64, 64, 128, 128], 255),
+        ] {
+            let n = ((rect[2] - rect[0]) * (rect[3] - rect[1])) as usize;
+            let mask = PsdMask {
+                rect,
+                data: (0..n).map(|i| (i % 251) as u8).collect(),
+                default,
+            };
+            let (a, b) = (mask_tiles(&mask, 200, 150, 64), whole(&mask, 200, 150));
+            assert_eq!(a.len(), b.len());
+            for (a, b) in a.iter().zip(&b) {
+                assert_eq!((a.tx, a.ty, &a.data), (b.tx, b.ty, &b.data));
+            }
+        }
     }
 }

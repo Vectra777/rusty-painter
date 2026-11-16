@@ -21,34 +21,53 @@ fn default_compressed() -> bool {
     true
 }
 
+/// A payload for [`push_payloads`]: raw bytes to compress, or a zstd frame
+/// made already (an undo snapshot kept compressed) with its raw length.
+pub(super) enum Payload<'a> {
+    Raw(&'a [u8]),
+    Packed(&'a [u8], usize),
+}
+
 /// Store zstd-compressed payloads: compressed in parallel, stored in
 /// order (the file is the same as pushing them one by one).
 pub(super) fn push_blobs(blobs: &mut Vec<u8>, raws: &[Vec<u8>]) -> Result<Vec<StoredBlob>, String> {
+    let payloads: Vec<Payload<'_>> = raws.iter().map(|r| Payload::Raw(r)).collect();
+    push_payloads(blobs, &payloads)
+}
+
+/// [`push_blobs`], with frames compressed already stored as they are
+/// (recompressing a long undo history was most of a save).
+pub(super) fn push_payloads(
+    blobs: &mut Vec<u8>,
+    payloads: &[Payload<'_>],
+) -> Result<Vec<StoredBlob>, String> {
     use rayon::prelude::*;
+    use std::borrow::Cow;
     // One compressor per thread, reused: making one per tile (MBs of
     // state) cost more than compressing.
-    let compressed: Vec<Vec<u8>> = raws
+    let compressed: Vec<(Cow<'_, [u8]>, usize)> = payloads
         .par_iter()
         .map_init(
             || zstd::bulk::Compressor::new(ZSTD_LEVEL),
-            |compressor, raw| match compressor {
-                Ok(c) => c
+            |compressor, payload| match (payload, compressor) {
+                (Payload::Packed(frame, raw_len), _) => Ok((Cow::Borrowed(*frame), *raw_len)),
+                (Payload::Raw(raw), Ok(c)) => c
                     .compress(raw)
+                    .map(|frame| (Cow::Owned(frame), raw.len()))
                     .map_err(|err| format!("Compression failed: {err}")),
-                Err(err) => Err(format!("Compression failed: {err}")),
+                (Payload::Raw(_), Err(err)) => Err(format!("Compression failed: {err}")),
             },
         )
         .collect::<Result<_, _>>()?;
-    Ok(raws
-        .iter()
-        .zip(compressed)
-        .map(|(raw, payload)| {
+    Ok(compressed
+        .into_iter()
+        .map(|(payload, raw_len)| {
             let offset = blobs.len() as u64;
             blobs.extend_from_slice(&payload);
             StoredBlob {
                 offset,
                 len: payload.len() as u64,
-                raw_len: raw.len() as u64,
+                raw_len: raw_len as u64,
                 compressed: true,
             }
         })

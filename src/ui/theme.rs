@@ -29,6 +29,15 @@ fn apply_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Settings → Interface size: the whole UI scaled (egui's zoom), when it
+/// changes.
+pub fn apply_interface_size(ctx: &egui::Context, prefs: &crate::ui::prefs::UiPrefs) {
+    let zoom = prefs.zoom();
+    if (ctx.zoom_factor() - zoom).abs() > 1e-3 {
+        ctx.set_zoom_factor(zoom);
+    }
+}
+
 /// Build the theme for desktop or touch (larger text and hit targets,
 /// always-visible scroll bars).
 pub fn apply_style(ctx: &egui::Context, touch: bool) {

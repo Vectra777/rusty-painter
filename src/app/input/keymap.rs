@@ -38,6 +38,7 @@ pub enum Action {
     BiggerBrush,
     Presets,
     Palette,
+    QuickMenu,
     SwapColors,
     // View
     TogglePanels,
@@ -356,6 +357,13 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Pop-up palette (hold or tap)",
         "Brush & colour",
         &[b!(NONE, K)],
+    ),
+    info(
+        Action::QuickMenu,
+        "quick_menu",
+        "QuickMenu (six actions round the pointer)",
+        "Brush & colour",
+        &[b!(NONE, J)],
     ),
     info(
         Action::SwapColors,

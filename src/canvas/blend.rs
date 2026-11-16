@@ -867,6 +867,19 @@ pub fn alpha_over_batch(src: &[Color32], dst: &[Color32], out: &mut [Color32]) {
     let simd_len = src.len() / 4 * 4;
     let mut i = 0;
     while i < simd_len {
+        // Opaque or empty paint (most of a painting): what alpha_over gives
+        // for them, without decoding and encoding four pixels for nothing.
+        let s = &src[i..i + 4];
+        if s.iter().all(|c| c.a() == 255) {
+            out[i..i + 4].copy_from_slice(s);
+            i += 4;
+            continue;
+        }
+        if s.iter().all(|c| c.a() == 0) {
+            out[i..i + 4].copy_from_slice(&dst[i..i + 4]);
+            i += 4;
+            continue;
+        }
         let blended = alpha_over_x4(
             luts,
             [src[i], src[i + 1], src[i + 2], src[i + 3]],
@@ -1137,6 +1150,16 @@ mod tests {
 
         for i in 0..5 {
             assert_color_close(out[i], alpha_over(src[i], dst[i]));
+        }
+
+        // Groups of four all opaque or all empty: exactly the scalar's.
+        let opaque = Color32::from_rgb(12, 200, 99);
+        let src = [opaque; 4].into_iter().chain([Color32::TRANSPARENT; 4]);
+        let src: Vec<Color32> = src.collect();
+        let mut out = vec![Color32::TRANSPARENT; 8];
+        alpha_over_batch(&src, &[dst[0]; 8], &mut out);
+        for (o, s) in out.iter().zip(&src) {
+            assert_eq!(*o, alpha_over(*s, dst[0]));
         }
     }
 

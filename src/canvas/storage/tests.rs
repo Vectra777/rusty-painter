@@ -1153,6 +1153,59 @@ fn a_border_rings_the_paint_across_tiles_and_merging_keeps_it() {
 }
 
 #[test]
+fn a_styled_tile_is_kept_until_its_paint_or_style_changes() {
+    use crate::canvas::layer_style::Border;
+    let mut canvas = Canvas::new(2 * T, T, Color32::WHITE, T);
+    let mut tile = vec![Color32::TRANSPARENT; T * T];
+    tile[4 * T + (T - 1)] = Color32::BLACK;
+    canvas.set_layer_tile_data(1, 0, 0, tile);
+    let border = Border {
+        width: 2.0,
+        colour: [255, 0, 0],
+        opacity: 1.0,
+    };
+    canvas.layers[1].style.border = Some(border);
+    let fresh = |c: &Canvas| c.make_styled_tile(1, 1, 0).map(|p| p.to_vec());
+    let first = canvas.styled_tile(1, 1, 0).expect("the border spills over");
+    // Asked again: the same pixels, not made again.
+    let again = canvas.styled_tile(1, 1, 0).unwrap();
+    assert!(Arc::ptr_eq(&first, &again));
+    // Another layer painted: still kept.
+    canvas.set_layer_tile_data(0, 1, 0, vec![Color32::BLUE; T * T]);
+    assert!(Arc::ptr_eq(&first, &canvas.styled_tile(1, 1, 0).unwrap()));
+    // The paint next door changed (the border reaches over): made again.
+    let mut moved = vec![Color32::TRANSPARENT; T * T];
+    moved[6 * T + (T - 1)] = Color32::BLACK;
+    canvas.set_layer_tile_data(1, 0, 0, moved);
+    let after = canvas.styled_tile(1, 1, 0).unwrap();
+    assert!(!Arc::ptr_eq(&first, &after));
+    assert_eq!(Some(after.to_vec()), fresh(&canvas));
+    // The tile itself written through any writer: made again.
+    canvas.ensure_layer_tile(1, 1, 0);
+    let cell = canvas.lock_layer_tile(1, 1, 0).unwrap();
+    {
+        let mut cell = cell.lock().unwrap();
+        cell.data_or_insert(T * T)[0] = Color32::GREEN;
+        cell.is_empty = false;
+    }
+    let written = canvas.styled_tile(1, 1, 0).unwrap();
+    assert_eq!(written[0], Color32::GREEN);
+    assert_eq!(Some(written.to_vec()), fresh(&canvas));
+    // The style changed: made again.
+    canvas.layers[1].style.border = Some(Border {
+        width: 4.0,
+        ..border
+    });
+    let wider = canvas.styled_tile(1, 1, 0).unwrap();
+    assert_eq!(Some(wider.to_vec()), fresh(&canvas));
+    assert_ne!(wider, written);
+    // What the picture shows is what it'd show made fresh.
+    let shown = picture(&canvas);
+    let cold = canvas.detached_copy();
+    assert_eq!(shown.pixels, picture(&cold).pixels);
+}
+
+#[test]
 fn fills_and_backgrounds_keep_their_exact_colour() {
     // A mid grey used to come out much lighter (converted to sRGB twice).
     let grey = Color32::from_rgb(100, 100, 100);
@@ -1321,4 +1374,410 @@ fn the_linear_flatten_is_the_8_bit_one_unrounded() {
         row.dedup();
         assert!(row.len() > 50, "{space:?}: {} steps", row.len());
     }
+}
+
+/// A deterministic mess of pixels: some transparent, some see-through.
+fn noise_tile(n: usize, seed: u32) -> Vec<Color32> {
+    let mut s = seed | 1;
+    (0..n)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            let a = [0u8, 90, 200, 255][(s % 4) as usize];
+            let c = |k: u32| ((s >> k) as u8).min(a);
+            Color32::from_rgba_premultiplied(c(8), c(16), c(24), a)
+        })
+        .collect()
+}
+
+fn close(a: &[Color32], b: &[Color32], by: u8) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(p, q)| (p.to_array().iter().zip(q.to_array())).all(|(x, y)| x.abs_diff(y) <= by))
+}
+
+/// The one-layer fast paths drew a half-transparent background as if it
+/// were opaque.
+#[test]
+fn a_see_through_background_looks_the_same_on_the_fast_paths() {
+    let make = |off_the_fast_path: bool| {
+        let mut c = Canvas::new(64, 64, Color32::WHITE, 64);
+        c.layers[0].opacity = 0.5;
+        c.set_layer_tile_data(1, 0, 0, noise_tile(64 * 64, 7));
+        if off_the_fast_path {
+            // An empty layer on top: two paint layers take the general path.
+            c.add_layer();
+        }
+        c
+    };
+    let (fast, general) = (make(false), make(true));
+    let (mut a, mut b) = (
+        ColorImage::new([0, 0], Color32::TRANSPARENT),
+        ColorImage::new([0, 0], Color32::TRANSPARENT),
+    );
+    fast.write_tile_to_color_image(0, 0, &mut a, 1, None);
+    general.write_tile_to_color_image(0, 0, &mut b, 1, None);
+    assert!(close(&a.pixels, &b.pixels, 1));
+    assert!(
+        a.pixels.iter().any(|p| p.a() < 255),
+        "the background shows through"
+    );
+    fast.write_tile_rect_downsampled(0, 0, [0, 0, 64, 64], 4, &mut a, None);
+    general.write_tile_rect_downsampled(0, 0, [0, 0, 64, 64], 4, &mut b, None);
+    assert!(close(&a.pixels, &b.pixels, 1));
+}
+
+/// A gamma document's full-precision picture: its premultiplied sRGB
+/// composite decoded unpremultiplied (decoding premultiplied values made
+/// half-transparent colours far too dark).
+#[test]
+fn a_gamma_documents_full_precision_picture_decodes_colour_unpremultiplied() {
+    let mut c = Canvas::new(64, 64, Color32::WHITE, 64);
+    c.blend_space = crate::canvas::blend_modes::BlendSpace::Gamma;
+    c.layers[0].visible = false;
+    let grey = Color32::from_rgba_premultiplied(64, 64, 64, 128);
+    c.set_layer_tile_data(1, 0, 0, vec![grey; 64 * 64]);
+    let px = c.flatten_linear()[0];
+    let a = 128.0 / 255.0;
+    assert!((px[3] - a).abs() < 1e-3);
+    // Alone over nothing, the picture is the pixel itself.
+    let want = crate::canvas::blend::color32_to_linear(grey).r();
+    assert!((px[0] - want).abs() < 1e-3, "{px:?}, want {want}");
+}
+
+/// Merging in a deeper document keeps its depth (it went through 8 bits).
+#[test]
+fn a_merge_in_a_deeper_document_keeps_the_full_depth() {
+    let mut c = Canvas::new(64, 64, Color32::WHITE, 64);
+    c.convert_depth(Depth::U16);
+    let mut ramp = DeepTile::transparent(Depth::U16, 64 * 64).unwrap();
+    for i in 0..ramp.len() {
+        let v = (i % 64) as f32 / 64.0 * 0.01;
+        ramp.set_linear(i, [v, v, v, 1.0]);
+    }
+    c.set_layer_tile_deep(1, 0, 0, &ramp);
+    c.add_layer();
+    c.set_layer_tile_data(
+        2,
+        0,
+        0,
+        vec![Color32::from_rgba_premultiplied(0, 0, 40, 64); 64 * 64],
+    );
+    c.merge_down(2).unwrap();
+    let merged = c.get_layer_tile_deep(1, 0, 0).expect("kept deep");
+    let mut row: Vec<u32> = (0..64)
+        .map(|i| (merged.linear(i)[1] * 1e6) as u32)
+        .collect();
+    row.dedup();
+    assert!(row.len() > 50, "{} steps", row.len());
+    assert_eq!(c.get_layer_tile_data(1, 0, 0), Some(merged.narrow_all()));
+}
+
+/// Too many pixels to transform is told up front (counting only what's
+/// painted, and only where asked).
+#[test]
+fn a_transform_too_big_to_do_is_known_before_it_starts() {
+    let c = Canvas::new(64, 64, Color32::WHITE, 64);
+    let one: SharedPixels = Arc::new(vec![Color32::RED; 64 * 64]);
+    {
+        let mut tiles = c.layers[1].tiles.lock().unwrap();
+        for i in 0..16_385 {
+            let cell = TileCell::shared(Arc::clone(&one), None, false);
+            tiles.insert((i % 200, i / 200), Arc::new(Mutex::new(cell)));
+        }
+    }
+    assert!(c.transform_too_big(1, None));
+    let part = eframe::egui::Rect::from_min_max(
+        eframe::egui::pos2(0.0, 0.0),
+        eframe::egui::pos2(640.0, 640.0),
+    );
+    assert!(!c.transform_too_big(1, Some(part)));
+}
+
+/// A quarter turn about a centre on a pixel edge still moves whole pixels
+/// (it blurred them by half a pixel).
+#[test]
+fn a_quarter_turn_about_any_centre_keeps_whole_pixels() {
+    let ts = 16;
+    let src = pattern_tiles(ts);
+    let colours: std::collections::HashSet<Color32> = src[&(0, 0)].iter().copied().collect();
+    let bounds = source_bounds_and_tiles(&src, ts, None).unwrap().0;
+    for centre in [
+        Vec2::new(8.5, 8.0),
+        Vec2::new(8.0, 7.5),
+        Vec2::new(8.5, 8.5),
+    ] {
+        for turn in [1.0f32, -1.0, 2.0] {
+            let params = TransformParams::new(
+                Vec2::ZERO,
+                turn * std::f32::consts::FRAC_PI_2,
+                Vec2::new(1.0, 1.0),
+                centre,
+            );
+            let out = transform_tiles(&src, bounds, params, ts, 64, 64, None);
+            let shown: Vec<Color32> = (out.values().flatten().copied())
+                .filter(|p| p.a() > 0)
+                .collect();
+            assert_eq!(shown.len(), ts * ts, "{centre:?} {turn}");
+            assert!(
+                shown.iter().all(|p| colours.contains(p)),
+                "{centre:?} {turn}"
+            );
+        }
+    }
+}
+
+/// Shrunk to under a quarter, a one-pixel checkerboard comes out an even
+/// grey (one bilinear sample a pixel gave stripes and moiré).
+#[test]
+fn shrinking_a_lot_averages_what_each_pixel_covers() {
+    let ts = 64;
+    let data = (0..ts * ts)
+        .map(|i| {
+            if (i % ts + i / ts) % 2 == 0 {
+                Color32::WHITE
+            } else {
+                Color32::BLACK
+            }
+        })
+        .collect();
+    let src = HashMap::from([((0, 0), data)]);
+    let bounds = source_bounds_and_tiles(&src, ts, None).unwrap().0;
+    let params = TransformParams::new(Vec2::ZERO, 0.3, Vec2::new(0.23, 0.23), Vec2::ZERO);
+    let out = transform_tiles(&src, bounds, params, ts, 256, 256, None);
+    let inner: Vec<Color32> = (out.values().flatten().copied())
+        .filter(|p| p.a() == 255)
+        .collect();
+    assert!(inner.len() > 100);
+    for p in inner {
+        assert!((100..=155).contains(&p.r()), "{p:?}");
+    }
+}
+
+/// A region across tiles (Copy Merged, playback frames), composited tile
+/// by tile in parallel, is what compositing each tile gives.
+#[test]
+fn a_region_across_tiles_matches_its_tiles_composited_alone() {
+    for tree in [false, true] {
+        let mut c = Canvas::new(200, 150, Color32::WHITE, 64);
+        c.add_layer();
+        c.add_layer();
+        for (i, (tx, ty)) in [(0, 0), (1, 1), (2, 0), (3, 2), (1, 2)]
+            .into_iter()
+            .enumerate()
+        {
+            c.set_layer_tile_data(1 + i % 3, tx, ty, noise_tile(64 * 64, 11 + i as u32));
+        }
+        c.layers[2].opacity = 0.6;
+        if tree {
+            c.layers[3].blend = LayerBlend::Multiply;
+        }
+        assert_eq!(c.needs_tree_compositing(), tree);
+        let mut whole = ColorImage::new([0, 0], Color32::TRANSPARENT);
+        c.write_region_to_color_image(0, 0, 200, 150, &mut whole, 1);
+        let mut part = ColorImage::new([0, 0], Color32::TRANSPARENT);
+        for ty in 0..3 {
+            for tx in 0..4 {
+                c.write_tile_rect_to_color_image(tx, ty, [0, 0, 64, 64], &mut part, None);
+                let [w, h] = part.size;
+                for row in 0..h {
+                    let at = (ty * 64 + row) * 200 + tx * 64;
+                    assert_eq!(
+                        &whole.pixels[at..at + w],
+                        &part.pixels[row * w..(row + 1) * w]
+                    );
+                }
+            }
+        }
+        // Every other pixel: the same pixels, sampled.
+        let mut half = ColorImage::new([0, 0], Color32::TRANSPARENT);
+        c.write_region_to_color_image(0, 0, 200, 150, &mut half, 2);
+        assert_eq!(half.size, [100, 75]);
+        for (i, p) in half.pixels.iter().enumerate() {
+            assert_eq!(*p, whole.pixels[(i / 100) * 2 * 200 + (i % 100) * 2]);
+        }
+    }
+}
+
+/// Lifting a soft selection splits its edge pixels (what's lifted and
+/// what's left add up to the pixel), and tiles it misses aren't touched.
+#[test]
+fn floating_a_soft_selection_splits_its_edge_and_leaves_other_tiles_alone() {
+    let mut c = Canvas::new(128, 64, Color32::WHITE, 64);
+    let paint = noise_tile(64 * 64, 3);
+    c.set_layer_tile_data(1, 0, 0, paint.clone());
+    c.set_layer_tile_data(1, 1, 0, paint.clone());
+    let untouched = c.layer_tile_cell(1, 1, 0).unwrap();
+    let (kept, revision) = {
+        let cell = untouched.lock().unwrap();
+        (Arc::clone(cell.shared_data().unwrap()), cell.revision())
+    };
+    let soft: Vec<u8> = (0..32 * 32).map(|i| (i % 32 * 8) as u8).collect();
+    let mut sel = SelectionManager::new();
+    sel.current_shape = Some(crate::selection::SelectionShape::Mask(Arc::new(
+        crate::selection::SelectionMask::new(10, 10, 32, 32, soft),
+    )));
+    let idx = c.float_pixels(Some(&sel)).expect("lifted");
+    let lifted = c.get_layer_tile_data(idx, 0, 0).unwrap();
+    let left = c.get_layer_tile_data(1, 0, 0).unwrap();
+    let mut split = 0;
+    for i in 0..64 * 64 {
+        let (l, r, p) = (
+            lifted[i].to_array(),
+            left[i].to_array(),
+            paint[i].to_array(),
+        );
+        assert_eq!([0, 1, 2, 3].map(|k| l[k] + r[k]), p, "pixel {i}");
+        split += usize::from(l[3] > 0 && r[3] > 0);
+    }
+    assert!(split > 100, "{split} pixels split");
+    let cell = untouched.lock().unwrap();
+    assert!(Arc::ptr_eq(cell.shared_data().unwrap(), &kept));
+    assert_eq!(cell.revision(), revision);
+}
+
+/// Mapping pixels that come out the same changes no tile (their pixels
+/// stay shared, nothing goes in the undo step).
+#[test]
+fn mapping_pixels_to_themselves_leaves_the_tiles_alone() {
+    let c = Canvas::new(128, 64, Color32::WHITE, 64);
+    c.set_layer_tile_data(1, 0, 0, noise_tile(64 * 64, 5));
+    let before = c.layer_tile_cell(1, 0, 0).unwrap();
+    let kept = Arc::clone(before.lock().unwrap().shared_data().unwrap());
+    let mut undo = empty_action();
+    let changed = c.map_layer_pixels(1, None, || (), |_, p, _, _| p, &mut undo);
+    assert!(changed.is_none() && undo.tiles.is_empty());
+    assert!(Arc::ptr_eq(
+        before.lock().unwrap().shared_data().unwrap(),
+        &kept
+    ));
+    // A real change keeps what was there for undo, shared.
+    let changed = c.map_layer_pixels(1, None, || (), |_, _, _, _| Color32::RED, &mut undo);
+    assert!(changed.is_some());
+    assert!(matches!(
+        &undo.tiles[0].data,
+        crate::canvas::history::SnapshotPixels::Raw(p) if Arc::ptr_eq(p, &kept)
+    ));
+}
+
+/// A layer lit by its paint's heights keeps its lit tiles until the
+/// heights (or its paint) change, as other styled layers do.
+#[test]
+fn an_impasto_layers_lit_tiles_are_kept_until_its_heights_change() {
+    use crate::canvas::impasto::{HeightMap, ImpastoLight};
+    let mut c = Canvas::new(128, 64, Color32::WHITE, 64);
+    c.set_layer_tile_data(1, 0, 0, vec![Color32::from_rgb(200, 120, 40); 64 * 64]);
+    let heights = HeightMap::default();
+    let ridge: Vec<u16> = (0..64 * 64).map(|i| ((i % 64) * 900) as u16).collect();
+    heights.set_tile((0, 0), Some(ridge));
+    c.layers[1].height = Some(Box::new(heights));
+    c.layers[1].style.impasto = Some(ImpastoLight::default());
+    let first = c.styled_tile(1, 0, 0).unwrap();
+    assert!(
+        Arc::ptr_eq(&first, &c.styled_tile(1, 0, 0).unwrap()),
+        "kept"
+    );
+    // Heights next door change its edge's slopes: made again.
+    let map = c.layers[1].height.as_deref().unwrap();
+    map.edit_tile((1, 0), 64, |h| h.fill(30_000));
+    let again = c.styled_tile(1, 0, 0).unwrap();
+    assert!(!Arc::ptr_eq(&first, &again));
+    assert_eq!(*again, *c.make_styled_tile(1, 0, 0).unwrap());
+}
+
+/// With folders, masks, clipping and blend modes (in either blend space),
+/// a stroke's redraw starting from the cached composite below its
+/// top-level layer gives exactly the pixels compositing everything does.
+#[test]
+fn a_cached_composite_below_a_top_level_layer_matches_the_tree() {
+    for gamma in [false, true] {
+        let mut c = Canvas::new(64, 64, Color32::WHITE, 32);
+        if gamma {
+            c.blend_space = crate::canvas::blend_modes::BlendSpace::Gamma;
+        }
+        for _ in 0..7 {
+            c.add_layer();
+        }
+        let folder = c.layers[2].id;
+        c.layers[2].kind = LayerKind::Group;
+        c.layers[2].opacity = 0.7;
+        c.layers[3].parent = Some(folder);
+        c.layers[3].blend = LayerBlend::Multiply;
+        c.layers[4].kind = LayerKind::Mask {
+            owner: c.layers[1].id,
+        };
+        c.layers[6].clipped = true;
+        c.layers[7].blend = LayerBlend::Screen;
+        for (n, i) in [1usize, 3, 4, 5, 6, 7].into_iter().enumerate() {
+            for t in 0..4 {
+                c.set_layer_tile_data(
+                    i,
+                    t % 2,
+                    t / 2,
+                    noise_tile(32 * 32, 31 + (n * 4 + t as usize) as u32),
+                );
+            }
+        }
+        assert!(c.needs_tree_compositing());
+        let active = 5;
+        assert!(c.below_splits_at(active));
+        assert!(!c.below_splits_at(3) && !c.below_splits_at(6));
+        for (tx, ty) in [(0usize, 0usize), (1, 0), (0, 1), (1, 1)] {
+            let below = c.composite_below(active, tx as i32, ty as i32);
+            let prefix = BelowComposite {
+                first_layer: active,
+                pixels: &below,
+            };
+            let (mut full, mut cached) = (
+                ColorImage::new([0, 0], Color32::TRANSPARENT),
+                ColorImage::new([0, 0], Color32::TRANSPARENT),
+            );
+            for step in [1, 2] {
+                c.write_tile_to_color_image(tx, ty, &mut full, step, None);
+                c.write_tile_to_color_image(tx, ty, &mut cached, step, Some(prefix));
+                assert_eq!(
+                    full.pixels, cached.pixels,
+                    "gamma {gamma}, step {step}, ({tx},{ty})"
+                );
+            }
+            c.write_tile_rect_downsampled(tx, ty, [0, 0, 32, 32], 4, &mut full, None);
+            c.write_tile_rect_downsampled(tx, ty, [0, 0, 32, 32], 4, &mut cached, Some(prefix));
+            assert_eq!(full.pixels, cached.pixels, "gamma {gamma}, downsampled");
+        }
+    }
+}
+
+/// A filter over the whole of a sparse layer (no selection) leaves the
+/// tiles it had nothing to put in unmade: a filtered empty canvas held
+/// every tile of it.
+#[test]
+fn filtering_a_sparse_layer_makes_only_the_tiles_something_shows_in() {
+    let c = Canvas::new(256, 256, Color32::WHITE, 64);
+    let paint = noise_tile(64 * 64, 9);
+    c.set_layer_tile_data(1, 1, 1, paint.clone());
+    let region = c.capture_region(1, [0, 0, 256, 256]);
+    assert_eq!(c.layer_tile_keys(1).len(), 1, "capturing makes nothing");
+    let src = region.pixels(64);
+    // Colours changed where there's paint; nothing where there's none.
+    let out: Vec<Color32> = src
+        .iter()
+        .map(|p| Color32::from_rgba_premultiplied(p.g(), p.r(), p.b(), p.a()))
+        .collect();
+    c.replace_region(1, &region, &out, None);
+    assert_eq!(c.layer_tile_keys(1), vec![(1, 1)]);
+    assert_eq!(c.region_snapshots(1, &region).len(), 1);
+    // Something spread into an empty tile: that one's made, and dropped
+    // again by a run that leaves it empty.
+    let mut spread = out.clone();
+    spread[10] = Color32::RED;
+    c.replace_region(1, &region, &spread, None);
+    assert_eq!(c.layer_tile_keys(1).len(), 2);
+    assert_eq!(c.region_snapshots(1, &region).len(), 2);
+    c.replace_region(1, &region, &out, None);
+    assert_eq!(c.layer_tile_keys(1), vec![(1, 1)]);
+    c.restore_region(&region);
+    assert_eq!(c.layer_tile_keys(1), vec![(1, 1)]);
+    assert_eq!(c.get_layer_tile_data(1, 1, 1), Some(paint));
 }

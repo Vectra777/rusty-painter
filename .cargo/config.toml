@@ -1,14 +1,23 @@
+# Android: 16 KB pages (what Google Play asks of native code from late
+# 2025 for apps targeting Android 15+). NDK r28+ links that way by default;
+# this keeps older NDKs doing it too. cargo-apk replaces these flags with
+# its own (CARGO_ENCODED_RUSTFLAGS), so scripts/build-android.sh passes the
+# same through RUSTFLAGS.
 [target.aarch64-linux-android]
 linker = "./scripts/linkers/aarch64-linux-android-clang"
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
 
 [target.armv7-linux-androideabi]
 linker = "./scripts/linkers/armv7-linux-androideabi-clang"
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
 
 [target.i686-linux-android]
 linker = "./scripts/linkers/i686-linux-android-clang"
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
 
 [target.x86_64-linux-android]
 linker = "./scripts/linkers/x86_64-linux-android-clang"
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
 
 # The C runtime inside the .exe, so it starts on a fresh Windows (no Visual
 # C++ Redistributable to install).

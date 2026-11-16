@@ -263,17 +263,30 @@ impl RgbTransform {
         self.0.transform_pixels(&src, pixels);
     }
 
-    /// One premultiplied linear-light pixel (see `DeepTile::linear`).
-    pub fn convert_linear(&self, px: [f32; 4]) -> [f32; 4] {
+    /// A tile's pixels at full depth, in place: one conversion for all its
+    /// visible pixels (one a call cost more than converting them).
+    pub fn convert_deep(&self, deep: &mut crate::canvas::storage::DeepTile) {
         use eframe::egui::ecolor::{gamma_from_linear, linear_from_gamma};
-        let a = px[3];
-        if a <= 0.0 {
-            return [0.0; 4];
+        let mut at = Vec::with_capacity(deep.len());
+        let mut rgb = Vec::with_capacity(deep.len());
+        for i in 0..deep.len() {
+            let px = deep.linear(i);
+            let a = px[3];
+            if a <= 0.0 {
+                deep.set_linear(i, [0.0; 4]);
+                continue;
+            }
+            at.push((i, a));
+            rgb.push([0, 1, 2].map(|c| gamma_from_linear((px[c] / a).max(0.0))));
         }
-        let mut rgb = [[0, 1, 2].map(|c| gamma_from_linear((px[c] / a).max(0.0)))];
+        if rgb.is_empty() {
+            return;
+        }
         self.convert(&mut rgb);
-        let [r, g, b] = rgb[0].map(|v| linear_from_gamma(v.max(0.0)) * a);
-        [r, g, b, a]
+        for (&(i, a), c) in at.iter().zip(&rgb) {
+            let [r, g, b] = c.map(|v| linear_from_gamma(v.max(0.0)) * a);
+            deep.set_linear(i, [r, g, b, a]);
+        }
     }
 
     /// 8-bit premultiplied pixels in place.
@@ -540,6 +553,38 @@ mod tests {
             "{:?}",
             px[0]
         );
+    }
+
+    /// A tile converted in one call gets what converting its pixels one
+    /// at a time gives.
+    #[test]
+    fn a_deep_tile_converts_as_its_pixels_one_by_one() {
+        use crate::canvas::storage::{DeepTile, Depth};
+        use eframe::egui::ecolor::{gamma_from_linear, linear_from_gamma};
+        let t = RgbTransform::new(
+            &ColorProfile::Srgb,
+            &ColorProfile::DisplayP3,
+            RenderingIntent::RelativeColorimetric,
+        )
+        .unwrap();
+        for depth in [Depth::U16, Depth::F32] {
+            let mut deep = DeepTile::transparent(depth, 64).unwrap();
+            for i in 1..64 {
+                let v = i as f32 / 64.0;
+                deep.set_linear(i, [0.9 * v * v, 0.3 * v, 0.1 * v, v]);
+            }
+            let mut one_by_one = deep.clone();
+            for i in 1..64 {
+                let px = one_by_one.linear(i);
+                let a = px[3];
+                let mut rgb = [[0, 1, 2].map(|c| gamma_from_linear((px[c] / a).max(0.0)))];
+                t.convert(&mut rgb);
+                let [r, g, b] = rgb[0].map(|v| linear_from_gamma(v.max(0.0)) * a);
+                one_by_one.set_linear(i, [r, g, b, a]);
+            }
+            t.convert_deep(&mut deep);
+            assert_eq!(deep, one_by_one);
+        }
     }
 
     #[test]

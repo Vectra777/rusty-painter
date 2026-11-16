@@ -827,6 +827,13 @@ pub struct DabVar {
     /// The pen's pressure at the dab (1 without one), for engines that
     /// use it directly (bristles cut by it, grid divisions).
     pub pressure: f32,
+    /// The spacing factor (pressure, inputs) the dab was placed at (see
+    /// `PlacedDab::spacing`).
+    pub spaced: f32,
+    /// What pressure makes of the brush's diameter, opacity, flow and wash
+    /// opacity at this dab, when its batch's dabs differ in them (see
+    /// `PlacedDab::pressured`); `None`: the brush's as it is.
+    pub pressured: Option<[f32; 4]>,
 }
 
 impl Default for DabVar {
@@ -858,6 +865,8 @@ impl Default for DabVar {
             thickness: 1.0,
             base: None,
             pressure: 1.0,
+            spaced: 1.0,
+            pressured: None,
         }
     }
 }

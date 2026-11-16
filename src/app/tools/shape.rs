@@ -479,13 +479,15 @@ impl PainterApp {
                 session.drag = Some(ShapeDrag::Point(i));
                 return;
             }
-            // (A turned ellipse: in its own frame.)
-            let pos = session.to_box(pos);
+            // (A turned ellipse: tested in its own frame. A move goes by
+            // canvas positions, as the drag compares them; turning about
+            // the centre moves along with it.)
+            let local = session.to_box(pos);
             let (min, max) = session.bounds();
-            let inside = pos.x >= min.x - hit
-                && pos.y >= min.y - hit
-                && pos.x <= max.x + hit
-                && pos.y <= max.y + hit;
+            let inside = local.x >= min.x - hit
+                && local.y >= min.y - hit
+                && local.x <= max.x + hit
+                && local.y <= max.y + hit;
             if inside {
                 session.drag = Some(ShapeDrag::Move { last: pos });
                 return;
@@ -761,16 +763,15 @@ impl PainterApp {
         let eraser = self.brush_state.brush.brush_options.blend_mode == BlendMode::Eraser;
         let color = self.brush_state.brush.brush_options.color;
         // The insides' coverage here (it needs the selection); painted
-        // first, so the outline paints over their edge.
+        // first, so the outline paints over their edge. (With the eraser,
+        // erased.)
         let mut masks = Vec::new();
-        if !eraser {
-            for outline in fills {
-                let mut polygons = vec![outline.clone()];
-                for copy in &copies {
-                    polygons.push(outline.iter().map(|&p| symmetry.map(copy, p)).collect());
-                }
-                masks.extend(polygons.into_iter().filter_map(|p| self.shape_fill_mask(p)));
+        for outline in fills {
+            let mut polygons = vec![outline.clone()];
+            for copy in &copies {
+                polygons.push(outline.iter().map(|&p| symmetry.map(copy, p)).collect());
             }
+            masks.extend(polygons.into_iter().filter_map(|p| self.shape_fill_mask(p)));
         }
         let mut brush = self.brush_state.brush.clone();
         brush.stabilizer_algorithm = StabilizerAlgorithm::None;
@@ -793,7 +794,12 @@ impl PainterApp {
             let mut changed: Option<egui::Rect> = None;
             let mut grow = |r: egui::Rect| changed = Some(changed.map_or(r, |c| c.union(r)));
             for mask in &masks {
-                if let Some(rect) = canvas.paint_mask(layer_idx, mask, color, &mut undo) {
+                let rect = if eraser {
+                    canvas.erase_mask(layer_idx, mask, &mut undo)
+                } else {
+                    canvas.paint_mask(layer_idx, mask, color, &mut undo)
+                };
+                if let Some(rect) = rect {
                     grow(rect);
                 }
             }
@@ -1248,6 +1254,56 @@ mod tests {
         assert_eq!(app.layer_state.history.stacks().0.len(), 1, "one step");
         app.apply_history(false);
         assert!(!painted(&app, 64, 20) && !painted(&app, 64, 64), "undone");
+    }
+
+    #[test]
+    fn a_turned_ellipse_moves_with_the_pointer_from_the_first_drag() {
+        let mut app = app();
+        app.viewport.zoom = 1.0;
+        drag(
+            &mut app,
+            ShapeKind::Ellipse,
+            Vec2::new(14.0, 54.0),
+            Vec2::new(114.0, 74.0),
+            ShapeMods::default(),
+        );
+        app.workspace.shapes.session.as_mut().unwrap().angle = std::f32::consts::FRAC_PI_2;
+        // Grab it below its centre (inside now it stands upright) and move
+        // it 5 px right.
+        drag(
+            &mut app,
+            ShapeKind::Ellipse,
+            Vec2::new(64.0, 90.0),
+            Vec2::new(69.0, 90.0),
+            ShapeMods::default(),
+        );
+        let session = app.workspace.shapes.session.as_ref().unwrap();
+        let c = session.box_center();
+        assert!((c - Vec2::new(69.0, 64.0)).length() < 1e-3, "{c:?}");
+    }
+
+    #[test]
+    fn a_filled_shape_with_the_eraser_erases_its_inside() {
+        let mut app = app();
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            app.canvas_mut()
+                .set_layer_tile_data(1, tx, ty, vec![Color32::RED; 64 * 64]);
+        }
+        app.brush_state.brush.brush_options.blend_mode = BlendMode::Eraser;
+        app.workspace.shapes.settings.style = ShapeStyle::Fill;
+        drag(
+            &mut app,
+            ShapeKind::Rectangle,
+            Vec2::new(20.0, 20.0),
+            Vec2::new(100.0, 80.0),
+            ShapeMods::default(),
+        );
+        app.shape_commit();
+        assert!(!painted(&app, 60, 50), "the inside is erased");
+        assert!(painted(&app, 10, 10) && painted(&app, 110, 50));
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+        app.apply_history(false);
+        assert!(painted(&app, 60, 50), "undone");
     }
 
     #[test]

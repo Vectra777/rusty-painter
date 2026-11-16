@@ -513,6 +513,137 @@ pub(crate) fn dropdown(
     }
 }
 
+/// A control that's off unless `enabled`: while off, its tooltip says
+/// `why` (a greyed-out button that never says why is a dead end). Takes
+/// the control's own response, or that of the `add_enabled_ui` around it.
+pub(crate) fn why_disabled(response: Response, enabled: bool, why: &str) -> Response {
+    if enabled {
+        response
+    } else if response.enabled {
+        response.on_hover_text(why)
+    } else {
+        response.on_disabled_hover_text(why)
+    }
+}
+
+/// How long a press held still on a widget takes to open its menu.
+pub(crate) const HOLD_MENU_SECONDS: f64 = 0.5;
+/// How far (points) a held press may wander and still open a menu.
+const HOLD_MENU_SLOP: f32 = 8.0;
+
+/// What [`context_menu_or_hold`] did this frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct HoldMenu {
+    /// The hold opened the menu this frame (a drag it started should stop).
+    pub opened: bool,
+    /// The menu is up for this widget: the lift ending a hold is a click on
+    /// the widget, which callers acting on clicks should skip.
+    pub open: bool,
+}
+
+/// `response`'s context menu: right-click, or a press held still on it for
+/// [`HOLD_MENU_SECONDS`] (finger or pen, any input mode).
+pub(crate) fn context_menu_or_hold(
+    ui: &egui::Ui,
+    response: &Response,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> HoldMenu {
+    let rect = response.interact_rect;
+    context_menu_or_hold_where(ui, response, |p| rect.contains(p), add_contents)
+}
+
+/// [`context_menu_or_hold`] where only a press starting where `starts`
+/// says counts as a hold (a row with a slider of its own, say).
+///
+/// egui's own long-touch menu closes again the next frame while the finger
+/// that opened it stays down (a press on the widget closes it), and only
+/// fingers count. So the hold is detected here, the menu created as by a
+/// right-click, and the widget shown as not hovered until that press lifts.
+pub(crate) fn context_menu_or_hold_where(
+    ui: &egui::Ui,
+    response: &Response,
+    starts: impl Fn(egui::Pos2) -> bool,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> HoldMenu {
+    let mut r = response.interact(Sense::click());
+    // egui's own finger long-press: only through the hold below.
+    r.long_touched = false;
+    let mut out = HoldMenu::default();
+    match hold_check(ui, r.id, starts) {
+        Hold::Due(t) => {
+            ui.data_mut(|d| d.insert_temp(hold_key(r.id), t));
+            r.long_touched = true;
+            r.hovered = true;
+            out.opened = true;
+        }
+        Hold::Waiting(wait) => {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(wait));
+        }
+        // The finger that opened the menu still down: not a press on the
+        // widget that closes it.
+        Hold::StillDown => r.hovered = false,
+        Hold::None => {}
+    }
+    r.context_menu(add_contents);
+    out.open = r.context_menu_opened();
+    out
+}
+
+/// Whether a press held on `response` opens its menu this frame (for menus
+/// that need to know where they were asked for before they show).
+pub(crate) fn hold_menu_due(ui: &egui::Ui, response: &Response) -> bool {
+    let rect = response.interact_rect;
+    matches!(
+        hold_check(ui, response.id, |p| rect.contains(p)),
+        Hold::Due(_)
+    )
+}
+
+enum Hold {
+    /// The press that started at this time opens the menu now.
+    Due(f64),
+    /// Held still; due in this many seconds.
+    Waiting(f64),
+    /// Still down after opening the menu.
+    StillDown,
+    None,
+}
+
+fn hold_key(id: egui::Id) -> egui::Id {
+    id.with("hold_menu_press")
+}
+
+fn hold_check(ui: &egui::Ui, id: egui::Id, starts: impl Fn(egui::Pos2) -> bool) -> Hold {
+    let (held_press, press, down, now) = ui.input(|inp| {
+        let p = &inp.pointer;
+        let still = p.primary_down()
+            && p.press_origin()
+                .zip(p.interact_pos())
+                .is_some_and(|(o, at)| starts(o) && o.distance(at) < HOLD_MENU_SLOP);
+        let start = p.press_start_time();
+        (
+            still.then_some(start).flatten(),
+            start,
+            p.primary_down(),
+            inp.time,
+        )
+    });
+    let fired = ui.data(|d| d.get_temp::<f64>(hold_key(id)));
+    match held_press {
+        Some(t) if fired != Some(t) => {
+            let wait = HOLD_MENU_SECONDS - (now - t);
+            if wait <= 0.0 {
+                Hold::Due(t)
+            } else {
+                Hold::Waiting(wait)
+            }
+        }
+        _ if down && fired.is_some() && fired == press => Hold::StillDown,
+        _ => Hold::None,
+    }
+}
+
 thread_local! {
     /// Sliders reset to this "default" epoch's first value; bumped when a
     /// preset is chosen, so their defaults become the preset's. (The UI's
@@ -738,5 +869,102 @@ mod growth_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hold_menu_tests {
+    use super::*;
+
+    /// One frame of a clickable square at (50, 50)..(150, 150) with a hold
+    /// menu; returns whether its menu showed.
+    fn frame(ctx: &egui::Context, events: Vec<egui::Event>, t: f64) -> (bool, HoldMenu) {
+        let mut shown = false;
+        let mut hold = HoldMenu::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                time: Some(t),
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let rect = Rect::from_min_max(egui::pos2(50.0, 50.0), egui::pos2(150.0, 150.0));
+                    let r = ui.interact(rect, ui.id().with("square"), Sense::click());
+                    hold = context_menu_or_hold(ui, &r, |ui| {
+                        shown = true;
+                        let _ = ui.button("An item");
+                    });
+                });
+            },
+        );
+        (shown, hold)
+    }
+
+    fn press(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_held_press_opens_the_menu_and_it_stays_after_the_lift() {
+        let ctx = egui::Context::default();
+        let at = egui::pos2(100.0, 100.0);
+        frame(&ctx, vec![egui::Event::PointerMoved(at)], 0.0);
+        frame(&ctx, vec![press(at, true)], 0.1);
+        let (shown, _) = frame(&ctx, vec![], 0.3);
+        assert!(!shown, "not before the hold time");
+        let (_, hold) = frame(&ctx, vec![], 0.1 + HOLD_MENU_SECONDS + 0.05);
+        assert!(hold.opened, "the hold opens it");
+        // Still held (egui's own menu closed here), then lifted.
+        let (shown, hold) = frame(&ctx, vec![], 0.9);
+        assert!(shown && hold.open, "still open while the finger is down");
+        let (shown, hold) = frame(&ctx, vec![press(at, false)], 1.0);
+        assert!(shown && hold.open, "open on the lift");
+        let (shown, _) = frame(&ctx, vec![], 1.1);
+        assert!(shown, "open after the lift");
+        // A tap elsewhere closes it.
+        let away = egui::pos2(300.0, 350.0);
+        frame(
+            &ctx,
+            vec![egui::Event::PointerMoved(away), press(away, true)],
+            1.5,
+        );
+        frame(&ctx, vec![press(away, false)], 1.55);
+        let (shown, _) = frame(&ctx, vec![], 1.6);
+        assert!(!shown, "a tap elsewhere closes it");
+    }
+
+    #[test]
+    fn a_press_that_moves_or_lifts_early_opens_nothing() {
+        let ctx = egui::Context::default();
+        let at = egui::pos2(100.0, 100.0);
+        frame(&ctx, vec![egui::Event::PointerMoved(at)], 0.0);
+        frame(&ctx, vec![press(at, true)], 0.1);
+        frame(
+            &ctx,
+            vec![egui::Event::PointerMoved(at + egui::vec2(20.0, 0.0))],
+            0.2,
+        );
+        let (shown, hold) = frame(&ctx, vec![], 1.0);
+        assert!(!shown && !hold.opened, "a drag isn't a hold");
+        frame(&ctx, vec![press(at, false)], 1.1);
+
+        frame(
+            &ctx,
+            vec![egui::Event::PointerMoved(at), press(at, true)],
+            2.0,
+        );
+        frame(&ctx, vec![press(at, false)], 2.2);
+        let (shown, _) = frame(&ctx, vec![], 3.0);
+        assert!(!shown, "a tap isn't a hold");
     }
 }

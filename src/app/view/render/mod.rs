@@ -30,9 +30,10 @@ pub struct CanvasView {
 /// composite the active layer and the ones above it.
 fn refresh_below_cache(app: &mut PainterApp, visible: &impl Fn(&CanvasTile) -> bool) {
     let active = app.canvas.active_layer_idx;
-    // The cache splits the stack at the active layer, which only works for a
-    // plain stack: folders and masks composite as a tree.
-    if !app.brush_state.is_drawing || active < 2 || app.canvas.needs_tree_compositing() {
+    // The cache splits the stack at the active layer: with folders, masks
+    // or blend modes only where the tree splits there too (a top-level,
+    // unclipped layer).
+    if !app.brush_state.is_drawing || active < 2 || !app.canvas.below_splits_at(active) {
         app.render_cache.below_cache = None;
         return;
     }
@@ -566,7 +567,7 @@ fn tile_run_uploads(
 
 /// Screen position of the canvas's top-left corner and of its center (the
 /// rotation pivot).
-fn canvas_placement(app: &PainterApp, rect: egui::Rect) -> (egui::Pos2, egui::Pos2) {
+pub(crate) fn canvas_placement(app: &PainterApp, rect: egui::Rect) -> (egui::Pos2, egui::Pos2) {
     let canvas_size =
         egui::vec2(app.canvas.width() as f32, app.canvas.height() as f32) * app.viewport.zoom;
     let origin = rect.min + egui::vec2(app.viewport.offset.x, app.viewport.offset.y);

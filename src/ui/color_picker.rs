@@ -6,7 +6,9 @@ use crate::app::state::BrushState;
 use crate::canvas::color::ColorManipulation;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
-use crate::ui::widgets::{color_swatch, draw_checkerboard, paint_swatch, section};
+use crate::ui::widgets::{
+    color_swatch, context_menu_or_hold, draw_checkerboard, paint_swatch, section,
+};
 use eframe::egui::{self, Color32, Pos2, RichText, Sense, Stroke};
 use std::f32::consts::TAU;
 
@@ -167,7 +169,7 @@ fn gradient_slider(
         painter.circle_filled(center, knob - 2.5, inner);
 
         // Right-click (or long-press): the bar's colours into a palette.
-        response.context_menu(|ui| {
+        context_menu_or_hold(ui, &response, |ui| {
             let steps_id = egui::Id::new("slider_palette_steps");
             let mut steps: usize = ui.data(|d| d.get_temp(steps_id)).unwrap_or(9);
             ui.horizontal(|ui| {
@@ -457,8 +459,16 @@ fn swatch_row(ui: &mut egui::Ui, brush_state: &mut BrushState) -> Option<Color32
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let color = brush_state.brush.brush_options.color;
-        color_swatch(ui, color, egui::vec2(44.0, 22.0)).on_hover_text("Brush color");
-        let (swap_rect, swap) = ui.allocate_exact_size(egui::vec2(16.0, 22.0), Sense::click());
+        // Finger-sized in touch mode: the swap arrow was 16 points wide.
+        let (h, swap_w, secondary_w) = if metrics(ui.ctx()).touch {
+            (MIN_TOUCH_TARGET, MIN_TOUCH_TARGET, MIN_TOUCH_TARGET)
+        } else {
+            (22.0, 16.0, 28.0)
+        };
+        let primary = color_swatch(ui, color, egui::vec2(h * 2.0, h))
+            .on_hover_text("Brush color: drag it onto the canvas to fill there");
+        crate::ui::color_drop::drag_source(ui, &primary, color);
+        let (swap_rect, swap) = ui.allocate_exact_size(egui::vec2(swap_w, h), Sense::click());
         let swap_color = if swap.hovered() {
             TEXT_STRONG
         } else {
@@ -466,13 +476,13 @@ fn swatch_row(ui: &mut egui::Ui, brush_state: &mut BrushState) -> Option<Color32
         };
         paint_icon(
             ui.painter(),
-            swap_rect.shrink2(egui::vec2(1.0, 4.0)),
+            egui::Rect::from_center_size(swap_rect.center(), egui::vec2(14.0, 14.0)),
             Icon::Swap,
             swap_color,
         );
         let swap_clicked = swap.on_hover_text("Swap colors (X)").clicked();
         let secondary_clicked =
-            color_swatch(ui, brush_state.secondary_color, egui::vec2(28.0, 22.0))
+            color_swatch(ui, brush_state.secondary_color, egui::vec2(secondary_w, h))
                 .on_hover_text("Secondary color: click to swap")
                 .clicked();
         if swap_clicked || secondary_clicked {

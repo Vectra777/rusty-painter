@@ -591,8 +591,7 @@ fn a_gradient_keeps_full_depth_and_undoes_to_it() {
         assert!(
             app.canvas
                 .get_layer_tile_deep(1, 1, 0)
-                .unwrap()
-                .is_transparent()
+                .is_none_or(|t| t.is_transparent())
         );
         app.apply_history(true);
         assert_eq!(app.canvas.get_layer_tile_deep(1, 1, 0).unwrap(), painted);

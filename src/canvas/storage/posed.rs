@@ -83,7 +83,7 @@ impl Layer {
 impl Canvas {
     /// Tile `(tx, ty)` of layer `idx` as the canvas shows it (moved, if it
     /// moves).
-    pub(super) fn shown_tile_cell(&self, idx: usize, tx: i32, ty: i32) -> Option<SharedCell> {
+    pub(crate) fn shown_tile_cell(&self, idx: usize, tx: i32, ty: i32) -> Option<SharedCell> {
         super::layer_tile(self.layers.get(idx)?, tx, ty)
     }
 
@@ -104,18 +104,23 @@ impl Canvas {
 
     /// A copy (sharing tiles) whose layers hold their pixels as they show
     /// at the frame showing, moved and with their look, and no keys: what
-    /// merging or a layered export works from. `None` if no layer is
-    /// moved or keyed (the canvas itself will do).
+    /// merging or a layered export works from (a colorize mask holds its
+    /// result). `None` if no layer is moved or keyed and none is a
+    /// colorize mask (the canvas itself will do).
     pub fn shown_copy(&self) -> Option<Canvas> {
         if !self
             .layers
             .iter()
-            .any(|l| l.motion.is_some() || l.is_posed())
+            .any(|l| l.motion.is_some() || l.is_posed() || l.colorize.is_some())
         {
             return None;
         }
         let mut copy = self.shared_copy();
         for (layer, original) in copy.layers.iter_mut().zip(&self.layers) {
+            // A colorize mask merges and exports as its result.
+            if let Some(colorize) = layer.colorize.take() {
+                *layer.tiles.lock().unwrap_or_else(|e| e.into_inner()) = colorize.result_tiles();
+            }
             let posed = (original.posed.lock().unwrap_or_else(|e| e.into_inner()))
                 .as_ref()
                 .map(|p| p.map.clone());

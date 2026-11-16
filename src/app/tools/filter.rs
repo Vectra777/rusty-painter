@@ -215,7 +215,24 @@ fn apply_to(
             filter.apply_deep(src, w, h)
         })
     };
-    if !deep {
+    if deep {
+        return;
+    }
+    if is_pointwise(&filter) {
+        // Pixel by pixel: over the layer's tiles one at a time, not a copy
+        // of the whole area.
+        let lut = filter.channel_lut();
+        canvas.map_region(layer, original, coverage, |src, w, h, origin| {
+            match filter {
+                // (Its grain depends on where the pixel is.)
+                Filter::Noise { .. } => filter.apply(src, w, h, origin),
+                _ => src
+                    .iter()
+                    .map(|&c| filter.adjust(c, lut.as_deref()))
+                    .collect(),
+            }
+        });
+    } else {
         let [x0, y0, x1, y1] = original.bounds;
         let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
         let src = original.pixels(canvas.tile_size());
@@ -227,6 +244,14 @@ fn apply_to(
         .unwrap_or_else(|| filter.apply(&src, w, h, (x0, y0)));
         canvas.replace_region(layer, original, &out, coverage);
     }
+}
+
+/// `filter` changes each pixel on its own (from its colour and where it
+/// is), leaving transparent ones as they are: [`Filter::apply`]'s colour
+/// adjustments, line art and noise.
+fn is_pointwise(filter: &Filter) -> bool {
+    matches!(filter, Filter::Noise { .. } | Filter::LineArt { .. })
+        || filter.rgb([0.5; 3]).is_some()
 }
 
 impl PainterApp {
@@ -668,6 +693,85 @@ mod tests {
         app.filter_open(Filter::Invert);
         assert_eq!(pixel(&app, 10, 10), Color32::from_rgb(0, 255, 255));
         assert_eq!(pixel(&app, 100, 10), Color32::RED);
+    }
+
+    #[test]
+    fn pixel_by_pixel_filters_go_tile_by_tile_with_the_same_result() {
+        // A 200×150 layer with varied (some see-through) pixels in three of
+        // its twelve tiles.
+        let canvas = |alpha_lock: bool| {
+            let mut c = Canvas::new(200, 150, Color32::WHITE, 64);
+            for (tx, ty) in [(0, 0), (2, 1), (3, 2)] {
+                let tile = (0..64 * 64u32)
+                    .map(|i| {
+                        let (x, y) = (i % 64, i / 64);
+                        let a = if (x + y) % 5 == 0 {
+                            0
+                        } else {
+                            (x * 4 + 3) as u8
+                        };
+                        Color32::from_rgba_unmultiplied((x * 4) as u8, (y * 4) as u8, 90, a)
+                    })
+                    .collect();
+                c.set_layer_tile_data(1, tx, ty, tile);
+            }
+            c.layers[1].alpha_locked = alpha_lock;
+            c
+        };
+        let bounds = [10, 5, 190, 140];
+        let (w, h) = (180, 135);
+        let soft = crate::selection::SelectionMask::rasterize(bounds, |y, x0, out| {
+            for (i, v) in out.iter_mut().enumerate() {
+                *v = ((x0 + i + y) % 97) as f32 / 96.0;
+            }
+        });
+        let filters = [
+            Filter::Invert,
+            Filter::Threshold { level: 0.4 },
+            Filter::HueSaturation {
+                hue: 70.0,
+                saturation: 0.3,
+                lightness: -0.1,
+            },
+            Filter::Levels {
+                black: 0.1,
+                white: 0.8,
+                gamma: 1.4,
+            },
+            Filter::LineArt {
+                black: 0.2,
+                white: 0.9,
+                keep_color: true,
+            },
+            Filter::Noise {
+                amount: 0.3,
+                mono: false,
+                size: 1.0,
+            },
+        ];
+        assert!(filters.iter().all(super::is_pointwise));
+        for filter in filters {
+            for alpha_lock in [false, true] {
+                for coverage in [None, Some(&soft)] {
+                    // The whole area in one buffer, as other filters are.
+                    let whole = canvas(alpha_lock);
+                    let region = whole.capture_region(1, bounds);
+                    let out = filter.apply(&region.pixels(64), w, h, (10, 5));
+                    whole.replace_region(1, &region, &out, coverage);
+                    let tiled = canvas(alpha_lock);
+                    let region = tiled.capture_region(1, bounds);
+                    super::apply_to(&tiled, 1, filter.clone(), &region, coverage);
+                    for (tx, ty) in (0..4).flat_map(|tx| (0..3).map(move |ty| (tx, ty))) {
+                        assert_eq!(
+                            whole.get_layer_tile_data(1, tx, ty),
+                            tiled.get_layer_tile_data(1, tx, ty),
+                            "{} tile {tx},{ty} lock {alpha_lock}",
+                            filter.name()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

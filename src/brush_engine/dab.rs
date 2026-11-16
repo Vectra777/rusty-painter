@@ -122,6 +122,13 @@ pub(crate) struct PlacedDab {
     pub smudge: f32,
     pub color_rate: f32,
     pub thickness: f32,
+    /// The spacing factor (pressure, inputs) it was placed at, which its
+    /// spacing stretch goes by (see `Brush::spacing_stretch`).
+    pub spacing: f32,
+    /// What pressure made of the brush's opacity, flow and wash opacity for
+    /// this dab, in place of the brush's own (a batch whose dabs differ in
+    /// them); `None` to take the brush's.
+    pub pressured: Option<[f32; 3]>,
 }
 
 /// Steps a dab's softness comes in (each a falloff of its own).
@@ -170,6 +177,8 @@ impl PlacedDab {
             smudge: 1.0,
             color_rate: 1.0,
             thickness: 1.0,
+            spacing: 1.0,
+            pressured: None,
         }
     }
 

@@ -39,7 +39,7 @@ pub(crate) mod svg_import;
 pub(crate) mod video;
 pub(crate) mod zip;
 
-use blobs::{StoredBlob, packed_blob, push_blobs, read_blob};
+use blobs::{Payload, StoredBlob, packed_blob, push_blobs, push_payloads, read_blob};
 use convert::{
     StoredColor, StoredColorModel, StoredLayerHistoryOp, StoredSelectionShape, StoredTransformInfo,
 };
@@ -63,6 +63,7 @@ pub(crate) struct LoadedProject {
     pub saved_selections: Vec<crate::app::tools::select::SavedSelection>,
     pub work_path: crate::canvas::path::Path,
     pub palettes: Vec<crate::app::tools::palettes::Palette>,
+    pub comps: Vec<crate::app::comps::LayerComp>,
 }
 
 /// Everything a project file holds, copied off the app: it's encoded and
@@ -75,6 +76,7 @@ pub(crate) struct ProjectSnapshot {
     saved_selections: Vec<crate::app::tools::select::SavedSelection>,
     work_path: crate::canvas::path::Path,
     palettes: Vec<crate::app::tools::palettes::Palette>,
+    comps: Vec<crate::app::comps::LayerComp>,
 }
 
 impl ProjectSnapshot {
@@ -89,6 +91,7 @@ impl ProjectSnapshot {
             saved_selections: app.workspace.select.saved.clone(),
             work_path: app.workspace.pen.path.clone(),
             palettes: app.brush_state.palettes.document.clone(),
+            comps: app.layer_state.comps.list.clone(),
         }
     }
 
@@ -143,8 +146,9 @@ impl ProjectSnapshot {
 
 /// A document read from disk, ready to replace the open one.
 pub(crate) enum OpenedDocument {
-    /// Another app's (Photoshop, Krita, Clip Studio).
-    Foreign(Canvas),
+    /// Another app's (Photoshop, Krita, Clip Studio), and what the user
+    /// should hear about it (parts left out).
+    Foreign(Canvas, Vec<String>),
     Project(Box<LoadedProject>),
 }
 
@@ -161,7 +165,9 @@ pub(crate) fn decode_document(name: &str, bytes: &[u8]) -> Result<OpenedDocument
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     if let Some(decode) = extension.as_deref().and_then(foreign_decoder) {
-        return Ok(OpenedDocument::Foreign(decode(bytes)?.into_canvas()?));
+        let mut doc = decode(bytes)?;
+        let notes = std::mem::take(&mut doc.notes);
+        return Ok(OpenedDocument::Foreign(doc.into_canvas()?, notes));
     }
     decode_project(bytes).map(|p| OpenedDocument::Project(Box::new(p)))
 }
@@ -306,7 +312,12 @@ impl PainterApp {
     /// Make `doc` the document.
     pub(crate) fn open_document(&mut self, doc: OpenedDocument) {
         match doc {
-            OpenedDocument::Foreign(canvas) => self.replace_document(canvas, History::new()),
+            OpenedDocument::Foreign(canvas, notes) => {
+                self.replace_document(canvas, History::new());
+                if !notes.is_empty() {
+                    self.report(notes.join(". "));
+                }
+            }
             OpenedDocument::Project(loaded) => {
                 let loaded = *loaded;
                 self.replace_document(loaded.canvas, loaded.history);
@@ -317,6 +328,7 @@ impl PainterApp {
                 self.workspace.select.saved = loaded.saved_selections;
                 self.workspace.pen.path = loaded.work_path;
                 self.brush_state.palettes.document = loaded.palettes;
+                self.layer_state.comps.list = loaded.comps;
             }
         }
         self.set_brush_tool(self.brush_state.eraser_active());
@@ -396,6 +408,7 @@ pub(crate) fn encode_shared(app: &PainterApp, pixels: bool) -> Result<Vec<u8>, S
         saved_selections: Vec::new(),
         work_path: Default::default(),
         palettes: Vec::new(),
+        comps: Vec::new(),
     })
 }
 
@@ -459,11 +472,8 @@ pub(crate) fn with_project_extension(path: &Path) -> std::path::PathBuf {
 }
 
 fn colors_to_bytes(colors: &[Color32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(colors.len() * 4);
-    for color in colors {
-        out.extend_from_slice(&color.to_array());
-    }
-    out
+    // (Color32 is its RGBA bytes: one copy.)
+    bytemuck::cast_slice::<Color32, u8>(colors).to_vec()
 }
 
 fn bytes_to_colors(bytes: Vec<u8>) -> Result<Vec<Color32>, String> {
@@ -519,6 +529,9 @@ struct ProjectFile {
     /// The document's own palettes; absent in older files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     palettes: Vec<crate::app::tools::palettes::Palette>,
+    /// Layer comps; absent in older files (and when there are none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    comps: Vec<crate::app::comps::LayerComp>,
 }
 
 impl ProjectFile {
@@ -552,6 +565,7 @@ impl ProjectFile {
             saved_selections: StoredSavedSelection::from_saved(&snapshot.saved_selections, blobs)?,
             work_path: snapshot.work_path.clone(),
             palettes: snapshot.palettes.clone(),
+            comps: snapshot.comps.clone(),
         })
     }
 
@@ -602,6 +616,12 @@ impl ProjectFile {
         // Version 2's per-layer histories become one.
         let history = History::merged(histories);
 
+        let ids: Vec<LayerId> = canvas.layers.iter().map(|l| l.id).collect();
+        let mut comps = self.comps;
+        for c in &mut comps {
+            c.tidy(&ids);
+        }
+
         let saved_selections = self
             .saved_selections
             .into_iter()
@@ -623,6 +643,7 @@ impl ProjectFile {
                     p
                 })
                 .collect(),
+            comps,
         })
     }
 }
@@ -672,6 +693,10 @@ struct StoredLayer {
     /// A shader layer's shader; absent in older files (and on other layers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shader: Option<crate::canvas::shader::ShaderLayer>,
+    /// A colorize mask's settings (its tiles are the hints; the result is
+    /// made again on load); absent in older files (and on other layers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    colorize: Option<crate::canvas::colorize::ColorizeSettings>,
     /// Impasto heights, as pixels (see `canvas::impasto::to_pixels`);
     /// absent in older files (and on layers without).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -802,7 +827,7 @@ fn load_warps(
                 .into_iter()
                 .map(|t| {
                     let s = t.into_snapshot(tile_size, Depth::U8, blobs)?;
-                    Ok(((s.tx, s.ty), s.data))
+                    Ok(((s.tx, s.ty), std::sync::Arc::unwrap_or_clone(s.data)))
                 })
                 .collect::<Result<_, String>>()
                 .map(std::sync::Arc::new)
@@ -928,6 +953,7 @@ impl StoredLayer {
             text: convert::StoredText::from_layer(layer.text.as_deref()),
             vector: layer.vector.as_deref().cloned(),
             shader: layer.shader.map(|s| *s),
+            colorize: layer.colorize.map(|c| c.settings),
             heights: match &layer.height {
                 Some(map) => {
                     let tiles = map.tiles();
@@ -967,7 +993,7 @@ impl StoredLayer {
                 let stored = push_blobs(blobs, &raws)?;
                 // A deeper document's tiles at full depth, beside them.
                 let deep: Vec<Vec<u8>> = (layer.tiles.par_iter())
-                    .filter_map(|t| t.deep.as_ref().map(DeepTile::to_bytes))
+                    .filter_map(|t| t.deep.as_ref().map(|d| d.to_bytes()))
                     .collect();
                 let mut deep = push_blobs(blobs, &deep)?.into_iter();
                 layer
@@ -1029,6 +1055,8 @@ impl StoredLayer {
                 None => None,
             },
             shader: self.shader.map(Box::new),
+            colorize: (self.colorize)
+                .map(|s| Box::new(crate::canvas::colorize::ColorizeLayer::new(s))),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
@@ -1120,8 +1148,8 @@ impl StoredTile {
             tx: self.tx,
             ty: self.ty,
             // The 8-bit pixels are the deep ones rounded, whatever was stored.
-            data: deep.as_ref().map_or(data, DeepTile::narrow_all),
-            deep,
+            data: deep.as_ref().map_or(data, DeepTile::narrow_all).into(),
+            deep: deep.map(std::sync::Arc::new),
         })
     }
 }
@@ -1368,12 +1396,24 @@ impl StoredUndoAction {
         Ok(Self {
             tiles: {
                 use rayon::prelude::*;
-                let raws: Vec<Vec<u8>> = action
+                // 8-bit snapshots kept compressed go in as they are.
+                let raws: Vec<Option<Vec<u8>>> = action
                     .tiles
                     .par_iter()
-                    .map(|t| colors_to_bytes(&t.data.to_vec()))
+                    .map(|t| match &t.data {
+                        SnapshotPixels::Compressed { .. } => None,
+                        data => Some(colors_to_bytes(&data.to_vec())),
+                    })
                     .collect();
-                let stored = push_blobs(blobs, &raws)?;
+                let payloads: Vec<Payload<'_>> = (action.tiles.iter().zip(&raws))
+                    .map(|(t, raw)| match (&t.data, raw) {
+                        (SnapshotPixels::Compressed { bytes, len }, _) => {
+                            Payload::Packed(bytes, len * 4)
+                        }
+                        (_, raw) => Payload::Raw(raw.as_deref().unwrap_or_default()),
+                    })
+                    .collect();
+                let stored = push_payloads(blobs, &payloads)?;
                 let deeps: Vec<Option<DeepTile>> =
                     action.tiles.par_iter().map(|t| t.data.deep()).collect();
                 let deep_raws: Vec<Vec<u8>> =

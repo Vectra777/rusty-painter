@@ -18,6 +18,9 @@ pub struct LiquifySettings {
     pub radius: f32,
     /// 0..1.
     pub strength: f32,
+    /// How long the brush glides on after the pen lifts, 0..1 (0: it
+    /// stops where the pen does), as Procreate's Momentum.
+    pub momentum: f32,
 }
 
 impl Default for LiquifySettings {
@@ -26,9 +29,28 @@ impl Default for LiquifySettings {
             mode: LiquifyMode::Push,
             radius: 60.0,
             strength: 0.5,
+            momentum: 0.0,
         }
     }
 }
+
+/// The brush gliding on after the pen lifted (Momentum).
+struct Glide {
+    /// Where the brush has got to (from where the pen lifted).
+    pos: Vec2,
+    /// Canvas pixels per second, slowing down.
+    velocity: Vec2,
+    /// The speed it started at (the dabs fade with it).
+    start_speed: f32,
+    /// Seconds since the pen lifted.
+    time: f32,
+}
+
+/// Slower than this (canvas pixels per second), a glide stops, and a lift
+/// starts none.
+const GLIDE_MIN_SPEED: f32 = 30.0;
+/// The longest a glide lasts (seconds).
+const GLIDE_MAX_TIME: f32 = 1.5;
 
 pub struct LiquifySession {
     layer_id: LayerId,
@@ -55,6 +77,14 @@ pub struct LiquifySession {
     preview_block: usize,
     /// What the preview stands in for: drawn into the layer on pen-up.
     previewed: Option<[i32; 4]>,
+    /// The pen's pressure (scales the strength; 1 for a mouse).
+    pressure: f32,
+    /// How fast the pen moves (canvas pixels per second, smoothed over
+    /// the frames), and where it was at the last frame.
+    velocity: Vec2,
+    frame_pen: Option<Vec2>,
+    /// After the pen lifted, with Momentum on.
+    glide: Option<Glide>,
 }
 
 impl LiquifySession {
@@ -78,6 +108,41 @@ impl LiquifySession {
     pub(crate) fn previewing(&self) -> bool {
         !self.preview.is_empty()
     }
+
+    /// How much of the session's displacement shows (Adjust, 0..=1).
+    pub(crate) fn adjust(&self) -> f32 {
+        self.field.scale()
+    }
+
+    /// Brush dabs along the way from where it last dabbed to `to`, a
+    /// spacing apart, at `scale` of the strength (the rest of the way
+    /// carries over).
+    fn dab_along(&mut self, settings: &LiquifySettings, to: Vec2, scale: f32) {
+        let Some(last) = self.last else {
+            return;
+        };
+        let (mode, radius) = (settings.mode, settings.radius);
+        let strength = settings.strength * self.pressure * scale;
+        let travel = to - last;
+        let spacing = (radius * 0.12).max(1.0);
+        let steps = (travel.length() / spacing).floor() as usize;
+        if steps == 0 {
+            return;
+        }
+        let step = travel.normalized() * spacing;
+        for i in 1..=steps {
+            let center = last + step * i as f32;
+            let (amount, delta) = match mode {
+                LiquifyMode::Push => (strength, step),
+                LiquifyMode::Edge => (strength * 0.3, step),
+                _ => (strength * 0.15, Vec2::ZERO),
+            };
+            if let Some(r) = self.field.dab(mode, center, radius, amount, delta) {
+                self.pending = Some(union(self.pending, r));
+            }
+        }
+        self.last = Some(last + step * steps as f32);
+    }
 }
 
 impl PainterApp {
@@ -100,15 +165,34 @@ impl PainterApp {
             return false;
         }
         self.release_canvas();
+        // Inside a selection, only the selected pixels move (on a moved
+        // layer: the selection carried onto its pixels).
+        let selection = self.layer_selection();
+        let coverage = match selection.get_bounds() {
+            Some(b) if selection.has_selection() => {
+                let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
+                let [x0, y0, x1, y1] = self.pixel_bounds(b);
+                let bounds = [x0.max(0), y0.max(0), x1.min(w), y1.min(h)];
+                let sel = &selection;
+                Some(std::sync::Arc::new(
+                    crate::selection::SelectionMask::rasterize(bounds, |y, x0, out| {
+                        sel.row_coverage(y, x0, out)
+                    }),
+                ))
+            }
+            _ => None,
+        };
+        let mut field = LiquifyField::new(
+            self.canvas.tile_size(),
+            self.canvas.width(),
+            self.canvas.height(),
+        );
+        field.confine_to(coverage);
         self.layer_state.liquify = Some(LiquifySession {
             layer_id,
             source: self.canvas.capture_layer_pixels(active),
             source_deep: self.canvas.capture_layer_linear(active),
-            field: LiquifyField::new(
-                self.canvas.tile_size(),
-                self.canvas.width(),
-                self.canvas.height(),
-            ),
+            field,
             written: HashSet::new(),
             last: None,
             pen: None,
@@ -116,17 +200,34 @@ impl PainterApp {
             preview: HashMap::new(),
             preview_block: 1,
             previewed: None,
+            pressure: 1.0,
+            velocity: Vec2::ZERO,
+            frame_pen: None,
+            glide: None,
         });
         true
     }
 
+    /// The mouse (or a full-pressure pen) down at `pos`.
+    #[cfg_attr(not(any(test, feature = "bench")), allow(dead_code))]
     pub(crate) fn liquify_press(&mut self, pos: Vec2) {
+        self.liquify_press_with_pressure(pos, 1.0);
+    }
+
+    /// The pen down at `pos` with `pressure` (0..1, scaling the strength).
+    pub(crate) fn liquify_press_with_pressure(&mut self, pos: Vec2, pressure: f32) {
         if !self.liquify_begin() {
             return;
         }
         if let Some(s) = self.layer_state.liquify.as_mut() {
+            // A new stroke builds on what Adjust left showing.
+            s.field.bake_scale();
             s.last = Some(pos);
             s.pen = Some(pos);
+            s.pressure = pressure.clamp(0.0, 1.0);
+            s.velocity = Vec2::ZERO;
+            s.frame_pen = Some(pos);
+            s.glide = None;
         }
         if self.workspace.liquify.mode.is_continuous() {
             self.liquify_hold(1.0 / 30.0);
@@ -136,35 +237,25 @@ impl PainterApp {
     /// Brush moved to `pos`: dab along the way, a spacing apart. A tablet
     /// reports many short moves where a mouse reports a few long ones; both
     /// get the same dabs (and the same strength), the rest carries over to
-    /// the next move.
+    /// the next move. (At the pressure it last had.)
     pub(crate) fn liquify_drag(&mut self, pos: Vec2) {
-        let settings = &self.workspace.liquify;
-        let (mode, radius, strength) = (settings.mode, settings.radius, settings.strength);
+        let settings = self.workspace.liquify;
         let Some(session) = self.layer_state.liquify.as_mut() else {
             return;
         };
-        let Some(last) = session.last else {
+        if session.last.is_none() {
             return;
-        };
+        }
         session.pen = Some(pos);
-        let travel = pos - last;
-        let spacing = (radius * 0.12).max(1.0);
-        let steps = (travel.length() / spacing).floor() as usize;
-        if steps == 0 {
-            return;
+        session.dab_along(&settings, pos, 1.0);
+    }
+
+    /// [`Self::liquify_drag`] with the pen's `pressure` (0..1).
+    pub(crate) fn liquify_drag_with_pressure(&mut self, pos: Vec2, pressure: f32) {
+        if let Some(s) = self.layer_state.liquify.as_mut() {
+            s.pressure = pressure.clamp(0.0, 1.0);
         }
-        let step = travel.normalized() * spacing;
-        for i in 1..=steps {
-            let center = last + step * i as f32;
-            let (amount, delta) = match mode {
-                LiquifyMode::Push => (strength, step),
-                _ => (strength * 0.15, Vec2::ZERO),
-            };
-            if let Some(r) = session.field.dab(mode, center, radius, amount, delta) {
-                session.pending = Some(union(session.pending, r));
-            }
-        }
-        session.last = Some(last + step * steps as f32);
+        self.liquify_drag(pos);
     }
 
     /// Brush held still for `dt` seconds: continuous modes keep working.
@@ -182,25 +273,93 @@ impl PainterApp {
         };
         // About 1.75 rad/s of twirl (or 60% pinch/bloat per second) at the
         // centre at 50% strength; it was a sluggish third of that.
-        let amount = (strength * dt * 10.0).min(1.0);
+        let amount = (strength * session.pressure * dt * 10.0).min(1.0);
         if let Some(rect) = session.field.dab(mode, center, radius, amount, Vec2::ZERO) {
             session.pending = Some(union(session.pending, rect));
         }
     }
 
     pub(crate) fn liquify_release(&mut self) {
+        let momentum = self.workspace.liquify.momentum;
         if let Some(s) = self.layer_state.liquify.as_mut() {
-            s.last = None;
+            // With Momentum, the brush glides on at the speed it had.
+            let speed = s.velocity.length();
+            s.glide = s
+                .pen
+                .filter(|_| momentum > 0.0 && speed > GLIDE_MIN_SPEED && s.last.is_some())
+                .map(|pos| Glide {
+                    pos,
+                    velocity: s.velocity,
+                    start_speed: speed,
+                    time: 0.0,
+                });
+            if s.glide.is_none() {
+                s.last = None;
+            }
             s.pen = None;
+            s.frame_pen = None;
         }
         self.liquify_flush();
     }
 
-    pub(crate) fn liquify_is_holding(&self) -> bool {
+    /// Once a frame, `dt` seconds on: with the pen down, how fast it moves
+    /// is measured and held-still modes keep working; after it lifted, a
+    /// Momentum glide goes on. Whether there's more to come (repaint).
+    pub(crate) fn liquify_tick(&mut self, dt: f32) -> bool {
+        let settings = self.workspace.liquify;
+        let Some(s) = self.layer_state.liquify.as_mut() else {
+            return false;
+        };
+        if dt <= 0.0 {
+            return s.pen.is_some() || s.glide.is_some();
+        }
+        if let Some(pen) = s.pen {
+            if let Some(was) = s.frame_pen.replace(pen) {
+                s.velocity = s.velocity * 0.5 + (pen - was) / dt * 0.5;
+            }
+            if settings.mode.is_continuous() {
+                self.liquify_hold(dt);
+            }
+            // (Momentum needs every frame: a pen held still has to read as
+            // stopped by the time it lifts.)
+            return settings.mode.is_continuous() || settings.momentum > 0.0;
+        }
+        let Some(glide) = s.glide.as_mut() else {
+            return false;
+        };
+        // Slowing down: by the time constant more Momentum makes longer.
+        let tau = 0.05 + 0.35 * settings.momentum.clamp(0.0, 1.0);
+        glide.velocity *= (-dt / tau).exp();
+        glide.time += dt;
+        glide.pos += glide.velocity * dt;
+        let speed = glide.velocity.length();
+        let (pos, fade) = (glide.pos, speed / glide.start_speed);
+        if speed < GLIDE_MIN_SPEED || glide.time > GLIDE_MAX_TIME {
+            s.glide = None;
+            s.last = None;
+            return false;
+        }
+        s.dab_along(&settings, pos, fade);
+        true
+    }
+
+    /// The session's Adjust (how much of its displacement shows), if one
+    /// is running.
+    pub(crate) fn liquify_adjust(&self) -> Option<f32> {
         self.layer_state
             .liquify
             .as_ref()
-            .is_some_and(|s| s.pen.is_some())
+            .map(LiquifySession::adjust)
+    }
+
+    /// Show `amount` (0..=1) of the session's displacement: drawn by the
+    /// next frame.
+    pub(crate) fn liquify_set_adjust(&mut self, amount: f32) {
+        if let Some(s) = self.layer_state.liquify.as_mut()
+            && let Some(rect) = s.field.set_scale(amount)
+        {
+            s.pending = Some(union(s.pending, rect));
+        }
     }
 
     /// Render what the field changed since the last call into the layer
@@ -548,6 +707,124 @@ mod tests {
             layer(&zoomed) == layer(&full),
             "pen-up draws what 1:1 would"
         );
+    }
+
+    /// The field's displacement at `p`.
+    fn moved(app: &mut crate::PainterApp, p: Vec2) -> Vec2 {
+        let s = app.layer_state.liquify.as_mut().unwrap();
+        s.field_for_test().sample(p)
+    }
+
+    #[test]
+    fn a_lighter_pen_pushes_less() {
+        let pushed = |pressure: f32| {
+            let mut app = app();
+            app.workspace.liquify.mode = LiquifyMode::Push;
+            app.liquify_press_with_pressure(Vec2::new(60.0, 128.0), pressure);
+            for i in 1..=30 {
+                app.liquify_drag_with_pressure(Vec2::new(60.0 + i as f32 * 2.0, 128.0), pressure);
+            }
+            moved(&mut app, Vec2::new(110.5, 128.5)).length()
+        };
+        let (light, full) = (pushed(0.3), pushed(1.0));
+        assert!(light > 0.5 && light < full * 0.6, "{light} vs {full}");
+    }
+
+    /// Press at x = 60 and move right 4 px a frame for `frames` frames, then
+    /// hold still for `still` frames and lift: how far right the field
+    /// reaches once any glide is over, and how many frames it glided.
+    fn flick(momentum: f32, frames: usize, still: usize) -> (i32, usize) {
+        let mut app = app();
+        app.workspace.liquify.mode = LiquifyMode::Push;
+        app.workspace.liquify.momentum = momentum;
+        let dt = 1.0 / 60.0;
+        app.liquify_press(Vec2::new(60.0, 128.0));
+        let mut x = 60.0;
+        for _ in 0..frames {
+            x += 4.0;
+            app.liquify_drag(Vec2::new(x, 128.0));
+            app.liquify_tick(dt);
+        }
+        for _ in 0..still {
+            app.liquify_tick(dt);
+        }
+        app.liquify_release();
+        let mut glided = 0;
+        while app.liquify_tick(dt) {
+            glided += 1;
+            assert!(glided < 200, "a glide ends");
+        }
+        let reach = (0..256)
+            .rev()
+            .find(|&x| moved(&mut app, Vec2::new(x as f32 + 0.5, 128.5)) != Vec2::ZERO);
+        (reach.unwrap_or(0), glided)
+    }
+
+    #[test]
+    fn momentum_glides_on_after_the_pen_lifts_and_fades() {
+        let (stopped, none) = flick(0.0, 10, 0);
+        assert_eq!(none, 0, "no momentum, no glide");
+        let (short, a) = flick(0.3, 10, 0);
+        let (long, b) = flick(1.0, 10, 0);
+        assert!(a > 0 && b > a, "more momentum glides longer: {a} {b}");
+        assert!(stopped < short && short < long, "{stopped} {short} {long}");
+        // A pen that stopped before it lifted doesn't glide.
+        let (_, after_stop) = flick(1.0, 10, 30);
+        assert_eq!(after_stop, 0);
+    }
+
+    #[test]
+    fn adjust_shows_part_of_the_session_and_ok_keeps_that() {
+        let mut app = app();
+        let original = layer(&app);
+        app.workspace.liquify.mode = LiquifyMode::Push;
+        app.liquify_press(Vec2::new(60.0, 128.0));
+        for i in 1..=30 {
+            app.liquify_drag(Vec2::new(60.0 + i as f32 * 3.0, 128.0));
+        }
+        app.liquify_release();
+        let full = layer(&app);
+        assert!(full != original);
+        assert_eq!(app.liquify_adjust(), Some(1.0));
+        app.liquify_set_adjust(0.0);
+        app.liquify_flush();
+        assert!(layer(&app) == original, "none of it");
+        app.liquify_set_adjust(1.0);
+        app.liquify_flush();
+        assert!(layer(&app) == full, "all of it");
+        app.liquify_set_adjust(0.5);
+        app.liquify_flush();
+        let half = layer(&app);
+        assert!(half != full && half != original);
+        app.liquify_commit();
+        assert!(layer(&app) == half, "OK keeps what shows");
+        assert_eq!(app.liquify_adjust(), None);
+        app.apply_history(false);
+        assert!(layer(&app) == original);
+    }
+
+    #[test]
+    fn inside_a_selection_only_the_selected_pixels_move() {
+        use crate::selection::{SelectionMode, SelectionShape};
+        let mut app = app();
+        app.selection_manager.canvas_size = [256, 256];
+        app.selection_manager.apply_shape(
+            SelectionShape::Rectangle {
+                start: Vec2::new(0.0, 0.0),
+                end: Vec2::new(128.0, 256.0),
+            },
+            SelectionMode::Replace,
+        );
+        let original = layer(&app);
+        drag(&mut app, LiquifyMode::Push, 4.0);
+        let after = layer(&app);
+        for i in 0..16 {
+            let tx = i % 4;
+            if tx >= 2 {
+                assert!(after[i] == original[i], "tile {i} outside moved");
+            }
+        }
+        assert!(after != original, "inside moved");
     }
 
     /// A soft edge keeps its colour (it went dark and grey).

@@ -21,6 +21,9 @@ pub struct EyedropperSettings {
     /// Side of the square averaged, in pixels (1, 3, 5 or 11).
     pub size: u8,
     pub from: PickFrom,
+    /// Keep the Eyedropper after a pick; otherwise it goes back to the
+    /// tool used before it.
+    pub stay: bool,
 }
 
 impl Default for EyedropperSettings {
@@ -28,6 +31,7 @@ impl Default for EyedropperSettings {
         Self {
             size: 1,
             from: PickFrom::Visible,
+            stay: false,
         }
     }
 }
@@ -40,6 +44,8 @@ pub struct EyedropperState {
     pub settings: EyedropperSettings,
     /// While picking: the colour before it began (the ring's lower half).
     pub before: Option<Color32>,
+    /// The tool the Eyedropper was chosen from, to go back to after a pick.
+    pub return_to: Option<crate::app::tools::Tool>,
 }
 
 /// The average colour of premultiplied `pixels`, unpremultiplied and
@@ -66,6 +72,31 @@ fn average(pixels: &[Color32]) -> Option<Color32> {
 }
 
 impl PainterApp {
+    /// Switch to the Eyedropper, remembering the tool to go back to.
+    pub(crate) fn select_eyedropper(&mut self) {
+        use crate::app::tools::Tool;
+        if !matches!(self.active_tool, Tool::Eyedropper) {
+            self.workspace.eyedropper.return_to = Some(self.active_tool);
+        }
+        self.active_tool = Tool::Eyedropper;
+    }
+
+    /// The press that picked lifted: the ring goes, and unless the
+    /// Eyedropper is to stay, the tool before it comes back (a press that
+    /// picked nothing, off the picture, leaves it on).
+    pub(crate) fn eyedropper_release(&mut self) {
+        use crate::app::tools::Tool;
+        let eyedropper = &mut self.workspace.eyedropper;
+        let picked = eyedropper.before.take().is_some();
+        if picked
+            && matches!(self.active_tool, Tool::Eyedropper)
+            && !eyedropper.settings.stay
+            && let Some(tool) = eyedropper.return_to.take()
+        {
+            self.active_tool = tool;
+        }
+    }
+
     /// Set the brush color to the color at `pos` (as the Eyedropper's
     /// settings say), keeping the brush's own alpha.
     pub(crate) fn pick_color(&mut self, pos: Vec2) {
@@ -186,7 +217,11 @@ mod tests {
         }
         app.canvas_mut().set_layer_tile_data(1, 0, 0, tile);
         let pick = |app: &mut PainterApp, size, from, x| {
-            app.workspace.eyedropper.settings = EyedropperSettings { size, from };
+            app.workspace.eyedropper.settings = EyedropperSettings {
+                size,
+                from,
+                stay: false,
+            };
             app.brush_state.brush.brush_options.color = Color32::RED;
             app.pick_color(Vec2::new(x, 20.5));
             app.brush_state.brush.brush_options.color
@@ -203,5 +238,33 @@ mod tests {
             "nothing there: the colour stays"
         );
         assert_eq!(app.workspace.eyedropper.before, Some(Color32::RED));
+    }
+
+    #[test]
+    fn the_eyedropper_picks_once_then_goes_back_unless_told_to_stay() {
+        use crate::app::tools::Tool;
+        let mut app = crate::project::tests::test_app_pub(crate::canvas::Canvas::new(
+            64,
+            64,
+            Color32::WHITE,
+            64,
+        ));
+        app.active_tool = Tool::Fill;
+        app.select_eyedropper();
+        app.brush_state.brush.brush_options.color = Color32::RED;
+        app.pick_color(Vec2::new(5.5, 5.5));
+        app.eyedropper_release();
+        assert_eq!(app.brush_state.brush.brush_options.color, Color32::WHITE);
+        assert!(
+            matches!(app.active_tool, Tool::Fill),
+            "back to the Fill tool"
+        );
+        assert_eq!(app.workspace.eyedropper.before, None, "the ring is gone");
+
+        app.workspace.eyedropper.settings.stay = true;
+        app.select_eyedropper();
+        app.pick_color(Vec2::new(5.5, 5.5));
+        app.eyedropper_release();
+        assert!(matches!(app.active_tool, Tool::Eyedropper), "it stays");
     }
 }

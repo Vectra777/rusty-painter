@@ -207,6 +207,12 @@ const MIN_AIRBRUSH_WAIT: f32 = 1.0 / 240.0;
 const RESOLVE_EVERY: std::time::Duration = std::time::Duration::from_millis(8);
 const MAX_AIRBRUSH_WAIT: f32 = 0.05;
 
+/// Catch-up (see `Session::catch_up`): the brush smooths on toward where
+/// the pen lifted until this near (canvas pixels), for at most this many
+/// of the stabiliser's steps.
+const CATCH_UP_NEAR: f32 = 0.5;
+const CATCH_UP_STEPS: usize = 200;
+
 enum Job {
     Begin(Box<StrokeSetup>),
     /// A sequential stroke.
@@ -237,6 +243,9 @@ enum Job {
 struct SharedState {
     /// Jobs queued or running.
     pending: usize,
+    /// Pen samples queued or running (of `pending`): what a deferred
+    /// resolve waits for (see [`Session::paint`]).
+    samples: usize,
     /// Tiles painted since the UI last collected them, with the tile-local
     /// rectangle that changed in each.
     dirty: HashMap<(usize, usize), [usize; 4]>,
@@ -370,6 +379,7 @@ impl StrokeWorker {
                         }
                     };
                     let is_end = matches!(job, Job::End);
+                    let is_sample = matches!(job, Job::Sample { .. });
                     if matches!(job, Job::Begin(_) | Job::BeginSequential(_)) {
                         begun += 1;
                     }
@@ -397,6 +407,9 @@ impl StrokeWorker {
                     // (Counted even if it panicked: it's over either way.)
                     if is_end {
                         state.ended += 1;
+                    }
+                    if is_sample {
+                        state.samples -= 1;
                     }
                     state.pending -= 1;
                     if state.pending == 0 {
@@ -577,7 +590,12 @@ impl StrokeWorker {
     }
 
     fn send(&self, job: Job) {
-        self.shared.lock().pending += 1;
+        let sample = matches!(job, Job::Sample { .. });
+        {
+            let mut state = self.shared.lock();
+            state.pending += 1;
+            state.samples += sample as usize;
+        }
         let sent = self
             .jobs
             .as_ref()
@@ -586,6 +604,7 @@ impl StrokeWorker {
             // Worker gone (only possible during shutdown): don't leave waiters hanging.
             let mut state = self.shared.lock();
             state.pending -= 1;
+            state.samples -= sample as usize;
             if state.pending == 0 {
                 self.shared.idle.notify_all();
             }
@@ -1136,25 +1155,51 @@ impl Session {
         self.show_provisional(shared);
     }
 
-    /// A pulled string with catch-up: the line goes on to where the pen
-    /// lifted.
+    /// Catch-up: when the pen lifts, the line goes on to where it lifted
+    /// (a stabiliser holds the brush back from the pen). A pulled string
+    /// goes straight there; the others smooth on, as with the pen held
+    /// still there, until the brush is within half a pixel of it.
     fn catch_up(&mut self, shared: &Shared) {
         let brush = &self.setup.brush;
         let Some(last) = self.last_sample else {
             return;
         };
-        if brush.stabilizer_algorithm != StabilizerAlgorithm::String
+        let algorithm = brush.stabilizer_algorithm;
+        let smooths = matches!(
+            algorithm,
+            StabilizerAlgorithm::Simple
+                | StabilizerAlgorithm::Dynamic
+                | StabilizerAlgorithm::MotionFilter
+        );
+        if !(smooths || algorithm == StabilizerAlgorithm::String)
             || !brush.stabilizer_modes.catch_up
+            // (The string caught up with pixel-perfect brushes before
+            // smoothing did: it still does.)
+            || smooths && brush.pixel_perfect
             || self.stroke.last_pos == Some(last.pos)
         {
             return;
         }
         self.paint(shared, |stroke, brush, context| {
-            brush.stabilizer_algorithm = StabilizerAlgorithm::None;
             stroke.tilt = last.tilt;
             stroke.barrel = last.barrel;
-            stroke.add_sample(brush, last.pos, last.pressure, Some(last.time), context);
-            brush.stabilizer_algorithm = StabilizerAlgorithm::String;
+            if !smooths {
+                brush.stabilizer_algorithm = StabilizerAlgorithm::None;
+                stroke.add_sample(brush, last.pos, last.pressure, Some(last.time), context);
+                brush.stabilizer_algorithm = algorithm;
+                return;
+            }
+            let mut time = last.time;
+            for _ in 0..CATCH_UP_STEPS {
+                if stroke
+                    .last_pos
+                    .is_none_or(|p| (p - last.pos).length() <= CATCH_UP_NEAR)
+                {
+                    break;
+                }
+                time += f64::from(crate::brush_engine::stabilizer::STEP);
+                stroke.add_sample(brush, last.pos, last.pressure, Some(time), context);
+            }
         });
     }
 
@@ -1345,10 +1390,12 @@ impl Session {
         // More samples waiting, and the pixels shown not long ago: what's
         // painted now would be painted over before it's seen, so it's
         // resolved with what comes next (corrections start again from the
-        // pixels, so they never wait).
+        // pixels, so they never wait). Only another sample: other jobs
+        // (a measured pressure, a prediction, a task) may paint nothing,
+        // and the pen resting then would leave the dabs unseen.
         let defer = correction.is_none()
             && live.is_none()
-            && shared.lock().pending > 1
+            && shared.lock().samples > 1
             && resolved.elapsed() < RESOLVE_EVERY;
         let mut context = StrokeContext::new(pool, canvas, selection.as_ref(), undo, tiles)
             .with_symmetry(symmetry, copies)
@@ -2011,6 +2058,71 @@ mod tests {
         let (without, behind) = end_painted(false);
         assert!(behind > 200, "{behind}");
         assert_eq!(without, 0, "the brush stops the string's length short");
+    }
+
+    #[test]
+    fn a_sample_followed_by_other_work_is_shown_once_the_queue_drains() {
+        // The pen rests after a sample, but other work (a task here, a
+        // measured pressure or a prediction from a pen) is queued behind
+        // it: the sample's paint is still shown when the queue drains.
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+        let canvas = Arc::new(Canvas::new(128, 128, Color32::TRANSPARENT, 64));
+        let worker = StrokeWorker::new();
+        worker.begin(StrokeSetup {
+            canvas: Arc::clone(&canvas),
+            brush: Brush::new(10.0, 100.0, Color32::BLACK, 10.0),
+            selection: None,
+            pool,
+            layer_idx: 1,
+            symmetry: Default::default(),
+            view_scale: 1.0,
+            perspective: Vec::new(),
+            wet_gravity: Vec2::new(0.0, 1.0),
+            inside: None,
+            seed: None,
+            wrap: false,
+        });
+        // Everything queued before the worker gets to it.
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        worker.task(Box::new(move || {
+            let _ = wait.recv();
+            Box::new(())
+        }));
+        worker.sample(Vec2::new(30.0, 30.0), 1.0);
+        worker.task(Box::new(|| Box::new(())));
+        release.send(()).unwrap();
+        worker.wait_idle();
+        let tile = canvas.get_layer_tile_data(1, 0, 0).unwrap();
+        assert!(tile[30 * 64 + 30].a() > 200, "the dab is shown");
+        worker.end();
+        worker.wait_idle();
+    }
+
+    #[test]
+    fn smoothing_stabilisers_catch_up_with_the_pen_when_it_lifts() {
+        let line: Vec<(Vec2, f32)> = (0..=40)
+            .map(|i| (Vec2::new(10.0 + i as f32 * 2.5, 64.0), 1.0))
+            .collect();
+        for algorithm in [
+            StabilizerAlgorithm::Simple,
+            StabilizerAlgorithm::Dynamic,
+            StabilizerAlgorithm::MotionFilter,
+        ] {
+            let end_painted = |catch_up: bool| {
+                let mut brush = Brush::new(6.0, 100.0, Color32::BLACK, 10.0);
+                brush.stabilizer_algorithm = algorithm;
+                brush.stabilizer = 0.9;
+                brush.stabilizer_modes.filter_strength = 1.0;
+                brush.stabilizer_modes.catch_up = catch_up;
+                let (canvas, _) = paint_on_worker(brush, &line);
+                // (109, 64): by the pen's last position, 110.
+                canvas
+                    .get_layer_tile_data(1, 1, 1)
+                    .map_or(0, |tile| tile[109 - 64].a())
+            };
+            assert!(end_painted(true) > 200, "{algorithm:?} catches up");
+            assert_eq!(end_painted(false), 0, "{algorithm:?} stops short");
+        }
     }
 
     #[test]

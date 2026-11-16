@@ -18,6 +18,7 @@
 //!   converting the document's profile.
 //! - [`animation`]: frames, playback, drawings and exporting animations.
 //! - [`rig`]: rig layers, importing animations and videos.
+//! - [`comps`]: layer comps (named snapshots of the layers' visibility).
 //! - [`settings`]: preferences and tool options kept between sessions.
 //! - [`autosave`]: autosave and recovering unsaved work after a crash.
 //! - [`shader_ops`]: shader layers (compiling, playback, baking).
@@ -32,6 +33,7 @@ pub(crate) mod canvas_ops;
 pub(crate) mod clipboard;
 pub(crate) mod collab;
 pub(crate) mod color_management;
+pub(crate) mod comps;
 #[cfg(not(target_os = "android"))]
 pub(crate) mod dev_shot;
 pub(crate) mod document;

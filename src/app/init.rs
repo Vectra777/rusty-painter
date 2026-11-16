@@ -114,6 +114,11 @@ impl PainterApp {
                 render_state.adapter.get_info(),
                 render_state.target_format
             );
+            // wgpu's default panics on a validation error or a lost device:
+            // logged instead, so the work in the app can still be saved.
+            render_state
+                .device
+                .on_uncaptured_error(Box::new(|err| log::error!("GPU error: {err}")));
             let gpu = GpuCanvas::new(&render_state.device, render_state.target_format);
             render_state.renderer.write().callback_resources.insert(gpu);
         } else {

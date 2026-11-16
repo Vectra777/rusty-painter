@@ -304,15 +304,19 @@ pub fn picker_poll() -> Option<Vec<String>> {
     PICKED.lock().ok()?.take()
 }
 
-/// A picked file's name and contents (the copy then removed).
-pub fn picker_read(uri: &str) -> Result<(String, Vec<u8>), String> {
+/// A picked file's name, and the file opened, to be read on a job's thread
+/// (the copy's name removed at once: the open file reads on).
+pub fn picker_read(uri: &str) -> Result<(String, crate::app::import::FileSource), String> {
     let path = Path::new(uri);
     let name = path
         .file_name()
         .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
-    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read {name}: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("Couldn't read {name}: {e}"))?;
     let _ = std::fs::remove_file(path);
-    Ok((name, bytes))
+    Ok((
+        name,
+        crate::app::import::FileSource::File(std::sync::Arc::new(file)),
+    ))
 }
 
 /// Write a save to `uri` (from [`picker_create`]) and show the picker that

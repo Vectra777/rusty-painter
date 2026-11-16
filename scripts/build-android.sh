@@ -42,6 +42,9 @@ if [[ -f "$ROOT/assets/brush-pack/default-v1/brushes.rpbrush" ]] &&
   cp -R "$ROOT/assets/brush-pack/." "$ROOT/target/android-assets/"
 fi
 
+# 16 KB pages (see .cargo/config.toml, whose flags cargo-apk replaces).
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,-z,max-page-size=16384"
+
 case "${MODE}" in
   release)
     cargo apk build --lib --target "${TARGET}" --release

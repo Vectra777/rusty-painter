@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use eframe::egui::{Color32, ColorImage, Rgba};
 
-use super::{Canvas, Layer, LayerId, LayerKind, RowTileCache, layer_tile};
+use super::{Canvas, Layer, LayerId, LayerKind, SharedPixels, layer_tile};
 use crate::canvas::blend::{
     LinearEncoder, alpha_over_batch, average_over, color32_to_linear, color32s_to_linear,
     gamma_color32_to_rgba, rgba_to_color32_fast,
@@ -14,6 +14,7 @@ use crate::canvas::blend::{
 use crate::canvas::blend_modes::{
     BlendSpace, LayerBlend, MIN_ALPHA, composite as blend_composite, pixel_noise,
 };
+use std::sync::{Arc, Mutex};
 
 /// A precomputed composite of the layers below `first_layer` for one tile.
 #[derive(Clone, Copy)]
@@ -478,35 +479,52 @@ impl Canvas {
     pub fn flatten_linear(&self) -> Vec<[f32; 4]> {
         let (w, h, ts) = (self.width, self.height, self.tile_size);
         let mut out = vec![[0.0; 4]; w * h];
-        let gamma = self.blend_space == BlendSpace::Gamma;
-        let to_linear = |c: Rgba| {
-            let [r, g, b, a] = c.to_array();
-            if gamma {
-                let l = eframe::egui::ecolor::linear_from_gamma;
-                [l(r.max(0.0)), l(g.max(0.0)), l(b.max(0.0)), a]
-            } else {
-                [r, g, b, a]
-            }
-        };
         out.par_chunks_mut(w * ts)
             .enumerate()
             .for_each(|(ty, strip)| {
                 let strip_h = strip.len() / w;
                 for tx in 0..w.div_ceil(ts) {
-                    let nodes = self.tile_nodes(tx as i32, ty as i32, None);
+                    let tile = self.composite_tile_precise(tx as i32, ty as i32);
                     for row in 0..strip_h.min(ts) {
-                        let gy = ty * ts + row;
-                        for col in 0..ts.min(w - tx * ts) {
-                            let gx = tx * ts + col;
-                            let noise = pixel_noise(gx as u32, gy as u32);
-                            let c =
-                                composite_nodes(&nodes, row * ts + col, Rgba::TRANSPARENT, noise);
-                            strip[row * w + gx] = to_linear(c);
-                        }
+                        let cols = ts.min(w - tx * ts);
+                        let dst = row * w + tx * ts;
+                        strip[dst..dst + cols].copy_from_slice(&tile[row * ts..row * ts + cols]);
                     }
                 }
             });
         out
+    }
+
+    /// Whole tile `(tx, ty)` composited at full precision (a deeper
+    /// document's layers read at their full depth), premultiplied in linear
+    /// light, row-major over the whole tile (pixels off the canvas are
+    /// composited too).
+    pub(crate) fn composite_tile_precise(&self, tx: i32, ty: i32) -> Vec<[f32; 4]> {
+        let ts = self.tile_size;
+        let nodes = self.tile_nodes(tx, ty, None, true);
+        let gamma = self.blend_space == BlendSpace::Gamma;
+        let decode = super::deep::linear_from_gamma_lut();
+        (0..ts * ts)
+            .map(|idx| {
+                let (gx, gy) = (
+                    tx * ts as i32 + (idx % ts) as i32,
+                    ty * ts as i32 + (idx / ts) as i32,
+                );
+                let noise = pixel_noise(gx as u32, gy as u32);
+                let [r, g, b, a] =
+                    composite_nodes(&nodes, idx, Rgba::TRANSPARENT, noise).to_array();
+                if !gamma {
+                    return [r, g, b, a];
+                }
+                // A gamma document's composite is premultiplied in sRGB:
+                // its colour is decoded unpremultiplied.
+                if a <= 0.0 {
+                    return [0.0; 4];
+                }
+                let dec = |v: f32| decode((v / a).max(0.0)) * a;
+                [dec(r), dec(g), dec(b), a]
+            })
+            .collect()
     }
 
     /// Composite one whole tile into `out` (downsampled by `step`), optionally
@@ -607,7 +625,7 @@ impl Canvas {
         let shrink = Some(Shrink { block, w, h, layer });
         let (tx, ty) = (tx as i32, ty as i32);
         if self.needs_tree_compositing() {
-            let nodes = self.tile_nodes(tx, ty, shrink);
+            let nodes = self.tile_nodes(tx, ty, shrink, false);
             let encoder = self.tree_encoder();
             for (idx, px) in out.pixels.iter_mut().enumerate() {
                 let (gx, gy) = (x + idx % dst_w * block, y + idx / dst_w * block);
@@ -692,7 +710,11 @@ impl Canvas {
             if !layer.visible || layer.opacity <= 0.0 {
                 continue;
             }
-            if idx == 0 {
+            if idx == 0 && layer.opacity < 1.0 {
+                // A see-through background: the general path applies its
+                // opacity.
+                return false;
+            } else if idx == 0 {
                 bg_visible = true;
             } else if paint_layer.is_none() && layer.opacity >= 1.0 {
                 paint_layer = Some(idx);
@@ -745,19 +767,70 @@ impl Canvas {
     /// Linear, premultiplied composite of the visible layers below
     /// `layer_idx` for every pixel of one tile: exactly the value the
     /// compositor has accumulated just before reaching `layer_idx`.
+    /// With folders, masks or blend modes, the composite of the top-level
+    /// entries below it (in the document's blend space), when
+    /// [`Self::below_splits_at`] says that's where the tree splits.
     pub fn composite_below(&self, layer_idx: usize, tx: i32, ty: i32) -> Vec<Rgba> {
-        let layers = self.tile_layer_inputs(tx, ty, 0..layer_idx.min(self.layers.len()), None);
-        (0..self.tile_size * self.tile_size)
+        let below = 0..layer_idx.min(self.layers.len());
+        let ts = self.tile_size;
+        if self.needs_tree_compositing() {
+            let nodes = self.tile_nodes_in(tx, ty, None, false, below);
+            let (x0, y0) = (tx * ts as i32, ty * ts as i32);
+            return (0..ts * ts)
+                .map(|idx| {
+                    let noise = pixel_noise(
+                        (x0 + (idx % ts) as i32) as u32,
+                        (y0 + (idx / ts) as i32) as u32,
+                    );
+                    composite_nodes(&nodes, idx, Rgba::TRANSPARENT, noise)
+                })
+                .collect();
+        }
+        let layers = self.tile_layer_inputs(tx, ty, below, None);
+        (0..ts * ts)
             .map(|idx| composite_pixel(&layers, idx, Rgba::TRANSPARENT))
             .collect()
     }
 
+    /// Whether the composite splits at entry `layer_idx`: what's below it
+    /// composites on its own, and it and everything above go over that (see
+    /// [`Self::composite_below`]). Always in a plain stack; with folders,
+    /// masks or blend modes, when it's a top-level paint layer that isn't
+    /// clipped (a clipped one is part of the layer it clips to).
+    pub fn below_splits_at(&self, layer_idx: usize) -> bool {
+        if !self.needs_tree_compositing() {
+            return true;
+        }
+        self.layers.get(layer_idx).is_some_and(|l| {
+            l.parent.is_none() && !l.clipped && l.kind == LayerKind::Paint && l.anim.is_none()
+        })
+    }
+
     /// Cache key for [`Self::composite_below`]: everything besides pixel
-    /// content (which only the active layer's strokes change) it depends on.
-    pub fn composite_below_key(&self, layer_idx: usize) -> (Color32, Vec<(LayerId, bool, u32)>) {
+    /// content (which only the active layer's strokes change) it depends
+    /// on: per entry below, its visibility and its settings (opacity, blend
+    /// mode, place in the tree...) hashed.
+    pub fn composite_below_key(&self, layer_idx: usize) -> (Color32, Vec<(LayerId, bool, u64)>) {
+        use std::fmt::Write;
+        use std::hash::{Hash, Hasher};
+        let tree = self.needs_tree_compositing();
+        // (One buffer for every layer's settings, written out to hash.)
+        let mut text = String::new();
         let layers = self.layers[..layer_idx.min(self.layers.len())]
             .iter()
-            .map(|l| (l.id, l.visible, l.opacity.to_bits()))
+            .map(|l| {
+                let mut h = rustc_hash::FxHasher::default();
+                l.opacity.to_bits().hash(&mut h);
+                tree.hash(&mut h);
+                text.clear();
+                let _ = write!(
+                    text,
+                    "{:?} {:?} {:?} {} {:?} {:?} {:?}",
+                    self.blend_space, l.blend, l.kind, l.clipped, l.parent, l.adjustment, l.style
+                );
+                text.hash(&mut h);
+                (l.id, l.visible, h.finish())
+            })
             .collect();
         (self.clear_color, layers)
     }
@@ -773,13 +846,14 @@ impl Canvas {
     ) -> Vec<LayerInput> {
         range
             .filter(|&i| self.layers[i].kind == LayerKind::Paint)
-            .filter_map(|i| self.layer_input(i, tx, ty, BlendSpace::Linear, shrink))
+            .filter_map(|i| self.layer_input(i, tx, ty, BlendSpace::Linear, shrink, false))
             .collect()
     }
 
     /// Layer `i`'s contribution to one tile, in `space` (linear light, or
     /// the stored sRGB values), or `None` if it contributes nothing (hidden,
-    /// fully transparent or no content there).
+    /// fully transparent or no content there). `precise`: as for
+    /// [`Self::tile_nodes`].
     fn layer_input(
         &self,
         i: usize,
@@ -787,6 +861,7 @@ impl Canvas {
         ty: i32,
         space: BlendSpace,
         shrink: Option<Shrink<'_>>,
+        precise: bool,
     ) -> Option<LayerInput> {
         let layer = &self.layers[i];
         if !(layer.visible && layer.opacity > 0.0) {
@@ -802,6 +877,7 @@ impl Canvas {
         }
         // A deeper document's gradient fill: at full precision.
         if shrink.is_none()
+            && precise
             && self.depth().is_deep()
             && let Some(fill) = &layer.style.fill
             && let Some(pixels) = fill.tile_precise(tx, ty, self.tile_size, space)
@@ -858,7 +934,7 @@ impl Canvas {
             });
         }
         // A deeper document's tile: its pixels at full depth.
-        if let Some(deep) = guard.as_ref().and_then(|g| g.deep()) {
+        if let Some(deep) = guard.as_ref().and_then(|g| g.deep()).filter(|_| precise) {
             let read = |i| match space {
                 BlendSpace::Linear => deep.linear(i),
                 BlendSpace::Gamma => deep.gamma(i),
@@ -895,12 +971,65 @@ impl Canvas {
 
     /// A styled layer's pixels for tile `(tx, ty)`, as a painted tile
     /// holds them: its fill, or its paint over its border. `None` where it
-    /// shows nothing.
-    pub(crate) fn styled_tile(&self, i: usize, tx: i32, ty: i32) -> Option<Vec<Color32>> {
+    /// shows nothing. Kept from the last time while the layer's style and
+    /// the paint it's made from stay the same (see [`StyleCache`]).
+    pub(crate) fn styled_tile(&self, i: usize, tx: i32, ty: i32) -> Option<SharedPixels> {
+        let layer = &self.layers[i];
+        let key = (layer.id, tx, ty);
+        let made_from = self.style_inputs(layer, tx, ty);
+        if let Some(kept) = self.style_cache.get(key, &made_from, layer, tx, ty) {
+            return kept;
+        }
+        let made = self.make_styled_tile(i, tx, ty);
+        self.style_cache
+            .put(key, made_from, made.clone(), layer, tx, ty);
+        made
+    }
+
+    /// What layer `layer`'s styled tile `(tx, ty)` is made from: its style
+    /// and the revisions of the tiles it reads (the tile and, for a border,
+    /// the tiles around it; the heights around it, for impasto).
+    fn style_inputs(&self, layer: &Layer, tx: i32, ty: i32) -> StyleInputs {
+        let style = layer.shown_style();
+        let mut tiles = [0; 9];
+        if style.fill.is_none() {
+            let around = if style.border.is_some() { 1 } else { 0 };
+            for dy in -around..=around {
+                for dx in -around..=around {
+                    tiles[((dy + 1) * 3 + dx + 1) as usize] = layer_tile(layer, tx + dx, ty + dy)
+                        .map_or(0, |cell| {
+                            let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                            cell.revision() << 1 | u64::from(cell.is_empty)
+                        });
+                }
+            }
+        }
+        let mut heights = [0; 9];
+        if let Some(map) = layer.height.as_deref()
+            && (style.impasto.is_some() || style.lightness_map)
+        {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    heights[((dy + 1) * 3 + dx + 1) as usize] = map.revision((tx + dx, ty + dy));
+                }
+            }
+        }
+        StyleInputs {
+            style,
+            space: self.blend_space,
+            tile_size: self.tile_size,
+            tiles,
+            heights,
+        }
+    }
+
+    /// [`Self::styled_tile`], made now. Where it looks just as the tile
+    /// does (no border in reach), the tile's own pixels, shared.
+    pub(crate) fn make_styled_tile(&self, i: usize, tx: i32, ty: i32) -> Option<SharedPixels> {
         let layer = &self.layers[i];
         let ts = self.tile_size;
         if let Some(fill) = &layer.style.fill {
-            return Some(fill.tile(tx, ty, ts, self.blend_space));
+            return Some(Arc::new(fill.tile(tx, ty, ts, self.blend_space)));
         }
         let mut out = match layer.style.border {
             Some(border) => self.bordered_tile(i, tx, ty, border)?,
@@ -910,15 +1039,22 @@ impl Canvas {
                 if guard.is_empty {
                     return None;
                 }
-                guard.data().cloned()?
+                guard.shared_data().cloned()?
             }
         };
         // Impasto: the paint lit by its thickness, or by its lightness map.
         if let Some(heights) = layer.height.as_deref() {
-            crate::canvas::impasto::relief(&layer.shown_style(), heights, &mut out, tx, ty, ts);
+            let pixels = Arc::make_mut(&mut out);
+            crate::canvas::impasto::relief(&layer.shown_style(), heights, pixels, tx, ty, ts);
         }
         if let Some(overlay) = &layer.style.overlay {
-            overlay.apply(&mut out, tx, ty, ts, self.blend_space);
+            overlay.apply(
+                Arc::make_mut(&mut out).as_mut_slice(),
+                tx,
+                ty,
+                ts,
+                self.blend_space,
+            );
         }
         Some(out)
     }
@@ -930,7 +1066,7 @@ impl Canvas {
         tx: i32,
         ty: i32,
         border: crate::canvas::layer_style::Border,
-    ) -> Option<Vec<Color32>> {
+    ) -> Option<SharedPixels> {
         let layer = &self.layers[i];
         let ts = self.tile_size;
         // The paint's alpha around the tile, as far as the border reaches
@@ -946,12 +1082,13 @@ impl Canvas {
                     continue;
                 };
                 let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(data) = guard.data().map(Vec::as_slice).filter(|_| !guard.is_empty) else {
+                let Some(shared) = guard.shared_data().filter(|_| !guard.is_empty) else {
                     continue;
                 };
+                let data = shared.as_slice();
                 any = true;
                 if (dx, dy) == (0, 0) {
-                    own = Some(data.to_vec());
+                    own = Some(Arc::clone(shared));
                 }
                 // Where this tile's pixels land in the square.
                 let (ox, oy) = (dx * ts as i32 + reach as i32, dy * ts as i32 + reach as i32);
@@ -971,7 +1108,15 @@ impl Canvas {
                 }
             }
         }
-        any.then(|| border.apply(&alpha, side, reach, own.as_deref(), ts))
+        if !any {
+            return None;
+        }
+        let out = border.apply(&alpha, side, reach, own.as_deref().map(Vec::as_slice), ts);
+        // No border showing here: the tile as it is, not a copy.
+        Some(match own {
+            Some(own) if *own == out => own,
+            _ => Arc::new(out),
+        })
     }
 
     /// Layer `i`'s input from pixels already shrunk.
@@ -991,7 +1136,29 @@ impl Canvas {
     }
 
     /// The composite tree (folders and masks) for one tile.
-    fn tile_nodes(&self, tx: i32, ty: i32, shrink: Option<Shrink<'_>>) -> Vec<CompositeNode> {
+    /// `precise`: a deeper document's layers read at their full depth (for
+    /// full-precision results: exports, merges); otherwise their 8-bit
+    /// pixels, all an 8-bit result (the screen) needs.
+    fn tile_nodes(
+        &self,
+        tx: i32,
+        ty: i32,
+        shrink: Option<Shrink<'_>>,
+        precise: bool,
+    ) -> Vec<CompositeNode> {
+        self.tile_nodes_in(tx, ty, shrink, precise, 0..self.layers.len())
+    }
+
+    /// [`Self::tile_nodes`] of only the top-level entries in `top` (see
+    /// [`Self::below_splits_at`]).
+    fn tile_nodes_in(
+        &self,
+        tx: i32,
+        ty: i32,
+        shrink: Option<Shrink<'_>>,
+        precise: bool,
+        top: std::ops::Range<usize>,
+    ) -> Vec<CompositeNode> {
         let masks: HashMap<LayerId, usize> = self
             .layers
             .iter()
@@ -1001,10 +1168,12 @@ impl Canvas {
                 _ => None,
             })
             .collect();
-        self.child_nodes(tx, ty, None, &masks, 0, shrink)
+        self.child_nodes(tx, ty, None, &masks, 0, shrink, precise, top)
     }
 
-    /// Nodes for the children of `parent`, bottom to top.
+    /// Nodes for the children of `parent`, bottom to top (only those in
+    /// `top`, at the top level).
+    #[allow(clippy::too_many_arguments)]
     fn child_nodes(
         &self,
         tx: i32,
@@ -1013,6 +1182,8 @@ impl Canvas {
         masks: &HashMap<LayerId, usize>,
         depth: usize,
         shrink: Option<Shrink<'_>>,
+        precise: bool,
+        top: std::ops::Range<usize>,
     ) -> Vec<CompositeNode> {
         let mut nodes: Vec<CompositeNode> = Vec::new();
         if depth > self.layers.len() {
@@ -1035,25 +1206,36 @@ impl Canvas {
         if let Some(track) = track {
             if self.onion.enabled {
                 for (i, k) in self.onion_frames(track, self.time) {
-                    if let Some(node) = self.layer_node(i, tx, ty, masks, depth, shrink) {
+                    if let Some(node) = self.layer_node(i, tx, ty, masks, depth, shrink, precise) {
                         nodes.push(onion_tint(node, k, self.onion.opacity, self.blend_space));
                     }
                 }
             }
             if let Some(i) = self.frame_at(track, self.time)
-                && let Some(node) = self.layer_node(i, tx, ty, masks, depth, shrink)
+                && let Some(node) = self.layer_node(i, tx, ty, masks, depth, shrink, precise)
             {
                 nodes.push(node);
             }
             return nodes;
         }
         for (i, layer) in self.layers.iter().enumerate() {
-            if layer.parent != parent || matches!(layer.kind, LayerKind::Mask { .. }) {
+            if layer.parent != parent
+                || matches!(layer.kind, LayerKind::Mask { .. })
+                || (parent.is_none() && !top.contains(&i))
+            {
                 continue;
             }
             if self.passes_through(i) && layer.visible && layer.opacity > 0.0 {
-                let mut children =
-                    self.child_nodes(tx, ty, Some(layer.id), masks, depth + 1, shrink);
+                let mut children = self.child_nodes(
+                    tx,
+                    ty,
+                    Some(layer.id),
+                    masks,
+                    depth + 1,
+                    shrink,
+                    precise,
+                    0..usize::MAX,
+                );
                 for child in &mut children {
                     child.fade(layer.opacity);
                 }
@@ -1062,7 +1244,7 @@ impl Canvas {
                 continue;
             }
             let node = if layer.visible && layer.opacity > 0.0 {
-                self.layer_node(i, tx, ty, masks, depth, shrink)
+                self.layer_node(i, tx, ty, masks, depth, shrink, precise)
             } else {
                 None
             };
@@ -1125,6 +1307,7 @@ impl Canvas {
 
     /// Layer `i` (a folder or paint layer) as a node for one tile, or `None`
     /// when it shows nothing there.
+    #[allow(clippy::too_many_arguments)]
     fn layer_node(
         &self,
         i: usize,
@@ -1133,12 +1316,22 @@ impl Canvas {
         masks: &HashMap<LayerId, usize>,
         depth: usize,
         shrink: Option<Shrink<'_>>,
+        precise: bool,
     ) -> Option<CompositeNode> {
         let layer = &self.layers[i];
         match layer.kind {
             LayerKind::Mask { .. } => None,
             LayerKind::Group => {
-                let children = self.child_nodes(tx, ty, Some(layer.id), masks, depth + 1, shrink);
+                let children = self.child_nodes(
+                    tx,
+                    ty,
+                    Some(layer.id),
+                    masks,
+                    depth + 1,
+                    shrink,
+                    precise,
+                    0..usize::MAX,
+                );
                 let blend = match layer.blend {
                     LayerBlend::PassThrough => LayerBlend::Normal,
                     blend => blend,
@@ -1159,7 +1352,7 @@ impl Canvas {
                 space: self.blend_space,
             }),
             LayerKind::Paint => {
-                let input = self.layer_input(i, tx, ty, self.blend_space, shrink)?;
+                let input = self.layer_input(i, tx, ty, self.blend_space, shrink, precise)?;
                 let mask = masks
                     .get(&layer.id)
                     .and_then(|&m| self.mask_input(m, tx, ty, shrink));
@@ -1223,10 +1416,11 @@ impl Canvas {
         below: Option<BelowComposite<'_>>,
     ) {
         let first_layer = below.map_or(0, |b| b.first_layer);
-        // Folders/masks need the tree compositor (never with a below-cache,
-        // which assumes a plain stack).
-        let nodes = (below.is_none() && self.needs_tree_compositing())
-            .then(|| self.tile_nodes(tx, ty, None));
+        // Folders/masks need the tree compositor; with a below-cache, the
+        // top-level entries from its layer up (see `below_splits_at`).
+        let nodes = self
+            .needs_tree_compositing()
+            .then(|| self.tile_nodes_in(tx, ty, None, false, first_layer..self.layers.len()));
         let layers = if nodes.is_some() {
             Vec::new()
         } else {
@@ -1234,12 +1428,9 @@ impl Canvas {
         };
         let start = |idx: usize| below.map_or(Rgba::TRANSPARENT, |b| b.pixels[idx]);
         let composite_at = |idx: usize, gx: usize, gy: usize| match &nodes {
-            Some(nodes) => composite_nodes(
-                nodes,
-                idx,
-                Rgba::TRANSPARENT,
-                pixel_noise(gx as u32, gy as u32),
-            ),
+            Some(nodes) => {
+                composite_nodes(nodes, idx, start(idx), pixel_noise(gx as u32, gy as u32))
+            }
             None => composite_pixel(&layers, idx, start(idx)),
         };
         let (tree, plain) = (self.tree_encoder(), LinearEncoder::new());
@@ -1269,7 +1460,8 @@ impl Canvas {
                     Some(nodes) => {
                         for (dx, px) in out_row.iter_mut().enumerate() {
                             let noise = pixel_noise((x + dx) as u32, gy);
-                            let c = composite_nodes(nodes, src_row + dx, Rgba::TRANSPARENT, noise);
+                            let idx = src_row + dx;
+                            let c = composite_nodes(nodes, idx, start(idx), noise);
                             *px = tree.encode(c);
                         }
                     }
@@ -1338,8 +1530,9 @@ impl Canvas {
         }
     }
 
-    /// Composite a region that spans multiple tiles, caching one decoded
-    /// tile per layer per output row.
+    /// Composite a region that spans multiple tiles (sampling one pixel
+    /// every `step`), tile by tile in parallel: each tile's layers (or
+    /// composite tree) are read once for all the output pixels it covers.
     fn write_multi_tile_region(
         &self,
         x: usize,
@@ -1349,145 +1542,67 @@ impl Canvas {
         step: usize,
         out: &mut ColorImage,
     ) {
-        if self.needs_tree_compositing() {
-            self.write_multi_tile_region_tree(x, y, dst_w, dst_h, step, out);
-            return;
-        }
-        let clear_color_linear = color32_to_linear(self.clear_color);
-        // Optimization: Cache tiles and pre-convert to linear space
-        for dst_y in 0..dst_h {
-            let global_y = y + dst_y * step;
-            let ty = (global_y / self.tile_size) as i32;
-            let local_y = global_y % self.tile_size;
-
-            // Cache tile Arc and converted linear data for this row
-            // Tuple: (cached_tx, tile_arc, linear_tile_data, is_empty)
-            let mut row_tile_cache: RowTileCache = Vec::with_capacity(self.layers.len());
-
-            // Initialize cache with None for each layer
-            for _ in 0..self.layers.len() {
-                row_tile_cache.push(None);
-            }
-
-            let mut dst_x = 0;
-            while dst_x < dst_w {
-                let global_x = x + dst_x * step;
-                let tx = (global_x / self.tile_size) as i32;
-                let local_x = global_x % self.tile_size;
-
-                let dst_start = dst_y * dst_w + dst_x;
-
-                let mut composite = Rgba::from_rgba_premultiplied(0.0, 0.0, 0.0, 0.0);
-
-                for (layer_idx, layer) in self.layers.iter().enumerate() {
-                    if !layer.visible || layer.opacity <= 0.0 {
-                        continue;
-                    }
-
-                    // Check if we need to fetch a different tile
-                    let needs_lookup = row_tile_cache[layer_idx]
-                        .as_ref()
-                        .is_none_or(|(cached_tx, _, _, _)| *cached_tx != tx);
-
-                    if needs_lookup {
-                        // Drop old cache entry
-                        row_tile_cache[layer_idx] = None;
-
-                        // Fetch new tile and pre-convert to linear
-                        if let Some(tile_arc) = self.shown_tile_cell(layer_idx, tx, ty) {
-                            // Lock temporarily to read data
-                            let guard = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
-                            let is_empty = guard.is_empty;
-
-                            // Pre-convert entire tile to linear space for efficiency
-                            let linear_data =
-                                guard.data().map(Vec::as_slice).map(color32s_to_linear);
-
-                            // Release lock and cache the Arc with converted data
-                            drop(guard);
-                            row_tile_cache[layer_idx] = Some((tx, tile_arc, linear_data, is_empty));
-                        }
-                    }
-
-                    // Skip if tile is empty or missing
-                    let (is_empty, linear_data) =
-                        if let Some((_, _, linear_data, is_empty)) = &row_tile_cache[layer_idx] {
-                            (*is_empty, linear_data.as_ref())
-                        } else if layer_idx == 0 {
-                            (false, None) // Background uses clear_color
-                        } else {
-                            continue; // Non-background layer with no tile
-                        };
-
-                    if is_empty {
-                        continue;
-                    }
-
-                    // Resolve Pixel in linear space
-                    let src = if let Some(linear_tile) = linear_data {
-                        let src_idx = local_y * self.tile_size + local_x;
-                        linear_tile[src_idx]
-                    } else if layer_idx == 0 {
-                        clear_color_linear
-                    } else {
-                        Rgba::TRANSPARENT
-                    };
-
-                    if src.a() == 0.0 {
-                        continue;
-                    }
-
-                    // Apply opacity and blend (already in linear space)
-                    let src = if layer.opacity < 1.0 {
-                        src * layer.opacity
-                    } else {
-                        src
-                    };
-                    composite = src + composite * (1.0 - src.a());
+        let ts = self.tile_size;
+        let tree = self.needs_tree_compositing();
+        let (tree_encoder, plain) = (self.tree_encoder(), LinearEncoder::new());
+        // Output rows and columns, grouped by the row or column of tiles
+        // they sample (each group is contiguous).
+        let groups = |start: usize, len: usize| {
+            let mut groups: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+            for d in 0..len {
+                let t = (start + d * step) / ts;
+                match groups.last_mut() {
+                    Some((last, range)) if *last == t => range.end = d + 1,
+                    _ => groups.push((t, d..d + 1)),
                 }
-
-                out.pixels[dst_start] = rgba_to_color32_fast(composite);
-                dst_x += 1;
             }
+            groups
+        };
+        let cols = groups(x, dst_w);
+        let mut bands = Vec::new();
+        let mut rest = &mut out.pixels[..dst_w * dst_h];
+        for (ty, rows) in groups(y, dst_h) {
+            let (band, after) = rest.split_at_mut(rows.len() * dst_w);
+            bands.push((ty as i32, rows, band));
+            rest = after;
         }
-    }
-
-    /// [`Self::write_multi_tile_region`] for canvases with folders or masks:
-    /// same sampling, through the composite tree. Trees are cached for one
-    /// row of tiles at a time to bound memory on large exports.
-    fn write_multi_tile_region_tree(
-        &self,
-        x: usize,
-        y: usize,
-        dst_w: usize,
-        dst_h: usize,
-        step: usize,
-        out: &mut ColorImage,
-    ) {
-        let mut cache: HashMap<i32, Vec<CompositeNode>> = HashMap::new();
-        let mut cached_ty = None;
-        let encoder = self.tree_encoder();
-        for dst_y in 0..dst_h {
-            let global_y = y + dst_y * step;
-            let ty = (global_y / self.tile_size) as i32;
-            if cached_ty != Some(ty) {
-                cache.clear();
-                cached_ty = Some(ty);
+        bands.into_par_iter().for_each(|(ty, rows, band)| {
+            let blocks: Vec<Vec<Color32>> = cols
+                .par_iter()
+                .map(|(tx, span)| {
+                    let tx = *tx as i32;
+                    let mut block = Vec::with_capacity(rows.len() * span.len());
+                    let pixels = rows
+                        .clone()
+                        .flat_map(|r| span.clone().map(move |c| (x + c * step, y + r * step)));
+                    if tree {
+                        let nodes = self.tile_nodes(tx, ty, None, false);
+                        block.extend(pixels.map(|(gx, gy)| {
+                            let idx = (gy % ts) * ts + gx % ts;
+                            let noise = pixel_noise(gx as u32, gy as u32);
+                            tree_encoder.encode(composite_nodes(
+                                &nodes,
+                                idx,
+                                Rgba::TRANSPARENT,
+                                noise,
+                            ))
+                        }));
+                    } else {
+                        let layers = self.tile_layer_inputs(tx, ty, 0..self.layers.len(), None);
+                        block.extend(pixels.map(|(gx, gy)| {
+                            let idx = (gy % ts) * ts + gx % ts;
+                            plain.encode(composite_pixel(&layers, idx, Rgba::TRANSPARENT))
+                        }));
+                    }
+                    block
+                })
+                .collect();
+            for ((_, span), block) in cols.iter().zip(&blocks) {
+                for (r, src) in block.chunks_exact(span.len()).enumerate() {
+                    band[r * dst_w + span.start..r * dst_w + span.end].copy_from_slice(src);
+                }
             }
-            let local_y = global_y % self.tile_size;
-            for dst_x in 0..dst_w {
-                let global_x = x + dst_x * step;
-                let tx = (global_x / self.tile_size) as i32;
-                let local_x = global_x % self.tile_size;
-                let nodes = cache
-                    .entry(tx)
-                    .or_insert_with(|| self.tile_nodes(tx, ty, None));
-                let idx = local_y * self.tile_size + local_x;
-                let noise = pixel_noise(global_x as u32, global_y as u32);
-                let composite = composite_nodes(nodes, idx, Rgba::TRANSPARENT, noise);
-                out.pixels[dst_y * dst_w + dst_x] = encoder.encode(composite);
-            }
-        }
+        });
     }
 
     pub fn write_thumbnail_nearest(&self, max_edge: usize, out: &mut ColorImage) {
@@ -1533,7 +1648,11 @@ impl Canvas {
             if !layer.visible || layer.opacity <= 0.0 {
                 continue;
             }
-            if idx == 0 {
+            if idx == 0 && layer.opacity < 1.0 {
+                // A see-through background: the general path applies its
+                // opacity.
+                return false;
+            } else if idx == 0 {
                 bg_visible = true;
             } else if paint_layer.is_none() && layer.opacity >= 1.0 {
                 paint_layer = Some(idx);
@@ -1752,4 +1871,118 @@ impl Canvas {
             })
             .collect()
     }
+}
+
+/// What a styled tile was made from (see [`Canvas::styled_tile`]): the
+/// same again makes the same pixels.
+#[derive(PartialEq)]
+struct StyleInputs {
+    style: crate::canvas::layer_style::LayerStyle,
+    space: BlendSpace,
+    tile_size: usize,
+    /// The revisions of the 3×3 tiles around it (0 where none, or not
+    /// read), each with its empty flag in the low bit.
+    tiles: [u64; 9],
+    /// The revisions of the 3×3 height tiles around it (0 where flat, or
+    /// not read).
+    heights: [u64; 9],
+}
+
+/// Styled layers' tiles as last made, by layer and tile: a border is a
+/// distance transform over the tiles around, made again for every redraw
+/// of the tile before (painting on another layer included).
+// Cleared whole when it holds more than `MAX_BYTES` of pixels of its own
+// (tiles that look as the layer's do are shared with it, for nothing) or
+// `MAX_TILES` tiles: per-layer LRU eviction if big outlined documents
+// thrash it.
+#[derive(Default)]
+pub(crate) struct StyleCache(Mutex<StyleCacheMap>);
+
+#[derive(Default)]
+struct StyleCacheMap {
+    tiles: rustc_hash::FxHashMap<(LayerId, i32, i32), StyledTile>,
+    /// Bytes of the pixels held that no tile shares.
+    own_bytes: usize,
+}
+
+/// A styled tile kept.
+struct StyledTile {
+    made_from: StyleInputs,
+    /// `None` when it's the tile's own pixels (read from the tile then:
+    /// held here too, every write to the tile would copy it first).
+    pixels: Option<SharedPixels>,
+    is_tile: bool,
+    /// Bytes of `pixels` counted as the cache's own.
+    own_bytes: usize,
+}
+
+impl StyleCache {
+    const MAX_BYTES: usize = 64 << 20;
+    /// And at most this many tiles (a tile shared when kept stays alive
+    /// here once the layer moves on, until redrawn).
+    const MAX_TILES: usize = 16384;
+
+    fn get(
+        &self,
+        key: (LayerId, i32, i32),
+        inputs: &StyleInputs,
+        layer: &Layer,
+        tx: i32,
+        ty: i32,
+    ) -> Option<Option<SharedPixels>> {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let kept = map
+            .tiles
+            .get(&key)
+            .filter(|kept| kept.made_from == *inputs)?;
+        if !kept.is_tile {
+            return Some(kept.pixels.clone());
+        }
+        drop(map);
+        // (The same revision as when kept: the same pixels.)
+        Some(layer_tile(layer, tx, ty).and_then(|cell| {
+            let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+            cell.shared_data().cloned()
+        }))
+    }
+
+    /// Keep `pixels`, made from `inputs`, for tile `(tx, ty)` of `layer`.
+    fn put(
+        &self,
+        key: (LayerId, i32, i32),
+        inputs: StyleInputs,
+        pixels: Option<SharedPixels>,
+        layer: &Layer,
+        tx: i32,
+        ty: i32,
+    ) {
+        // Shared with the tile itself: not held, read from the tile.
+        let is_tile = pixels.as_ref().is_some_and(|p| shares(layer, tx, ty, p));
+        let pixels = pixels.filter(|_| !is_tile);
+        let bytes = pixels
+            .as_ref()
+            .map_or(0, |p| p.len() * std::mem::size_of::<Color32>());
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if map.own_bytes + bytes > Self::MAX_BYTES || map.tiles.len() >= Self::MAX_TILES {
+            *map = StyleCacheMap::default();
+        }
+        map.own_bytes += bytes;
+        let kept = StyledTile {
+            made_from: inputs,
+            pixels,
+            is_tile,
+            own_bytes: bytes,
+        };
+        if let Some(old) = map.tiles.insert(key, kept) {
+            map.own_bytes -= old.own_bytes;
+        }
+    }
+}
+
+/// Whether `pixels` are tile `(tx, ty)` of `layer`'s own.
+fn shares(layer: &Layer, tx: i32, ty: i32, pixels: &SharedPixels) -> bool {
+    layer_tile(layer, tx, ty).is_some_and(|cell| {
+        let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+        cell.shared_data().is_some_and(|d| Arc::ptr_eq(d, pixels))
+    })
 }

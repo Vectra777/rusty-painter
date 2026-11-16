@@ -61,6 +61,9 @@ pub struct BrushState {
     pub import_report: Option<Vec<(String, usize, Vec<String>)>>,
     /// The pulled string of the stroke being drawn, shown on the canvas.
     pub string: Option<crate::app::stroke_ops::PulledString>,
+    /// Where the last brush stroke ended (canvas point, pressure), for a
+    /// Shift+click's straight line from there.
+    pub last_stroke_end: Option<(Vec2, f32)>,
     /// Tags, favourites and recent presets, and the pop-up palette.
     pub library: crate::app::brush_library::BrushLibrary,
     /// The paint a mixing brush that isn't cleaned after each stroke
@@ -137,6 +140,7 @@ impl BrushState {
             blend_stroke: None,
             import_report: None,
             string: None,
+            last_stroke_end: None,
             library: Default::default(),
             dirty_brush: Default::default(),
         };
@@ -250,7 +254,7 @@ impl ViewportState {
 
 pub struct BelowCache {
     /// `Canvas::composite_below_key` for the layers this was built from.
-    pub key: (Color32, Vec<(LayerId, bool, u32)>),
+    pub key: (Color32, Vec<(LayerId, bool, u64)>),
     pub tiles: FxHashMap<(usize, usize), Vec<Rgba>>,
 }
 
@@ -374,6 +378,10 @@ pub struct ToolGroups {
     pub animate: bool,
     /// The Eraser button shows Lasso delete.
     pub lasso_delete: bool,
+    /// The Smudge button shows Blur.
+    pub blur: bool,
+    /// The Pen button shows: 0 the Pen, 1 Liquify, 2 Puppet.
+    pub warp: usize,
 }
 
 /// See [`LayerState::float_overlay`].
@@ -446,6 +454,8 @@ pub struct LayerState {
     /// Changes others made while painting together: they're not steps in
     /// this painter's history, but are work to save (and autosave).
     pub remote_edits: u64,
+    /// Layer comps (saved with the document).
+    pub comps: crate::app::comps::LayerComps,
     pub thumbnails_built_at: Option<std::time::Instant>,
 }
 
@@ -473,6 +483,7 @@ impl LayerState {
             thumbnails: Vec::new(),
             thumbnails_dirty: true,
             remote_edits: 0,
+            comps: Default::default(),
             thumbnails_built_at: None,
         }
     }
@@ -591,6 +602,8 @@ pub struct WorkspaceState {
     /// Let a single finger paint; when off, one finger pans and only a
     /// stylus paints.
     pub finger_painting: bool,
+    /// Interface preferences (size, touch helpers, hidden tools, QuickMenu).
+    pub ui: crate::ui::prefs::UiPrefs,
     /// Touch mode: the tool strip and brush panel fade out while painting
     /// and come back when the pen or mouse comes near them.
     pub autohide_panels: bool,
@@ -601,6 +614,9 @@ pub struct WorkspaceState {
     /// The pen's last raw pressure and what the curve made of it, for the
     /// live readout in Settings.
     pub last_pressure: Option<(f32, f32)>,
+    /// Draw the stroke ahead to where the pen is predicted to be (Android:
+    /// iOS predicts it itself), so it keeps up with the pen.
+    pub motion_prediction: bool,
     /// Wet paint: which way is down (canvas pixels: its direction), the
     /// time it last dried for, the history step on top that has taken it
     /// in (see `History::top_token`), and how long a step of drying took
@@ -745,6 +761,7 @@ impl WorkspaceState {
             applied_style: None,
             finger_painting: true,
             autohide_panels: true,
+            ui: Default::default(),
             pressure_curve: crate::brush_engine::hardness::SoftnessCurve {
                 points: vec![
                     crate::brush_engine::hardness::CurvePoint::new(0.0, 0.0),
@@ -752,6 +769,7 @@ impl WorkspaceState {
                 ],
             },
             last_pressure: None,
+            motion_prediction: cfg!(target_os = "android"),
             calibration: None,
             wet_gravity: [0.0, 1.0],
             wet_clock: None,

@@ -3,6 +3,7 @@
 //! in the submodules.
 
 mod cell;
+pub use cell::SharedPixels;
 pub(crate) use cell::TileCell;
 mod composite;
 pub mod deep;
@@ -58,7 +59,6 @@ pub struct LayerId(pub u64);
 // Tile lookups happen per dab per tile and per layer per composited tile; FxHash
 // is several times cheaper than the default SipHash for small integer keys.
 type TileMap = FxHashMap<(i32, i32), Arc<Mutex<TileCell>>>;
-type RowTileCache = Vec<Option<(i32, Arc<Mutex<TileCell>>, Option<Vec<Rgba>>, bool)>>;
 
 /// What a layer entry is. Folders and masks are entries in the same flat
 /// list as paint layers, so painting, undo and saving handle them all alike;
@@ -135,6 +135,10 @@ pub struct Layer {
     /// A rig layer's onion skins: the rig posed at the frames around the
     /// one showing (frames away, and its tiles), while onion skins are on.
     pub(crate) rig_onion: Mutex<Vec<RigOnion>>,
+    /// A colorize mask: its pixels are colour hints, and it shows the
+    /// areas of its line-art layer filled from them (see
+    /// [`crate::canvas::colorize`]).
+    pub colorize: Option<Box<crate::canvas::colorize::ColorizeLayer>>,
     tiles: Mutex<TileMap>,
     /// Its pixels as shown while it's moved (see `posed`).
     posed: Mutex<Option<posed::Posed>>,
@@ -147,9 +151,11 @@ pub(crate) type RigOnion = (i32, Arc<crate::canvas::puppet::Tiles>);
 pub struct CanvasTileSnapshot {
     pub tx: i32,
     pub ty: i32,
-    pub data: Vec<Color32>,
+    /// Shared with the tile it was taken from (copied on the tile's next
+    /// write), so a snapshot costs nothing until the canvas changes.
+    pub data: SharedPixels,
     /// In a deeper document, the same pixels at full depth.
-    pub deep: Option<DeepTile>,
+    pub deep: Option<Arc<DeepTile>>,
 }
 
 #[derive(Clone)]
@@ -186,6 +192,8 @@ pub struct CanvasLayerSnapshot {
     /// [`crate::canvas::puppet::WarpMemory`]).
     pub warps: Vec<std::sync::Arc<crate::canvas::puppet::WarpMemory>>,
     pub motion: Option<Box<crate::canvas::motion::Motion>>,
+    /// A colorize mask's settings and result (its tiles hold the hints).
+    pub colorize: Option<Box<crate::canvas::colorize::ColorizeLayer>>,
     pub tiles: Vec<CanvasTileSnapshot>,
 }
 
@@ -217,13 +225,33 @@ impl Layer {
         style
     }
 
-    /// Bytes of pixels this layer holds (for the undo history's budget).
+    /// Bytes of pixels this layer holds alone (for the undo history's
+    /// budget): pixels it still shares with the canvas (or another copy)
+    /// cost nothing until one of them is written and copies them.
     pub(crate) fn held_bytes(&self) -> usize {
         let tiles = self.tiles.lock().unwrap_or_else(|e| e.into_inner());
         tiles
             .values()
-            .map(|t| t.lock().unwrap_or_else(|e| e.into_inner()).bytes())
+            .map(|t| t.lock().unwrap_or_else(|e| e.into_inner()).unshared_bytes())
             .sum()
+    }
+
+    /// The same layer with its own tiles showing the same pixels, shared
+    /// copy-on-write: what undo keeps of a whole document, which the
+    /// canvas's next writes leave as it was (unlike [`Layer::share`], whose
+    /// tiles are the canvas's own).
+    pub(crate) fn cow_copy(&self) -> Layer {
+        let layer = self.shell();
+        let tiles: TileMap = (self.tiles.lock().unwrap_or_else(|e| e.into_inner()).iter())
+            .filter_map(|(&key, cell)| {
+                let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let data = cell.shared_data()?.clone();
+                let copy = TileCell::shared(data, cell.shared_deep().cloned(), cell.is_empty);
+                Some((key, Arc::new(Mutex::new(copy))))
+            })
+            .collect();
+        *layer.tiles.lock().unwrap_or_else(|e| e.into_inner()) = tiles;
+        layer
     }
 
     /// The same layer (id and settings) with no pixels.
@@ -255,6 +283,7 @@ impl Layer {
             warps: self.warps.clone(),
             motion: self.motion.clone(),
             rig_onion: Mutex::new(Vec::new()),
+            colorize: self.colorize.clone(),
             tiles: Mutex::new(TileMap::default()),
             posed: Mutex::new(None),
         }
@@ -312,6 +341,7 @@ impl Layer {
             warps: Vec::new(),
             motion: None,
             rig_onion: Mutex::new(Vec::new()),
+            colorize: None,
             tiles: Mutex::new(TileMap::default()),
             posed: Mutex::new(None),
         }
@@ -319,7 +349,6 @@ impl Layer {
 
     /// The layer's settings and painted tiles, sorted row by row.
     pub(crate) fn snapshot(&self) -> CanvasLayerSnapshot {
-        use rayon::prelude::*;
         let cells: Vec<(TileKey, SharedCell)> = self
             .tiles
             .lock()
@@ -327,19 +356,19 @@ impl Layer {
             .iter()
             .map(|(&k, c)| (k, Arc::clone(c)))
             .collect();
-        // Copied in parallel (a 4K layer is ~64 MB).
+        // Shared, not copied: the tiles copy their pixels when next written.
         let mut tiles: Vec<_> = cells
-            .par_iter()
+            .iter()
             .filter_map(|&((tx, ty), ref cell)| {
                 let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.is_empty {
                     return None;
                 }
-                guard.data().cloned().map(|data| CanvasTileSnapshot {
+                guard.shared_data().cloned().map(|data| CanvasTileSnapshot {
                     tx,
                     ty,
                     data,
-                    deep: guard.deep().cloned(),
+                    deep: guard.shared_deep().cloned(),
                 })
             })
             .collect();
@@ -369,6 +398,7 @@ impl Layer {
             rig: self.rig.clone(),
             warps: self.warps.clone(),
             motion: self.motion.clone(),
+            colorize: self.colorize.clone(),
             tiles,
         }
     }
@@ -380,7 +410,7 @@ impl Layer {
                 (tile.tx, tile.ty),
                 Arc::new(Mutex::new({
                     let is_empty = tile.data.iter().all(|&p| p == Color32::TRANSPARENT);
-                    TileCell::with_deep(tile.data, tile.deep, is_empty)
+                    TileCell::shared(tile.data, tile.deep, is_empty)
                 })),
             );
         }
@@ -411,6 +441,7 @@ impl Layer {
             warps: snapshot.warps,
             motion: snapshot.motion,
             rig_onion: Mutex::new(Vec::new()),
+            colorize: snapshot.colorize,
             tiles: Mutex::new(tiles),
             posed: Mutex::new(None),
         }
@@ -438,6 +469,9 @@ pub struct Canvas {
     pub timeline: crate::canvas::animation::Timeline,
     /// Onion skins, on screen (copies of the canvas leave them off).
     pub onion: crate::canvas::animation::OnionSkin,
+    /// Styled layers' tiles, kept until what they're made from changes
+    /// (shared with views of this canvas: the keys say what they show).
+    pub(crate) style_cache: Arc<composite::StyleCache>,
 }
 
 /// A tile's `(tx, ty)` position.
@@ -451,12 +485,17 @@ fn layer_tile(layer: &Layer, tx: i32, ty: i32) -> Option<Arc<Mutex<TileCell>>> {
     if let Some(posed) = layer.posed_tile(tx, ty) {
         return posed;
     }
-    layer
+    let own = layer
         .tiles
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&(tx, ty))
-        .cloned()
+        .cloned();
+    // A colorize mask shows its result (its own pixels are the hints).
+    match layer.colorize.as_deref() {
+        Some(colorize) => colorize.shown_tile((tx, ty), own),
+        None => own,
+    }
 }
 
 impl Canvas {
@@ -494,6 +533,7 @@ impl Canvas {
             time: 0,
             timeline: Default::default(),
             onion: Default::default(),
+            style_cache: Default::default(),
         }
     }
 
@@ -510,7 +550,7 @@ impl Canvas {
     /// Say the pixels' numbers are colours of `profile` (their numbers stay,
     /// so they show differently). Returns the document as it was, for undo
     /// (swap it back with [`Canvas::swap_document`]); its layers share the
-    /// tiles, which this doesn't change.
+    /// pixels copy-on-write, which this doesn't change.
     pub fn assign_profile(
         &mut self,
         profile: crate::canvas::color_profile::ColorProfile,
@@ -518,7 +558,7 @@ impl Canvas {
         let mut doc = DocumentState {
             width: self.width,
             height: self.height,
-            layers: self.layers.iter().map(Layer::share).collect(),
+            layers: self.layers.iter().map(Layer::cow_copy).collect(),
             active_layer_idx: self.active_layer_idx,
             depth: self.depth,
             profile,
@@ -544,19 +584,16 @@ impl Canvas {
                 // Masks hold coverage, not colours.
                 if !matches!(layer.kind, LayerKind::Mask { .. }) {
                     snapshot.tiles.par_iter_mut().for_each(|tile| {
-                        match tile
-                            .deep
-                            .take()
+                        match (tile.deep.take().map(Arc::unwrap_or_clone))
                             .or_else(|| DeepTile::widen(depth, &tile.data))
                         {
                             Some(mut deep) => {
-                                for i in 0..deep.len() {
-                                    deep.set_linear(i, transform.convert_linear(deep.linear(i)));
-                                }
-                                tile.data = deep.narrow_all();
-                                tile.deep = Some(deep);
+                                transform.convert_deep(&mut deep);
+                                tile.data = Arc::new(deep.narrow_all());
+                                tile.deep = Some(Arc::new(deep));
                             }
-                            None => transform.convert_pixels(&mut tile.data),
+                            None => transform
+                                .convert_pixels(Arc::make_mut(&mut tile.data).as_mut_slice()),
                         }
                     });
                 }
@@ -587,12 +624,13 @@ impl Canvas {
             .map(|layer| {
                 let mut snapshot = layer.snapshot();
                 for tile in &mut snapshot.tiles {
-                    let deep =
-                        (tile.deep.take()).or_else(|| DeepTile::widen(self.depth, &tile.data));
-                    tile.deep = deep.and_then(|d| d.convert(depth));
-                    if let Some(deep) = &tile.deep {
-                        tile.data = deep.narrow_all();
+                    let deep = (tile.deep.take().map(Arc::unwrap_or_clone))
+                        .or_else(|| DeepTile::widen(self.depth, &tile.data))
+                        .and_then(|d| d.convert(depth));
+                    if let Some(deep) = &deep {
+                        tile.data = Arc::new(deep.narrow_all());
                     }
+                    tile.deep = deep.map(Arc::new);
                 }
                 let mut converted = Layer::from_snapshot(snapshot);
                 // Kept as they were: wet paint is still drying.
@@ -753,6 +791,7 @@ impl Canvas {
         layer.anim = meta.anim;
         layer.rig = meta.rig.clone();
         layer.motion = meta.motion.clone();
+        layer.colorize = meta.colorize.clone();
         self.layers.insert(idx, layer);
         // `id` is a reused (previously-allocated) id, not a new one, but
         // guard against ever handing out a colliding id afterward.
@@ -777,7 +816,7 @@ impl Canvas {
                 if guard.is_empty {
                     return None;
                 }
-                guard.data().cloned().map(|data| TileSnapshot {
+                guard.shared_data().cloned().map(|data| TileSnapshot {
                     tx,
                     ty,
                     layer_id: id,
@@ -816,6 +855,7 @@ impl Canvas {
             anim: layer.anim,
             rig: layer.rig.clone(),
             motion: layer.motion.clone(),
+            colorize: layer.colorize.clone(),
         })
     }
 
@@ -1020,8 +1060,8 @@ impl Canvas {
                     }
                     // To 8 bits: the 8-bit pixels are already the rounding.
                     None => {
-                        let data = cell.data().cloned();
-                        cell.set_data(data);
+                        let data = cell.shared_data().cloned();
+                        cell.set_shared(data, None);
                     }
                 }
             }
@@ -1101,19 +1141,26 @@ impl Canvas {
         cells
     }
 
+    /// What a tile of layer `layer_idx` without pixels shows.
+    pub(crate) fn empty_tile_color(&self, layer_idx: usize) -> Color32 {
+        if layer_idx == 0 {
+            self.clear_color
+        } else if (self.layers.get(layer_idx))
+            .is_some_and(|l| matches!(l.kind, LayerKind::Mask { .. }))
+        {
+            // A mask starts out showing everything.
+            Color32::WHITE
+        } else {
+            Color32::TRANSPARENT
+        }
+    }
+
     /// Give a tile of layer `layer_idx` without pixels its empty colour.
     fn init_tile(&self, layer_idx: usize, tile: &mut TileCell) {
         if tile.data().is_some() {
             return;
         }
-        let fill_color = if layer_idx == 0 {
-            self.clear_color
-        } else if matches!(self.layers[layer_idx].kind, LayerKind::Mask { .. }) {
-            // A mask starts out showing everything.
-            Color32::WHITE
-        } else {
-            Color32::TRANSPARENT
-        };
+        let fill_color = self.empty_tile_color(layer_idx);
         let data = vec![fill_color; self.tile_size * self.tile_size];
         tile.is_empty = fill_color == Color32::TRANSPARENT;
         tile.set_data(Some(data));
@@ -1171,6 +1218,55 @@ impl Canvas {
                 .copied()
                 .collect()
         })
+    }
+
+    /// Layer `layer_idx`'s tiles, in no order: where, their revision, and
+    /// their pixels (shared; `None` for a tile without any or an empty one).
+    pub(crate) fn layer_tiles_shared(
+        &self,
+        layer_idx: usize,
+    ) -> Vec<(TileKey, u64, Option<SharedPixels>)> {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return Vec::new();
+        };
+        let cells: Vec<(TileKey, SharedCell)> = (layer.tiles.lock())
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(&k, c)| (k, Arc::clone(c)))
+            .collect();
+        cells
+            .into_iter()
+            .map(|(k, cell)| {
+                let g = cell.lock().unwrap_or_else(|e| e.into_inner());
+                let data = g.shared_data().filter(|_| !g.is_empty).cloned();
+                (k, g.revision(), data)
+            })
+            .collect()
+    }
+
+    /// Drop tile `(tx, ty)` of layer `layer_idx` if it holds no pixels
+    /// (undo leaves such a tile where it went back to transparent).
+    pub(crate) fn drop_tile_without_pixels(&self, layer_idx: usize, tx: i32, ty: i32) {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return;
+        };
+        let lock = || layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
+        // (The cell is looked at with the tile map unlocked, as everywhere.)
+        let Some(cell) = lock().get(&(tx, ty)).cloned() else {
+            return;
+        };
+        if cell
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data()
+            .is_some()
+        {
+            return;
+        }
+        let mut tiles = lock();
+        if tiles.get(&(tx, ty)).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+            tiles.remove(&(tx, ty));
+        }
     }
 
     /// Drop tile `(tx, ty)` of layer `layer_idx` (it reads as unpainted).

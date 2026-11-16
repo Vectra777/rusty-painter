@@ -392,6 +392,33 @@ pub fn redo(app: &mut PainterApp) {
     app.apply_history_now(true);
 }
 
+/// Lock (or unlock) the active layer's transparency.
+pub fn set_alpha_lock(app: &mut PainterApp, on: bool) {
+    let idx = app.canvas.active_layer_idx;
+    app.canvas_mut().layers[idx].alpha_locked = on;
+}
+
+/// Give the active layer an outline `width` px wide (Layer Style → Border).
+pub fn set_border(app: &mut PainterApp, width: f32) {
+    let idx = app.canvas.active_layer_idx;
+    app.canvas_mut().layers[idx].style.border = Some(crate::canvas::layer_style::Border {
+        width,
+        colour: [255, 0, 0],
+        opacity: 1.0,
+    });
+}
+
+/// Duplicate the active layer (as Layer → Duplicate does).
+pub fn duplicate_layer(app: &mut PainterApp) {
+    app.duplicate_layer();
+}
+
+/// The copy of the document a background save or export works on: its
+/// layer count.
+pub fn detached_copy(app: &PainterApp) -> usize {
+    app.canvas.detached_copy().layers.len()
+}
+
 /// The project file bytes (as Save writes them).
 pub fn save_project(app: &mut PainterApp) -> Vec<u8> {
     app.release_canvas();
@@ -469,6 +496,8 @@ pub fn open_psd(bytes: &[u8]) -> usize {
 /// Record one time-lapse frame of the canvas as it is.
 pub fn timelapse_frame(app: &mut PainterApp) -> usize {
     app.set_timelapse_recording(true);
+    // (Made on another thread: all of it counts here.)
+    app.timelapse_collect(true);
     app.workspace.timelapse.frame_count()
 }
 

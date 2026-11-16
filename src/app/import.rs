@@ -16,6 +16,10 @@ pub(crate) enum FileSource {
     /// Already in memory (dropped on the window on the web, Android's
     /// gallery).
     Bytes(Arc<[u8]>),
+    /// A file the system picker opened (Android, iOS): only opened on the
+    /// UI thread, read on the job's.
+    #[cfg(mobile)]
+    File(Arc<std::fs::File>),
 }
 
 impl FileSource {
@@ -25,6 +29,18 @@ impl FileSource {
                 .map(std::borrow::Cow::Owned)
                 .map_err(|e| format!("Couldn't read {}: {e}", path.display())),
             Self::Bytes(bytes) => Ok(std::borrow::Cow::Borrowed(bytes)),
+            #[cfg(mobile)]
+            Self::File(file) => {
+                use std::io::{Read, Seek};
+                let mut file = &**file;
+                // From the start, should it have been read before (a pipe
+                // can't seek, and hasn't been).
+                let _ = file.seek(std::io::SeekFrom::Start(0));
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map(|_| std::borrow::Cow::Owned(bytes))
+                    .map_err(|e| format!("Couldn't read the file: {e}"))
+            }
         }
     }
 }
@@ -40,21 +56,19 @@ pub(crate) fn decode_image_in(
     bytes: &[u8],
     to: &crate::canvas::color_profile::ColorProfile,
 ) -> Result<image::RgbaImage, String> {
-    use crate::canvas::color_profile::{ColorProfile, RenderingIntent, RgbTransform};
-    use image::ImageDecoder;
-    let failed = |e: image::ImageError| format!("Couldn't open the image: {e}");
-    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| format!("Couldn't open the image: {e}"))?
-        .into_decoder()
-        .map_err(failed)?;
-    let from = (decoder.icc_profile().ok().flatten())
-        .and_then(|icc| ColorProfile::from_icc(icc, "Picture's profile").ok())
-        .unwrap_or_default();
-    // `into_`: no second copy of a big photo when it's RGBA already.
-    let mut img = image::DynamicImage::from_decoder(decoder)
-        .map_err(failed)?
-        .into_rgba8();
+    use crate::canvas::color_profile::{RenderingIntent, RgbTransform};
+    let (mut img, from) = match decode_with_profile(bytes) {
+        Ok(decoded) => decoded,
+        // HEIC (most phone photos) and others the decoders here don't
+        // read: Android decodes them, to sRGB.
+        #[cfg(target_os = "android")]
+        Err(err) => (
+            crate::android::decode_image(bytes).map_err(|_| err)?,
+            Default::default(),
+        ),
+        #[cfg(not(target_os = "android"))]
+        Err(err) => return Err(err),
+    };
     if &from != to
         && let Ok(t) = RgbTransform::new(&from, to, RenderingIntent::Perceptual)
     {
@@ -75,6 +89,28 @@ pub(crate) fn decode_image_in(
         }
     }
     Ok(img)
+}
+
+/// A picture's pixels and the colour profile it carries (sRGB if none).
+fn decode_with_profile(
+    bytes: &[u8],
+) -> Result<(image::RgbaImage, crate::canvas::color_profile::ColorProfile), String> {
+    use crate::canvas::color_profile::ColorProfile;
+    use image::ImageDecoder;
+    let failed = |e: image::ImageError| format!("Couldn't open the image: {e}");
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("Couldn't open the image: {e}"))?
+        .into_decoder()
+        .map_err(failed)?;
+    let from = (decoder.icc_profile().ok().flatten())
+        .and_then(|icc| ColorProfile::from_icc(icc, "Picture's profile").ok())
+        .unwrap_or_default();
+    // `into_`: no second copy of a big photo when it's RGBA already.
+    let img = image::DynamicImage::from_decoder(decoder)
+        .map_err(failed)?
+        .into_rgba8();
+    Ok((img, from))
 }
 
 /// `img` scaled down to fit `w`×`h` if it's bigger.

@@ -523,3 +523,122 @@ fn a_stroke_resolved_late_ends_with_the_same_pixels() {
         assert!(now == late, "{name}");
     }
 }
+
+#[test]
+fn a_tapered_watercolour_end_keeps_its_rim() {
+    // A soft round tip drawing its watercolour edge from its dabs' depth,
+    // its end tapered: the last stretch is drawn as a tail, then redrawn
+    // thin when the pen lifts.
+    let make = |wet_edge: f32| {
+        let mut b = Brush::new(40.0, 50.0, Color32::BLACK, 5.0);
+        b.brush_options.pressure_size = false;
+        b.dynamics = tapered(0.0, 120.0);
+        b.wet_edge = wet_edge;
+        b
+    };
+    let (plain, _) = paint(&mut make(0.0), &line(64.0, 0.5), 1, true);
+    let (wet, _) = paint(&mut make(0.9), &line(64.0, 0.5), 1, true);
+    // Near the end the dabs are a few pixels across, all rim: they keep
+    // most of their paint (the full-size tail's depth, had it stayed when
+    // the tail was cleared, would take nearly all of it).
+    let (w, p) = (alpha(&wet, 230, 64) as f32, alpha(&plain, 230, 64) as f32);
+    assert!(p > 50.0, "the end is painted: {p}");
+    assert!(w > p * 0.5, "tapered end {w} vs {p} without the edge");
+    // Further back, inside the full-size line, the middle still thins.
+    let (w, p) = (alpha(&wet, 60, 64) as f32, alpha(&plain, 60, 64) as f32);
+    assert!(w < p * 0.5, "middle {w} vs {p}");
+}
+
+/// `brush`'s stroke along `path` on the stroke worker, each sample painted
+/// (and its tiles taken, as the display does) before the next: the layer
+/// just before the pen lifts, and once it has.
+fn live_and_lifted(brush: Brush, path: &[(Vec2, f32)]) -> (Vec<Color32>, Vec<Color32>) {
+    use crate::brush_engine::stroke_worker::{StrokeSetup, StrokeWorker};
+    use std::sync::Arc;
+    let pool = Arc::new(ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+    let mut canvas = painted(Color32::from_rgb(200, 220, 120));
+    canvas.active_layer_idx = 1;
+    let canvas = Arc::new(canvas);
+    let worker = StrokeWorker::new();
+    worker.begin(StrokeSetup {
+        canvas: Arc::clone(&canvas),
+        brush,
+        selection: None,
+        pool,
+        layer_idx: 1,
+        symmetry: Default::default(),
+        view_scale: 1.0,
+        perspective: Vec::new(),
+        wet_gravity: Vec2::new(0.0, 1.0),
+        inside: None,
+        seed: Some(3),
+        wrap: false,
+    });
+    for &(pos, pressure) in path {
+        worker.sample(pos, pressure);
+        worker.wait_idle();
+        worker.take_dirty();
+    }
+    let live = pixels_rgba(&canvas);
+    worker.end();
+    worker.wait_idle();
+    (live, pixels_rgba(&canvas))
+}
+
+/// A soft square brush (its watercolour edge is blurred from its
+/// coverage), across tiles.
+fn square_brush() -> Brush {
+    let mut b = Brush::new(36.0, 30.0, Color32::from_rgb(20, 40, 160), 8.0);
+    b.brush_options.pressure_size = false;
+    b.brush_options.pixel_shape = crate::brush_engine::brush_options::PixelBrushShape::Square;
+    b
+}
+
+#[test]
+fn live_watercolour_and_burnt_edges_show_the_stroke_as_it_lifts() {
+    use crate::brush_engine::wet_edge::{BurntEdges, WetEdgeStyle};
+    let path: Vec<(Vec2, f32)> = (0..=40)
+        .map(|i| {
+            let t = i as f32 / 40.0;
+            (
+                Vec2::new(30.0 + t * 190.0, 60.0 + (t * 6.0).sin() * 25.0),
+                1.0,
+            )
+        })
+        .collect();
+    let mut blurred = square_brush();
+    (blurred.wet_edge, blurred.wet_edge_width) = (0.7, 5.0);
+    let mut ring = blurred.clone();
+    ring.wet_edge_style = WetEdgeStyle::Ring;
+    let mut burnt = square_brush();
+    burnt.burnt_edges = Some(BurntEdges {
+        amount: 0.8,
+        mode: crate::canvas::blend_modes::LayerBlend::Multiply,
+    });
+    for (name, brush) in [("blurred", blurred), ("ring", ring), ("burnt", burnt)] {
+        let (live, lifted) = live_and_lifted(brush, &path);
+        assert!(live == lifted, "{name}: the lift changed what was shown");
+    }
+}
+
+#[test]
+fn a_live_watercolour_edge_thins_the_tail_as_the_rest() {
+    // The last stretch of a stroke with an end taper is its tail, drawn
+    // apart until the pen lifts: shown, it thins as it would without.
+    let path: Vec<(Vec2, f32)> = (0..=40)
+        .map(|i| (Vec2::new(30.0 + i as f32 * 4.5, 64.0), 1.0))
+        .collect();
+    let make = |taper: f32| {
+        let mut b = square_brush();
+        (b.wet_edge, b.wet_edge_width) = (0.7, 5.0);
+        b.dynamics = tapered(0.0, taper);
+        b
+    };
+    let (untapered, _) = live_and_lifted(make(0.0), &path);
+    let (tapered, _) = live_and_lifted(make(60.0), &path);
+    for (i, (a, b)) in untapered.iter().zip(&tapered).enumerate() {
+        let (a, b) = (a.to_array(), b.to_array());
+        let off = (0..4).map(|k| a[k].abs_diff(b[k])).max().unwrap_or(0);
+        assert!(off <= 1, "pixel {i}: {a:?} vs {b:?}");
+    }
+}

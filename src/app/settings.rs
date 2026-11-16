@@ -26,7 +26,7 @@ use crate::brush_engine::{
     preset_file,
 };
 use crate::canvas::{blend_modes::BlendSpace, fill::FillSettings, text::TextStyle};
-use crate::project::export::ExportFormat;
+use crate::project::export::{ExportFormat, ExportPreset};
 use crate::selection::SelectionType;
 use eframe::egui::Color32;
 use serde::{Deserialize, Serialize};
@@ -49,11 +49,15 @@ pub struct AppSettings {
     thread_count: usize,
     use_masked_brush: bool,
     pressure_curve: SoftnessCurve,
+    /// Draw ahead to where the pen is predicted to be (Android).
+    motion_prediction: bool,
     touch_mode: bool,
     /// The UI's accent colour, chosen in Settings.
     accent: [u8; 3],
     finger_painting: bool,
     autohide_panels: bool,
+    /// Interface size, touch helpers, hidden tools, the QuickMenu.
+    ui: crate::ui::prefs::UiPrefs,
     show_left_panel: bool,
     show_color: bool,
     show_layers: bool,
@@ -89,10 +93,18 @@ pub struct AppSettings {
     new_canvas_blend_space: BlendSpace,
     export_format: ExportFormat,
     export_base_name: String,
+    /// The export dialog's size (%), trim and JPEG quality.
+    export_scale_percent: u32,
+    export_trim: bool,
+    export_jpeg_quality: u8,
+    /// The export dialog's saved options.
+    export_presets: Vec<ExportPreset>,
     /// The folder the file dialogs open in.
     last_dir: Option<PathBuf>,
     /// Which GPU draws (read at startup, before the window opens).
     gpu: GpuChoice,
+    /// Which graphics API drives it (read at startup too).
+    gpu_backend: GpuBackend,
     /// The undo history's memory budget, in MiB.
     undo_memory_mb: usize,
 }
@@ -119,19 +131,127 @@ impl GpuChoice {
     }
 }
 
+/// The graphics API the GPU is driven through. Apple's systems have Metal
+/// only; elsewhere a driver that crashes on one may work on the other.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum GpuBackend {
+    /// wgpu's pick (Vulkan where it works; DirectX 12 on Windows).
+    #[default]
+    Auto,
+    Vulkan,
+    /// OpenGL ES (OpenGL on the desktop).
+    Gl,
+}
+
+impl GpuBackend {
+    #[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Vulkan, Self::Gl];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Automatic",
+            Self::Vulkan => "Vulkan",
+            Self::Gl => "OpenGL ES",
+        }
+    }
+
+    fn backends(self) -> eframe::wgpu::Backends {
+        use eframe::wgpu::Backends;
+        match self {
+            // eframe's own default.
+            Self::Auto => Backends::PRIMARY | Backends::GL,
+            Self::Vulkan => Backends::VULKAN,
+            Self::Gl => Backends::GL,
+        }
+    }
+}
+
+/// The API chosen in Settings, kept here (as [`LAST_DIR`] is) because it's
+/// read before the app exists.
+static GPU_BACKEND: Mutex<GpuBackend> = Mutex::new(GpuBackend::Auto);
+
+pub fn gpu_backend() -> GpuBackend {
+    GPU_BACKEND.lock().map_or_else(|e| *e.into_inner(), |b| *b)
+}
+
+pub fn set_gpu_backend(backend: GpuBackend) {
+    if let Ok(mut b) = GPU_BACKEND.lock() {
+        *b = backend;
+    }
+}
+
+/// A setting from `settings.json`, read before the app is built.
+fn startup_setting<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    let bytes = std::fs::read(crate::app::init::data_dir().join("settings.json")).ok()?;
+    let file: Value = serde_json::from_slice(&bytes).ok()?;
+    serde_json::from_value(file.get(key)?.clone()).ok()
+}
+
 /// The GPU to ask for when the window opens: `WGPU_POWER_PREF` (low/high)
 /// if set, else the one chosen in Settings.
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 pub fn startup_power_preference() -> eframe::wgpu::PowerPreference {
     use eframe::wgpu::{PowerPreference, util::power_preference_from_env};
-    let chosen = || {
-        let bytes = std::fs::read(crate::app::init::data_dir().join("settings.json")).ok()?;
-        let file: Value = serde_json::from_slice(&bytes).ok()?;
-        serde_json::from_value::<GpuChoice>(file.get("gpu")?.clone()).ok()
-    };
-    power_preference_from_env().unwrap_or(match chosen().unwrap_or_default() {
+    power_preference_from_env().unwrap_or(match startup_setting("gpu").unwrap_or_default() {
         GpuChoice::Integrated => PowerPreference::LowPower,
         GpuChoice::Discrete => PowerPreference::HighPerformance,
     })
+}
+
+/// The graphics APIs to start on: `WGPU_BACKEND` if set, else the one
+/// chosen in Settings, except that on Android a start that never drew a
+/// frame on Vulkan (its driver crashed the app) is followed by one on
+/// OpenGL ES (see [`gpu_started`]).
+pub fn startup_backends() -> eframe::wgpu::Backends {
+    if let Some(backends) = eframe::wgpu::util::backend_bits_from_env() {
+        return backends;
+    }
+    let chosen = startup_setting("gpu_backend").unwrap_or_default();
+    let backend = if cfg!(target_os = "android") {
+        fall_back_after_crash(chosen, &gpu_flag())
+    } else {
+        chosen
+    };
+    backend.backends()
+}
+
+/// The file that's there while the GPU is being started.
+fn gpu_flag() -> PathBuf {
+    crate::app::init::data_dir().join("gpu-starting")
+}
+
+/// The last start left `flag` behind (it never drew a frame) and wasn't
+/// on OpenGL ES already: this one is. `flag` is written again, naming the
+/// API tried now.
+fn fall_back_after_crash(chosen: GpuBackend, flag: &Path) -> GpuBackend {
+    let crashed = std::fs::read_to_string(flag).ok();
+    let backend = match crashed {
+        Some(tried) if chosen != GpuBackend::Gl && tried != "Gl" => {
+            log::warn!("The last start on {tried} never drew a frame: starting on OpenGL ES");
+            FELL_BACK.store(true, std::sync::atomic::Ordering::Relaxed);
+            GpuBackend::Gl
+        }
+        _ => chosen,
+    };
+    let _ = std::fs::write(flag, format!("{backend:?}"));
+    backend
+}
+
+/// This start fell back to OpenGL ES (see [`fall_back_after_crash`]): to
+/// keep and to say, once the settings are loaded.
+static FELL_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Once a frame: the second time (the first frame is on the screen), the
+/// GPU started fine, and the flag [`startup_backends`] left goes.
+pub fn gpu_started() {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static FRAMES: AtomicU8 = AtomicU8::new(0);
+    if !cfg!(target_os = "android") || FRAMES.load(Ordering::Relaxed) > 1 {
+        return;
+    }
+    if FRAMES.fetch_add(1, Ordering::Relaxed) == 1 {
+        let _ = std::fs::remove_file(gpu_flag());
+    }
 }
 
 /// The integrated GPU asked for: keep NVIDIA's Vulkan driver from being
@@ -140,6 +260,7 @@ pub fn startup_power_preference() -> eframe::wgpu::PowerPreference {
 /// quits, and keeps it awake meanwhile. Only when another GPU is there to
 /// draw on and the Vulkan loader's own variables are left unset. Call
 /// before any other thread starts (it sets an environment variable).
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 pub fn keep_discrete_gpu_asleep(power: eframe::wgpu::PowerPreference) {
     #[cfg(target_os = "linux")]
     {
@@ -223,7 +344,13 @@ pub fn remember_dir(path: &Path) {
 pub struct Saved {
     settings: AppSettings,
     brushes: [Brush; 4],
+    /// When they were last compared with the app's.
+    checked: std::time::Instant,
 }
+
+/// How often [`PainterApp::save_settings_when_due`] compares: building and
+/// comparing every setting each frame added up.
+const CHECK_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl AppSettings {
     fn of(app: &PainterApp) -> Self {
@@ -247,10 +374,12 @@ impl AppSettings {
             thread_count: ws.thread_count,
             use_masked_brush: bs.use_masked_brush,
             pressure_curve: ws.pressure_curve.clone(),
+            motion_prediction: ws.motion_prediction,
             touch_mode: ws.touch_mode,
             accent: [ws.accent.r(), ws.accent.g(), ws.accent.b()],
             finger_painting: ws.finger_painting,
             autohide_panels: ws.autohide_panels,
+            ui: ws.ui.clone(),
             show_left_panel: ws.show_left_panel,
             show_color: ws.show_color,
             show_layers: ws.show_layers,
@@ -281,10 +410,15 @@ impl AppSettings {
             new_canvas_background: nc.background,
             new_canvas_custom_bg: nc.custom_bg.to_array(),
             new_canvas_blend_space: nc.blend_space,
-            export_format: app.export_state.settings.format,
+            export_format: app.export_state.settings.options.format,
             export_base_name: app.export_state.settings.base_name.clone(),
+            export_scale_percent: app.export_state.settings.options.scale_percent,
+            export_trim: app.export_state.settings.options.trim,
+            export_jpeg_quality: app.export_state.settings.options.jpeg_quality,
+            export_presets: app.export_state.settings.presets.clone(),
             last_dir: last_dir(),
             gpu: ws.gpu,
+            gpu_backend: gpu_backend(),
             undo_memory_mb: crate::canvas::history::max_undo_mb(),
         }
     }
@@ -325,11 +459,13 @@ impl AppSettings {
             ws.pool = std::sync::Arc::new(pool);
         }
         ws.pressure_curve = self.pressure_curve;
+        ws.motion_prediction = self.motion_prediction;
         ws.touch_mode = self.touch_mode;
         let [r, g, b] = self.accent;
         ws.accent = Color32::from_rgb(r, g, b);
         ws.finger_painting = self.finger_painting;
         ws.autohide_panels = self.autohide_panels;
+        ws.ui = self.ui;
         // A tablet starts with the canvas clear: the panels stay closed.
         let restore = !ws.touch_mode;
         ws.show_left_panel = restore && self.show_left_panel;
@@ -374,12 +510,22 @@ impl AppSettings {
         nc.blend_space = self.new_canvas_blend_space;
         nc.sync_from_canvas(&app.canvas);
         let export = &mut app.export_state.settings;
-        export.format = self.export_format;
+        export.options.format = self.export_format;
+        export.options.scale_percent = self.export_scale_percent;
+        export.options.trim = self.export_trim;
+        export.options.jpeg_quality = self.export_jpeg_quality;
+        export.options.tidy();
         export.base_name = self.export_base_name;
+        export.presets = self.export_presets;
+        export.presets.retain(|p| !p.name.trim().is_empty());
+        for p in &mut export.presets {
+            p.options.tidy();
+        }
         if let Ok(mut last) = LAST_DIR.lock() {
             *last = self.last_dir;
         }
         app.workspace.gpu = self.gpu;
+        set_gpu_backend(self.gpu_backend);
         crate::canvas::history::set_max_undo_mb(self.undo_memory_mb);
     }
 }
@@ -464,19 +610,43 @@ impl PainterApp {
         self.workspace.settings_saved = Some(Saved {
             settings: AppSettings::of(self),
             brushes: self.current_brushes(),
+            checked: std::time::Instant::now(),
         });
+        // (After the above, so it's written with the next save.)
+        if FELL_BACK.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            set_gpu_backend(GpuBackend::Gl);
+            self.report(
+                "The GPU's Vulkan driver stopped the app last time: it now draws through \
+                 OpenGL ES (Settings → Graphics API changes it back)."
+                    .into(),
+            );
+        }
+    }
+
+    /// Once a frame: [`Self::save_settings`], comparing at most every
+    /// [`CHECK_EVERY`].
+    pub(crate) fn save_settings_when_due(&mut self, pointer_down: bool) {
+        let saved = self.workspace.settings_saved.as_ref();
+        if saved.is_some_and(|s| s.checked.elapsed() < CHECK_EVERY) {
+            return;
+        }
+        self.save_settings(pointer_down);
     }
 
     /// Write the settings and the brushes in use when they've changed
     /// (not while the pointer is down: not every frame of a slider drag).
     /// Errors are logged.
     pub(crate) fn save_settings(&mut self, pointer_down: bool) {
-        let Some(saved) = &self.workspace.settings_saved else {
-            return;
-        };
         if pointer_down || self.brush_state.is_drawing {
             return;
         }
+        let Some(saved) = &mut self.workspace.settings_saved else {
+            return;
+        };
+        saved.checked = std::time::Instant::now();
+        let Some(saved) = &self.workspace.settings_saved else {
+            return;
+        };
         let mixer = self.mixer_path();
         self.workspace.mixer.save(&mixer);
         let settings = AppSettings::of(self);
@@ -502,7 +672,11 @@ impl PainterApp {
             });
         }
         if settings_changed || brushes_changed {
-            self.workspace.settings_saved = Some(Saved { settings, brushes });
+            self.workspace.settings_saved = Some(Saved {
+                settings,
+                brushes,
+                checked: std::time::Instant::now(),
+            });
         }
     }
 }
@@ -551,7 +725,13 @@ mod tests {
         app.workspace.keyboard.choice = Some(KeyboardLayout::default());
         app.modal_state.new_canvas.unit = CanvasUnit::Inches;
         app.modal_state.new_canvas.resolution = 32.0;
-        app.export_state.settings.format = ExportFormat::Jpeg;
+        app.export_state.settings.options.format = ExportFormat::Jpeg;
+        app.export_state.settings.options.scale_percent = 50;
+        app.export_state.settings.options.trim = true;
+        app.export_state.settings.save_preset("Web");
+        app.export_state.settings.options.jpeg_quality = 70;
+        app.export_state.settings.options.format = ExportFormat::Png;
+        app.export_state.settings.save_preset("Print");
         remember_dir(&dir.join("picture.png"));
         app.save_settings(true);
         assert!(
@@ -574,7 +754,14 @@ mod tests {
             back.workspace.keyboard.choice,
             Some(KeyboardLayout::default())
         );
-        assert_eq!(back.export_state.settings.format, ExportFormat::Jpeg);
+        let export = &back.export_state.settings;
+        assert_eq!(export.options, app.export_state.settings.options);
+        assert_eq!(export.options.jpeg_quality, 70);
+        assert_eq!(export.presets, app.export_state.settings.presets);
+        assert_eq!(export.presets[0].name, "Web");
+        assert_eq!(export.presets[0].options.format, ExportFormat::Jpeg);
+        assert_eq!(export.presets[0].options.scale_percent, 50);
+        assert!(export.presets[0].options.trim);
         assert_eq!(last_dir().as_deref(), Some(dir.as_path()));
         // The New Canvas size is the canvas's, in the unit kept: 64 px at 32 dpi.
         let nc = &back.modal_state.new_canvas;
@@ -590,6 +777,52 @@ mod tests {
         back.load_settings();
         assert_eq!(back.active_tool, Tool::Brush);
         assert_eq!(back.workspace.fill.settings.tolerance, 77);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_are_compared_at_most_every_half_second() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rp-due-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = app_in(&dir);
+        app.load_settings();
+        app.workspace.fill.settings.tolerance = 55;
+        app.save_settings_when_due(false);
+        assert!(!dir.join("settings.json").exists(), "just compared");
+        let saved = app.workspace.settings_saved.as_mut().unwrap();
+        saved.checked -= CHECK_EVERY;
+        app.save_settings_when_due(false);
+        assert!(dir.join("settings.json").exists(), "due");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_start_that_never_drew_is_followed_by_one_on_gl() {
+        // (Loading settings takes the fallback's notice.)
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rp-gpuflag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let flag = dir.join("gpu-starting");
+        // A first start: as chosen, the flag left while it starts.
+        assert_eq!(
+            fall_back_after_crash(GpuBackend::Auto, &flag),
+            GpuBackend::Auto
+        );
+        assert!(flag.exists());
+        // It never drew: the next is on GL.
+        assert_eq!(
+            fall_back_after_crash(GpuBackend::Auto, &flag),
+            GpuBackend::Gl
+        );
+        assert!(FELL_BACK.swap(false, std::sync::atomic::Ordering::Relaxed));
+        // GL didn't draw either: nothing to fall back to, the choice stands.
+        assert_eq!(
+            fall_back_after_crash(GpuBackend::Vulkan, &flag),
+            GpuBackend::Vulkan
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

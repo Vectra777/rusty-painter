@@ -27,7 +27,9 @@ pub(crate) const BORDER: Color32 = Color32::from_gray(20);
 pub(crate) const BORDER_LIGHT: Color32 = Color32::from_gray(60);
 
 pub(crate) const TEXT: Color32 = Color32::from_gray(212);
-pub(crate) const TEXT_DIM: Color32 = Color32::from_gray(140);
+/// Secondary text: as dim as it goes while still 4.5:1 against the
+/// raised rows it sits on (WCAG AA for body text).
+pub(crate) const TEXT_DIM: Color32 = Color32::from_gray(150);
 pub(crate) const TEXT_STRONG: Color32 = Color32::from_gray(245);
 
 /// The accent the app starts with, until one is chosen in Settings.
@@ -117,6 +119,10 @@ pub(crate) const PREVIEW_INK: Color32 = Color32::from_gray(255 - BG_INSET.r());
 pub(crate) const CHECKERBOARD_LIGHT: Color32 = Color32::from_gray(200);
 pub(crate) const CHECKERBOARD_DARK: Color32 = Color32::from_gray(150);
 
+/// The smallest a control is in touch mode: a fingertip's size (Apple's
+/// and Google's guidelines both say 44 points or about).
+pub(crate) const MIN_TOUCH_TARGET: f32 = 44.0;
+
 /// Sizes that grow in touch mode so controls are comfortable finger targets.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Metrics {
@@ -186,5 +192,37 @@ pub(crate) fn metrics(ctx: &eframe::egui::Context) -> Metrics {
         TOUCH_METRICS
     } else {
         DESKTOP_METRICS
+    }
+}
+
+/// WCAG contrast ratio between two opaque colours (1 to 21).
+#[cfg(test)]
+pub(crate) fn contrast(a: Color32, b: Color32) -> f32 {
+    let luminance = |c: Color32| {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    };
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+
+    #[test]
+    fn dim_text_reads_on_every_panel_shade() {
+        for bg in [BG_CANVAS, BG_PANEL, BG_RAISED, BG_INSET] {
+            let c = contrast(TEXT_DIM, bg);
+            assert!(c >= 4.5, "TEXT_DIM on {bg:?}: {c:.2}:1");
+        }
+        assert!(contrast(TEXT, BG_RAISED) >= 7.0);
     }
 }

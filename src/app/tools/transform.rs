@@ -43,9 +43,19 @@ fn session_info(app: &PainterApp) -> Option<TransformInfo> {
 /// floating layer. A selection with nothing under it to lift (or on a layer
 /// that can't be changed) is transformed itself, as an outline. Does
 /// nothing if a session is already running, or there's nothing to lift.
-pub(crate) fn create_floating_layer(app: &mut PainterApp) {
+/// Returns false when the transform is refused (too much to move).
+pub(crate) fn create_floating_layer(app: &mut PainterApp) -> bool {
     if transform_running(app) {
-        return;
+        return true;
+    }
+    if transform_too_big(app) {
+        app.export_state.message =
+            Some("Too much to transform at once: select a smaller part".into());
+        // No box to drag, so nothing (the selection included) moves.
+        if let Tool::Transform(ref mut info) = app.active_tool {
+            info.reset_to(None);
+        }
+        return false;
     }
     if !lift_pixels(app) && app.selection_manager.has_selection() {
         app.layer_state.selection_transform = app.selection_manager.current_shape.clone();
@@ -55,6 +65,25 @@ pub(crate) fn create_floating_layer(app: &mut PainterApp) {
         }
     }
     remember_info(app);
+    true
+}
+
+/// Whether the pixels a transform would lift now (the selected part of
+/// the active layer and of the layers moving with it) are more than it
+/// can move.
+fn transform_too_big(app: &PainterApp) -> bool {
+    let active = app.canvas.active_layer_idx;
+    let area = app
+        .selection_manager
+        .has_selection()
+        .then(|| app.selection_manager.get_bounds())
+        .flatten();
+    let others = moving_with(app)
+        .into_iter()
+        .filter_map(|id| app.canvas.layer_index_of(id));
+    std::iter::once(active)
+        .chain(others)
+        .any(|i| app.canvas.transform_too_big(i, area))
 }
 
 /// The floating-layer part of [`create_floating_layer`]: whether it lifted
@@ -434,9 +463,9 @@ fn put_back(app: &mut PainterApp, idx: usize, session: &mut FloatSession) {
     app.layer_state.float_overlay = None;
 }
 
-/// Layer `layer`'s tiles under `lifted` as they were before the lift: the
-/// float lifted disjoint pixels, so putting them back over what's left is
-/// exact.
+/// Layer `layer`'s tiles under `lifted` as they were before the lift: what
+/// the float lifted and what it left of each pixel add up to it (a soft
+/// selection's edge splits pixels), so adding them back is exact.
 fn sources_before(
     app: &PainterApp,
     layer: usize,
@@ -452,7 +481,9 @@ fn sources_before(
                 .unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_len]);
             for (dst, &src) in tile.iter_mut().zip(lifted) {
                 if src != Color32::TRANSPARENT {
-                    *dst = src;
+                    let (d, s) = (dst.to_array(), src.to_array());
+                    let [r, g, b, a] = [0, 1, 2, 3].map(|k| d[k].saturating_add(s[k]));
+                    *dst = Color32::from_rgba_premultiplied(r, g, b, a);
                 }
             }
             ((tx, ty), tile)
@@ -841,7 +872,9 @@ pub(crate) fn flush_transform_preview(app: &mut PainterApp) {
 
 /// Mirror the floating content inside its box.
 pub(crate) fn flip(app: &mut PainterApp, horizontal: bool) {
-    create_floating_layer(app);
+    if !create_floating_layer(app) {
+        return;
+    }
     if let Tool::Transform(ref mut info) = app.active_tool {
         if let Some(w) = info.warp.as_mut() {
             *w = w.flipped(horizontal);
@@ -862,7 +895,9 @@ pub(crate) fn flip(app: &mut PainterApp, horizontal: bool) {
 
 /// Turn the floating content a quarter turn.
 pub(crate) fn rotate_quarter(app: &mut PainterApp, clockwise: bool) {
-    create_floating_layer(app);
+    if !create_floating_layer(app) {
+        return;
+    }
     if let Tool::Transform(ref mut info) = app.active_tool {
         if let Some(w) = info.warp.as_mut() {
             *w = w.rotated(clockwise);

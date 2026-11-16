@@ -124,6 +124,26 @@ impl PainterApp {
         }
     }
 
+    /// ColorDrop: a bucket fill at `pos` with the brush colour, as the
+    /// Fill tool's (its source, gaps and growth) but with `tolerance`.
+    pub(crate) fn color_drop_fill(&mut self, pos: Vec2, tolerance: u8) {
+        let (x, y) = (pos.x.floor() as i32, pos.y.floor() as i32);
+        self.run_fill(move |canvas, source, settings| {
+            let settings = FillSettings {
+                tolerance,
+                ..*settings
+            };
+            let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
+            fill::bucket_fill(
+                &reference,
+                canvas.width(),
+                canvas.height(),
+                (x, y),
+                &settings,
+            )
+        });
+    }
+
     pub(crate) fn fill_drag(&mut self, pos: Vec2) {
         let min_step = 1.5 / self.viewport.zoom.max(0.01);
         let smoothing = self.selection_manager.smoothing;
@@ -390,6 +410,39 @@ mod tests {
         assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert_eq!(alpha(&app, 20, 20), 255, "undone");
+    }
+
+    #[test]
+    fn clear_layer_erases_only_that_layer_as_one_undo_step() {
+        let paper = Color32::from_rgb(10, 20, 30);
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(128, 64, paper, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        for tx in 0..2 {
+            app.canvas_mut()
+                .set_layer_tile_data(1, tx, 0, vec![Color32::RED; 64 * 64]);
+        }
+        app.selection_manager.canvas_size = [128, 64];
+        app.canvas_mut()
+            .set_layer_tile_data(0, 0, 0, vec![Color32::BLUE; 64 * 64]);
+        app.clear_layer();
+        assert_eq!(
+            (alpha(&app, 5, 5), alpha(&app, 120, 60)),
+            (0, 0),
+            "all of it"
+        );
+        assert_eq!(app.canvas.clear_color(), paper, "the paper is left");
+        assert_eq!(
+            app.canvas.get_layer_tile_data(0, 0, 0).unwrap()[0],
+            Color32::BLUE,
+            "the other layers are left"
+        );
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+        app.apply_history(false);
+        assert_eq!(alpha(&app, 120, 60), 255, "undone");
+        // With a selection, what's selected.
+        select_rect(&mut app, 10.0, 10.0, 40.0, 40.0);
+        app.clear_layer();
+        assert_eq!((alpha(&app, 20, 20), alpha(&app, 60, 20)), (0, 255));
     }
 
     #[test]

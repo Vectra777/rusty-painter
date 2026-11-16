@@ -65,7 +65,7 @@ pub fn run() -> eframe::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             power_preference,
-            ..Default::default()
+            ..wgpu_options()
         },
         ..Default::default()
     };
@@ -81,6 +81,30 @@ pub fn run() -> eframe::Result<()> {
         log::error!("The app couldn't start or its event loop failed: {err}");
     }
     result
+}
+
+/// The wgpu setup every platform shares: the graphics API chosen in
+/// Settings, and a lost or outdated surface set up again.
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::SurfaceErrorAction;
+    use eframe::wgpu::SurfaceError;
+    eframe::egui_wgpu::WgpuConfiguration {
+        supported_backends: app::settings::startup_backends(),
+        // eframe's default skips the frame whatever the error, a lost
+        // surface too, which then stays lost: the canvas froze (Android
+        // loses it going to the background and back).
+        on_surface_error: std::sync::Arc::new(|err| match err {
+            SurfaceError::Lost | SurfaceError::Outdated => {
+                log::debug!("Surface {err}: set up again");
+                SurfaceErrorAction::RecreateSurface
+            }
+            err => {
+                log::warn!("Dropped a frame: {err}");
+                SurfaceErrorAction::SkipFrame
+            }
+        }),
+        ..Default::default()
+    }
 }
 
 /// The window and taskbar icon (the .exe's own is set in build.rs).
@@ -105,6 +129,12 @@ fn android_native_options(app: AndroidApp) -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default().with_fullscreen(true),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            // One frame queued, not wgpu's two: the pen's paint shows a
+            // frame sooner.
+            desired_maximum_frame_latency: Some(1),
+            ..wgpu_options()
+        },
         ..Default::default()
     };
     options.event_loop_builder = Some(Box::new(move |builder| {
@@ -119,6 +149,18 @@ pub fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
+    // A panic's message goes to stderr, which Android throws away: into
+    // the log, with where it happened.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!(
+            "Thread {} {info}\n{backtrace}",
+            thread.name().unwrap_or("unnamed")
+        );
+        default_hook(info);
+    }));
 
     if let Some(dir) = app.internal_data_path() {
         let _ = ANDROID_DATA.set(dir);

@@ -9,7 +9,7 @@
 //! checked against the file's own thumbnail; the document's orientation
 //! decides only when there's none to check with.
 
-use super::psd::{PsdDocument, PsdKind, PsdLayer};
+use super::psd::{PsdDocument, PsdKind, PsdLayer, PsdMask};
 use crate::brush_engine::import::procreate::{Plist, procreate_blend, read_bplist};
 use crate::canvas::blend_modes::LayerBlend;
 use crate::canvas::storage::Depth;
@@ -94,7 +94,7 @@ pub fn decode_procreate(bytes: &[u8]) -> Result<PsdDocument, String> {
     }
     if reader.skipped > 0 {
         log::warn!(
-            "{} Procreate layer mask(s) left out: their layers open without them",
+            "{} Procreate layer mask(s) couldn't be read: their layers open without them",
             reader.skipped
         );
     }
@@ -106,6 +106,7 @@ pub fn decode_procreate(bytes: &[u8]) -> Result<PsdDocument, String> {
         height: dh,
         layers,
         composite: composite.map(|c| turn.apply(&c, w, h)).unwrap_or_default(),
+        notes: Vec::new(),
         depth: Depth::U8,
         composite_deep: None,
         profile: Default::default(),
@@ -144,6 +145,7 @@ fn pixel_layer(name: &str, rect: [i32; 4], pixels: Vec<Color32>) -> PsdLayer {
         position_locked: false,
         mask: None,
         vector: None,
+        fill: None,
     }
 }
 
@@ -414,7 +416,7 @@ struct LayerReader<'a> {
     a: &'a Archive,
     stored: &'a Stored<'a>,
     turn: Turn,
-    /// Layer masks left out.
+    /// Layer masks that couldn't be read.
     skipped: usize,
 }
 
@@ -451,8 +453,11 @@ impl LayerReader<'_> {
             }
             let mut l = common(PsdKind::Pixels);
             l.alpha_locked = a.flag(layer, "preserve");
-            if a.get(layer, "mask").is_some() {
-                self.skipped += 1;
+            if let Some(mask) = a.get(layer, "mask") {
+                match self.mask(mask) {
+                    Some(m) => l.mask = m,
+                    None => self.skipped += 1,
+                }
             }
             let Some(uuid) = a.text(layer, "UUID") else {
                 continue;
@@ -464,6 +469,34 @@ impl LayerReader<'_> {
             out.push(l);
         }
         Ok(())
+    }
+}
+
+impl LayerReader<'_> {
+    /// A layer's mask (itself a layer): grey levels over the canvas, white
+    /// showing. `Some(None)` for one switched off; `None` if unreadable.
+    fn mask(&self, mask: usize) -> Option<Option<PsdMask>> {
+        let a = self.a;
+        let uuid = a.text(mask, "UUID")?;
+        if a.flag(mask, "hidden") {
+            return Some(None);
+        }
+        let (w, h) = (self.stored.w, self.stored.h);
+        let pixels = self.turn.apply(&self.stored.layer(uuid), w, h);
+        let (dw, dh) = self.turn.size(w, h);
+        // Its paint's lightness, over white where it's unpainted (a new
+        // mask starts white: everything shows).
+        let data = (pixels.iter())
+            .map(|p| {
+                let lightness = (p.r() as u32 + p.g() as u32 + p.b() as u32) / 3;
+                (lightness + (255 - p.a() as u32)).min(255) as u8
+            })
+            .collect();
+        Some(Some(PsdMask {
+            rect: [0, 0, dw as i32, dh as i32],
+            data,
+            default: 255,
+        }))
     }
 }
 
@@ -619,6 +652,49 @@ mod tests {
                 .collect();
             let _ = lzo1x_decompress(&junk, 256);
         }
+    }
+
+    #[test]
+    fn a_layer_mask_comes_as_grey_levels_and_a_switched_off_one_not() {
+        use crate::brush_engine::import::procreate::Plist;
+        // A 4 × 4 mask tile: black on the left half, white on the right,
+        // stored as literals (17 + 64, the bytes, the end marker).
+        let mut tile = vec![81u8];
+        for i in 0..16 {
+            let v = if i % 4 < 2 { 0 } else { 255 };
+            tile.extend([v, v, v, 255]);
+        }
+        tile.extend([17, 0, 0]);
+        let entries: HashMap<String, Vec<u8>> = [("m1/0~0.chunk".to_string(), tile)].into();
+        let stored = Stored {
+            entries: &entries,
+            w: 4,
+            h: 4,
+            tile: 4,
+        };
+        let s = |t: &str| Plist::Str(t.into());
+        let a = Archive {
+            objects: vec![
+                s("UUID"),
+                s("m1"),
+                s("hidden"),
+                Plist::Bool(true),
+                Plist::Dict(vec![(0, 1)]),
+                Plist::Dict(vec![(0, 1), (2, 3)]),
+            ],
+            archived: Vec::new(),
+            root: 0,
+        };
+        let reader = LayerReader {
+            a: &a,
+            stored: &stored,
+            turn: Turn::for_orientation(1, false, false),
+            skipped: 0,
+        };
+        let mask = reader.mask(4).unwrap().expect("a mask");
+        assert_eq!(mask.rect, [0, 0, 4, 4]);
+        assert_eq!(&mask.data[..4], &[0, 0, 255, 255]);
+        assert!(reader.mask(5).unwrap().is_none(), "switched off");
     }
 
     #[test]

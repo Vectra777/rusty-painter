@@ -1352,3 +1352,48 @@ fn a_tapered_tight_mixing_stroke_is_laid_once_and_shows() {
     // The pen lift lays nothing again behind the pen.
     assert_eq!(px(&app, 30, 32), drawn);
 }
+
+#[test]
+fn a_stabilised_smudge_from_the_mouse_follows_it_after_a_pens_stroke() {
+    // A pen's last sample left its time behind; the mouse's moves then
+    // all went with that one time, and a smoothed brush (Simple, high)
+    // never moved past its first dab.
+    let blue = Color32::from_rgb(20, 30, 230);
+    let red = Color32::from_rgb(230, 30, 20);
+    let mut app = crate::project::tests::test_app_pub(Canvas::new(512, 256, Color32::WHITE, 64));
+    app.canvas_mut().active_layer_idx = 1;
+    for tx in 0..8 {
+        for ty in 0..4 {
+            let c = if tx < 4 { blue } else { red };
+            app.canvas_mut()
+                .set_layer_tile_data(1, tx, ty, vec![c; 64 * 64]);
+        }
+    }
+    app.active_tool = crate::app::tools::Tool::Smudge;
+    let brush = &mut app.brush_state.brush;
+    brush.brush_options.diameter = 60.0;
+    brush.stabilizer_algorithm = crate::brush_engine::brush::StabilizerAlgorithm::Simple;
+    brush.stabilizer = 0.89;
+    brush.is_changed = true;
+    app.viewport.touch.pen_time = Some(5.0);
+    let mut time = 10.0;
+    let mut mouse = |app: &mut crate::PainterApp, x: f32| {
+        time += 0.016;
+        app.viewport.touch.pointer_time = Some(time);
+        crate::app::input::mouse_sample(app);
+        x
+    };
+    let x = mouse(&mut app, 220.0);
+    app.blend_press(Vec2::new(x, 128.0), 1.0);
+    for i in 1..=40 {
+        let x = mouse(&mut app, 220.0 + i as f32 * 3.0);
+        app.blend_drag(Vec2::new(x, 128.0), 1.0);
+    }
+    app.blend_release();
+    app.settle_strokes();
+    let p = app
+        .canvas
+        .get_layer_tile_data(1, 4, 2)
+        .map_or(red, |t| t[10]);
+    assert!(p.b() > p.r(), "the blue was carried into the red: {p:?}");
+}

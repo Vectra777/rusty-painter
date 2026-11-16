@@ -244,6 +244,7 @@ pub(crate) fn selection_actions(app: &mut PainterApp, ui: &mut egui::Ui) {
     if ui
         .add_enabled(has, button(ui, Icon::Deselect, "Deselect"))
         .on_hover_text("Ctrl+D")
+        .on_disabled_hover_text("Nothing is selected")
         .clicked()
     {
         app.deselect();

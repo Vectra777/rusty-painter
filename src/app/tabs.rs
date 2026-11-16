@@ -73,19 +73,23 @@ impl Document {
         }
     }
 
-    /// Whether it has work the user hasn't saved.
-    fn unsaved(&self) -> bool {
+    /// Where its undo history stands (as [`PainterApp::doc_version`]).
+    fn version(&self) -> crate::app::autosave::Version {
         let history = &self.layer_state.history;
         let (undo, redo) = history.stacks();
-        let version = (
+        (
             (history.push_count())
                 .wrapping_add(self.shader_edits)
                 .wrapping_add(self.palette_edits)
                 .wrapping_add(self.layer_state.remote_edits),
             undo.len(),
             redo.len(),
-        );
-        !self.autosave.matches_saved(version)
+        )
+    }
+
+    /// Whether it has work the user hasn't saved.
+    fn unsaved(&self) -> bool {
+        !self.autosave.matches_saved(self.version())
     }
 }
 
@@ -240,13 +244,23 @@ impl PainterApp {
             .unwrap_or(usize::MAX)
     }
 
-    /// Show tab `i`.
+    /// Show tab `i`. The one left is autosaved (in the background) if it
+    /// has changes the autosave doesn't: the app may end before it's
+    /// shown again.
     pub(crate) fn switch_tab(&mut self, i: usize) {
+        self.show_tab(i, true);
+    }
+
+    /// Show tab `i`, autosaving the one left if `autosave`.
+    fn show_tab(&mut self, i: usize, autosave: bool) {
         let tabs = &self.workspace.tabs;
         if i == tabs.active || i >= tabs.docs.len() || !self.can_change_tab() {
             return;
         }
         self.settle_for_tab_change();
+        if autosave {
+            self.autosave_if_changed();
+        }
         let Some(mut doc) = self.workspace.tabs.docs[i].take() else {
             return;
         };
@@ -272,11 +286,14 @@ impl PainterApp {
             return;
         }
         if i == self.workspace.tabs.active {
-            self.switch_tab(if i == 0 { 1 } else { i - 1 });
+            // (Not autosaved: it's going.)
+            self.show_tab(if i == 0 { 1 } else { i - 1 }, false);
         }
         let tabs = &mut self.workspace.tabs;
-        if let Some(doc) = tabs.docs.remove(i) {
-            // Closed on purpose: nothing to recover next time.
+        if let Some(mut doc) = tabs.docs.remove(i) {
+            // Closed on purpose: nothing to recover next time (an autosave
+            // still being written would leave its file).
+            doc.autosave.abandon_writing();
             let path = self.autosave_path_for(doc.autosave.slot());
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(path.with_extension("source"));
@@ -288,11 +305,20 @@ impl PainterApp {
     }
 
     /// Quitting: every tab's unsaved work kept for the next start, as the
-    /// shown one's is.
+    /// shown one's is. Tabs with nothing new to write aren't swapped in
+    /// (on a phone this runs each time the app leaves the front).
     pub(crate) fn autosave_tabs_on_exit(&mut self) {
         let shown = self.workspace.tabs.active;
         for i in 0..self.workspace.tabs.len() {
             if i == shown {
+                continue;
+            }
+            let Some(doc) = &self.workspace.tabs.docs[i] else {
+                continue;
+            };
+            // (A file left from before, its work since saved, goes too.)
+            let stale_file = !doc.unsaved() && self.autosave_path_for(doc.autosave.slot()).exists();
+            if !doc.autosave.exit_work(doc.version()) && !stale_file {
                 continue;
             }
             let Some(mut doc) = self.workspace.tabs.docs[i].take() else {
@@ -472,7 +498,10 @@ mod tests {
 
     #[test]
     fn a_document_with_work_moves_to_a_tab_and_each_tab_keeps_its_own() {
+        let dir = std::env::temp_dir().join(format!("rp-tabs-own-{}", std::process::id()));
         let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        // (The tab left is autosaved: not into the working folder.)
+        app.brush_state.brushes_path = dir.join("brushes");
         app.workspace.library.has_document = true;
         app.workspace.autosave.recovery = None;
         app.mark_saved();
@@ -499,6 +528,7 @@ mod tests {
         app.close_tab(0, true);
         assert_eq!(app.workspace.tabs.len(), 1);
         assert_eq!(top_left(&app), Color32::GREEN, "the shown one stays");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -508,6 +538,28 @@ mod tests {
         app.mark_saved();
         app.replace_document(Canvas::new(128, 64, Color32::WHITE, 64), History::new());
         assert_eq!(app.workspace.tabs.len(), 1);
+    }
+
+    #[test]
+    fn the_tab_left_is_autosaved() {
+        let dir = std::env::temp_dir().join(format!("rp-tabs-left-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.brush_state.brushes_path = dir.join("brushes");
+        app.workspace.library.has_document = true;
+        app.workspace.autosave.recovery = None;
+        app.mark_saved();
+        change(&mut app, Color32::RED);
+        app.replace_document(Canvas::new(64, 64, Color32::WHITE, 64), History::new());
+        change(&mut app, Color32::BLUE);
+        app.switch_tab(0);
+        // The blue tab, now waiting, has its autosave on the way.
+        let left = app.workspace.tabs.docs[1].as_mut().unwrap();
+        assert!(left.autosave.exit_work(left.version()), "being written");
+        left.autosave.abandon_writing();
+        assert!(dir.join("autosave-1.rpainter").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

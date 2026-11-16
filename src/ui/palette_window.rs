@@ -11,7 +11,7 @@ use crate::project::palette_files::Format;
 use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::FitScreen;
-use crate::ui::widgets::{color_swatch, paint_swatch, segmented};
+use crate::ui::widgets::{color_swatch, context_menu_or_hold, paint_swatch, segmented};
 use eframe::egui::{self, Color32, RichText, Sense, Stroke};
 
 fn heading(ui: &mut egui::Ui, text: &str) {
@@ -638,31 +638,11 @@ pub(crate) fn palette_grid(
                     if r.clicked() {
                         action = Some(GridAction::Pick(s.color));
                     }
-                    if m.touch {
-                        let menu = id.with("menu");
-                        if r.long_touched() {
-                            ui.memory_mut(|mem| mem.open_popup(menu));
-                        }
-                        let picked = egui::popup_below_widget(
-                            ui,
-                            menu,
-                            &r,
-                            egui::PopupCloseBehavior::CloseOnClickOutside,
-                            |ui| swatch_menu(ui, slot, s, current),
-                        );
-                        if let Some(Some(a)) = picked {
-                            if !matches!(a, GridAction::Rename(..)) {
-                                ui.memory_mut(|mem| mem.close_popup());
-                            }
+                    context_menu_or_hold(ui, &r, |ui| {
+                        if let Some(a) = swatch_menu(ui, slot, s, current) {
                             action = Some(a);
                         }
-                    } else {
-                        r.context_menu(|ui| {
-                            if let Some(a) = swatch_menu(ui, slot, s, current) {
-                                action = Some(a);
-                            }
-                        });
-                    }
+                    });
                     if r.hovered() && !dragging {
                         painter.rect_stroke(
                             rect.expand(1.0),

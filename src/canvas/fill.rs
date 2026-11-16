@@ -54,7 +54,7 @@ impl<F: Fn(i32, i32, usize, usize) -> Vec<Color32> + Sync> Reference for F {
 }
 
 #[inline]
-fn diff(a: Color32, b: Color32) -> u8 {
+pub(crate) fn diff(a: Color32, b: Color32) -> u8 {
     let d = |x: u8, y: u8| x.abs_diff(y);
     d(a.r(), b.r())
         .max(d(a.g(), b.g()))
@@ -768,15 +768,7 @@ pub fn select_color(
     if width == 0 || height == 0 {
         return None;
     }
-    // Oklab of the colour behind a premultiplied pixel, and its alpha.
-    let lab_alpha = |c: Color32| {
-        let [r, g, b, a] = crate::canvas::blend::unmultiply(c);
-        (
-            crate::canvas::palette::Lab::from_rgb(r, g, b).0,
-            a as f32 / 255.0,
-        )
-    };
-    let (target_lab, target_a) = lab_alpha(target);
+    let target_lab = lab_alpha(target);
     let coverage = |c: Color32| -> u8 {
         match matching {
             ColorMatch::Channels { tolerance } => {
@@ -789,22 +781,7 @@ pub fn select_color(
             ColorMatch::Perceptual {
                 tolerance,
                 softness,
-            } => {
-                let (lab, a) = lab_alpha(c);
-                let d2 = (0..3)
-                    .map(|i| (lab[i] - target_lab[i]).powi(2))
-                    .sum::<f32>();
-                // Colour counts as much as both pixels show it; transparent
-                // pixels match each other whatever their (invisible) colour.
-                let d = 100.0 * (d2.sqrt() * a.min(target_a) + (a - target_a).abs());
-                if d <= tolerance {
-                    255
-                } else if softness > 0.0 && d < tolerance + softness {
-                    (255.0 * (1.0 - (d - tolerance) / softness)).round() as u8
-                } else {
-                    0
-                }
-            }
+            } => soft_coverage(perceptual_distance(c, target_lab), tolerance, softness),
         }
     };
     let mut data = vec![0u8; width * height];
@@ -831,6 +808,38 @@ pub fn select_color(
             }
         });
     SelectionMask::new(0, 0, width, height, data).into_cropped()
+}
+
+/// Oklab of the colour behind a premultiplied pixel, and its alpha.
+pub(crate) fn lab_alpha(c: Color32) -> ([f32; 3], f32) {
+    let [r, g, b, a] = crate::canvas::blend::unmultiply(c);
+    (
+        crate::canvas::palette::Lab::from_rgb(r, g, b).0,
+        a as f32 / 255.0,
+    )
+}
+
+/// Colour Range's distance (percent) of `c` from a target's
+/// [`lab_alpha`]: colour counts as much as both pixels show it;
+/// transparent pixels match each other whatever their (invisible) colour.
+pub(crate) fn perceptual_distance(c: Color32, (target_lab, target_a): ([f32; 3], f32)) -> f32 {
+    let (lab, a) = lab_alpha(c);
+    let d2 = (0..3)
+        .map(|i| (lab[i] - target_lab[i]).powi(2))
+        .sum::<f32>();
+    100.0 * (d2.sqrt() * a.min(target_a) + (a - target_a).abs())
+}
+
+/// How much a pixel `d` from the target is selected: all within
+/// `tolerance`, fading out over `softness` past it.
+pub(crate) fn soft_coverage(d: f32, tolerance: f32, softness: f32) -> u8 {
+    if d <= tolerance {
+        255
+    } else if softness > 0.0 && d < tolerance + softness {
+        (255.0 * (1.0 - (d - tolerance) / softness)).round() as u8
+    } else {
+        0
+    }
 }
 
 fn most_common(pixels: impl Iterator<Item = Color32>) -> Option<Color32> {

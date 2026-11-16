@@ -384,6 +384,7 @@ pub(crate) enum Pick {
     File,
     Files,
     Save,
+    Folder,
 }
 
 #[cfg(not(mobile))]
@@ -406,6 +407,7 @@ impl PainterApp {
                     Pick::File => dialog.pick_file().await.into_iter().collect(),
                     Pick::Files => dialog.pick_files().await.unwrap_or_default(),
                     Pick::Save => dialog.save_file().await.into_iter().collect(),
+                    Pick::Folder => dialog.pick_folder().await.into_iter().collect(),
                 }
             })
             .iter()

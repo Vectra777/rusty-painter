@@ -1050,7 +1050,9 @@ fn deep_documents_round_trip_with_their_history() {
         loaded
             .history
             .undo(&mut loaded.canvas, &mut selection, &mut tool);
-        assert_eq!(loaded.canvas.get_layer_tile_deep(1, 0, 0).unwrap(), before);
+        // (Undone to transparent, the tile goes.)
+        let undone = loaded.canvas.get_layer_tile_deep(1, 0, 0);
+        assert!(undone.is_none_or(|t| t == before));
         loaded
             .history
             .redo(&mut loaded.canvas, &mut selection, &mut tool);

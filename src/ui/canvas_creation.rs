@@ -5,7 +5,7 @@ use crate::app::document::{MAX_CANVAS_DIMENSION, MAX_CANVAS_DPI};
 use crate::app::files::OpenFor;
 use crate::canvas::blend_modes::BlendSpace;
 use crate::ui::style::TEXT_DIM;
-use crate::ui::widgets::FitScreen;
+use crate::ui::widgets::{FitScreen, context_menu_or_hold};
 use crate::{BackgroundChoice, CanvasUnit, ColorModel, NewCanvasSettings, Orientation, PainterApp};
 use eframe::egui::{self, RichText};
 
@@ -88,130 +88,168 @@ pub fn canvas_creation_modal(app: &mut PainterApp, ctx: &egui::Context) {
         .resizable(false)
         // Rows wrap on a narrow screen instead of running off it.
         .max_width(540.0_f32.min(ctx.screen_rect().width() - 16.0))
-        .show_fitted(ctx, |ui| {
-            let clip = (app.workspace.clipboard.clip.as_ref()).map(|c| (c.w, c.h));
-            presets_panel(
-                ui,
-                &mut app.modal_state.canvas_presets,
-                &mut app.modal_state.new_canvas,
-                clip,
-            );
-            ui.separator();
+        .fit_screen_size(ctx)
+        .show(ctx, |ui| {
+            // Create and Cancel pinned under the scrolling settings, never
+            // scrolled out of reach on a short screen.
+            let footer = 2.0 * (ui.spacing().interact_size.y + ui.spacing().item_spacing.y) + 16.0;
+            egui::ScrollArea::vertical()
+                .max_height((ui.available_height() - footer).max(80.0))
+                .show(ui, |ui| {
+                    let clip = (app.workspace.clipboard.clip.as_ref()).map(|c| (c.w, c.h));
+                    presets_panel(
+                        ui,
+                        &mut app.modal_state.canvas_presets,
+                        &mut app.modal_state.new_canvas,
+                        clip,
+                    );
+                    ui.separator();
+                    let settings: &mut NewCanvasSettings = &mut app.modal_state.new_canvas;
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Name");
+                        ui.text_edit_singleline(&mut settings.name);
+                    });
+
+                    ui.separator();
+                    ui.heading("Dimensions");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Width");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.width)
+                                .speed(1.0)
+                                .range(1.0..=MAX_CANVAS_DIMENSION as f32)
+                                .suffix(settings.unit.label()),
+                        );
+                        ui.label("Height");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.height)
+                                .speed(1.0)
+                                .range(1.0..=MAX_CANVAS_DIMENSION as f32)
+                                .suffix(settings.unit.label()),
+                        );
+                        // (Not `from_label`: a combo and label in a row of their
+                        // own never wrap, and ran off a phone's screen.)
+                        egui::ComboBox::from_id_salt("canvas_units")
+                            .selected_text(settings.unit.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut settings.unit,
+                                    CanvasUnit::Pixels,
+                                    "Pixels",
+                                );
+                                ui.selectable_value(
+                                    &mut settings.unit,
+                                    CanvasUnit::Inches,
+                                    "Inches",
+                                );
+                                ui.selectable_value(
+                                    &mut settings.unit,
+                                    CanvasUnit::Millimeters,
+                                    "Millimeters",
+                                );
+                                ui.selectable_value(
+                                    &mut settings.unit,
+                                    CanvasUnit::Centimeters,
+                                    "Centimeters",
+                                );
+                            });
+                    });
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Resolution (DPI)");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.resolution)
+                                .speed(1.0)
+                                .range(1.0..=MAX_CANVAS_DPI),
+                        );
+                        let mut orientation_changed = false;
+                        orientation_changed |= ui
+                            .selectable_value(
+                                &mut settings.orientation,
+                                Orientation::Portrait,
+                                "Portrait",
+                            )
+                            .changed();
+                        orientation_changed |= ui
+                            .selectable_value(
+                                &mut settings.orientation,
+                                Orientation::Landscape,
+                                "Landscape",
+                            )
+                            .changed();
+                        if orientation_changed {
+                            std::mem::swap(&mut settings.width, &mut settings.height);
+                        }
+                    });
+
+                    ui.separator();
+                    ui.heading("Color");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Background");
+                        ui.radio_value(&mut settings.background, BackgroundChoice::White, "White");
+                        ui.radio_value(&mut settings.background, BackgroundChoice::Black, "Black");
+                        ui.radio_value(
+                            &mut settings.background,
+                            BackgroundChoice::Transparent,
+                            "Transparent",
+                        );
+                        ui.radio_value(
+                            &mut settings.background,
+                            BackgroundChoice::Custom,
+                            "Custom",
+                        );
+                        if settings.background == BackgroundChoice::Custom {
+                            ui.color_edit_button_srgba(&mut settings.custom_bg);
+                        }
+                    });
+                    let settings: &mut NewCanvasSettings = &mut app.modal_state.new_canvas;
+                    // The paper and the colour format, which few change.
+                    egui::CollapsingHeader::new("Advanced")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            pick = paper_row(
+                                ui,
+                                &mut settings.paper,
+                                &app.brush_state.loaded_textures,
+                            );
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Color Model");
+                                egui::ComboBox::from_id_salt("color_model")
+                                    .selected_text(match settings.color_model {
+                                        ColorModel::Rgba => "RGBA",
+                                        ColorModel::Grayscale => "Grayscale",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut settings.color_model,
+                                            ColorModel::Rgba,
+                                            "RGBA",
+                                        );
+                                        ui.selectable_value(
+                                            &mut settings.color_model,
+                                            ColorModel::Grayscale,
+                                            "Grayscale",
+                                        );
+                                    });
+                            });
+                            ui.weak("Grayscale paints in a single channel.");
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Color blending");
+                                blend_space_picker(ui, &mut settings.blend_space);
+                            });
+                            ui.weak(blend_space_hint(settings.blend_space));
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Colour depth");
+                                depth_picker(ui, &mut settings.depth);
+                            });
+                            ui.weak(depth_hint(settings.depth));
+                        });
+                });
             let settings: &mut NewCanvasSettings = &mut app.modal_state.new_canvas;
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut settings.name);
-            });
-
-            ui.separator();
-            ui.heading("Dimensions");
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Width");
-                ui.add(
-                    egui::DragValue::new(&mut settings.width)
-                        .speed(1.0)
-                        .range(1.0..=MAX_CANVAS_DIMENSION as f32)
-                        .suffix(settings.unit.label()),
-                );
-                ui.label("Height");
-                ui.add(
-                    egui::DragValue::new(&mut settings.height)
-                        .speed(1.0)
-                        .range(1.0..=MAX_CANVAS_DIMENSION as f32)
-                        .suffix(settings.unit.label()),
-                );
-                // (Not `from_label`: a combo and label in a row of their
-                // own never wrap, and ran off a phone's screen.)
-                egui::ComboBox::from_id_salt("canvas_units")
-                    .selected_text(settings.unit.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut settings.unit, CanvasUnit::Pixels, "Pixels");
-                        ui.selectable_value(&mut settings.unit, CanvasUnit::Inches, "Inches");
-                        ui.selectable_value(
-                            &mut settings.unit,
-                            CanvasUnit::Millimeters,
-                            "Millimeters",
-                        );
-                        ui.selectable_value(
-                            &mut settings.unit,
-                            CanvasUnit::Centimeters,
-                            "Centimeters",
-                        );
-                    });
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Resolution (DPI)");
-                ui.add(
-                    egui::DragValue::new(&mut settings.resolution)
-                        .speed(1.0)
-                        .range(1.0..=MAX_CANVAS_DPI),
-                );
-                let mut orientation_changed = false;
-                orientation_changed |= ui
-                    .selectable_value(&mut settings.orientation, Orientation::Portrait, "Portrait")
-                    .changed();
-                orientation_changed |= ui
-                    .selectable_value(
-                        &mut settings.orientation,
-                        Orientation::Landscape,
-                        "Landscape",
-                    )
-                    .changed();
-                if orientation_changed {
-                    std::mem::swap(&mut settings.width, &mut settings.height);
-                }
-            });
-
-            ui.separator();
-            ui.heading("Color");
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Background");
-                ui.radio_value(&mut settings.background, BackgroundChoice::White, "White");
-                ui.radio_value(&mut settings.background, BackgroundChoice::Black, "Black");
-                ui.radio_value(
-                    &mut settings.background,
-                    BackgroundChoice::Transparent,
-                    "Transparent",
-                );
-                ui.radio_value(&mut settings.background, BackgroundChoice::Custom, "Custom");
-                if settings.background == BackgroundChoice::Custom {
-                    ui.color_edit_button_srgba(&mut settings.custom_bg);
-                }
-            });
-            pick = paper_row(ui, &mut settings.paper, &app.brush_state.loaded_textures);
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Color Model");
-                egui::ComboBox::from_id_salt("color_model")
-                    .selected_text(match settings.color_model {
-                        ColorModel::Rgba => "RGBA",
-                        ColorModel::Grayscale => "Grayscale",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut settings.color_model, ColorModel::Rgba, "RGBA");
-                        ui.selectable_value(
-                            &mut settings.color_model,
-                            ColorModel::Grayscale,
-                            "Grayscale",
-                        );
-                    });
-            });
-            ui.weak("Grayscale paints in a single channel.");
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Color blending");
-                blend_space_picker(ui, &mut settings.blend_space);
-            });
-            ui.weak(blend_space_hint(settings.blend_space));
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Colour depth");
-                depth_picker(ui, &mut settings.depth);
-            });
-            ui.weak(depth_hint(settings.depth));
-
             let validation = settings.validated_dimensions();
             match validation {
                 Ok((px_w, px_h)) => {
@@ -491,7 +529,7 @@ fn presets_panel(
                 state.paste = false;
             }
             if state.shelf == Shelf::Mine {
-                response.context_menu(|ui| {
+                context_menu_or_hold(ui, &response, |ui| {
                     if ui.button("Delete preset").clicked() {
                         delete = Some(i);
                         ui.close_menu();

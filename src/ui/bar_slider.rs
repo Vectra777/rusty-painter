@@ -31,6 +31,18 @@ const DRAG_THRESHOLD: f32 = 3.0;
 const DOUBLE_CLICK_WINDOW: f64 = 0.3;
 /// Shift: how much slower the value follows the pointer.
 const FINE_SPEED: f64 = 0.1;
+/// Touch mode: a drag this far (points) above or below the bar starts
+/// slowing, to half speed at another [`FINE_DISTANCE`] and so on.
+const FINE_DEAD_ZONE: f32 = 24.0;
+const FINE_DISTANCE: f32 = 60.0;
+
+/// Touch mode: how fast a drag moves the value with the finger `off`
+/// points above or below the bar (further: slower, for fine control
+/// where Shift would do on a keyboard).
+pub(crate) fn touch_drag_speed(off: f32) -> f64 {
+    let past = (off.abs() - FINE_DEAD_ZONE).max(0.0);
+    1.0 / (1.0 + (past / FINE_DISTANCE) as f64)
+}
 
 #[must_use = "add it with `ui.add(...)`"]
 pub(crate) struct BarSlider<'a> {
@@ -403,6 +415,7 @@ impl Widget for BarSlider<'_> {
         }
 
         // Dragging: relative to where the drag started.
+        let touch = metrics(ui.ctx()).touch;
         let dragging = response.dragged_by(egui::PointerButton::Primary);
         if response.drag_started_by(egui::PointerButton::Primary) {
             ui.data_mut(|d| d.insert_temp(drag_id, (self.normalized(before), 0.0_f32)));
@@ -410,9 +423,19 @@ impl Widget for BarSlider<'_> {
         if dragging
             && let Some((mut norm, mut travel)) = ui.data(|d| d.get_temp::<(f64, f32)>(drag_id))
         {
-            let (delta, fine) = ui.input(|i| (i.pointer.delta().x, i.modifiers.shift));
+            let (delta, fine, y) = ui.input(|i| {
+                let y = i.pointer.interact_pos().map_or(rect.center().y, |p| p.y);
+                (i.pointer.delta().x, i.modifiers.shift, y)
+            });
             travel += delta.abs();
-            let speed = if fine { FINE_SPEED } else { 1.0 };
+            let speed = if fine {
+                FINE_SPEED
+            } else if touch {
+                let off = (y - rect.center().y).abs() - rect.height() * 0.5;
+                touch_drag_speed(off)
+            } else {
+                1.0
+            };
             norm = (norm + delta as f64 / rect.width().max(1.0) as f64 * speed).clamp(0.0, 1.0);
             // A press that barely moves stays a click.
             if travel > DRAG_THRESHOLD {
@@ -430,11 +453,31 @@ impl Widget for BarSlider<'_> {
 
         // A click (not the end of a drag, nor half of a double-click, which
         // resets: see `widgets::reset`) types a value in, once the double
-        // click's window has passed.
+        // click's window has passed. In touch mode a tap does nothing (a
+        // keyboard taking half the screen for a slip of the finger): a press
+        // held still there types instead.
         let pending_id = id.with("bar_slider_pending_edit");
+        let held = touch
+            && !travelled
+            && response.is_pointer_button_down_on()
+            && ui.input(|i| {
+                i.pointer
+                    .press_start_time()
+                    .is_some_and(|t| i.time - t >= crate::ui::widgets::HOLD_MENU_SECONDS)
+            });
+        if touch && response.is_pointer_button_down_on() && !travelled && !held {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if response.double_clicked() {
             ui.data_mut(|d| d.remove::<f64>(pending_id));
-        } else if response.clicked() && !travelled {
+        } else if held {
+            // At once (no double-click to wait for), and the drag ends.
+            ui.data_mut(|d| {
+                d.remove::<(f64, f32)>(drag_id);
+                d.insert_temp(pending_id, f64::NEG_INFINITY);
+            });
+        } else if response.clicked() && !travelled && !touch {
             let now = ui.input(|i| i.time);
             ui.data_mut(|d| d.insert_temp(pending_id, now));
         }
@@ -814,5 +857,63 @@ mod tests {
             1.3,
         );
         assert!((value - 0.25).abs() < 1e-6, "typed 0.25, got {value}");
+    }
+
+    /// Touch mode: whether the slider at `value` is typing a value in after
+    /// a press held `hold` seconds at its centre.
+    fn editing_after_touch(hold: f64) -> bool {
+        let ctx = egui::Context::default();
+        crate::ui::style::set_touch_metrics(&ctx, true);
+        let mut value = 0.5_f32;
+        let rect = frame(&ctx, &mut value, vec![], 0.0);
+        let at = rect.center();
+        frame(&ctx, &mut value, vec![egui::Event::PointerMoved(at)], 0.1);
+        frame(&ctx, &mut value, vec![button(at, true)], 0.2);
+        let mut t = 0.2;
+        while t < 0.2 + hold {
+            t += 0.05;
+            frame(&ctx, &mut value, vec![], t);
+        }
+        frame(&ctx, &mut value, vec![button(at, false)], t + 0.05);
+        frame(&ctx, &mut value, vec![], t + 1.0);
+        frame(&ctx, &mut value, vec![], t + 1.1);
+        // Typing replaces the whole text: the value changes only if editing.
+        frame(
+            &ctx,
+            &mut value,
+            vec![egui::Event::Text("0.25".into())],
+            t + 1.2,
+        );
+        frame(
+            &ctx,
+            &mut value,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            t + 1.3,
+        );
+        (value - 0.25).abs() < 1e-6
+    }
+
+    #[test]
+    fn touch_mode_types_on_a_held_press_not_a_tap() {
+        assert!(!editing_after_touch(0.05), "a tap brings no keyboard");
+        assert!(editing_after_touch(0.7), "a press held still does");
+    }
+
+    #[test]
+    fn touch_drags_slow_down_further_from_the_bar() {
+        assert_eq!(touch_drag_speed(0.0), 1.0);
+        assert_eq!(touch_drag_speed(FINE_DEAD_ZONE), 1.0);
+        let half = touch_drag_speed(FINE_DEAD_ZONE + FINE_DISTANCE);
+        assert!((half - 0.5).abs() < 1e-9, "{half}");
+        assert!(
+            touch_drag_speed(-300.0) < half,
+            "above the bar too, slower further"
+        );
     }
 }

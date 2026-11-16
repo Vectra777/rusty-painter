@@ -474,6 +474,21 @@ pub(super) fn transform_tiles<P: Px>(
     // Whole-pixel moves copy pixels exactly; anything else is resampled
     // bilinearly so rotated or scaled art stays smooth.
     let exact = params.is_whole_pixel_move();
+    // A quarter turn (or three) keeps whole pixels whole: each takes the
+    // source pixel its centre lands in (bilinear blurred by half a pixel
+    // when the turn's centre isn't on a pixel corner or centre).
+    let turns = params.rotation / std::f32::consts::FRAC_PI_2;
+    let quarter = params.is_affine()
+        && params.scale.x.abs() == 1.0
+        && params.scale.y.abs() == 1.0
+        && params.rotation != 0.0
+        && (turns - turns.round()).abs() < 1e-4;
+    // Shrunk below half size, one bilinear sample a pixel skips source
+    // pixels (aliasing, moiré): each pixel averages k×k samples over its
+    // footprint instead.
+    let shrink = params.scale.x.abs().min(params.scale.y.abs());
+    let box_k = (params.is_affine() && !params.draft && !exact && shrink < 0.5)
+        .then(|| ((1.0 / shrink).ceil() as usize).clamp(2, 16));
     let (src_min_x, src_max_x) = (src_area.min.x.floor() as i32, src_area.max.x.ceil() as i32);
     let (src_min_y, src_max_y) = (src_area.min.y.floor() as i32, src_area.max.y.ceil() as i32);
 
@@ -524,6 +539,56 @@ pub(super) fn transform_tiles<P: Px>(
                 for x in tile_x0..tile_x1 {
                     let pixel = if exact {
                         source(x - params.offset.x as i32, y - params.offset.y as i32)
+                    } else if quarter {
+                        let Some(p) = inverse(Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) else {
+                            continue;
+                        };
+                        // Snapped to the nearest half pixel first, so a centre
+                        // a rounding error off a pixel edge lands the same way
+                        // for every pixel.
+                        let snap = |v: f32| ((v * 2.0).round() / 2.0).floor() as i32;
+                        source(snap(p.x), snap(p.y))
+                    } else if let Some(k) = box_k {
+                        let mut sum = [0.0f32; 4];
+                        let mut n = 0;
+                        for j in 0..k {
+                            for i in 0..k {
+                                let at = Vec2::new(
+                                    x as f32 + (i as f32 + 0.5) / k as f32,
+                                    y as f32 + (j as f32 + 0.5) / k as f32,
+                                );
+                                let Some(p) = inverse(at) else {
+                                    continue;
+                                };
+                                let (u, v) = (p.x - 0.5, p.y - 0.5);
+                                let (fx0, fy0) = (u.floor(), v.floor());
+                                let (ix, iy) = (fx0 as i32, fy0 as i32);
+                                let (fx, fy) = (u - fx0, v - fy0);
+                                let w = [
+                                    (1.0 - fx) * (1.0 - fy),
+                                    fx * (1.0 - fy),
+                                    (1.0 - fx) * fy,
+                                    fx * fy,
+                                ];
+                                let corners = [
+                                    source(ix, iy),
+                                    source(ix + 1, iy),
+                                    source(ix, iy + 1),
+                                    source(ix + 1, iy + 1),
+                                ];
+                                for (c, wc) in corners.iter().zip(w) {
+                                    let c = c.to_f32();
+                                    for ch in 0..4 {
+                                        sum[ch] += c[ch] * wc;
+                                    }
+                                }
+                                n += 1;
+                            }
+                        }
+                        if n == 0 {
+                            continue;
+                        }
+                        P::from_f32(sum.map(|v| v / n as f32))
                     } else if params.draft {
                         let Some(p) = inverse(Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) else {
                             continue;
@@ -602,6 +667,10 @@ pub(super) trait Px: Copy + PartialEq + Send + Sync {
     const CLEAR: Self;
     /// Bilinear blend of four premultiplied pixels.
     fn bilinear(p00: Self, p10: Self, p01: Self, p11: Self, fx: f32, fy: f32) -> Self;
+    /// Its channels as numbers (as stored), for averaging.
+    fn to_f32(self) -> [f32; 4];
+    /// [`Px::to_f32`] back.
+    fn from_f32(v: [f32; 4]) -> Self;
 }
 
 impl Px for Color32 {
@@ -610,6 +679,15 @@ impl Px for Color32 {
     #[inline]
     fn bilinear(p00: Self, p10: Self, p01: Self, p11: Self, fx: f32, fy: f32) -> Self {
         bilinear(p00, p10, p01, p11, fx, fy)
+    }
+
+    fn to_f32(self) -> [f32; 4] {
+        self.to_array().map(f32::from)
+    }
+
+    fn from_f32(v: [f32; 4]) -> Self {
+        let [r, g, b, a] = v.map(|c| (c + 0.5).clamp(0.0, 255.0) as u8);
+        Color32::from_rgba_premultiplied(r, g, b, a)
     }
 }
 
@@ -625,6 +703,14 @@ impl Px for [f32; 4] {
             fx * fy,
         ];
         std::array::from_fn(|c| p00[c] * w[0] + p10[c] * w[1] + p01[c] * w[2] + p11[c] * w[3])
+    }
+
+    fn to_f32(self) -> [f32; 4] {
+        self
+    }
+
+    fn from_f32(v: [f32; 4]) -> Self {
+        v
     }
 }
 
@@ -857,6 +943,12 @@ impl Canvas {
         }
         let (ts, depth) = (self.tile_size, self.depth);
         let decoder = crate::canvas::blend::LinearDecoder::new();
+        // How much of each original pixel was lifted (all of it but at a
+        // soft selection's edge), from the 8-bit alphas.
+        let part = |o: &DeepTile, i: usize, c: Color32| match o.narrow(i).a() {
+            0 => 1.0,
+            a => (c.a() as f32 / a as f32).min(1.0),
+        };
         let lifted_deep: HashMap<TileKey, Vec<[f32; 4]>> = lifted
             .par_iter()
             .map(|(key, px)| {
@@ -864,7 +956,10 @@ impl Canvas {
                 let px = (px.iter().enumerate())
                     .map(|(i, &c)| match (c == Color32::TRANSPARENT, o) {
                         (true, _) => [0.0; 4],
-                        (false, Some(o)) => o.linear(i),
+                        (false, Some(o)) => {
+                            let k = part(o, i, c);
+                            o.linear(i).map(|v| v * k)
+                        }
                         (false, None) => decoder.decode(c).to_array(),
                     })
                     .collect();
@@ -903,7 +998,8 @@ impl Canvas {
             if let Some(px) = lifted.get(&key) {
                 for (i, &c) in px.iter().enumerate() {
                     if c != Color32::TRANSPARENT {
-                        out.set_linear(i, [0.0; 4]);
+                        let k = 1.0 - part(&out, i, c);
+                        out.set_linear(i, out.linear(i).map(|v| v * k));
                     }
                 }
             }
@@ -928,6 +1024,28 @@ impl Canvas {
                 cell.set_both(Some(out.narrow_all()), Some(out));
             }
         });
+    }
+
+    /// Whether layer `layer_idx`'s painted tiles within `area` (all of
+    /// them for `None`) are more than a transform can move (it would do
+    /// nothing): refused up front, rather than recording a step that moves
+    /// the selection and not the pixels.
+    pub fn transform_too_big(&self, layer_idx: usize, area: Option<eframe::egui::Rect>) -> bool {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return false;
+        };
+        let ts = self.tile_size as f32;
+        let tiles = layer.tiles.lock().unwrap_or_else(|e| e.into_inner());
+        let count = (tiles.iter())
+            .filter(|&(&(tx, ty), _)| {
+                area.is_none_or(|a| {
+                    let (x0, y0) = (tx as f32 * ts, ty as f32 * ts);
+                    a.max.x >= x0 && a.min.x <= x0 + ts && a.max.y >= y0 && a.min.y <= y0 + ts
+                })
+            })
+            .filter(|(_, cell)| !cell.lock().unwrap_or_else(|e| e.into_inner()).is_empty)
+            .count();
+        count.saturating_mul(self.tile_size * self.tile_size) > MAX_TRANSFORM_SOURCE_PIXELS
     }
 
     /// Content bounds of detached tiles (a floating layer's source).
@@ -1122,33 +1240,58 @@ impl Canvas {
             .iter()
             .map(|(&key, cell)| (key, cell.clone()))
             .collect();
-        // Split each tile into its floated and remaining pixels, in parallel.
+        // Split each tile into its floated and remaining pixels, in parallel:
+        // a pixel the selection covers partly (a soft edge) goes as much as
+        // it covers it, the rest stays. Tiles the selection misses are only
+        // read (they keep their pixels, deep ones included).
+        let bounds = selection.map(|sel| sel.get_bounds());
+        let depth = self.depth;
         let floated: Vec<(TileKey, Vec<Color32>)> = cells
             .par_iter()
-            .filter_map(|((tx, ty), cell)| {
+            .filter_map(|&((tx, ty), ref cell)| {
+                let (x0, y0) = (tx * ts as i32, ty * ts as i32);
+                if let Some(bounds) = bounds {
+                    let b = bounds?;
+                    let (x1, y1) = ((x0 + ts as i32) as f32, (y0 + ts as i32) as f32);
+                    if b.max.x < x0 as f32 || b.min.x > x1 || b.max.y < y0 as f32 || b.min.y > y1 {
+                        return None;
+                    }
+                }
                 let mut tile = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let data = tile.data_mut()?;
-                let mut lifted = vec![Color32::TRANSPARENT; ts * ts];
-                let mut has_content = false;
-                for y in 0..ts {
-                    for x in 0..ts {
-                        let idx = y * ts + x;
-                        if data[idx] == Color32::TRANSPARENT {
-                            continue;
+                if tile.is_empty {
+                    return None;
+                }
+                let cover = selection.map(|sel| tile_coverage(sel, x0, y0, ts));
+                let cover_at = |i: usize| cover.as_ref().map_or(255, |c| c[i]);
+                let data = tile.data()?;
+                let lifted: Vec<Color32> = (data.iter().enumerate())
+                    .map(|(i, &p)| scale_premultiplied(p, cover_at(i)))
+                    .collect();
+                if lifted.iter().all(|&p| p == Color32::TRANSPARENT) {
+                    return None;
+                }
+                let (data, mut deep) = tile.deep_parts(depth, ts * ts);
+                for (i, &up) in lifted.iter().enumerate() {
+                    let c = cover_at(i);
+                    if c == 0 {
+                        continue;
+                    }
+                    match deep.as_deref_mut() {
+                        Some(deep) => {
+                            let k = 1.0 - c as f32 / 255.0;
+                            deep.set_linear(i, deep.linear(i).map(|v| v * k));
+                            data[i] = deep.narrow(i);
                         }
-                        let (px, py) = (tx * ts as i32 + x as i32, ty * ts as i32 + y as i32);
-                        if selection.is_none_or(|sel| sel.contains(Vec2::new(px as f32, py as f32)))
-                        {
-                            lifted[idx] = data[idx];
-                            data[idx] = Color32::TRANSPARENT;
-                            has_content = true;
+                        // What's left and what's lifted add up to the pixel.
+                        None => {
+                            let (p, l) = (data[i].to_array(), up.to_array());
+                            let [r, g, b, a] = [0, 1, 2, 3].map(|k| p[k] - l[k]);
+                            data[i] = Color32::from_rgba_premultiplied(r, g, b, a);
                         }
                     }
                 }
-                if has_content {
-                    tile.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
-                }
-                has_content.then_some(((*tx, *ty), lifted))
+                tile.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
+                Some(((tx, ty), lifted))
             })
             .collect();
         if floated.is_empty() {
@@ -1241,4 +1384,40 @@ impl Canvas {
         };
         touched
     }
+}
+
+/// `p` (premultiplied) times `cover` (0..=255).
+fn scale_premultiplied(p: Color32, cover: u8) -> Color32 {
+    match cover {
+        255 => p,
+        0 => Color32::TRANSPARENT,
+        _ => {
+            let k = |c: u8| ((c as u32 * cover as u32 + 127) / 255) as u8;
+            let [r, g, b, a] = p.to_array();
+            Color32::from_rgba_premultiplied(k(r), k(g), k(b), k(a))
+        }
+    }
+}
+
+/// How much `sel` covers each pixel (at its centre, anti-aliased as the
+/// other selection tools see it) of the tile at canvas `(x0, y0)`, 0..=255.
+fn tile_coverage(sel: &SelectionManager, x0: i32, y0: i32, ts: usize) -> Vec<u8> {
+    let mut cover = vec![0u8; ts * ts];
+    let mut row = vec![0.0f32; ts];
+    for (ly, out) in cover.chunks_mut(ts).enumerate() {
+        let y = y0 + ly as i32;
+        if x0 >= 0 && y >= 0 {
+            sel.row_coverage(y as usize, x0 as usize, &mut row);
+        } else {
+            // (Off the canvas's top or left edge: pixel by pixel.)
+            for (lx, c) in row.iter_mut().enumerate() {
+                let x = (x0 + lx as i32) as f32 + 0.5;
+                *c = f32::from(u8::from(sel.contains_coords(x, y as f32 + 0.5)));
+            }
+        }
+        for (o, &c) in out.iter_mut().zip(&row) {
+            *o = (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        }
+    }
+    cover
 }

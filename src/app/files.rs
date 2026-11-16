@@ -190,26 +190,49 @@ impl PainterApp {
         match self.workspace.file_pick.take() {
             Some(PendingPick::Open(purpose)) => {
                 for uri in uris {
+                    // Opened here, read on a job's thread.
                     match crate::platform::picker_read(&uri) {
-                        Ok((name, bytes)) => {
-                            self.open_picked(&purpose, name, FileSource::Bytes(bytes.into()), None)
-                        }
+                        Ok((name, source)) => self.open_picked(&purpose, name, source, None),
                         Err(err) => self.report(err),
                     }
                 }
             }
             Some(PendingPick::Save(bytes)) => {
                 if let Some(uri) = uris.first() {
-                    match crate::platform::picker_write(uri, &bytes) {
-                        // iOS's picker opens after the write, and says itself
-                        // when the file is in place.
-                        Ok(()) if cfg!(target_os = "android") => self.report("Saved".to_string()),
-                        Ok(()) => {}
-                        Err(err) => self.report(err),
-                    }
+                    self.write_picked(uri, bytes);
                 }
             }
             None => {}
+        }
+    }
+
+    /// Write `bytes` into the file the picker created at `uri`: opened
+    /// here, written on another thread.
+    #[cfg(target_os = "android")]
+    fn write_picked(&mut self, uri: &str, bytes: Vec<u8>) {
+        let mut file = match crate::android::picker_open_file(uri) {
+            Ok(file) => file,
+            Err(err) => return self.report(err),
+        };
+        self.spawn_job(None, move || {
+            use std::io::Write;
+            let result = file.write_all(&bytes);
+            // (A provider's descriptor may be a pipe, which can't sync.)
+            let _ = file.sync_all();
+            Box::new(move |app: &mut PainterApp| match result {
+                Ok(()) => app.report("Saved".to_string()),
+                Err(err) => app.report(format!("Couldn't write the file: {err}")),
+            })
+        });
+    }
+
+    /// iOS: the save is written to where [`crate::platform::picker_create`]
+    /// said, then the picker opens, and says itself when the file is in
+    /// place.
+    #[cfg(target_os = "ios")]
+    fn write_picked(&mut self, uri: &str, bytes: Vec<u8>) {
+        if let Err(err) = crate::platform::picker_write(uri, &bytes) {
+            self.report(err);
         }
     }
 
@@ -262,11 +285,9 @@ impl PainterApp {
             }
             OpenFor::Reference => self.open_reference_in_background(name, source),
             OpenFor::Paper => self.spawn_job(None, move || {
-                let image = source.read().and_then(|bytes| {
-                    image::load_from_memory(&bytes)
-                        .map(|img| img.to_rgba8())
-                        .map_err(|e| format!("Couldn't open {name}: {e}"))
-                });
+                let image = (source.read())
+                    .and_then(|bytes| crate::app::import::decode_image(&bytes))
+                    .map_err(|e| format!("{name}: {e}"));
                 Box::new(move |app: &mut PainterApp| match image {
                     Ok(image) => {
                         let name = std::path::Path::new(&name)
@@ -280,19 +301,26 @@ impl PainterApp {
                     Err(err) => app.report(err),
                 })
             }),
-            OpenFor::Textures => match source.read() {
-                Ok(bytes) => self.add_texture(&name, &bytes),
-                Err(err) => self.report(err),
-            },
+            OpenFor::Textures => self.spawn_job(None, move || {
+                let bytes = source.read().map(std::borrow::Cow::into_owned);
+                Box::new(move |app: &mut PainterApp| match bytes {
+                    Ok(bytes) => app.add_texture(&name, &bytes),
+                    Err(err) => app.report(err),
+                })
+            }),
             OpenFor::Profile(target) => {
+                let target = *target;
                 let stem = std::path::Path::new(&name).file_stem().map_or_else(
                     || "ICC profile".into(),
                     |s| s.to_string_lossy().into_owned(),
                 );
-                match source.read() {
-                    Ok(bytes) => self.use_profile(*target, bytes.into_owned(), &stem),
-                    Err(err) => self.report(err),
-                }
+                self.spawn_job(None, move || {
+                    let bytes = source.read().map(std::borrow::Cow::into_owned);
+                    Box::new(move |app: &mut PainterApp| match bytes {
+                        Ok(bytes) => app.use_profile(target, bytes, &stem),
+                        Err(err) => app.report(err),
+                    })
+                });
             }
         }
     }
@@ -314,10 +342,11 @@ impl PainterApp {
                 let stem = std::path::Path::new(name)
                     .file_stem()
                     .map_or_else(|| "Imported".into(), |s| s.to_string_lossy().into_owned());
-                let path = crate::ui::library::unused_path(folder, &stem);
-                self.save_project_to_path(&path)?;
-                self.workspace.library.project = Some(path);
-                self.workspace.library.refresh();
+                let path = crate::project::with_project_extension(
+                    &crate::ui::library::unused_path(folder, &stem),
+                );
+                self.workspace.library.project = Some(path.clone());
+                self.save_into_library(path);
             }
             // Saving goes back to where it came from, if it was ours.
             _ => {
@@ -328,9 +357,69 @@ impl PainterApp {
         Ok(())
     }
 
+    /// Save the document just imported as the library's `path`: encoded
+    /// and written on another thread, then listed in the library.
+    fn save_into_library(&mut self, path: PathBuf) {
+        // As a save copies it: every pixel painted, no quick mask, shader
+        // layers at their frame.
+        self.settle_vectors();
+        self.quick_mask_leave();
+        self.bake_shader_layers();
+        let snapshot = crate::project::ProjectSnapshot::capture(self);
+        let version = self.doc_version();
+        self.spawn_job(Some("Saving…"), move || {
+            let result = snapshot.write(&path);
+            Box::new(move |app: &mut PainterApp| {
+                match result {
+                    Ok(()) => app.saved_by_user_at(version),
+                    Err(err) => {
+                        app.report(format!("Save failed: {err}"));
+                        // Not written: the document isn't that project.
+                        let project = &mut app.workspace.library.project;
+                        if project.as_ref() == Some(&path) {
+                            *project = None;
+                        }
+                    }
+                }
+                app.workspace.library.refresh();
+            })
+        });
+    }
+
     /// Show `msg` to the user (and log it).
     pub(crate) fn report(&mut self, msg: String) {
         log::info!("{msg}");
         self.export_state.message = Some(msg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canvas::Canvas;
+    use eframe::egui::Color32;
+
+    #[test]
+    fn a_document_imported_into_the_library_is_saved_there_in_the_background() {
+        let dir = std::env::temp_dir().join(format!("rp-files-lib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let picked = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::RED, 64));
+        let bytes = crate::project::encode_project(&picked).unwrap();
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(32, 32, Color32::WHITE, 64));
+        app.brush_state.brushes_path = dir.join("brushes");
+        let source = FileSource::Bytes(bytes.into());
+        let purpose = OpenFor::Library(dir.clone());
+        app.open_picked(&purpose, "Mine.rpainter".into(), source, None);
+        app.run_jobs();
+        let path = dir.join("Mine.rpainter");
+        assert_eq!(
+            app.workspace.library.project.as_deref(),
+            Some(path.as_path())
+        );
+        assert!(path.exists(), "written");
+        assert!(!app.has_unsaved_work(), "saved");
+        assert_eq!(app.canvas.width(), 64);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

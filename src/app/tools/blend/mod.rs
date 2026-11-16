@@ -264,6 +264,36 @@ pub(crate) struct BlendSession {
     /// are most of a megabyte; allocated and cleared each dab they were a
     /// tenth of its time).
     sums: Vec<[f32; 4]>,
+    /// The dabs' patch-sized buffers, handed on from dab to dab.
+    scratch: std::sync::Mutex<Scratch>,
+}
+
+/// Buffers the size of a dab's patch, kept for the next dab: a big dab's
+/// are megabytes each, and made afresh (and zeroed) for every dab they
+/// cost a share of its time, and page faults besides.
+#[derive(Default)]
+struct Scratch {
+    paint: Vec<Vec<[f32; 4]>>,
+    stored: Vec<Vec<Color32>>,
+    masks: Vec<Vec<f32>>,
+}
+
+/// How many of each kind [`Scratch`] keeps.
+const SCRATCH_KEEP: usize = 6;
+
+/// A buffer from `pool` (or a new one), `n` long, all `fill`.
+fn take_buffer<T: Copy>(pool: &mut Vec<Vec<T>>, n: usize, fill: T) -> Vec<T> {
+    let mut v = pool.pop().unwrap_or_default();
+    v.clear();
+    v.resize(n, fill);
+    v
+}
+
+/// `v` back into `pool` (unless it holds enough).
+fn give_buffer<T>(pool: &mut Vec<Vec<T>>, v: Vec<T>) {
+    if pool.len() < SCRATCH_KEEP && v.capacity() > 0 {
+        pool.push(v);
+    }
 }
 
 impl BlendSession {
@@ -335,6 +365,7 @@ impl BlendSession {
             wrap: false,
             damage: Vec::new(),
             sums: Vec::new(),
+            scratch: Default::default(),
             dabber,
             stroke: BlendStroke {
                 kind,
@@ -427,8 +458,9 @@ struct BlendStroke {
     kind: BlendKind,
     /// The way the brush last moved (unit), for Deform's push.
     dir: Vec2,
-    /// Tiles as they were before the stroke first changed them.
-    before: HashMap<(i32, i32), Vec<Color32>>,
+    /// Tiles as they were before the stroke first changed them (shared
+    /// with what the tile held then: no copy).
+    before: HashMap<(i32, i32), crate::canvas::storage::SharedPixels>,
     /// In a deeper document, the same tiles at full depth.
     before_deep: HashMap<(i32, i32), crate::canvas::storage::DeepTile>,
     last: Option<Vec2>,
@@ -591,6 +623,19 @@ fn recurve(v: [f32; 4], curve: fn(f32) -> f32) -> [f32; 4] {
     }
     let c = |x: f32| curve((x / a).clamp(0.0, 1.0)) * a;
     [c(v[0]), c(v[1]), c(v[2]), a]
+}
+
+/// `f` with a row's worth (`len`) of scratch values, all `fill`: one
+/// buffer a thread, reused row after row and dab after dab.
+fn with_row<R>(len: usize, fill: f32, f: impl FnOnce(&mut [f32]) -> R) -> R {
+    thread_local! {
+        static ROW: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    ROW.with_borrow_mut(|row| {
+        row.clear();
+        row.resize(len, fill);
+        f(row)
+    })
 }
 
 /// Run `f` on each `side`-long row of `data` (with its index), on `pool`
@@ -1540,7 +1585,7 @@ impl BlendSession {
         let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
         let wrap = self.wrap;
         let selection = self.selection.as_ref();
-        let mut mask = vec![0.0f32; side * side];
+        let mut mask = self.take_mask(side * side);
         let round = tip.plain_round(&local);
         let r = local.r.max(0.5);
         for_rows(&self.pool, &mut mask, side, |ly, row| {
@@ -1587,18 +1632,76 @@ impl BlendSession {
                 *v *= strength;
             }
             if let Some(selection) = selection {
-                let mut sel = vec![0.0f32; side];
-                if let Some(ty) = canvas_row(y, ch, wrap) {
-                    for (sx, dx, w) in wrap_pieces_or_clip(x0, side, cw, wrap) {
-                        selection.row_coverage(ty, sx as usize, &mut sel[dx..dx + w]);
+                with_row(side, 0.0, |sel| {
+                    if let Some(ty) = canvas_row(y, ch, wrap) {
+                        for (sx, dx, w) in wrap_pieces_or_clip(x0, side, cw, wrap) {
+                            selection.row_coverage(ty, sx as usize, &mut sel[dx..dx + w]);
+                        }
                     }
-                }
-                for (v, s) in row.iter_mut().zip(&sel) {
-                    *v *= s;
-                }
+                    for (v, s) in row.iter_mut().zip(sel.iter()) {
+                        *v *= s;
+                    }
+                });
             }
         });
         mask
+    }
+
+    fn scratch(&self) -> std::sync::MutexGuard<'_, Scratch> {
+        self.scratch.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A paint buffer `n` long (transparent), from the scratch.
+    fn take_paint(&self, n: usize) -> Vec<[f32; 4]> {
+        take_buffer(&mut self.scratch().paint, n, [0.0; 4])
+    }
+
+    fn give_paint(&self, v: Vec<[f32; 4]>) {
+        give_buffer(&mut self.scratch().paint, v);
+    }
+
+    /// An 8-bit buffer `n` long (transparent), from the scratch.
+    fn take_stored(&self, n: usize) -> Vec<Color32> {
+        take_buffer(&mut self.scratch().stored, n, Color32::TRANSPARENT)
+    }
+
+    fn give_stored(&self, v: Vec<Color32>) {
+        give_buffer(&mut self.scratch().stored, v);
+    }
+
+    /// A mask `n` long (all 0), from the scratch.
+    fn take_mask(&self, n: usize) -> Vec<f32> {
+        take_buffer(&mut self.scratch().masks, n, 0.0)
+    }
+
+    fn give_mask(&self, v: Vec<f32>) {
+        give_buffer(&mut self.scratch().masks, v);
+    }
+
+    /// [`patch_block`] into a scratch paint buffer.
+    fn paint_block(
+        &self,
+        patch: &[[f32; 4]],
+        side: usize,
+        rect: (usize, usize, usize, usize),
+    ) -> Vec<[f32; 4]> {
+        let block = patch_block(patch, side, rect);
+        let mut out = self.take_paint(0);
+        out.extend_from_slice(&block);
+        out
+    }
+
+    /// [`patch_block`] into a scratch 8-bit buffer.
+    fn stored_block(
+        &self,
+        patch: &[Color32],
+        side: usize,
+        rect: (usize, usize, usize, usize),
+    ) -> Vec<Color32> {
+        let block = patch_block(patch, side, rect);
+        let mut out = self.take_stored(0);
+        out.extend_from_slice(&block);
+        out
     }
 
     fn blend_diameter(&self, pressure: f32) -> f32 {
@@ -1666,38 +1769,39 @@ impl BlendSession {
             // times the stroke strength and the selection. (A big dab's
             // rows, and its other per-pixel work below, run in parallel.)
             None => {
-                let mut mask = vec![0.0f32; side * side];
+                let mut mask = self.take_mask(side * side);
                 let selection = self.selection.as_ref();
                 let r_mask = r.max(0.5);
                 for_rows(&pool, &mut mask, side, |ly, mask_row| {
                     let y = y0 + ly as i32;
-                    let mut row_sel = vec![1.0f32; side];
-                    if let Some(selection) = selection {
-                        if y < 0 {
-                            return;
+                    with_row(side, 1.0, |row_sel| {
+                        if let Some(selection) = selection {
+                            if y < 0 {
+                                return;
+                            }
+                            let start = x0.max(0);
+                            row_sel.fill(0.0);
+                            let skip = (start - x0) as usize;
+                            if skip < side {
+                                selection.row_coverage(
+                                    y as usize,
+                                    start as usize,
+                                    &mut row_sel[skip..],
+                                );
+                            }
                         }
-                        let start = x0.max(0);
-                        row_sel.fill(0.0);
-                        let skip = (start - x0) as usize;
-                        if skip < side {
-                            selection.row_coverage(
-                                y as usize,
-                                start as usize,
-                                &mut row_sel[skip..],
-                            );
+                        let dy = y as f32 + 0.5 - center.y;
+                        for lx in 0..side {
+                            let dx = (x0 + lx as i32) as f32 + 0.5 - center.x;
+                            let t = (dx * dx + dy * dy).sqrt() / r_mask;
+                            if t < 1.0 {
+                                mask_row[lx] =
+                                    crate::brush_engine::masks::gaussian_falloff(t, hardness)
+                                        * strength
+                                        * row_sel[lx];
+                            }
                         }
-                    }
-                    let dy = y as f32 + 0.5 - center.y;
-                    for lx in 0..side {
-                        let dx = (x0 + lx as i32) as f32 + 0.5 - center.x;
-                        let t = (dx * dx + dy * dy).sqrt() / r_mask;
-                        if t < 1.0 {
-                            mask_row[lx] =
-                                crate::brush_engine::masks::gaussian_falloff(t, hardness)
-                                    * strength
-                                    * row_sel[lx];
-                        }
-                    }
+                    });
                 });
                 mask
             }
@@ -1876,7 +1980,7 @@ impl BlendSession {
             }
             BlendKind::Adjust(hsv) => under.iter().map(|&u| adjust_hsv(codec, u, hsv)).collect(),
             BlendKind::Smudge => {
-                let picked = soft.take().unwrap_or_else(|| under.clone());
+                let picked_buf = soft.take().unwrap_or_else(|| under.clone());
                 // A brush that carries nothing yet starts with the paint
                 // under it (inside the selection).
                 let fresh =
@@ -1896,7 +2000,7 @@ impl BlendSession {
                     // (a tip turned): the paint where it was, centred, the
                     // part new to it what's under it.
                     Some(c) if c.r == r => {
-                        let mut px = picked.clone();
+                        let mut px = picked_buf.clone();
                         let d = (side as i32 - c.side as i32) / 2;
                         let (from, to) = (d.max(0) as usize, (-d).max(0) as usize);
                         let n = side.min(c.side);
@@ -1931,7 +2035,7 @@ impl BlendSession {
                 // (Picked up before it paints, so the length counts under
                 // all of the tip: picking up what it had just laid kept all
                 // it carried wherever the tip was at full strength.)
-                let picked = &picked;
+                let picked = &picked_buf;
                 for_rows(&pool, &mut carry.px, side, |row, line| {
                     for (c, u) in line.iter_mut().zip(&picked[row * side..]) {
                         for k in 0..4 {
@@ -1943,6 +2047,7 @@ impl BlendSession {
                 // (Lent as the target, put back once it's laid.)
                 let px = std::mem::take(&mut carry.px);
                 carries[copy] = Some(carry);
+                self.give_paint(picked_buf);
                 px
             }
             BlendKind::Blur => soft.take().unwrap_or_else(|| under.clone()),
@@ -1990,11 +2095,19 @@ impl BlendSession {
         if changed {
             self.write_blend_patch((x0, y0), side, &stored, &result, &mask, &spans);
         }
-        if self.stroke.kind == BlendKind::Smudge
-            && let Some(Some(carry)) = self.stroke.carries.get_mut(copy)
-        {
-            carry.px = target;
+        let target = match self.stroke.carries.get_mut(copy) {
+            Some(Some(carry)) if self.stroke.kind == BlendKind::Smudge => {
+                carry.px = target;
+                None
+            }
+            _ => Some(target),
+        };
+        // The patch's buffers, for the next dab.
+        for v in [Some(result), target, soft].into_iter().flatten() {
+            self.give_paint(v);
         }
+        self.give_stored(stored);
+        self.give_mask(mask);
     }
 
     /// A smudge dab of mirror copy `copy` at `center`: its `side`² patch
@@ -2024,7 +2137,8 @@ impl BlendSession {
         let n = back.x.abs().max(back.y.abs()).round() as usize;
         if n <= 1 || moved.length() > side as f32 {
             let (stored, under) = self.read_layer(origin, side, side);
-            let mut picked = under.clone();
+            let mut picked = self.take_paint(0);
+            picked.extend_from_slice(&under);
             self.only_selected(origin, side, &mut picked);
             return (stored, under, picked);
         }
@@ -2040,14 +2154,16 @@ impl BlendSession {
         );
         let (w, h) = (side + (hi_x - lo_x) as usize, side + (hi_y - lo_y) as usize);
         let wide_origin = (origin.0 + lo_x, origin.1 + lo_y);
-        let (stored, mut around) = self.read_layer(wide_origin, w, h);
+        let (wide_stored, mut around) = self.read_layer(wide_origin, w, h);
         let inside = ((-lo_x) as usize, (-lo_y) as usize, side, side);
-        let stored = if stored.is_empty() {
-            stored
+        let stored = if wide_stored.is_empty() {
+            wide_stored
         } else {
-            patch_block(&stored, w, inside).into_owned()
+            let stored = self.stored_block(&wide_stored, w, inside);
+            self.give_stored(wide_stored);
+            stored
         };
-        let under = patch_block(&around, w, inside).into_owned();
+        let under = self.paint_block(&around, w, inside);
         // (What it picks up: only the paint inside the selection.)
         self.only_selected(wide_origin, w, &mut around);
         // Each pixel picks up the `n` places a pixel apart back along the
@@ -2109,7 +2225,7 @@ impl BlendSession {
             }
         });
         let share = 1.0 / n as f32;
-        let mut picked = vec![[0.0f32; 4]; side * side];
+        let mut picked = self.take_paint(side * side);
         for_rows(&self.pool, &mut picked, side, |row, out| {
             for (col, v) in out.iter_mut().enumerate() {
                 // This pixel along and across the way.
@@ -2136,6 +2252,7 @@ impl BlendSession {
             }
         });
         self.sums = sums;
+        self.give_paint(around);
         (stored, under, picked)
     }
 
@@ -2206,15 +2323,16 @@ impl BlendSession {
         let (cw, ch) = (self.canvas.width() as i32, self.canvas.height() as i32);
         let wrap = self.wrap;
         for_rows(&self.pool, paint, w, |row, line| {
-            let mut sel = vec![0.0f32; w];
-            if let Some(y) = canvas_row(y0 + row as i32, ch, wrap) {
-                for (sx, dx, pw) in wrap_pieces_or_clip(x0, w, cw, wrap) {
-                    selection.row_coverage(y, sx as usize, &mut sel[dx..dx + pw]);
+            with_row(w, 0.0, |sel| {
+                if let Some(y) = canvas_row(y0 + row as i32, ch, wrap) {
+                    for (sx, dx, pw) in wrap_pieces_or_clip(x0, w, cw, wrap) {
+                        selection.row_coverage(y, sx as usize, &mut sel[dx..dx + pw]);
+                    }
                 }
-            }
-            for (p, s) in line.iter_mut().zip(sel) {
-                *p = p.map(|c| c * s);
-            }
+                for (p, &s) in line.iter_mut().zip(sel.iter()) {
+                    *p = p.map(|c| c * s);
+                }
+            });
         });
     }
 
@@ -2234,7 +2352,7 @@ impl BlendSession {
             return (Vec::new(), paint);
         }
         let stored = read_patch(&self.canvas, Some(self.idx), origin, w, h, self.wrap);
-        let mut paint = vec![[0.0f32; 4]; w * h];
+        let mut paint = self.take_paint(w * h);
         let precise = &self.stroke.precise;
         // Each row decoded, and what the stroke painted laid over it, in
         // one pass: the row's pieces in each tile worked out once.
@@ -2338,7 +2456,7 @@ impl BlendSession {
             // A big tip's dabs spread further apart than asked: each moves
             // the paint toward what it picked up, the brush colour and the
             // layer as far as the ones skipped would have.
-            let k = brush.spacing_stretch(placed.dab.r * 2.0, 1.0);
+            let k = brush.spacing_stretch(placed.dab.r * 2.0, placed.dab.spacing);
             if k > 1.0 {
                 use crate::brush_engine::brush_options::stacked;
                 (
@@ -2718,7 +2836,7 @@ impl BlendSession {
         };
         let mut result = Vec::new();
         if !deep {
-            result = vec![Color32::TRANSPARENT; side * side];
+            result = self.take_stored(side * side);
             for_rows(&self.pool, &mut result, side, |row, line| {
                 line.copy_from_slice(&stored[row * side..(row + 1) * side]);
                 let (first, last) = spans[row];
@@ -2746,6 +2864,7 @@ impl BlendSession {
             return;
         }
         self.write_stored((x0, y0), side, &result);
+        self.give_stored(result);
         let stroke = &mut self.stroke;
         // The paint, for the stroke to read back (a tile met for the first
         // time holds none: an alpha below 0). Only under the tip: elsewhere
@@ -2895,7 +3014,7 @@ fn lay_spans<T: PartialEq + Copy + Send>(
 fn filter_tile(
     canvas: &crate::canvas::Canvas,
     idx: usize,
-    before: &HashMap<(i32, i32), Vec<Color32>>,
+    before: &HashMap<(i32, i32), crate::canvas::storage::SharedPixels>,
     key: (i32, i32),
     filter: crate::canvas::filters::Filter,
     wrap: bool,

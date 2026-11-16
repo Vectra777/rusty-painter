@@ -12,8 +12,12 @@ use std::sync::Mutex;
 
 use eframe::egui::{Color32, ColorImage};
 
-use super::{Canvas, Layer, LayerId, LayerKind, TileCell};
+use super::{Canvas, DeepTile, Layer, LayerId, LayerKind, TileCell};
 use crate::canvas::blend_modes::LayerBlend;
+
+/// A merged tile: its 8-bit pixels and, in a deeper document, the same at
+/// full depth.
+type MergedTile = ((i32, i32), Vec<Color32>, Option<DeepTile>);
 
 /// Entries taken out of the layer list and others put in their place, as
 /// one step (a merge). Applying it again reverses it, so undo and redo
@@ -55,7 +59,15 @@ impl Layer {
         layer.vector = None;
         layer.height = None;
         layer.shader = None;
+        layer.colorize = None;
         layer
+    }
+
+    /// For a view: a colorize mask's hints not shown over its result.
+    fn hide_hints(&mut self) {
+        if let Some(colorize) = &mut self.colorize {
+            colorize.settings.show_hints = false;
+        }
     }
 }
 
@@ -107,6 +119,7 @@ impl Canvas {
                 .enumerate()
                 .map(|(i, l)| {
                     let mut layer = l.share();
+                    layer.hide_hints();
                     adjust(i, &mut layer);
                     layer
                 })
@@ -119,6 +132,7 @@ impl Canvas {
             time: self.time,
             timeline: self.timeline,
             onion: Default::default(),
+            style_cache: std::sync::Arc::clone(&self.style_cache),
         }
     }
 
@@ -136,7 +150,9 @@ impl Canvas {
                 .enumerate()
                 .map(|(i, l)| {
                     if shown.get(i).copied().unwrap_or(false) {
-                        l.share()
+                        let mut layer = l.share();
+                        layer.hide_hints();
+                        layer
                     } else {
                         let mut layer = l.shell();
                         layer.visible = false;
@@ -152,6 +168,7 @@ impl Canvas {
             time: self.time,
             timeline: self.timeline,
             onion: Default::default(),
+            style_cache: std::sync::Arc::clone(&self.style_cache),
         }
     }
 
@@ -179,7 +196,10 @@ impl Canvas {
     /// The canvas without its draft layers (as exported), or `None` when
     /// it has none (the canvas itself is then the answer).
     pub fn without_drafts(&self) -> Option<Canvas> {
-        self.has_drafts().then(|| {
+        // (Colorize hints are left out as drafts are.)
+        let hints = (self.layers.iter())
+            .any(|l| l.colorize.as_ref().is_some_and(|c| c.settings.show_hints));
+        (self.has_drafts() || hints).then(|| {
             self.view(|_, l| {
                 if l.draft && !matches!(l.kind, LayerKind::Mask { .. }) {
                     l.visible = false;
@@ -208,15 +228,27 @@ impl Canvas {
 
     /// Composites of whole tiles `keys` (on the canvas), in parallel;
     /// transparent ones are left out unless `keep_empty` (the background
-    /// shows its colour where a tile is missing).
-    fn composite_tiles(
-        &self,
-        keys: Vec<(i32, i32)>,
-        keep_empty: bool,
-    ) -> Vec<((i32, i32), Vec<Color32>)> {
+    /// shows its colour where a tile is missing). A deeper document's are
+    /// composited at its full depth and kept at it too.
+    fn composite_tiles(&self, keys: Vec<(i32, i32)>, keep_empty: bool) -> Vec<MergedTile> {
         let ts = self.tile_size;
+        let depth = self.depth;
         keys.into_par_iter()
             .filter_map(|(tx, ty)| {
+                if depth.is_deep() {
+                    let pixels = self.composite_tile_precise(tx, ty);
+                    let mut deep = DeepTile::transparent(depth, ts * ts)?;
+                    let w = ts.min(self.width.saturating_sub(tx as usize * ts));
+                    let h = ts.min(self.height.saturating_sub(ty as usize * ts));
+                    for row in 0..h {
+                        let at = row * ts;
+                        for (i, &v) in pixels[at..at + w].iter().enumerate() {
+                            deep.set_linear(at + i, v);
+                        }
+                    }
+                    return (keep_empty || !deep.is_transparent())
+                        .then(|| ((tx, ty), deep.narrow_all(), Some(deep)));
+                }
                 let mut part = ColorImage::new([0, 0], Color32::TRANSPARENT);
                 self.write_tile_to_color_image(tx as usize, ty as usize, &mut part, 1, None);
                 let [pw, ph] = part.size;
@@ -225,8 +257,11 @@ impl Canvas {
                     data[row * ts..row * ts + pw]
                         .copy_from_slice(&part.pixels[row * pw..(row + 1) * pw]);
                 }
-                (keep_empty || data.iter().any(|&p| p != Color32::TRANSPARENT))
-                    .then_some(((tx, ty), data))
+                (keep_empty || data.iter().any(|&p| p != Color32::TRANSPARENT)).then_some((
+                    (tx, ty),
+                    data,
+                    None,
+                ))
             })
             .collect()
     }
@@ -255,13 +290,16 @@ impl Canvas {
     }
 
     /// A layer shaped like `template` holding `tiles`.
-    fn layer_with_tiles(template: Layer, tiles: Vec<((i32, i32), Vec<Color32>)>) -> Layer {
+    fn layer_with_tiles(template: Layer, tiles: Vec<MergedTile>) -> Layer {
         let map = tiles
             .into_iter()
-            .map(|(key, data)| {
+            .map(|(key, data, deep)| {
                 let cell = {
-                    let is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
-                    TileCell::new(Some(data), is_empty)
+                    // (A faint deep glaze narrows to transparent 8-bit
+                    // pixels: it's still there.)
+                    let is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT)
+                        && deep.as_ref().is_none_or(|d| d.is_transparent());
+                    TileCell::with_deep(data, deep, is_empty)
                 };
                 (key, std::sync::Arc::new(Mutex::new(cell)))
             })

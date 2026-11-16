@@ -26,7 +26,7 @@ use crate::ui::bar_slider::BarSlider;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::motion_panel::paint_diamond;
 use crate::ui::style::*;
-use crate::ui::widgets::{icon_button, vdivider};
+use crate::ui::widgets::{context_menu_or_hold, hold_menu_due, icon_button, vdivider};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, pos2, vec2};
 use std::collections::HashSet;
 
@@ -987,12 +987,12 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
     } else if matches!(view.drag, Some(Drag::Scrub)) {
         view.drag = None;
     }
-    if ruler_response.secondary_clicked()
+    if (ruler_response.secondary_clicked() || hold_menu_due(ui, &ruler_response))
         && let Some(p) = pointer
     {
         view.menu = Some(Menu::Ruler(frame_at(p.x)));
     }
-    ruler_response.context_menu(|ui| {
+    context_menu_or_hold(ui, &ruler_response, |ui| {
         let Some(Menu::Ruler(t)) = view.menu else {
             ui.close_menu();
             return;
@@ -1378,7 +1378,7 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
                 }
             }
         }
-        if response.secondary_clicked()
+        if (response.secondary_clicked() || hold_menu_due(ui, &response))
             && let Some(t) = t_here
         {
             view.menu = Some(match key_here {
@@ -1386,7 +1386,7 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
                 None => Menu::Frame(r.id, t),
             });
         }
-        response.context_menu(|ui| match view.menu {
+        context_menu_or_hold(ui, &response, |ui| match view.menu {
             Some(Menu::Key(id, prop, k)) if id == r.id && prop == r.prop => {
                 key_menu(app, ui, r, prop, k);
             }

@@ -9,8 +9,6 @@ use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use eframe::egui::{self, Stroke};
 
-/// Touch target of the brush palette button.
-const HIT_WIDTH: f32 = 36.0;
 /// Each top-bar slider's track.
 const SLIDER_WIDTH: f32 = 110.0;
 const MIN_SIZE: f32 = 1.0;
@@ -83,13 +81,14 @@ fn context_action(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
                     app.magnetic_undo_anchor();
                 }
             }
-            crate::ui::widgets::vdivider(ui);
-            if ui.button("Invert").clicked() {
-                app.invert_selection();
-            }
+            // With a selection, the bar floating by it has Invert and
+            // Deselect; not twice on screen.
             let has = app.selection_manager.has_selection();
-            if ui.add_enabled(has, egui::Button::new("Deselect")).clicked() {
-                app.deselect();
+            if !has {
+                crate::ui::widgets::vdivider(ui);
+                if ui.button("Invert").clicked() {
+                    app.invert_selection();
+                }
             }
             if ui
                 .add_enabled(
@@ -158,12 +157,20 @@ pub fn canvas_sliders(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
     area.min.x = (area.min.x + crate::app::layout::left_cover(ctx)).min(area.max.x - 60.0);
     context_action(app, ctx, area);
     palette_button(app, ctx, area);
+    crate::ui::general_settings::gesture_hints(app, ctx);
+    // Above the palette button.
+    crate::ui::quick_menu::modifier_keys(
+        ctx,
+        egui::pos2(area.left() + 6.0, area.bottom() - MIN_TOUCH_TARGET - 24.0),
+        MIN_TOUCH_TARGET,
+    );
 }
 
 /// A button in the bottom-left corner that opens the pop-up brush palette
 /// (a right click does on the desktop).
 fn palette_button(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
-    let size = HIT_WIDTH;
+    // A finger's size (touch mode only).
+    let size = MIN_TOUCH_TARGET;
     egui::Area::new(egui::Id::new("canvas_palette_button"))
         .fixed_pos(egui::pos2(area.left() + 6.0, area.bottom() - size - 12.0))
         .order(egui::Order::Middle)

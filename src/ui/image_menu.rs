@@ -4,6 +4,7 @@
 use crate::PainterApp;
 use crate::canvas::geometry::ImageOp;
 use crate::ui::widgets::FitScreen;
+use crate::ui::widgets::why_disabled;
 use crate::ui::widgets::{property_row, segmented};
 use eframe::egui;
 
@@ -48,10 +49,9 @@ pub fn image_menu(
         });
     }
     let can_crop = app.selection_manager.has_selection();
-    if ui
-        .add_enabled_ui(can_crop, |ui| item(ui, "Crop to Selection"))
-        .inner
-    {
+    let crop = ui.add_enabled_ui(can_crop, |ui| item(ui, "Crop to Selection"));
+    why_disabled(crop.response, can_crop, "Select an area first");
+    if crop.inner {
         crop_to_selection(app);
     }
     ui.separator();

@@ -35,6 +35,17 @@ pub struct AutosaveState {
     focused: bool,
     /// Which autosave file is this document's: each tab has its own.
     slot: usize,
+    /// An autosave being written on another thread. It's this document's
+    /// state (it moves with its tab), so its result lands in the right one.
+    writing: Option<Writing>,
+}
+
+/// An autosave being written: the version it holds, what `autosaved` was
+/// when it started, and the write.
+struct Writing {
+    version: Version,
+    before: Version,
+    done: std::thread::JoinHandle<Result<(), String>>,
 }
 
 impl AutosaveState {
@@ -61,6 +72,7 @@ impl AutosaveState {
             recovery: None,
             focused: true,
             slot,
+            writing: None,
         }
     }
 
@@ -71,6 +83,20 @@ impl AutosaveState {
     /// Whether the document at `version` is as it was saved.
     pub fn matches_saved(&self, version: Version) -> bool {
         version == self.saved
+    }
+
+    /// Whether quitting has anything to write or wait for here, the
+    /// document standing at `version`.
+    pub(crate) fn exit_work(&self, version: Version) -> bool {
+        self.writing.is_some() || (version != self.saved && version != self.autosaved)
+    }
+
+    /// Wait for the autosave being written, its result not wanted (the
+    /// document is being closed for good).
+    pub(crate) fn abandon_writing(&mut self) {
+        if let Some(writing) = self.writing.take() {
+            let _ = writing.done.join();
+        }
     }
 }
 
@@ -120,11 +146,12 @@ impl PainterApp {
     pub(crate) fn doc_version(&self) -> Version {
         let history = &self.layer_state.history;
         let (undo, redo) = history.stacks();
-        // Shader and palette edits aren't undo steps but are changes to
-        // keep.
+        // Shader, palette and layer comp edits aren't undo steps but are
+        // changes to keep.
         let edits = (self.workspace.shaders.edits)
             .wrapping_add(self.brush_state.palettes.document_edits)
-            .wrapping_add(self.layer_state.remote_edits);
+            .wrapping_add(self.layer_state.remote_edits)
+            .wrapping_add(self.layer_state.comps.edits);
         (
             history.push_count().wrapping_add(edits),
             undo.len(),
@@ -176,6 +203,11 @@ impl PainterApp {
     pub(crate) fn autosave_tick(&mut self, ctx: &eframe::egui::Context) {
         #[cfg(any(target_os = "ios", target_os = "android"))]
         self.save_on_leaving(ctx);
+        #[cfg(target_os = "android")]
+        if crate::android::take_low_memory() {
+            self.release_memory();
+        }
+        self.finish_autosave(false);
         let now = Instant::now();
         let active = ctx.input(|i| !i.events.is_empty() || i.pointer.any_down());
         let state = &mut self.workspace.autosave;
@@ -201,6 +233,26 @@ impl PainterApp {
             || self.vector_busy()
             || self.session_running()
             || !self.workspace.jobs.is_idle()
+            || self.workspace.autosave.writing.is_some()
+        {
+            return;
+        }
+        self.autosave_in_background();
+    }
+
+    /// Autosave now, in the background, if there are changes the autosave
+    /// file doesn't have yet (a tab being left, memory running low).
+    pub(crate) fn autosave_if_changed(&mut self) {
+        let state = &self.workspace.autosave;
+        if state.recovery.is_some()
+            || state.writing.is_some()
+            || !self.has_unsaved_work()
+            || self.doc_version() == state.autosaved
+            || self.session_running()
+            // Not mid-stroke or mid-job: the copy would hold half of it.
+            || self.brush_state.is_drawing
+            || self.vector_busy()
+            || !self.workspace.jobs.is_idle()
         {
             return;
         }
@@ -219,10 +271,39 @@ impl PainterApp {
         self.save_active_preset(false);
         self.save_settings(false);
         self.autosave_on_exit();
+        // The other tabs too: the app may not come back to the front.
+        self.autosave_tabs_on_exit();
         crate::app::jobs::flush_writes();
     }
 
-    /// Copy the document, then encode and write it on another thread.
+    /// Memory is running low (Android says so): drop what can be made
+    /// again, and autosave, as the system may end the app next. (iOS's
+    /// warning doesn't reach the app through winit, so it isn't heard
+    /// there.)
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn release_memory(&mut self) {
+        log::warn!("Memory is low: dropping caches");
+        // Each is made again from the layers when next needed.
+        self.render_cache.below_cache = None;
+        let retired = &mut self.workspace.retired_textures;
+        retired.extend(self.layer_state.thumbnails.drain(..).flatten());
+        self.layer_state.thumbnails_dirty = true;
+        retired.extend(self.brush_state.preset_previews.drain().map(|(_, t)| t));
+        // Up to a gigabyte of rendered frames (the canvas draws its own
+        // frame again first, if it showed one of them).
+        self.leave_cached_frame();
+        let retired = &mut self.workspace.retired_textures;
+        self.workspace.animation.cache.clear(retired);
+        self.drop_pick_distances();
+        crate::app::release_freed_memory();
+        // (The undo history keeps all but its newest step compressed
+        // already.)
+        self.autosave_if_changed();
+    }
+
+    /// Copy the document, then encode and write it on another thread. The
+    /// version it holds counts as autosaved once it's on disk; a write that
+    /// fails is tried again later (the next is due [`EVERY`] on).
     fn autosave_in_background(&mut self) {
         self.sync_stroke_worker();
         let snapshot = crate::project::ProjectSnapshot::capture(self);
@@ -230,20 +311,47 @@ impl PainterApp {
         let project = self.workspace.library.project.clone();
         let version = self.doc_version();
         let state = &mut self.workspace.autosave;
-        state.autosaved = version;
         state.last_write = Some(Instant::now());
-        self.spawn_job(None, move || {
-            // A crash mid-write keeps the last one.
-            let result = snapshot
-                .encode_data_only()
-                .and_then(|bytes| crate::project::write_atomically(&path, &bytes));
-            write_autosave_source(&path, project.as_deref());
-            Box::new(move |_: &mut PainterApp| {
-                if let Err(err) = result {
-                    log::error!("Autosave failed: {err}");
-                }
-            })
-        });
+        let spawned = std::thread::Builder::new()
+            .name("autosave".into())
+            .spawn(move || {
+                // A crash mid-write keeps the last one.
+                let result = snapshot
+                    .encode_data_only()
+                    .and_then(|bytes| crate::project::write_atomically(&path, &bytes));
+                write_autosave_source(&path, project.as_deref());
+                result
+            });
+        match spawned {
+            Ok(done) => {
+                state.writing = Some(Writing {
+                    version,
+                    before: state.autosaved,
+                    done,
+                });
+            }
+            Err(err) => log::error!("Autosave couldn't start: {err}"),
+        }
+    }
+
+    /// The autosave being written, once it's done (or waiting for it, with
+    /// `wait`): what it holds counts as autosaved if it got onto the disk.
+    pub(crate) fn finish_autosave(&mut self, wait: bool) {
+        let state = &mut self.workspace.autosave;
+        let Some(writing) = state.writing.take_if(|w| wait || w.done.is_finished()) else {
+            return;
+        };
+        let result = (writing.done.join()).unwrap_or_else(|_| Err("it panicked".into()));
+        match result {
+            // (Unless the user saved meanwhile: that's newer.)
+            Ok(()) if state.autosaved == writing.before => state.autosaved = writing.version,
+            Ok(()) => {}
+            Err(err) => log::error!("Autosave failed: {err}"),
+        }
+        // Saved by the user while it was written: it has nothing to keep.
+        if !self.has_unsaved_work() && self.workspace.autosave.recovery.is_none() {
+            let _ = std::fs::remove_file(self.autosave_path());
+        }
     }
 
     /// A tool session is previewing pixels that aren't applied yet.
@@ -267,21 +375,27 @@ impl PainterApp {
         let result = crate::project::ProjectSnapshot::capture(self)
             .encode_data_only()
             .and_then(|bytes| crate::project::write_atomically(&path, &bytes));
-        if let Err(err) = result {
-            log::error!("Autosave failed: {err}");
-        }
         write_autosave_source(&path, self.workspace.library.project.as_deref());
         let version = self.doc_version();
         let state = &mut self.workspace.autosave;
-        state.autosaved = version;
         state.last_write = Some(Instant::now());
+        match result {
+            Ok(()) => state.autosaved = version,
+            // (Tried again next time.)
+            Err(err) => log::error!("Autosave failed: {err}"),
+        }
     }
 
     /// Quitting: keep unsaved work for the next start, else tidy up.
     pub(crate) fn autosave_on_exit(&mut self) {
+        // An autosave being written finishes first: what it holds may be
+        // all there is to keep.
+        self.finish_autosave(true);
         if self.workspace.autosave.recovery.is_some() {
             return; // left as it was: still on offer next time
         }
+        // A stroke still being painted is work too.
+        self.release_canvas();
         if self.has_unsaved_work() {
             if self.doc_version() != self.workspace.autosave.autosaved {
                 self.write_autosave();
@@ -459,6 +573,51 @@ mod tests {
         app.mark_saved();
         app.autosave_on_exit();
         assert!(!app.autosave_path().exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_autosave_isnt_counted_and_is_tried_again() {
+        let dir = temp_dir("failed");
+        let mut app = app(&dir.join("missing"));
+        change(&mut app);
+        // Its folder isn't there: the write fails.
+        app.autosave_in_background();
+        app.finish_autosave(true);
+        assert_ne!(app.workspace.autosave.autosaved, app.doc_version());
+        std::fs::create_dir_all(dir.join("missing")).unwrap();
+        app.autosave_in_background();
+        app.finish_autosave(true);
+        assert_eq!(app.workspace.autosave.autosaved, app.doc_version());
+        assert!(app.autosave_path().exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quitting_mid_autosave_waits_for_it() {
+        let dir = temp_dir("midwrite");
+        let mut app = app(&dir);
+        change(&mut app);
+        app.autosave_in_background();
+        // Not counted until it's on disk.
+        assert_ne!(app.workspace.autosave.autosaved, app.doc_version());
+        app.autosave_on_exit();
+        assert!(app.workspace.autosave.writing.is_none());
+        assert_eq!(app.workspace.autosave.autosaved, app.doc_version());
+        assert!(app.autosave_path().exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stroke_still_being_painted_is_kept_on_quitting() {
+        let dir = temp_dir("stroke");
+        let mut app = app(&dir);
+        app.canvas_mut().active_layer_idx = 1;
+        app.mark_saved();
+        app.start_stroke_with_pressure(eframe::egui::vec2(10.0, 10.0), 1.0);
+        app.add_stroke_point(eframe::egui::vec2(40.0, 30.0), 1.0);
+        app.autosave_on_exit();
+        assert!(app.autosave_path().exists(), "the stroke is unsaved work");
         let _ = std::fs::remove_dir_all(dir);
     }
 

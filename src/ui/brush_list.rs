@@ -15,7 +15,7 @@ use crate::ui::icons::Icon;
 use crate::ui::preview_worker::PreviewLook;
 use crate::ui::style::*;
 use crate::ui::widgets::FitScreen;
-use crate::ui::widgets::icon_button;
+use crate::ui::widgets::{context_menu_or_hold, icon_button};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use rayon::ThreadPool;
 use std::sync::Arc;
@@ -622,7 +622,7 @@ fn folder_row(
         }
     }
     if lib.drag.is_none() {
-        response.context_menu(|ui| folder_actions(lib, ui, folder.id, true));
+        context_menu_or_hold(ui, &response, |ui| folder_actions(lib, ui, folder.id, true));
     }
 }
 
@@ -697,7 +697,8 @@ fn preset_row(
 
     if star {
         picked = Some(PresetAction::ToggleFavourite(index));
-    } else if tile.clicked() {
+    } else if tile.clicked() && !tile.context_menu_opened() {
+        // (Not the lift ending a hold that opened its menu.)
         picked = Some(PresetAction::Pick(index));
     }
     if matches!(bs.library.shelf, Shelf::Folder(_))
@@ -733,7 +734,7 @@ fn preset_row(
     let tags = bs.library.file.tags(&preset.name).to_vec();
     let new_tag = &mut bs.library.new_tag;
     if bs.library.drag.is_none() {
-        tile.context_menu(|ui| {
+        context_menu_or_hold(ui, &tile, |ui| {
             let star_text = if favourite {
                 "Remove from favorites"
             } else {
@@ -827,9 +828,14 @@ fn preset_row(
             if default && ui.button("Reset to default").clicked() {
                 picked = Some(PresetAction::Reset(index));
             }
-            if ui.button("Delete").clicked() {
-                picked = Some(PresetAction::Delete(index));
-            }
+            // Asked again: a preset deleted is gone (no undo).
+            ui.menu_button("Delete…", |ui| {
+                ui.label(format!("Delete \"{name}\"? This can't be undone."));
+                if ui.button("Delete").clicked() {
+                    picked = Some(PresetAction::Delete(index));
+                    ui.close_menu();
+                }
+            });
         });
     }
     picked

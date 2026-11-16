@@ -20,12 +20,25 @@ pub const MAX_HEIGHT: f32 = 24.0;
 #[derive(Debug, Default)]
 pub struct HeightMap {
     tiles: Mutex<FxHashMap<(i32, i32), Vec<u16>>>,
+    /// Each tile's revision: a new one, unique across all maps, with every
+    /// write (none for flat tiles), so a layer lit by its heights can keep
+    /// its lit tiles until they change.
+    revisions: Mutex<FxHashMap<(i32, i32), u64>>,
+}
+
+/// The next height tile revision (0 is never given: it stands for flat).
+fn next_revision() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Clone for HeightMap {
     fn clone(&self) -> Self {
+        // (Its revisions too: they stand for the same heights.)
+        let tiles = self.lock();
         Self {
-            tiles: Mutex::new(self.lock().clone()),
+            revisions: Mutex::new(self.revisions().clone()),
+            tiles: Mutex::new(tiles.clone()),
         }
     }
 }
@@ -41,6 +54,16 @@ impl HeightMap {
         self.tiles.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn revisions(&self) -> std::sync::MutexGuard<'_, FxHashMap<(i32, i32), u64>> {
+        self.revisions.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Tile `key`'s revision (0 while it's flat): a new one after every
+    /// write to it.
+    pub fn revision(&self, key: (i32, i32)) -> u64 {
+        self.revisions().get(&key).copied().unwrap_or(0)
+    }
+
     /// Tile `key`'s heights, if it has any.
     pub fn tile(&self, key: (i32, i32)) -> Option<Vec<u16>> {
         self.lock().get(&key).cloned()
@@ -49,9 +72,17 @@ impl HeightMap {
     /// Put tile `key`'s heights (`None`: flat), returning what was there.
     pub fn set_tile(&self, key: (i32, i32), heights: Option<Vec<u16>>) -> Option<Vec<u16>> {
         let mut tiles = self.lock();
+        // (Bumped while the tiles are locked: whoever sees the new revision
+        // reads the new heights.)
         match heights {
-            Some(h) if h.iter().any(|&v| v > 0) => tiles.insert(key, h),
-            _ => tiles.remove(&key),
+            Some(h) if h.iter().any(|&v| v > 0) => {
+                self.revisions().insert(key, next_revision());
+                tiles.insert(key, h)
+            }
+            _ => {
+                self.revisions().remove(&key);
+                tiles.remove(&key)
+            }
         }
     }
 
@@ -60,6 +91,7 @@ impl HeightMap {
         let mut tiles = self.lock();
         let tile = tiles.entry(key).or_insert_with(|| vec![0; side * side]);
         edit(tile);
+        self.revisions().insert(key, next_revision());
     }
 
     /// Every tile, sorted (for saving).

@@ -74,19 +74,9 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
             "Click to type, drag for a text box  ·  click in the text: caret, twice: word, three times: line  ·  move: its corner handle or Ctrl+drag  ·  Ctrl+Enter or a click away keeps it, Esc drops it"
         }
     };
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        // Hints are optional: drop them rather than overlap the options.
-        let font = egui::TextStyle::Small.resolve(ui.style());
-        let width = ui
-            .painter()
-            .layout_no_wrap(hint.into(), font, TEXT_DIM)
-            .size()
-            .x;
-        if width + 12.0 < ui.available_width() {
-            let hint = crate::app::input::keyboard::with_keycaps(ui.ctx(), hint);
-            ui.label(RichText::new(hint).small().color(TEXT_DIM));
-        }
-    });
+    // (The tool's hint isn't shown: it took the bar's room. Shortcuts are
+    // listed in Help → Gestures & Shortcuts.)
+    let _ = hint;
 }
 
 /// Puppet Warp and Bones share a toolbar button: this switches between them.
@@ -1018,7 +1008,8 @@ pub(crate) fn fill_options(app: &mut PainterApp, ui: &mut egui::Ui, compact: boo
     }
 }
 
-/// Liquify mode, size, strength, apply and cancel.
+/// Liquify mode, size, strength, momentum, the session's Adjust, apply and
+/// cancel.
 pub(crate) fn liquify_options(
     app: &mut PainterApp,
     ui: &mut egui::Ui,
@@ -1053,6 +1044,21 @@ pub(crate) fn liquify_options(
         ui.add(crate::ui::widgets::reset(&mut s.strength, |v| {
             percent_of_unit(BarSlider::new(v, 0.02..=1.0))
         }));
+        ui.label(RichText::new("Momentum").color(TEXT_DIM))
+            .on_hover_text("How far the brush glides on after the pen lifts");
+        ui.add(crate::ui::widgets::reset(&mut s.momentum, |v| {
+            percent_of_unit(BarSlider::new(v, 0.0..=1.0))
+        }));
+        if let Some(mut adjust) = app.liquify_adjust() {
+            ui.label(RichText::new("Adjust").color(TEXT_DIM))
+                .on_hover_text("How much of this liquify shows, until it's applied");
+            if ui
+                .add(percent_of_unit(BarSlider::new(&mut adjust, 0.0..=1.0)))
+                .changed()
+            {
+                app.liquify_set_adjust(adjust);
+            }
+        }
         vdivider(ui);
     } else {
         ui.horizontal_wrapped(|ui| {
@@ -1077,6 +1083,26 @@ pub(crate) fn liquify_options(
                 percent_of_unit(BarSlider::new(v, 0.02..=1.0))
             }),
         );
+        crate::ui::widgets::slider_row(
+            ui,
+            "Momentum",
+            crate::ui::widgets::reset(&mut s.momentum, |v| {
+                percent_of_unit(BarSlider::new(v, 0.0..=1.0))
+            }),
+        )
+        .on_hover_text("How far the brush glides on after the pen lifts");
+        if let Some(mut adjust) = app.liquify_adjust() {
+            let changed = crate::ui::widgets::slider_row(
+                ui,
+                "Adjust",
+                percent_of_unit(BarSlider::new(&mut adjust, 0.0..=1.0)),
+            )
+            .on_hover_text("How much of this liquify shows, until it's applied")
+            .changed();
+            if changed {
+                app.liquify_set_adjust(adjust);
+            }
+        }
     }
     let active = app.layer_state.liquify.is_some();
     ui.horizontal(|ui| {
@@ -1095,7 +1121,7 @@ pub(crate) fn liquify_options(
             app.liquify_cancel();
         }
     });
-    "Drag to push  ·  hold still to twirl / pinch / bloat  ·  [ ] size  ·  Enter apply  ·  Esc cancel"
+    "Drag to push or pull to an edge  ·  hold still to twirl / pinch / bloat / crystals  ·  [ ] size  ·  Enter apply  ·  Esc cancel"
 }
 
 /// Puppet Warp: mode, mesh spacing and reach, the mesh shown; the
@@ -1385,6 +1411,10 @@ pub(crate) fn eyedropper_options(app: &mut PainterApp, ui: &mut egui::Ui) -> &'s
     vdivider(ui);
     ui.label(RichText::new("Sample").color(TEXT_DIM));
     segmented(ui, &mut s.size, &SIZES, true);
+    vdivider(ui);
+    ui.checkbox(&mut s.stay, "Stay").on_hover_text(
+        "Keep the Eyedropper after picking (otherwise it goes back to the tool before)",
+    );
     match s.from {
         PickFrom::Visible => {
             "Click or drag to pick the colour you see  ·  Alt+click picks with the brush"

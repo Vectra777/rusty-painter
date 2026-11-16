@@ -5,6 +5,7 @@ pub(crate) mod animate;
 pub(crate) mod assistants;
 pub(crate) mod blend;
 pub(crate) mod bone;
+pub(crate) mod colorize;
 pub(crate) mod eyedropper;
 pub(crate) mod fill;
 pub(crate) mod filter;

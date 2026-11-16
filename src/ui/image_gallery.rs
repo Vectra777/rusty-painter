@@ -47,7 +47,8 @@ const THUMB_PX: i32 = 192;
 enum Msg {
     Listed(Result<Vec<photos::GalleryImage>, String>),
     Thumb(i64, egui::ColorImage),
-    Decoded(Result<(String, image::RgbaImage), String>),
+    /// The picked image's name (without extension) and file bytes.
+    Read(Result<(String, Vec<u8>), String>),
 }
 
 #[derive(PartialEq)]
@@ -161,16 +162,15 @@ impl GalleryState {
         self.phase = Phase::Importing;
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let result = photos::read_image(image.id).and_then(|bytes| {
-                let img = image::load_from_memory(&bytes)
-                    .map_err(|e| format!("Couldn't open {}: {e}", image.name))?
-                    .to_rgba8();
+            // Only read here: decoded (and fitted) by the same job as a
+            // desktop import, which keeps a big photo's memory in check.
+            let result = photos::read_image(image.id).map(|bytes| {
                 let name = std::path::Path::new(&image.name)
                     .file_stem()
                     .map_or_else(|| "Image".to_string(), |s| s.to_string_lossy().into_owned());
-                Ok((name, img))
+                (name, bytes)
             });
-            let _ = tx.send(Msg::Decoded(result));
+            let _ = tx.send(Msg::Read(result));
             ctx.request_repaint();
         });
     }
@@ -183,7 +183,7 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
     }
 
     // Results from the background threads.
-    let mut decoded = None;
+    let mut read = None;
     while let Ok(msg) = app.workspace.gallery.rx.try_recv() {
         let g = &mut app.workspace.gallery;
         match msg {
@@ -211,16 +211,17 @@ pub fn image_gallery(app: &mut PainterApp, ctx: &egui::Context) {
                     ));
                 }
             }
-            Msg::Decoded(result) => decoded = Some(result),
+            Msg::Read(result) => read = Some(result),
         }
     }
-    match decoded {
-        Some(Ok((name, img))) => {
+    match read {
+        Some(Ok((name, bytes))) => {
             app.workspace.gallery.close();
+            let source = crate::app::import::FileSource::Bytes(bytes.into());
             if std::mem::take(&mut app.workspace.gallery.for_reference) {
-                app.set_reference_image(&name, img);
+                app.open_reference_in_background(name, source);
             } else {
-                app.import_rgba(&name, img);
+                app.import_image_in_background(name, source);
             }
             return;
         }

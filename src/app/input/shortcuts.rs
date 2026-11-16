@@ -245,6 +245,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let panels = on(Action::TogglePanels);
     let presets = on(Action::Presets);
     let palette = on(Action::Palette);
+    let quick_menu = on(Action::QuickMenu);
     let smaller = on(Action::SmallerBrush);
     let bigger = on(Action::BiggerBrush);
     let grid = on(Action::Grid);
@@ -471,6 +472,11 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         app.open_radial_palette(pos.unwrap_or(ctx.screen_rect().center()), true);
         repaint = true;
     }
+    if quick_menu {
+        let pos = ctx.input(|i| i.pointer.latest_pos());
+        ui::quick_menu::toggle(ctx, pos.unwrap_or(ctx.screen_rect().center()));
+        repaint = true;
+    }
     if panels {
         ui::menus::toggle_panels(app);
         repaint = true;
@@ -538,7 +544,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             app.set_transform_tool();
         }
         if eyedropper {
-            app.active_tool = Tool::Eyedropper;
+            app.select_eyedropper();
         }
         if fill {
             // Pressing G again goes to the next mode (bucket, enclose,

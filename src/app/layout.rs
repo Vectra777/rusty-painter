@@ -616,15 +616,59 @@ fn right_panel(app: &mut PainterApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Over the canvas's bottom-left corner: the last message (export done,
-/// errors) until dismissed or a few seconds pass, and a content-aware
-/// fill's progress.
+/// How a notice shows and goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoticeKind {
+    /// A result: goes after a few seconds.
+    Info,
+    /// Something failed: red, stays until dismissed.
+    Error,
+    /// Work still running (an export): stays, with its progress.
+    Busy,
+}
+
+/// What kind of notice `message` is; `running` is whether a background
+/// export (image, animation or time-lapse) is still going.
+///
+/// The messages are plain text from all over the app, so this reads their
+/// wording: failures start "Couldn't", "Failed" and the like, work in
+/// progress ends in "…". A failure worded otherwise shows as a result
+/// (and fades); a severity carried with each message would settle it.
+pub(crate) fn notice_kind(message: &str, running: bool) -> NoticeKind {
+    let lower = message.to_lowercase();
+    const FAILED: [&str; 10] = [
+        "couldn't",
+        "could not",
+        "can't",
+        "cannot",
+        "failed",
+        "error",
+        "blocked",
+        "unable",
+        "panicked",
+        "stopped",
+    ];
+    if FAILED.iter().any(|w| lower.contains(w)) {
+        NoticeKind::Error
+    } else if running && (message.ends_with('…') || message.ends_with("...")) {
+        NoticeKind::Busy
+    } else {
+        NoticeKind::Info
+    }
+}
+
+/// Red for failures.
+const ERROR_RED: egui::Color32 = egui::Color32::from_rgb(222, 72, 64);
+
+/// Over the canvas's bottom centre (clear of the corner buttons and the
+/// colours): the last message (export done, errors) and a content-aware
+/// fill's progress. Results go after a few seconds (not while hovered);
+/// errors stay until dismissed; a running export stays with its progress.
 pub(crate) fn notices(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rect) {
     const SHOWN_FOR: f64 = 6.0;
     let now = ctx.input(|i| i.time);
     let id = egui::Id::new("notice_since");
     let message = app.export_state.message.clone();
-    // Errors and results stay a moment, then go (unless hovered).
     let since: Option<(String, f64)> = ctx.data(|d| d.get_temp(id));
     let since = match (&message, since) {
         (Some(m), Some((seen, t))) if *m == seen => Some(t),
@@ -638,41 +682,76 @@ pub(crate) fn notices(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
     if message.is_none() && progress.is_none() {
         return;
     }
-    let response =
-        egui::Area::new(egui::Id::new("canvas_notice"))
-            .fixed_pos(area.left_bottom() + egui::vec2(10.0, -10.0))
-            .pivot(egui::Align2::LEFT_BOTTOM)
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
+    let image_export = app.export_state.in_progress;
+    let running = image_export
+        || app.workspace.animation.task.is_some()
+        || app.workspace.timelapse.task.is_some();
+    let kind = message
+        .as_deref()
+        .map_or(NoticeKind::Info, |m| notice_kind(m, running));
+    let close = metrics(ctx).header_button;
+    let response = egui::Area::new(egui::Id::new("canvas_notice"))
+        .fixed_pos(area.center_bottom() + egui::vec2(0.0, -10.0))
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let error = kind == NoticeKind::Error && progress.is_none();
+            let frame =
                 egui::Frame::none()
                     .fill(BG_PANEL)
-                    .stroke(Stroke::new(1.0_f32, BORDER_LIGHT))
-                    .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        if error { ERROR_RED } else { BORDER_LIGHT },
+                    ))
+                    .inner_margin(egui::Margin {
+                        left: if error { 12.0 } else { 8.0 },
+                        right: 4.0,
+                        top: 4.0,
+                        bottom: 4.0,
+                    })
                     .show(ui, |ui| {
-                        ui.set_max_width((area.width() - 40.0).max(120.0));
+                        ui.set_max_width((area.width() - 40.0).clamp(120.0, 520.0));
                         ui.horizontal(|ui| {
                             if let Some(p) = progress {
-                                if ui
-                                    .small_button("×")
-                                    .on_hover_text("Cancel the fill")
-                                    .clicked()
-                                {
-                                    app.patch_cancel();
-                                }
-                                ui.add(egui::ProgressBar::new(p).desired_width(140.0).text(
+                                ui.add(egui::ProgressBar::new(p).desired_width(160.0).text(
                                     egui::RichText::new("Filling from surroundings").small(),
                                 ));
+                                if dismiss(ui, close, "Cancel the fill") {
+                                    app.patch_cancel();
+                                }
                             } else if let Some(m) = &message {
-                                if ui.small_button("×").on_hover_text("Dismiss").clicked() {
-                                    app.export_state.message = None;
+                                if error {
+                                    error_mark(ui);
+                                } else if kind == NoticeKind::Busy {
+                                    if image_export {
+                                        ui.add(
+                                            egui::ProgressBar::new(app.export_state.progress)
+                                                .desired_width(100.0),
+                                        );
+                                    } else {
+                                        ui.spinner();
+                                    }
                                 }
                                 ui.add(egui::Label::new(egui::RichText::new(m).small()).wrap());
+                                if dismiss(ui, close, "Dismiss") {
+                                    app.export_state.message = None;
+                                }
                             }
                         });
                     });
-            })
-            .response;
-    if progress.is_none()
+            if error {
+                // The red edge down the left side.
+                let r = frame.response.rect;
+                let edge = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 4.0, r.bottom()));
+                ui.painter().rect_filled(edge, 0.0, ERROR_RED);
+            }
+        })
+        .response;
+    if kind == NoticeKind::Busy {
+        // Running: shown until the result replaces it.
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    } else if progress.is_none()
+        && kind == NoticeKind::Info
         && let Some(t) = since
     {
         if response.hovered() {
@@ -683,6 +762,38 @@ pub(crate) fn notices(app: &mut PainterApp, ctx: &egui::Context, area: egui::Rec
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(SHOWN_FOR - (now - t)));
         }
     }
+}
+
+/// A notice's × button, `side` points square (a finger's size in touch
+/// mode).
+fn dismiss(ui: &mut egui::Ui, side: f32, tip: &str) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::click());
+    let color = if response.hovered() {
+        TEXT_STRONG
+    } else {
+        TEXT_DIM
+    };
+    let c = rect.center();
+    let d = (side * 0.18).min(6.0);
+    let stroke = Stroke::new(1.5_f32, color);
+    ui.painter()
+        .line_segment([c - egui::vec2(d, d), c + egui::vec2(d, d)], stroke);
+    ui.painter()
+        .line_segment([c + egui::vec2(-d, d), c + egui::vec2(d, -d)], stroke);
+    response.on_hover_text(tip).clicked()
+}
+
+/// A red disc with "!" before an error's text.
+fn error_mark(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 8.0, ERROR_RED);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "!",
+        egui::FontId::proportional(13.0),
+        egui::Color32::WHITE,
+    );
 }
 
 #[cfg(test)]
@@ -736,6 +847,122 @@ mod tests {
         let rect = ctx.memory(|m| m.area_rect(egui::Id::new("float_brush")));
         let width = rect.expect("the brush panel floats").width();
         assert!(width <= super::PANEL_WIDTH + 1.0, "{width}");
+    }
+
+    #[test]
+    fn notices_say_failures_and_running_work_apart_from_results() {
+        use super::{NoticeKind, notice_kind};
+        assert_eq!(notice_kind("Saved picture.png", false), NoticeKind::Info);
+        assert_eq!(
+            notice_kind("Couldn't save the preset: disk full", false),
+            NoticeKind::Error
+        );
+        assert_eq!(
+            notice_kind("Export blocked: no layers", false),
+            NoticeKind::Error
+        );
+        assert_eq!(
+            notice_kind("Failed to build RGB image", true),
+            NoticeKind::Error
+        );
+        assert_eq!(
+            notice_kind("Exporting the animation…", true),
+            NoticeKind::Busy
+        );
+        assert_eq!(notice_kind("Exporting...", true), NoticeKind::Busy);
+        // Done (nothing running any more): a result, it fades.
+        assert_eq!(
+            notice_kind("Exporting the animation…", false),
+            NoticeKind::Info
+        );
+    }
+
+    /// Notices of each kind over the canvas `area`, for `secs` of frames;
+    /// whether the message is still there after.
+    fn notice_after(message: &str, secs: f64) -> bool {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.export_state.message = Some(message.to_string());
+        let ctx = egui::Context::default();
+        let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        for t in [0.0, secs] {
+            let input = egui::RawInput {
+                time: Some(t),
+                screen_rect: Some(area),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| super::notices(&mut app, ctx, area));
+        }
+        app.export_state.message.is_some()
+    }
+
+    #[test]
+    fn errors_stay_until_dismissed_and_results_fade() {
+        assert!(!notice_after("Saved picture.png", 10.0), "a result fades");
+        assert!(notice_after("Saved picture.png", 2.0), "not at once");
+        assert!(
+            notice_after("Couldn't write picture.png: denied", 60.0),
+            "an error stays"
+        );
+    }
+
+    /// Auto-hide in touch mode, the strip away: a press at the window's
+    /// edge lands on the grab tab (not the canvas, which would paint a
+    /// dot) and brings the strip back.
+    #[test]
+    fn an_edge_press_brings_the_hidden_strip_back_without_painting() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.workspace.touch_mode = true;
+        app.workspace.autohide_panels = true;
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_style(&ctx, true);
+        crate::ui::style::set_touch_metrics(&ctx, true);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("left_reveal"), (0.0_f32, false)));
+        let edge = egui::pos2(6.0, 400.0);
+        let mut run = |events: Vec<egui::Event>, t: f64| {
+            let input = egui::RawInput {
+                time: Some(t),
+                predicted_dt: 0.05,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut over_canvas = false;
+            let _ = ctx.run(input, |ctx| {
+                crate::ui::toolbar::toolbar(&mut app, ctx);
+                over_canvas = ctx
+                    .layer_id_at(edge)
+                    .is_none_or(|l| l.order == egui::Order::Background);
+            });
+            over_canvas
+        };
+        run(
+            vec![egui::Event::PointerMoved(egui::pos2(600.0, 400.0))],
+            0.0,
+        );
+        run(vec![], 0.05);
+        assert!(!run(vec![], 0.1), "the tab takes presses at the edge");
+        run(
+            vec![
+                egui::Event::PointerMoved(edge),
+                egui::Event::PointerButton {
+                    pos: edge,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+            0.15,
+        );
+        for i in 0..10 {
+            run(vec![], 0.2 + i as f64 * 0.05);
+        }
+        let shown: (f32, bool) = ctx
+            .data(|d| d.get_temp(egui::Id::new("left_reveal")))
+            .unwrap();
+        assert_eq!(shown.0, 1.0, "the strip is back");
     }
 
     /// Auto-hide: the side fades out with the pen away, back when it's near.

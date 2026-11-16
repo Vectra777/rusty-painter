@@ -112,6 +112,28 @@ fn memory_and_gpu_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
                 ws.gpus.1.join("\n")
             ));
     });
+    // (Apple's systems have Metal only.)
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    ui.horizontal_wrapped(|ui| {
+        use crate::app::settings::{GpuBackend, gpu_backend, set_gpu_backend};
+        ui.label("Graphics API");
+        let mut backend = gpu_backend();
+        egui::ComboBox::from_id_salt("gpu_backend")
+            .selected_text(backend.label())
+            .show_ui(ui, |ui| {
+                for choice in GpuBackend::ALL {
+                    ui.selectable_value(&mut backend, choice, choice.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Applies at the next start. Try the other one if the canvas draws wrong \
+                 or the app won't start.",
+            );
+        if backend != gpu_backend() {
+            set_gpu_backend(backend);
+        }
+    });
     if !ws.gpus.0.is_empty() {
         ui.label(
             egui::RichText::new(format!("Drawing on {}", ws.gpus.0))
@@ -177,6 +199,17 @@ fn appearance_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
             *accent = DEFAULT_ACCENT;
         }
     });
+    let ui_prefs = &mut app.workspace.ui;
+    let mut percent = (ui_prefs.zoom() * 100.0).round() as u32;
+    let response = ui.add(crate::ui::widgets::reset(&mut percent, |v| {
+        BarSlider::new(v, 90..=150)
+            .suffix("%")
+            .text("Interface size")
+    }));
+    if response.changed() {
+        ui_prefs.interface_size = percent as f32 / 100.0;
+    }
+    response.on_hover_text("Everything but the canvas larger or smaller (100% by default)");
 }
 
 /// Touch-screen and pen pressure options.
@@ -194,6 +227,29 @@ fn touch_and_pen_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
     );
     ui.checkbox(&mut ws.finger_painting, "Paint with one finger")
         .on_hover_text("When off, only a stylus paints and one finger pans the canvas.");
+    ui.add_enabled(
+        ws.touch_mode,
+        egui::Checkbox::new(
+            &mut ws.ui.hold_eyedropper,
+            "Hold a finger still on the canvas to pick a colour",
+        ),
+    )
+    .on_hover_text("Lift it to go back to the tool you had")
+    .on_disabled_hover_text("Touch mode only");
+    if ws.touch_mode {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Show the gesture tips again").clicked() {
+                ws.ui.hints_seen = false;
+            }
+            if ui.button("All gestures…").clicked() {
+                app.modal_state.show_shortcuts = true;
+            }
+        });
+        let ws = &mut app.workspace;
+        crate::ui::toolbar::strip_tools_settings(ui, &mut ws.ui.hidden_tools);
+        quick_menu_settings(ui, &mut ws.ui.quick_menu);
+    }
+    let ws = &mut app.workspace;
     ui.label("Pen pressure").on_hover_text(
         "How hard you press (across) to the pressure every brush gets (up). \
              Bowed up (Firm): light touches count more. Bowed down (Soft): needs \
@@ -229,6 +285,13 @@ fn touch_and_pen_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
         );
     });
     calibration_pad(ui, ws);
+    // (iOS predicts the Pencil itself; desktop tablets report fast enough.)
+    #[cfg(target_os = "android")]
+    ui.checkbox(&mut ws.motion_prediction, "Predict where the pen goes")
+        .on_hover_text(
+            "Draws the line a frame ahead to where the pen is heading, so it keeps up \
+             with the pen; taken back as the pen gets there.",
+        );
     ui.label(
         egui::RichText::new(
             "What pressure controls (size, opacity, flow) is set per brush in the Brush panel.",
@@ -236,6 +299,40 @@ fn touch_and_pen_settings(app: &mut PainterApp, ui: &mut egui::Ui) {
         .small()
         .color(crate::ui::style::TEXT_DIM),
     );
+}
+
+/// The QuickMenu's six slots, each a menu of the keymap's actions.
+fn quick_menu_settings(ui: &mut egui::Ui, slots: &mut [Option<String>; 6]) {
+    use crate::ui::quick_menu::{action_for, short_label, slot_choices};
+    ui.label("QuickMenu (three fingers held still, or J)");
+    egui::Grid::new("quick_menu_slots")
+        .num_columns(2)
+        .show(ui, |ui| {
+            const PLACES: [&str; 6] = [
+                "Top",
+                "Top right",
+                "Bottom right",
+                "Bottom",
+                "Bottom left",
+                "Top left",
+            ];
+            for (i, slot) in slots.iter_mut().enumerate() {
+                ui.label(egui::RichText::new(PLACES[i]).color(crate::ui::style::TEXT_DIM));
+                let name = slot
+                    .as_deref()
+                    .and_then(action_for)
+                    .map_or("Empty", |a| short_label(a.info()));
+                ui.menu_button(name, |ui| {
+                    ui.set_max_height(360.0);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if slot_choices(ui, slot) {
+                            ui.close_menu();
+                        }
+                    });
+                });
+                ui.end_row();
+            }
+        });
 }
 
 /// "Calibrate from test strokes": a pad to draw a few strokes on with the
@@ -344,6 +441,100 @@ fn keyboard_layout_row(app: &mut PainterApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Touch mode's gestures (what `app::input::touch` and the panels
+/// recognise), listed first in Help → Gestures & Shortcuts.
+pub(crate) const TOUCH_GESTURES: &[(&str, &str)] = &[
+    (
+        "One finger",
+        "Paint (pans instead when \"Paint with one finger\" is off)",
+    ),
+    (
+        "Two fingers",
+        "Pan, pinch to zoom, twist to rotate (snaps upright near 0°)",
+    ),
+    ("Two-finger tap", "Undo"),
+    (
+        "Two fingers held still",
+        "Undo again and again until you lift",
+    ),
+    ("Three-finger tap", "Redo"),
+    (
+        "Three fingers held still",
+        "QuickMenu: six actions you choose",
+    ),
+    (
+        "One finger held still",
+        "Pick a colour; lift to go back to your tool",
+    ),
+    ("Long press a layer, brush, swatch or frame", "Its menu"),
+    (
+        "Long press a slider",
+        "Type a value; drag above or below it for fine steps",
+    ),
+    (
+        "Drag the colour swatch onto the canvas",
+        "Fill there; hold to slide the threshold",
+    ),
+    ("Tab at the left edge", "Bring back the hidden tools"),
+    (
+        "Ctrl / Alt / Shift keys, bottom left",
+        "Tap to keep one down, or hold it while you paint",
+    ),
+];
+
+/// A heading and `(gesture, what)` rows, as the shortcuts window shows them.
+fn gesture_rows(ui: &mut egui::Ui, title: &str, rows: &[(&str, &str)]) {
+    ui.label(
+        egui::RichText::new(title)
+            .small()
+            .strong()
+            .color(crate::ui::style::TEXT_DIM),
+    );
+    egui::Grid::new(title).num_columns(2).show(ui, |ui| {
+        for (gesture, what) in rows {
+            ui.label(egui::RichText::new(*gesture).strong());
+            ui.label(*what);
+            ui.end_row();
+        }
+    });
+}
+
+/// Touch mode, the first times: the gestures that aren't on any button, over
+/// the canvas until dismissed (Settings brings it back).
+pub(crate) fn gesture_hints(app: &mut PainterApp, ctx: &egui::Context) {
+    if !app.workspace.touch_mode || app.workspace.ui.hints_seen {
+        return;
+    }
+    const HINTS: [&str; 5] = [
+        "Two fingers: pan, pinch to zoom, twist to rotate",
+        "Tap two fingers to undo, three to redo; hold two to keep undoing",
+        "Hold a finger still on the canvas to pick a colour",
+        "Long press a layer, brush or slider for more",
+        "Three fingers held still: the QuickMenu",
+    ];
+    egui::Window::new("Touch gestures")
+        .id(egui::Id::new("gesture_hints"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_max_width(360.0);
+            for hint in HINTS {
+                ui.label(format!("• {hint}"));
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Got it").clicked() {
+                    app.workspace.ui.hints_seen = true;
+                }
+                if ui.button("All gestures…").clicked() {
+                    app.workspace.ui.hints_seen = true;
+                    app.modal_state.show_shortcuts = true;
+                }
+            });
+        });
+}
+
 /// Keys and gestures that aren't commands to rebind: `(keys, what)` rows
 /// shown under each group of the shortcuts window.
 const FIXED: &[(&str, &[(&str, &str)])] = &[
@@ -374,8 +565,8 @@ const FIXED: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl + X / C / V", "Cut / copy / paste (as a new layer)"),
             ("Ctrl + Shift + C", "Copy everything visible (merged)"),
             ("Double-click a layer", "Rename it (folders too)"),
-            ("Two-finger tap", "Undo"),
-            ("Three-finger tap", "Redo"),
+            ("Two-finger tap", "Undo (hold: keep undoing)"),
+            ("Three-finger tap", "Redo (hold: QuickMenu)"),
         ],
     ),
     (
@@ -445,54 +636,64 @@ pub fn shortcuts_window(app: &mut PainterApp, ctx: &egui::Context) {
         .clamp(1.0, 3.0) as usize;
     let columns = shortcut_columns(columns);
     let mut open = true;
-    egui::Window::new("Keyboard Shortcuts")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show_fitted(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    egui::RichText::new(
-                        "Click a shortcut, then press the new keys (Esc: cancel). \
+    let touch = app.workspace.touch_mode;
+    egui::Window::new(if touch {
+        "Gestures & Shortcuts"
+    } else {
+        "Keyboard Shortcuts"
+    })
+    .id(egui::Id::new("shortcuts_window"))
+    .open(&mut open)
+    .collapsible(false)
+    .resizable(false)
+    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    .show_fitted(ctx, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Click a shortcut, then press the new keys (Esc: cancel). \
                          + adds another key, × leaves it without one.",
-                    )
-                    .small()
-                    .color(crate::ui::style::TEXT_DIM),
-                );
-                let changed = keymap::ACTIONS
-                    .iter()
-                    .any(|i| !app.workspace.keymap.is_default(i.action));
-                if ui
-                    .add_enabled(changed, egui::Button::new("Reset All"))
-                    .clicked()
-                {
-                    app.workspace.keymap.reset_all();
-                    set_notice(ctx, None);
-                }
-            });
-            if let Some(notice) = notice(ctx) {
-                ui.label(egui::RichText::new(notice).color(crate::ui::style::TEXT_STRONG));
+                )
+                .small()
+                .color(crate::ui::style::TEXT_DIM),
+            );
+            let changed = keymap::ACTIONS
+                .iter()
+                .any(|i| !app.workspace.keymap.is_default(i.action));
+            if ui
+                .add_enabled(changed, egui::Button::new("Reset All"))
+                .clicked()
+            {
+                app.workspace.keymap.reset_all();
+                set_notice(ctx, None);
             }
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .max_height((screen.height() - 150.0).max(200.0))
-                .show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        for (c, column) in columns.iter().enumerate() {
-                            if c > 0 {
-                                ui.separator();
-                            }
-                            ui.vertical(|ui| {
-                                ui.set_width(SHORTCUT_COLUMN_WIDTH - 24.0);
-                                for group in column {
-                                    shortcut_group(app, ui, group);
-                                }
-                            });
-                        }
-                    });
-                });
         });
+        if let Some(notice) = notice(ctx) {
+            ui.label(egui::RichText::new(notice).color(crate::ui::style::TEXT_STRONG));
+        }
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .max_height((screen.height() - 150.0).max(200.0))
+            .show(ui, |ui| {
+                if touch {
+                    gesture_rows(ui, "TOUCH GESTURES", TOUCH_GESTURES);
+                    ui.separator();
+                }
+                ui.horizontal_top(|ui| {
+                    for (c, column) in columns.iter().enumerate() {
+                        if c > 0 {
+                            ui.separator();
+                        }
+                        ui.vertical(|ui| {
+                            ui.set_width(SHORTCUT_COLUMN_WIDTH - 24.0);
+                            for group in column {
+                                shortcut_group(app, ui, group);
+                            }
+                        });
+                    }
+                });
+            });
+    });
     app.modal_state.show_shortcuts = open;
 }
 

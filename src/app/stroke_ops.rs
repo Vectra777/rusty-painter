@@ -66,9 +66,10 @@ impl PainterApp {
 
     /// Wet paint dries on (between strokes): each layer's, by the time
     /// passed, in steps of [`crate::canvas::wet::STEP`] (at most four a
-    /// frame, worked out off the UI thread). Returns
-    /// whether any is still wet (to keep the frames coming).
-    pub(crate) fn wet_tick(&mut self) -> bool {
+    /// frame, worked out off the UI thread). Returns whether to keep the
+    /// frames coming; waiting for the next step, it asks `ctx` for a frame
+    /// then instead.
+    pub(crate) fn wet_tick(&mut self, ctx: &egui::Context) -> bool {
         let wet: Vec<(usize, std::sync::Arc<crate::canvas::wet::WetLayer>)> =
             (self.canvas.layers.iter())
                 .enumerate()
@@ -93,7 +94,10 @@ impl PainterApp {
         let steps = ((now - last).as_secs_f64() / crate::canvas::wet::STEP) as usize;
         if steps == 0 {
             self.workspace.wet_clock.get_or_insert(now);
-            return true;
+            // (Not a frame each vsync meanwhile: one when the step is due.)
+            let due = std::time::Duration::from_secs_f64(crate::canvas::wet::STEP);
+            ctx.request_repaint_after(due.saturating_sub(now - last));
+            return false;
         }
         self.workspace.wet_clock = Some(now);
         // (Worked out off the UI thread: a big wash's step takes a frame's
@@ -347,11 +351,12 @@ impl PainterApp {
             self.workspace.animation.playing = false;
             self.leave_cached_frame();
         }
-        // On a moved layer: where the pointer is on its own pixels.
-        let pos = self.to_layer_space(pos);
         // A stroke still running (a second press without a release) is
         // ended first: replacing it would lose its undo step.
         self.finish_stroke();
+        self.brush_state.last_stroke_end = Some((pos, pressure));
+        // On a moved layer: where the pointer is on its own pixels.
+        let pos = self.to_layer_space(pos);
         // On a vector layer the brush and eraser draw and erase lines.
         if matches!(self.active_tool, crate::app::tools::Tool::Brush)
             && self.vector_stroke_begin(pos, pressure)
@@ -464,6 +469,9 @@ impl PainterApp {
     }
 
     pub(crate) fn add_stroke_point(&mut self, pos: Vec2, pressure: f32) {
+        if self.brush_state.is_drawing {
+            self.brush_state.last_stroke_end = Some((pos, pressure));
+        }
         let pos = self.to_layer_space(pos);
         if self.vector_stroke_add(pos, pressure) {
             return;
@@ -493,6 +501,24 @@ impl PainterApp {
                 awaiting.take(),
             );
         }
+    }
+
+    /// Shift+click with the brush: a straight line from where the last
+    /// stroke ended to `pos` (as Photoshop and Krita draw one), not
+    /// smoothed; a stroke from `pos` when there was none before.
+    pub(crate) fn stroke_line_from_last(&mut self, pos: Vec2, pressure: f32) {
+        let Some((from, from_pressure)) = self.brush_state.last_stroke_end else {
+            return self.start_stroke_with_pressure(pos, pressure);
+        };
+        // (The press's measured pressure is this end's, not the start's.)
+        let awaiting = self.viewport.touch.pen_awaiting.take();
+        let brush = &mut self.brush_state.brush;
+        let smoothing =
+            std::mem::replace(&mut brush.stabilizer_algorithm, StabilizerAlgorithm::None);
+        self.start_stroke_with_pressure(from, from_pressure);
+        self.brush_state.brush.stabilizer_algorithm = smoothing;
+        self.viewport.touch.pen_awaiting = awaiting;
+        self.add_stroke_point(pos, pressure);
     }
 
     /// Where the pen is predicted to go next (canvas points, pressures
@@ -898,6 +924,36 @@ mod tests {
     }
 
     #[test]
+    fn an_alpha_locked_stroke_recolours_paint_and_leaves_empty_tiles_alone() {
+        // Tile (0, 0) painted red; the stroke runs on across empty tiles.
+        let mut app = wet_app();
+        let red = vec![Color32::from_rgb(200, 0, 0); 64 * 64];
+        app.canvas.set_layer_tile_data(1, 0, 0, red);
+        app.canvas_mut().layers[1].alpha_locked = true;
+        wet_stroke(
+            &mut app,
+            false,
+            Vec2::new(30.0, 32.0),
+            Vec2::new(170.0, 32.0),
+            |_| {},
+        );
+        assert_eq!(
+            layer_px(&app, 30, 32),
+            Color32::from_rgb(30, 60, 200),
+            "recoloured"
+        );
+        assert_eq!(layer_px(&app, 100, 32), Color32::TRANSPARENT);
+        // The empty tiles weren't created, nor kept for undo.
+        assert_eq!(app.canvas.layer_tile_keys(1), vec![(0, 0)]);
+        let (undo, _) = app.layer_state.history.stacks();
+        let step = undo.last().expect("the stroke");
+        assert!(
+            step.tiles.iter().all(|t| (t.tx, t.ty) == (0, 0)),
+            "only the painted tile"
+        );
+    }
+
+    #[test]
     fn wet_paint_keeps_opacity_erasers_alpha_lock_and_what_was_painted_meanwhile() {
         use crate::brush_engine::brush_options::BlendMode;
         let dab = Vec2::new(30.0, 32.0);
@@ -1256,5 +1312,74 @@ mod tests {
         assert_eq!(app.brush_state.string.unwrap().tip, Vec2::new(30.0, 10.0));
         app.finish_stroke();
         assert!(app.brush_state.string.is_none());
+    }
+
+    #[test]
+    fn shift_click_draws_a_straight_line_on_from_the_last_stroke() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(128, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        let brush = &mut app.brush_state.brush;
+        brush.brush_options.diameter = 6.0;
+        brush.brush_options.hardness = 100.0;
+        // Smoothing doesn't bend the line.
+        brush.stabilizer_algorithm = StabilizerAlgorithm::Simple;
+        brush.stabilizer = 0.9;
+        let alpha = |app: &crate::PainterApp, x: i32, y: i32| {
+            app.canvas
+                .get_layer_tile_data(1, x / 64, y / 64)
+                .map_or(0, |t| t[(y % 64 * 64 + x % 64) as usize].a())
+        };
+        app.start_stroke_with_pressure(Vec2::new(10.0, 10.0), 1.0);
+        app.add_stroke_point(Vec2::new(20.0, 10.0), 1.0);
+        app.finish_stroke();
+        app.release_canvas();
+        assert_eq!(
+            app.brush_state.last_stroke_end,
+            Some((Vec2::new(20.0, 10.0), 1.0))
+        );
+        assert_eq!(alpha(&app, 70, 40), 0);
+        app.stroke_line_from_last(Vec2::new(120.0, 60.0), 1.0);
+        app.finish_stroke();
+        app.release_canvas();
+        // Along the straight line from (20, 10) to (120, 60), across tiles.
+        for x in [40, 70, 100] {
+            let y = 10 + (x - 20) / 2;
+            assert!(alpha(&app, x, y) > 200, "({x}, {y})");
+        }
+        assert_eq!(
+            app.brush_state.brush.stabilizer_algorithm,
+            StabilizerAlgorithm::Simple
+        );
+        // One undo step each.
+        app.apply_history(false);
+        assert_eq!(alpha(&app, 70, 40), 0);
+        assert!(alpha(&app, 15, 10) > 200, "the first stroke stays");
+    }
+
+    #[test]
+    fn wet_paint_waiting_to_dry_asks_for_a_frame_when_its_step_is_due() {
+        let mut app = crate::project::tests::test_app_pub(Canvas::new(64, 64, Color32::WHITE, 64));
+        app.canvas_mut().active_layer_idx = 1;
+        let brush = &mut app.brush_state.brush;
+        brush.brush_options.diameter = 10.0;
+        brush.wet = Some(crate::canvas::wet::WetPaint {
+            drying: 2.0,
+            ..Default::default()
+        });
+        app.start_stroke_with_pressure(Vec2::new(20.0, 32.0), 1.0);
+        app.add_stroke_point(Vec2::new(40.0, 32.0), 1.0);
+        app.finish_stroke();
+        app.settle_strokes();
+        let ctx = eframe::egui::Context::default();
+        // The step's clock starts: not every frame until it's due.
+        app.workspace.wet_clock = Some(std::time::Instant::now());
+        assert!(!app.wet_tick(&ctx), "waits for the step");
+        // Due: a step is worked out (and frames come to show it).
+        app.workspace.wet_clock = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs_f64(crate::canvas::wet::STEP * 2.0),
+        );
+        assert!(app.wet_tick(&ctx));
+        app.take_wet_drying(true);
     }
 }

@@ -71,26 +71,194 @@ pub fn import_svg(text: &str) -> Result<(VectorLayer, [u32; 2], ImportReport), S
     ))
 }
 
-/// An SVG file as a document: its size, one vector layer of what it draws.
+/// An SVG file as a document: its size, its drawing as vector layers and
+/// its pictures (`<image>`, as this app's own SVG keeps paint layers) as
+/// paint layers, in their order. When something has no form here (text,
+/// clipping, masks, filters), the whole picture comes too, as a hidden top
+/// layer, and the user hears what was left out.
 pub fn decode_svg(bytes: &[u8]) -> Result<crate::project::psd::PsdDocument, String> {
+    use crate::project::psd::PsdLayer;
     let text = std::str::from_utf8(bytes).map_err(|_| "The SVG isn't UTF-8 text")?;
-    let (layer, [w, h], report) = import_svg(text)?;
-    if let Some(message) = report.message() {
-        log::info!("{message}");
-    }
-    let (w, h) = (w as usize, h as usize);
+    let tree = usvg::Tree::from_str(text, &usvg::Options::default())
+        .map_err(|e| format!("Not an SVG this can read: {e}"))?;
+    let size = tree.size();
+    let (w, h) = (
+        size.width().ceil().max(1.0) as usize,
+        size.height().ceil().max(1.0) as usize,
+    );
     crate::app::document::validate_canvas_size(w, h)?;
+    let ours = written_by_us(text);
+    let mut report = ImportReport {
+        left_out: ours.text,
+        ..Default::default()
+    };
     let full = [0, 0, w as i32, h as i32];
-    let pixels = crate::canvas::vector::render_region(layer.items(), full);
+    let picture_layer = |name: &str, pixels| PsdLayer {
+        vector: None,
+        ..vector_layer(name, full, pixels, VectorLayer::default())
+    };
+    let mut layers = Vec::new();
+    // Vector items in a row become one vector layer.
+    let mut run = Vec::new();
+    let flush = |run: &mut Vec<VectorItem>, layers: &mut Vec<PsdLayer>| {
+        if !run.is_empty() {
+            let layer = VectorLayer::from_items(std::mem::take(run));
+            let pixels = crate::canvas::vector::render_region(layer.items(), full);
+            layers.push(vector_layer("Vector", full, pixels, layer));
+        }
+    };
+    // Each top-level element in turn (this app's SVG: one per layer).
+    for node in tree.root().children() {
+        let mut images = Vec::new();
+        node_items(node, &ours, &mut run, &mut report, Some(&mut images), 1.0);
+        if images.is_empty() {
+            continue;
+        }
+        flush(&mut run, &mut layers);
+        let name = ours.names.get(node.id()).map_or("Picture", String::as_str);
+        for (image, opacity) in images {
+            match image_pixels(&image, w, h) {
+                Some(pixels) => {
+                    let mut layer = picture_layer(name, pixels);
+                    layer.opacity = opacity;
+                    layers.push(layer);
+                }
+                None => report.left_out += 1,
+            }
+        }
+    }
+    flush(&mut run, &mut layers);
+    if layers.is_empty() {
+        layers.push(vector_layer(
+            "Vector",
+            full,
+            Vec::new(),
+            VectorLayer::default(),
+        ));
+    }
+    let mut notes = Vec::new();
+    if let Some(message) = report.message() {
+        // (Drawn without fonts or embedded pictures: text isn't in it, and
+        // the pictures are layers of their own.)
+        let beyond_text = report.approximated > 0 || report.left_out > ours.text;
+        notes.push(
+            match beyond_text.then(|| whole_picture(&tree, w, h)).flatten() {
+                Some(pixels) => {
+                    let mut layer = picture_layer("SVG picture (parts not brought across)", pixels);
+                    layer.visible = false;
+                    layers.push(layer);
+                    format!("{message}: the whole picture was added as a hidden top layer")
+                }
+                None => message,
+            },
+        );
+    }
     Ok(crate::project::psd::PsdDocument {
         width: w,
         height: h,
-        layers: vec![vector_layer("Vector", full, pixels.clone(), layer)],
-        composite: pixels,
+        layers,
+        composite: Vec::new(),
+        notes,
         depth: Default::default(),
         composite_deep: None,
         profile: Default::default(),
     })
+}
+
+/// A tiny-skia picture's pixels (premultiplied).
+fn pixmap_pixels(pixmap: &resvg::tiny_skia::Pixmap) -> Vec<eframe::egui::Color32> {
+    (pixmap.pixels().iter())
+        .map(|p| {
+            eframe::egui::Color32::from_rgba_premultiplied(p.red(), p.green(), p.blue(), p.alpha())
+        })
+        .collect()
+}
+
+/// `tree` drawn whole at `w`×`h`.
+fn whole_picture(tree: &usvg::Tree, w: usize, h: usize) -> Option<Vec<eframe::egui::Color32>> {
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w as u32, h as u32)?;
+    resvg::render(
+        tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    Some(pixmap_pixels(&pixmap))
+}
+
+/// An `<image>` drawn where it sits on a `w`×`h` canvas, premultiplied;
+/// `None` if its picture can't be read.
+fn image_pixels(image: &usvg::Image, w: usize, h: usize) -> Option<Vec<eframe::egui::Color32>> {
+    use eframe::egui::Color32;
+    use resvg::tiny_skia;
+    if !image.is_visible() {
+        return None;
+    }
+    let size = image.size();
+    let data = match image.kind() {
+        usvg::ImageKind::PNG(d)
+        | usvg::ImageKind::JPEG(d)
+        | usvg::ImageKind::GIF(d)
+        | usvg::ImageKind::WEBP(d) => d,
+        usvg::ImageKind::SVG(tree) => {
+            let mut pixmap = tiny_skia::Pixmap::new(w as u32, h as u32)?;
+            let t = image.abs_transform().pre_scale(
+                size.width() / tree.size().width(),
+                size.height() / tree.size().height(),
+            );
+            resvg::render(tree, t, &mut pixmap.as_mut());
+            return Some(pixmap_pixels(&pixmap));
+        }
+    };
+    let img = image::load_from_memory(data).ok()?.to_rgba8();
+    let (iw, ih) = (img.width(), img.height());
+    if iw == 0 || ih == 0 {
+        return None;
+    }
+    let t = image
+        .abs_transform()
+        .pre_scale(size.width() / iw as f32, size.height() / ih as f32);
+    // Pixel for pixel where it sits on whole pixels (this app's own
+    // pictures): copied as they are, not resampled.
+    let whole = |v: f32| (v - v.round()).abs() < 1e-4;
+    if (t.sx - 1.0).abs() < 1e-4
+        && (t.sy - 1.0).abs() < 1e-4
+        && t.kx == 0.0
+        && t.ky == 0.0
+        && whole(t.tx)
+        && whole(t.ty)
+    {
+        let mut out = vec![Color32::TRANSPARENT; w * h];
+        let (ox, oy) = (t.tx.round() as i64, t.ty.round() as i64);
+        for (y, row) in img.rows().enumerate() {
+            let cy = oy + y as i64;
+            if cy < 0 || cy >= h as i64 {
+                continue;
+            }
+            for (x, p) in row.enumerate() {
+                let cx = ox + x as i64;
+                if cx >= 0 && cx < w as i64 {
+                    out[cy as usize * w + cx as usize] =
+                        Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]);
+                }
+            }
+        }
+        return Some(out);
+    }
+    let premultiplied: Vec<u8> = (img.pixels())
+        .flat_map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]).to_array())
+        .collect();
+    let src = tiny_skia::Pixmap::from_vec(premultiplied, tiny_skia::IntSize::from_wh(iw, ih)?)?;
+    let mut pixmap = tiny_skia::Pixmap::new(w as u32, h as u32)?;
+    let quality = match image.rendering_mode() {
+        usvg::ImageRendering::OptimizeSpeed => tiny_skia::FilterQuality::Nearest,
+        _ => tiny_skia::FilterQuality::Bicubic,
+    };
+    let paint = tiny_skia::PixmapPaint {
+        quality,
+        ..Default::default()
+    };
+    pixmap.draw_pixmap(0, 0, src.as_ref(), &paint, t, None);
+    Some(pixmap_pixels(&pixmap))
 }
 
 /// An imported document's layer holding `layer` (its pixels `pixels`,
@@ -115,6 +283,7 @@ pub(crate) fn vector_layer(
         position_locked: false,
         mask: None,
         vector: Some(Box::new(layer)),
+        fill: None,
     }
 }
 
@@ -151,6 +320,8 @@ struct Ours {
     markers: HashMap<String, (Marker, Marker)>,
     /// Text elements (which have no vector form here).
     text: usize,
+    /// Layer names (`data-name`), by element id.
+    names: HashMap<String, String>,
 }
 
 fn written_by_us(text: &str) -> Ours {
@@ -159,8 +330,9 @@ fn written_by_us(text: &str) -> Ours {
         lines: HashMap::new(),
         markers: HashMap::new(),
         text: 0,
+        names: HashMap::new(),
     };
-    if !text.contains("data-rp-") && !text.contains("<text") {
+    if !text.contains("data-rp-") && !text.contains("<text") && !text.contains("data-name") {
         return ours;
     }
     let mut reader = quick_xml::Reader::from_str(text);
@@ -171,17 +343,28 @@ fn written_by_us(text: &str) -> Ours {
                     ours.text += 1;
                 }
                 let mut id = None;
-                let (mut points, mut markers) = (None, None);
+                let (mut points, mut markers, mut name) = (None, None, None);
                 for a in e.attributes().flatten() {
                     let value = String::from_utf8_lossy(&a.value).into_owned();
                     match a.key.as_ref() {
                         b"id" => id = Some(value),
+                        // (Escaped as this app's export escapes it.)
+                        b"data-name" => {
+                            name = Some(
+                                (value.replace("&lt;", "<").replace("&gt;", ">"))
+                                    .replace("&quot;", "\"")
+                                    .replace("&amp;", "&"),
+                            )
+                        }
                         b"data-rp-points" => points = Some(value),
                         b"data-rp-markers" => markers = Some(value),
                         _ => {}
                     }
                 }
                 let Some(id) = id else { continue };
+                if let Some(name) = name {
+                    ours.names.insert(id.clone(), name);
+                }
                 if let Some(p) = points {
                     let pts: Vec<[f32; 3]> = (p.split_whitespace())
                         .filter_map(|t| {
@@ -218,61 +401,79 @@ fn marker_named(name: &str) -> Marker {
 
 fn group_items(g: &usvg::Group, ours: &Ours, out: &mut Vec<VectorItem>, report: &mut ImportReport) {
     for node in g.children() {
-        match node {
-            usvg::Node::Group(inner) => {
-                if inner.clip_path().is_some()
-                    || inner.mask().is_some()
-                    || !inner.filters().is_empty()
-                {
-                    report.approximated += 1;
-                }
-                let mut items = Vec::new();
-                group_items(inner, ours, &mut items, report);
-                if items.is_empty() {
-                    continue;
-                }
-                let opacity = inner.opacity().get();
-                // usvg makes groups for transforms and the like: only those
-                // that are something (faded, or ours) stay groups.
-                if opacity < 1.0
-                    || inner.id().starts_with("rpg-")
-                    || items.len() > 1 && !inner.id().is_empty()
-                {
-                    out.push(VectorItem::Group(VectorGroup {
-                        name: String::new(),
-                        opacity,
-                        visible: true,
-                        items,
-                    }));
-                } else {
-                    out.extend(items);
-                }
+        node_items(node, ours, out, report, None, 1.0);
+    }
+}
+
+/// One element's items into `out`. Its pictures go into `images` with
+/// their opacity (times `opacity`, their groups'), or without it are left
+/// out.
+fn node_items(
+    node: &usvg::Node,
+    ours: &Ours,
+    out: &mut Vec<VectorItem>,
+    report: &mut ImportReport,
+    mut images: Option<&mut Vec<(usvg::Image, f32)>>,
+    opacity: f32,
+) {
+    match node {
+        usvg::Node::Group(inner) => {
+            if inner.clip_path().is_some() || inner.mask().is_some() || !inner.filters().is_empty()
+            {
+                report.approximated += 1;
             }
-            usvg::Node::Path(p) => {
-                // Markers this app drew as paths: the shape keeps them.
-                if p.id().starts_with("rpm-") || !p.is_visible() {
-                    continue;
-                }
-                if let Some(points) = ours.lines.get(p.id()) {
-                    let (colour, opacity) = match p.fill().map(|f| (f.paint(), f.opacity().get())) {
-                        Some((usvg::Paint::Color(c), o)) => ([c.red, c.green, c.blue], o),
-                        _ => ([0, 0, 0], 1.0),
-                    };
-                    out.push(VectorItem::Line(VectorStroke {
-                        points: points.clone(),
-                        colour,
-                        opacity,
-                    }));
-                    continue;
-                }
-                if let Some(shape) = path_shape(p, ours, report) {
-                    out.push(VectorItem::Shape(shape));
-                }
+            let own = inner.opacity().get();
+            let mut items = Vec::new();
+            for child in inner.children() {
+                let images = images.as_deref_mut();
+                node_items(child, ours, &mut items, report, images, opacity * own);
             }
-            usvg::Node::Image(_) => report.left_out += 1,
-            // (Counted from the source: see `written_by_us`.)
-            usvg::Node::Text(_) => {}
+            if items.is_empty() {
+                return;
+            }
+            // usvg makes groups for transforms and the like: only those
+            // that are something (faded, or ours) stay groups.
+            if own < 1.0
+                || inner.id().starts_with("rpg-")
+                || items.len() > 1 && !inner.id().is_empty()
+            {
+                out.push(VectorItem::Group(VectorGroup {
+                    name: String::new(),
+                    opacity: own,
+                    visible: true,
+                    items,
+                }));
+            } else {
+                out.extend(items);
+            }
         }
+        usvg::Node::Path(p) => {
+            // Markers this app drew as paths: the shape keeps them.
+            if p.id().starts_with("rpm-") || !p.is_visible() {
+                return;
+            }
+            if let Some(points) = ours.lines.get(p.id()) {
+                let (colour, opacity) = match p.fill().map(|f| (f.paint(), f.opacity().get())) {
+                    Some((usvg::Paint::Color(c), o)) => ([c.red, c.green, c.blue], o),
+                    _ => ([0, 0, 0], 1.0),
+                };
+                out.push(VectorItem::Line(VectorStroke {
+                    points: points.clone(),
+                    colour,
+                    opacity,
+                }));
+                return;
+            }
+            if let Some(shape) = path_shape(p, ours, report) {
+                out.push(VectorItem::Shape(shape));
+            }
+        }
+        usvg::Node::Image(image) => match images {
+            Some(images) => images.push(((**image).clone(), opacity)),
+            None => report.left_out += 1,
+        },
+        // (Counted from the source: see `written_by_us`.)
+        usvg::Node::Text(_) => {}
     }
 }
 
@@ -802,5 +1003,42 @@ mod tests {
         assert_eq!(size, [300, 150]);
         let b = layer.items()[0].bounds();
         assert!((b[2] - 300).abs() <= 3, "{b:?}");
+    }
+
+    #[test]
+    fn our_own_svg_opens_with_its_paint_layers() {
+        use crate::canvas::Canvas;
+        use eframe::egui::Color32;
+        let mut canvas = Canvas::new(100, 70, Color32::WHITE, 64);
+        canvas.layers[1].name = "Sky & sea".into();
+        let mut tile = vec![Color32::TRANSPARENT; 64 * 64];
+        tile[10 * 64 + 20] = Color32::from_rgb(200, 30, 40);
+        canvas.set_layer_tile_data(1, 0, 0, tile);
+        canvas.layers[1].opacity = 0.5;
+        let svg = crate::project::svg::document_svg(&canvas).unwrap();
+        let doc = decode_svg(svg.as_bytes()).unwrap();
+        assert!(doc.notes.is_empty(), "{:?}", doc.notes);
+        let paint = (doc.layers.iter())
+            .find(|l| l.name == "Sky & sea")
+            .expect("the paint layer came back");
+        assert!(paint.vector.is_none());
+        assert!((paint.opacity - 0.5).abs() < 0.01);
+        assert_eq!(paint.pixels[10 * 100 + 20], Color32::from_rgb(200, 30, 40));
+        assert_eq!(paint.pixels[10 * 100 + 21], Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn what_has_no_form_here_brings_the_whole_picture_and_a_note() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+            <clipPath id="c"><rect width="20" height="40"/></clipPath>
+            <g clip-path="url(#c)"><rect width="40" height="40" fill="#0000ff"/></g>
+        </svg>"##;
+        let doc = decode_svg(svg.as_bytes()).unwrap();
+        assert_eq!(doc.notes.len(), 1);
+        let whole = doc.layers.last().unwrap();
+        assert!(!whole.visible && whole.vector.is_none());
+        assert_eq!(whole.pixels[5 * 40 + 5].b(), 255, "clipped in");
+        assert_eq!(whole.pixels[5 * 40 + 30].a(), 0, "clipped out");
+        assert!(doc.layers[0].vector.is_some(), "the shapes still come");
     }
 }

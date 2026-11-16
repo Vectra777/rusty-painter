@@ -284,10 +284,18 @@ impl FileEntry {
 
 /// Largest entry inflated from another app's archive (a brush bundle).
 const MAX_INFLATED: usize = 256 << 20;
+/// The most a whole archive may unpack to: its entries' limits alone would
+/// let a few kilobytes of tiny entries ask for gigabytes.
+const MAX_TOTAL_INFLATED: usize = 1 << 30;
 
 /// Every entry of a ZIP archive, stored or deflated (other apps' archives,
 /// such as `.bundle` brush sets, compress theirs): `(name, data)`.
 pub(crate) fn read_all(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    read_all_within(bytes, MAX_TOTAL_INFLATED)
+}
+
+/// [`read_all`], unpacking to `total` bytes at most.
+fn read_all_within(bytes: &[u8], total: usize) -> Result<Vec<(String, Vec<u8>)>, String> {
     let broken = || "Damaged archive".to_string();
     let search_from = bytes.len().saturating_sub(22 + usize::from(u16::MAX));
     let end = (search_from..=bytes.len().saturating_sub(22))
@@ -297,6 +305,7 @@ pub(crate) fn read_all(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let count = get16(bytes, end + 10).ok_or_else(broken)?;
     let mut at = get32(bytes, end + 16).ok_or_else(broken)? as usize;
     let mut out = Vec::with_capacity(count as usize);
+    let mut left = total;
     for _ in 0..count {
         if get32(bytes, at) != Some(CENTRAL_HEADER) {
             return Err(broken());
@@ -325,14 +334,17 @@ pub(crate) fn read_all(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         let data = match method {
             0 => raw.to_vec(),
             8 => {
-                if size > MAX_INFLATED {
+                if size > MAX_INFLATED.min(left) {
                     return Err(format!("{name} is too large"));
                 }
-                miniz_oxide::inflate::decompress_to_vec_with_limit(raw, MAX_INFLATED)
+                miniz_oxide::inflate::decompress_to_vec_with_limit(raw, MAX_INFLATED.min(left))
                     .map_err(|_| broken())?
             }
             _ => return Err(format!("Unsupported compression for {name}")),
         };
+        left = left
+            .checked_sub(data.len())
+            .ok_or_else(|| "The archive unpacks to too much".to_string())?;
         if crc32fast::hash(&data) != crc {
             return Err(broken());
         }
@@ -343,6 +355,17 @@ pub(crate) fn read_all(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_archive_unpacking_to_too_much_is_refused() {
+        let mut zip = super::ZipWriter::default();
+        for i in 0..4 {
+            zip.add(&format!("e{i}"), &vec![0u8; 100_000]).unwrap();
+        }
+        let bytes = zip.finish().unwrap();
+        assert_eq!(super::read_all_within(&bytes, 400_000).unwrap().len(), 4);
+        assert!(super::read_all_within(&bytes, 350_000).is_err());
+    }
+
     #[test]
     fn an_entry_reads_from_the_file_alone() {
         let mut zip = super::ZipWriter::default();

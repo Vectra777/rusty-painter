@@ -6,6 +6,7 @@ pub mod blend;
 pub mod blend_modes;
 pub mod color;
 pub mod color_profile;
+pub mod colorize;
 pub mod effects;
 pub mod fill;
 #[cfg(test)]

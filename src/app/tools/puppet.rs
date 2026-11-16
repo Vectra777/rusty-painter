@@ -14,7 +14,7 @@
 //! before it.
 
 use crate::PainterApp;
-use crate::canvas::history::{TileSnapshot, UndoAction};
+use crate::canvas::history::{SnapshotPixels, TileSnapshot, UndoAction};
 use crate::canvas::puppet::arap::PuppetMode;
 use crate::canvas::puppet::mesh::{PuppetMesh, PuppetShape};
 use crate::canvas::puppet::raster::{self, Picture};
@@ -70,6 +70,13 @@ pub struct PuppetSession {
     /// The layer's tiles as the session found them (what Cancel and undo
     /// put back).
     source: Tiles,
+    /// In a deeper document, the same at full depth.
+    source_deep: HashMap<(i32, i32), crate::canvas::storage::DeepTile>,
+    /// In a deeper document, the paint bent and what stays put (see
+    /// `original` and `base`) at full depth; empty in an 8-bit one, or for
+    /// a warp opened again (it bends the 8-bit paint it remembers).
+    original_deep: DeepTiles,
+    base_deep: DeepTiles,
     /// The paint the warp bends (the layer as it was before an earlier
     /// warp, when one is opened again).
     original: Arc<Tiles>,
@@ -181,6 +188,7 @@ impl PainterApp {
         self.bake_impasto(active);
         self.release_canvas();
         let source = self.canvas.capture_layer_pixels(active);
+        let source_deep = self.canvas.capture_layer_deep(active);
         // A warp of these very pixels: open it again (unless a selection
         // says to warp a part of them anew).
         let fresh = self.selection_manager.has_selection();
@@ -214,10 +222,20 @@ impl PainterApp {
         }
         let ts = self.canvas.tile_size();
         let (bent, base) = split(&original, part.as_deref(), ts);
-        let Some(picture) = picture_of(&bent, ts) else {
+        let Some(mut picture) = picture_of(&bent, ts) else {
             self.report("Nothing to warp here: the layer (or selection) is empty".into());
             return false;
         };
+        let original_deep: DeepTiles = match memory {
+            Some(_) => DeepTiles::new(),
+            None => (source_deep.iter())
+                .map(|(&k, d)| (k, (0..d.len()).map(|i| d.linear(i)).collect()))
+                .collect(),
+        };
+        let (bent_deep, base_deep) = split_deep(&original_deep, part.as_deref(), ts);
+        if !bent_deep.is_empty() {
+            picture.deep = Some(deep_picture(&picture, &bent_deep, ts));
+        }
         let settings = self.workspace.puppet;
         let Some(mut puppet) =
             shape_of(&picture, settings.density, settings.expansion).and_then(Puppet::new)
@@ -236,6 +254,9 @@ impl PainterApp {
         self.layer_state.puppet = Some(PuppetSession {
             layer_id,
             source,
+            source_deep,
+            original_deep,
+            base_deep,
             original,
             part,
             base,
@@ -626,7 +647,11 @@ impl PainterApp {
         };
         let ts = self.canvas.tile_size();
         let size = (self.canvas.width(), self.canvas.height());
-        let mut drawn = if s.puppet.is_identity() {
+        // A deeper document: drawn at full depth (see `redraw_deep`).
+        let mut drawn_deep = (!s.original_deep.is_empty()).then(|| redraw_deep(s, ts, size));
+        let mut drawn = if drawn_deep.is_some() {
+            HashMap::new()
+        } else if s.puppet.is_identity() {
             // At rest: exactly the paint as it was, where it was drawn.
             s.written
                 .iter()
@@ -677,10 +702,21 @@ impl PainterApp {
         let mut touched: Vec<(i32, i32)> = s.written.iter().copied().collect();
         touched.extend(drawn.keys().filter(|k| !s.written.contains(k)));
         let mut damage: Option<[i32; 4]> = None;
+        let depth = self.canvas.depth();
+        if let Some(deep) = &drawn_deep {
+            touched.extend(deep.keys().filter(|k| !s.written.contains(k)));
+        }
         for key in touched {
-            match drawn.remove(&key) {
-                Some(data) => self.canvas.set_layer_tile_data(idx, key.0, key.1, data),
-                None => self.canvas.clear_layer_tile(idx, key.0, key.1),
+            if let Some(deep) = drawn_deep.as_mut() {
+                match deep.remove(&key).and_then(|px| deep_tile(depth, &px)) {
+                    Some(tile) => self.canvas.set_layer_tile_deep(idx, key.0, key.1, &tile),
+                    None => self.canvas.clear_layer_tile(idx, key.0, key.1),
+                }
+            } else {
+                match drawn.remove(&key) {
+                    Some(data) => self.canvas.set_layer_tile_data(idx, key.0, key.1, data),
+                    None => self.canvas.clear_layer_tile(idx, key.0, key.1),
+                }
             }
             s.written.insert(key);
             let t = ts as i32;
@@ -753,6 +789,7 @@ impl PainterApp {
             }
         }
         let ts = self.canvas.tile_size();
+        let depth = self.canvas.depth();
         let tiles = session
             .written
             .iter()
@@ -764,12 +801,15 @@ impl PainterApp {
                 y0: 0,
                 width: ts,
                 height: ts,
-                data: session
-                    .source
-                    .get(&(tx, ty))
-                    .cloned()
-                    .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
-                    .into(),
+                // At full depth in a deeper document, as it was.
+                data: match (session.source_deep.get(&(tx, ty)).cloned())
+                    .or_else(|| crate::canvas::storage::DeepTile::transparent(depth, ts * ts))
+                {
+                    Some(deep) => SnapshotPixels::Deep(deep),
+                    None => (session.source.get(&(tx, ty)).cloned())
+                        .unwrap_or_else(|| vec![Color32::TRANSPARENT; ts * ts])
+                        .into(),
+                },
             })
             .collect();
         self.push_undo(UndoAction {
@@ -796,9 +836,13 @@ impl PainterApp {
         };
         self.release_canvas();
         for &(tx, ty) in &session.written {
-            match session.source.get(&(tx, ty)) {
-                Some(data) => self.canvas.set_layer_tile_data(idx, tx, ty, data.clone()),
-                None => self.canvas.clear_layer_tile(idx, tx, ty),
+            match (
+                session.source_deep.get(&(tx, ty)),
+                session.source.get(&(tx, ty)),
+            ) {
+                (Some(deep), _) => self.canvas.set_layer_tile_deep(idx, tx, ty, deep),
+                (None, Some(data)) => self.canvas.set_layer_tile_data(idx, tx, ty, data.clone()),
+                (None, None) => self.canvas.clear_layer_tile(idx, tx, ty),
             }
         }
         self.mark_all_tiles_dirty();
@@ -908,6 +952,70 @@ fn split(original: &Tiles, part: Option<&Coverage>, ts: usize) -> (Tiles, Tiles)
     (bent, base)
 }
 
+/// [`PainterApp::puppet_redraw`]'s tiles at full depth: the bent part
+/// (drawn from the picture's full-depth pixels) over what stays.
+fn redraw_deep(s: &PuppetSession, ts: usize, size: (usize, usize)) -> DeepTiles {
+    if s.puppet.is_identity() {
+        return (s.written.iter())
+            .filter_map(|k| Some((*k, s.original_deep.get(k)?.clone())))
+            .collect();
+    }
+    let area = s.picture.width * s.picture.height;
+    let step = if s.drag.is_some() {
+        ((area as f32 / ROUGH_PIXELS).sqrt().ceil() as usize).clamp(1, 4)
+    } else {
+        1
+    };
+    let part = raster::render_values(
+        &s.picture,
+        &s.puppet.mesh,
+        &s.puppet.pos,
+        s.puppet.order(),
+        ts,
+        size,
+        step,
+    );
+    let mut out: DeepTiles = (part.into_iter())
+        .map(|(k, px)| (k, px.into_iter().map(|v| v.map(|c| c / 255.0)).collect()))
+        .collect();
+    let keys: Vec<(i32, i32)> = out.keys().chain(&s.written).copied().collect();
+    for key in keys {
+        let base = (s.base_deep.get(&key)).or_else(|| {
+            s.part
+                .is_some()
+                .then(|| s.original_deep.get(&key))
+                .flatten()
+        });
+        let Some(base) = base else {
+            continue;
+        };
+        match out.get_mut(&key) {
+            Some(top) => {
+                for (t, b) in top.iter_mut().zip(base) {
+                    let keep = 1.0 - t[3].clamp(0.0, 1.0);
+                    *t = std::array::from_fn(|c| t[c] + b[c] * keep);
+                }
+            }
+            None => {
+                out.insert(key, base.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Full-depth pixels as a tile at `depth` (`None` if nothing shows).
+fn deep_tile(
+    depth: crate::canvas::storage::Depth,
+    px: &[[f32; 4]],
+) -> Option<crate::canvas::storage::DeepTile> {
+    let mut tile = crate::canvas::storage::DeepTile::transparent(depth, px.len())?;
+    for (i, &v) in px.iter().enumerate() {
+        tile.set_linear(i, v);
+    }
+    (!tile.is_transparent()).then_some(tile)
+}
+
 /// `top` over `bottom`, premultiplied.
 fn over(top: Color32, bottom: Color32) -> Color32 {
     if top.a() == 255 || bottom.a() == 0 {
@@ -960,7 +1068,55 @@ fn picture_of(tiles: &Tiles, ts: usize) -> Option<Picture> {
         width: w,
         height: h,
         pixels,
+        deep: None,
     })
+}
+
+/// Full-depth pixels (premultiplied linear light) a tile.
+type DeepTiles = HashMap<(i32, i32), Vec<[f32; 4]>>;
+
+/// [`split`] at full depth.
+fn split_deep(original: &DeepTiles, part: Option<&Coverage>, ts: usize) -> (DeepTiles, DeepTiles) {
+    let Some(m) = part else {
+        return (original.clone(), DeepTiles::new());
+    };
+    let [x0, y0, x1, y1] = m.bounds();
+    let t = ts as i32;
+    let (mut bent, mut base) = (DeepTiles::new(), DeepTiles::new());
+    for (&(tx, ty), tile) in original {
+        if tx * t >= x1 || ty * t >= y1 || tx * t + t <= x0 || ty * t + t <= y0 {
+            continue;
+        }
+        let (mut inside, mut outside) = (tile.clone(), tile.clone());
+        for (i, (a, b)) in inside.iter_mut().zip(outside.iter_mut()).enumerate() {
+            let x = tx * t + (i % ts) as i32;
+            let y = ty * t + (i / ts) as i32;
+            let k = m.value(x, y) as f32 / 255.0;
+            *a = a.map(|v| v * k);
+            *b = b.map(|v| v * (1.0 - k));
+        }
+        bent.insert((tx, ty), inside);
+        base.insert((tx, ty), outside);
+    }
+    (bent, base)
+}
+
+/// `tiles` laid out as `picture`'s full-depth pixels (0..255).
+fn deep_picture(picture: &Picture, tiles: &DeepTiles, ts: usize) -> Vec<[f32; 4]> {
+    let (x0, y0, w, h) = (picture.x0, picture.y0, picture.width, picture.height);
+    let mut out = vec![[0.0; 4]; w * h];
+    for (&(tx, ty), tile) in tiles {
+        for (i, v) in tile.iter().enumerate() {
+            let (x, y) = (
+                tx * ts as i32 + (i % ts) as i32 - x0,
+                ty * ts as i32 + (i / ts) as i32 - y0,
+            );
+            if v[3] > 0.0 && x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                out[y as usize * w + x as usize] = v.map(|c| c * 255.0);
+            }
+        }
+    }
+    out
 }
 
 /// The picture's shape: points `density` apart, reaching `expansion`
@@ -1068,6 +1224,54 @@ mod tests {
         assert!(layer(&app) == before, "undo puts it back");
         app.apply_history(true);
         assert!(layer(&app) == bent, "redo bends it again");
+    }
+
+    /// A deeper document bends at full depth (a ramp too fine for 8 bits
+    /// stays smooth), and undo and Cancel put the full depth back.
+    #[test]
+    fn a_deeper_document_bends_at_full_depth_and_undoes_to_it() {
+        use crate::canvas::storage::{DeepTile, Depth};
+        let mut app = app();
+        app.canvas_mut().convert_depth(Depth::U16);
+        // The bar's tiles as a fine ramp: each row a little brighter.
+        for tx in 0..4 {
+            let mut deep = DeepTile::transparent(Depth::U16, 64 * 64).unwrap();
+            for i in 0..64 * 64 {
+                let (x, y) = (tx * 64 + i % 64, 64 + i / 64);
+                if (40..216).contains(&x) && (110..146).contains(&y) {
+                    let v = 0.2 + x as f32 * 0.00005;
+                    deep.set_linear(i, [v, v, v, 1.0]);
+                }
+            }
+            app.canvas_mut().set_layer_tile_deep(1, tx as i32, 1, &deep);
+        }
+        let before: Vec<_> = (0..4)
+            .map(|tx| app.canvas.get_layer_tile_deep(1, tx, 1).unwrap())
+            .collect();
+        bend(&mut app);
+        app.puppet_commit();
+        // By the left pin the paint barely moves: still the fine ramp.
+        let bent = app.canvas.get_layer_tile_deep(1, 0, 1).expect("still deep");
+        let mut row: Vec<u32> = (45..64)
+            .map(|x| (bent.linear((120 - 64) * 64 + x)[0] * 1e6) as u32)
+            .collect();
+        row.dedup();
+        assert!(row.len() > 12, "{} steps", row.len());
+        app.apply_history(false);
+        for (tx, b) in before.iter().enumerate() {
+            assert_eq!(
+                app.canvas.get_layer_tile_deep(1, tx as i32, 1).as_ref(),
+                Some(b)
+            );
+        }
+        bend(&mut app);
+        app.puppet_cancel();
+        for (tx, b) in before.iter().enumerate() {
+            assert_eq!(
+                app.canvas.get_layer_tile_deep(1, tx as i32, 1).as_ref(),
+                Some(b)
+            );
+        }
     }
 
     #[test]

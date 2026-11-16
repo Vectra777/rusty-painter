@@ -426,8 +426,8 @@ impl PainterApp {
 
     /// Change the document's structure with `change` (which says whether
     /// it changed anything) as one undo step: the whole document before it
-    /// comes back on undo (its layers share their tiles, which this
-    /// doesn't change).
+    /// comes back on undo (its layers share their pixels copy-on-write, so
+    /// the canvas's later writes leave them as they were).
     pub(crate) fn document_step(
         &mut self,
         change: impl FnOnce(&mut crate::canvas::Canvas) -> bool,
@@ -437,7 +437,7 @@ impl PainterApp {
         let before = crate::canvas::storage::DocumentState {
             width: canvas.width(),
             height: canvas.height(),
-            layers: canvas.layers.iter().map(|l| l.share()).collect(),
+            layers: canvas.layers.iter().map(|l| l.cow_copy()).collect(),
             active_layer_idx: canvas.active_layer_idx,
             depth: canvas.depth(),
             profile: canvas.profile.clone(),

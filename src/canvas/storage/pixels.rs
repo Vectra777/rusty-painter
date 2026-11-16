@@ -18,18 +18,22 @@ use crate::selection::SelectionManager;
 pub struct Region {
     /// The canvas area painted, `[x0, y0, x1, y1)`.
     pub bounds: [i32; 4],
+    /// The layer it's of.
+    layer: usize,
     /// Each tile's pixels as they were, and the tile itself (looked up
     /// once: the layer's tile map is behind one lock).
     tiles: Vec<RegionTile>,
 }
 
-/// A tile's key, its pixels as they were (and in a deeper document, at
-/// full depth), and the tile.
+/// A tile's key, its pixels as they were (shared with the tile; one
+/// transparent buffer for all the missing ones) and in a deeper document
+/// at full depth, and the tile (`None` where the layer had none: it's made
+/// only if something's written there).
 type RegionTile = (
     (i32, i32),
-    Vec<Color32>,
+    super::SharedPixels,
     Option<DeepTile>,
-    Arc<Mutex<TileCell>>,
+    Option<Arc<Mutex<TileCell>>>,
 );
 
 impl Region {
@@ -61,6 +65,19 @@ impl Region {
             .iter()
             .map(|(key, data, _, _)| (*key, data.as_slice()))
     }
+}
+
+/// Tile `key`'s pixels as they are (`cell`'s; transparent where it has
+/// none) into `before`, the first time only: shared, not copied.
+fn keep_before(
+    before: &mut HashMap<(i32, i32), super::SharedPixels>,
+    key: (i32, i32),
+    cell: &TileCell,
+    len: usize,
+) {
+    before.entry(key).or_insert_with(|| {
+        (cell.shared_data().cloned()).unwrap_or_else(|| Arc::new(vec![Color32::TRANSPARENT; len]))
+    });
 }
 
 /// `a` to `b` by `t` (0..=255), premultiplied.
@@ -168,6 +185,9 @@ impl Canvas {
             .iter()
             .map(|(&k, c)| (k, c.clone()))
             .collect();
+        // Each tile read as it is, and copied only once a pixel changes: a
+        // tile the change leaves alone keeps its pixels (and deep ones)
+        // and its revision, shared with whatever else holds them.
         let changed: Vec<(TileKey, TileSnapshot)> = cells
             .par_iter()
             .filter_map(|((tx, ty), cell)| {
@@ -175,32 +195,43 @@ impl Canvas {
                 if cell.is_empty {
                     return None;
                 }
-                let data = cell.data_mut()?;
-                let before = data.clone();
+                let before = cell.shared_data()?.clone();
+                let mut after: Option<Vec<Color32>> = None;
                 let mut inside = vec![true; ts];
-                let mut any = false;
                 let mut state = init();
+                let x0 = *tx * ts as i32;
                 for ly in 0..ts {
                     let y = *ty * ts as i32 + ly as i32;
                     if y < 0 {
                         continue;
                     }
-                    if let Some(sel) = selection {
-                        sel.row_mask(y as usize, (*tx * ts as i32).max(0) as usize, &mut inside);
+                    match selection {
+                        Some(sel) if x0 >= 0 => sel.row_mask(y as usize, x0 as usize, &mut inside),
+                        // (Off the canvas's left edge: pixel by pixel.)
+                        Some(sel) => {
+                            for (lx, slot) in inside.iter_mut().enumerate() {
+                                let x = (x0 + lx as i32) as f32 + 0.5;
+                                *slot = sel.contains_coords(x, y as f32 + 0.5);
+                            }
+                        }
+                        None => {}
                     }
                     for (lx, _) in inside.iter().enumerate().filter(|(_, i)| **i) {
                         let i = ly * ts + lx;
-                        let out = f(&mut state, data[i], *tx * ts as i32 + lx as i32, y);
-                        if out != data[i] {
-                            data[i] = out;
-                            any = true;
+                        let out = f(&mut state, before[i], x0 + lx as i32, y);
+                        if out != before[i] {
+                            after.get_or_insert_with(|| before.to_vec())[i] = out;
                         }
                     }
                 }
-                if !any {
-                    return None;
-                }
-                cell.is_empty = data.iter().all(|&p| p == Color32::TRANSPARENT);
+                let after = after?;
+                // Kept at full depth for undo, if the tile had them.
+                let kept = match cell.deep() {
+                    Some(deep) => SnapshotPixels::Deep(deep.clone()),
+                    None => SnapshotPixels::Raw(before),
+                };
+                cell.is_empty = after.iter().all(|&p| p == Color32::TRANSPARENT);
+                cell.set_data(Some(after));
                 Some((
                     (*tx, *ty),
                     TileSnapshot {
@@ -211,7 +242,7 @@ impl Canvas {
                         y0: 0,
                         width: ts,
                         height: ts,
-                        data: before.into(),
+                        data: kept,
                     },
                 ))
             })
@@ -235,13 +266,14 @@ impl Canvas {
     /// Write `pixels` (row-major, `w`×`h`) into layer `layer_idx` at `(x, y)`,
     /// the region given as `(x, y, w, h)`
     /// (clipped to the canvas). Each tile's content before its first write
-    /// is saved into `before` (if given), for undo.
+    /// is kept in `before` (if given), for undo: shared with the tile, which
+    /// copies it as it's written (no second copy).
     pub fn write_layer_region(
         &self,
         layer_idx: usize,
         (x, y, w, h): (i32, i32, usize, usize),
         pixels: &[Color32],
-        mut before: Option<&mut HashMap<(i32, i32), Vec<Color32>>>,
+        mut before: Option<&mut HashMap<(i32, i32), super::SharedPixels>>,
     ) {
         let ts = self.tile_size as i32;
         let (x0, y0) = (x.max(0), y.max(0));
@@ -258,11 +290,11 @@ impl Canvas {
                     continue;
                 };
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(before) = before.as_deref_mut() {
+                    keep_before(before, (tx, ty), &cell, (ts * ts) as usize);
+                }
                 let was_empty = cell.is_empty;
                 let data = cell.data_or_insert((ts * ts) as usize);
-                if let Some(before) = before.as_deref_mut() {
-                    before.entry((tx, ty)).or_insert_with(|| data.clone());
-                }
                 let (ox, oy) = (tx * ts, ty * ts);
                 let (cx0, cx1) = (x0.max(ox), x1.min(ox + ts));
                 let mut wrote_paint = false;
@@ -336,7 +368,7 @@ impl Canvas {
         layer_idx: usize,
         (x, y, w, h): (i32, i32, usize, usize),
         pixels: &[[f32; 4]],
-        before: &mut HashMap<(i32, i32), Vec<Color32>>,
+        before: &mut HashMap<(i32, i32), super::SharedPixels>,
         before_deep: &mut HashMap<(i32, i32), DeepTile>,
     ) {
         let ts = self.tile_size as i32;
@@ -355,11 +387,18 @@ impl Canvas {
                 };
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
                 let was_empty = cell.is_empty;
+                let first = !before.contains_key(&(tx, ty));
+                if first {
+                    keep_before(before, (tx, ty), &cell, (ts * ts) as usize);
+                }
                 let (data, deep) = cell.deep_parts(self.depth, (ts * ts) as usize);
                 let Some(deep) = deep else {
+                    // (Nothing written: nothing to keep.)
+                    if first {
+                        before.remove(&(tx, ty));
+                    }
                     continue;
                 };
-                before.entry((tx, ty)).or_insert_with(|| data.clone());
                 before_deep.entry((tx, ty)).or_insert_with(|| deep.clone());
                 let (ox, oy) = (tx * ts, ty * ts);
                 let (cx0, cx1) = (x0.max(ox), x1.min(ox + ts));
@@ -696,22 +735,61 @@ impl Canvas {
             }
         }
         let tile_len = (ts * ts) as usize;
-        let cells = self.ensure_layer_tiles(layer_idx, keys);
+        // A paint layer's missing tiles stay missing (filtering an empty
+        // part of the canvas made every tile of it); the background's and a
+        // mask's show their colour, so they're made.
+        let cells: Vec<(TileKey, Option<SharedCell>)> =
+            if self.empty_tile_color(layer_idx) == Color32::TRANSPARENT {
+                let tiles = self.layers.get(layer_idx).map(|l| l.tiles.lock());
+                let tiles = tiles.map(|t| t.unwrap_or_else(|e| e.into_inner()));
+                (keys.into_iter())
+                    .map(|k| (k, tiles.as_ref().and_then(|t| t.get(&k).cloned())))
+                    .collect()
+            } else {
+                (self.ensure_layer_tiles(layer_idx, keys).into_iter())
+                    .map(|(k, c)| (k, Some(c)))
+                    .collect()
+            };
+        let clear: super::SharedPixels = Arc::new(vec![Color32::TRANSPARENT; tile_len]);
         let depth = self.depth;
         let tiles = cells
             .into_par_iter()
             .map(|(key, cell)| {
-                let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let data =
-                    (guard.data().cloned()).unwrap_or_else(|| vec![Color32::TRANSPARENT; tile_len]);
-                let deep = (guard.deep().cloned()).or_else(|| DeepTile::widen(depth, &data));
+                let guard = cell
+                    .as_ref()
+                    .map(|c| c.lock().unwrap_or_else(|e| e.into_inner()));
+                let data = (guard.as_ref().and_then(|g| g.shared_data().cloned()))
+                    .unwrap_or_else(|| Arc::clone(&clear));
+                let deep = (guard.as_ref().and_then(|g| g.deep().cloned()))
+                    .or_else(|| DeepTile::widen(depth, &data));
                 drop(guard);
                 (key, data, deep, cell)
             })
             .collect();
         Region {
             bounds: [bx0, by0, bx1, by1],
+            layer: layer_idx,
             tiles,
+        }
+    }
+
+    /// Region tile `key`'s tile, made if the layer had none, unless it's
+    /// left `empty` (then a tile an earlier preview made is dropped, and
+    /// `None`: a missing tile is transparent already).
+    fn region_cell(
+        &self,
+        region: &Region,
+        key: (i32, i32),
+        cell: &Option<SharedCell>,
+        empty: bool,
+    ) -> Option<SharedCell> {
+        match cell {
+            Some(cell) => Some(Arc::clone(cell)),
+            None if empty => {
+                self.clear_layer_tile(region.layer, key.0, key.1);
+                None
+            }
+            None => self.ensure_layer_tile(region.layer, key.0, key.1),
         }
     }
 
@@ -764,6 +842,33 @@ impl Canvas {
         let alpha_lock = layer.alpha_locked;
         let ts = self.tile_size as i32;
         let [bx0, by0, bx1, by1] = region.bounds;
+        // `out` (the tile, as `original` was) with the rows painted over.
+        let paint = |out: &mut [Color32],
+                     original: &[Color32],
+                     tx: i32,
+                     ty: i32,
+                     [lx0, ly0, lx1, ly1]: [i32; 4]| {
+            let mut src = vec![Color32::TRANSPARENT; (lx1 - lx0).max(0) as usize];
+            for ly in ly0..ly1 {
+                row(tx * ts + lx0, ty * ts + ly, &mut src);
+                let base = (ly * ts) as usize;
+                for (lx, &s) in (lx0..lx1).zip(&src) {
+                    if s.a() == 0 {
+                        continue;
+                    }
+                    let i = base + lx as usize;
+                    let dst = original[i];
+                    if alpha_lock && dst.a() == 0 {
+                        continue;
+                    }
+                    let mut px = over(s, dst, tx * ts + lx, ty * ts + ly);
+                    if alpha_lock {
+                        px = crate::canvas::blend::with_alpha_of(px, dst.a());
+                    }
+                    out[i] = px;
+                }
+            }
+        };
         region
             .tiles
             .par_iter()
@@ -771,35 +876,25 @@ impl Canvas {
                 let (tx, ty) = (*tx, *ty);
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
                 let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
+                let part = [lx0, ly0, lx1, ly1];
+                // A tile the layer didn't have: made only if something
+                // shows there.
+                let Some(cell) = cell else {
+                    let mut out = original.to_vec();
+                    paint(&mut out, original, tx, ty, part);
+                    self.put_region_tile(layer_idx, (tx, ty), &None, out);
+                    return;
+                };
                 // Into the tile's own buffer (no new one a tile a frame).
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
                 match cell.data_mut() {
                     Some(data) if data.len() == original.len() => data.copy_from_slice(original),
-                    _ => cell.set_data(Some(original.clone())),
+                    _ => cell.set_data(Some(original.to_vec())),
                 }
                 let Some(out) = cell.data_mut() else {
                     return;
                 };
-                let mut src = vec![Color32::TRANSPARENT; (lx1 - lx0).max(0) as usize];
-                for ly in ly0..ly1 {
-                    row(tx * ts + lx0, ty * ts + ly, &mut src);
-                    let base = (ly * ts) as usize;
-                    for (lx, &s) in (lx0..lx1).zip(&src) {
-                        if s.a() == 0 {
-                            continue;
-                        }
-                        let i = base + lx as usize;
-                        let dst = original[i];
-                        if alpha_lock && dst.a() == 0 {
-                            continue;
-                        }
-                        let mut px = over(s, dst, tx * ts + lx, ty * ts + ly);
-                        if alpha_lock {
-                            px = crate::canvas::blend::with_alpha_of(px, dst.a());
-                        }
-                        out[i] = px;
-                    }
-                }
+                paint(out, original, tx, ty, part);
                 let empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
                 cell.is_empty = empty;
             });
@@ -843,7 +938,7 @@ impl Canvas {
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
                 let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
                 let mut out = deep.clone();
-                let mut out8 = original.clone();
+                let mut out8 = original.to_vec();
                 let mut src = vec![[0.0f32; 4]; (lx1 - lx0).max(0) as usize];
                 for ly in ly0..ly1 {
                     row(tx * ts + lx0, ty * ts + ly, &mut src);
@@ -883,8 +978,12 @@ impl Canvas {
                         out8[i] = out.narrow(i);
                     }
                 }
+                let empty = out.is_transparent();
+                let Some(cell) = self.region_cell(region, (tx, ty), cell, empty) else {
+                    return;
+                };
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                cell.is_empty = out.is_transparent();
+                cell.is_empty = empty;
                 cell.set_both(Some(out8), Some(out));
             });
     }
@@ -915,7 +1014,7 @@ impl Canvas {
                 let (tx, ty) = (*tx, *ty);
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
                 let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
-                let (mut out, mut out8) = (deep.clone(), original.clone());
+                let (mut out, mut out8) = (deep.clone(), original.to_vec());
                 for ly in ly0..ly1 {
                     for lx in lx0..lx1 {
                         let (x, y) = (tx * ts + lx, ty * ts + ly);
@@ -930,8 +1029,12 @@ impl Canvas {
                         out8[i] = out.narrow(i);
                     }
                 }
+                let empty = out.is_transparent();
+                let Some(cell) = self.region_cell(region, (tx, ty), cell, empty) else {
+                    return;
+                };
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                cell.is_empty = out.is_transparent();
+                cell.is_empty = empty;
                 cell.set_both(Some(out8), Some(out));
             });
         true
@@ -987,7 +1090,7 @@ impl Canvas {
                 let (tx, ty) = (*tx, *ty);
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
                 let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
-                let (mut out, mut out8) = (deep.clone(), original.clone());
+                let (mut out, mut out8) = (deep.clone(), original.to_vec());
                 for ly in ly0..ly1 {
                     for lx in lx0..lx1 {
                         let (x, y) = (tx * ts + lx, ty * ts + ly);
@@ -1006,8 +1109,12 @@ impl Canvas {
                         out8[i] = out.narrow(i);
                     }
                 }
+                let empty = out.is_transparent();
+                let Some(cell) = self.region_cell(region, (tx, ty), cell, empty) else {
+                    return;
+                };
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                cell.is_empty = out.is_transparent();
+                cell.is_empty = empty;
                 cell.set_both(Some(out8), Some(out));
             });
         true
@@ -1038,7 +1145,7 @@ impl Canvas {
                 let (tx, ty) = (*tx, *ty);
                 let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
                 let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
-                let mut out = original.clone();
+                let mut out = original.to_vec();
                 for ly in ly0..ly1 {
                     let y = ty * ts + ly;
                     for lx in lx0..lx1 {
@@ -1055,10 +1162,99 @@ impl Canvas {
                         out[i] = new;
                     }
                 }
-                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                cell.is_empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
-                cell.set_data(Some(out));
+                self.put_region_tile(layer_idx, (tx, ty), cell, out);
             });
+    }
+
+    /// Set the layer's pixels in `region` to `f` of its originals, one
+    /// tile's part at a time (`f(pixels, w, h, origin)`: row-major, `w`×`h`,
+    /// its top-left corner at `origin` on the canvas), mixed with them by
+    /// `coverage` where it's given, as [`Self::replace_region`] does. For
+    /// filters that work pixel by pixel and leave transparent pixels as they
+    /// are: only the layer's tiles with something on them are worked on,
+    /// and nothing the size of the region is made.
+    pub fn map_region(
+        &self,
+        layer_idx: usize,
+        region: &Region,
+        coverage: Option<&crate::selection::SelectionMask>,
+        f: impl Fn(&[Color32], usize, usize, (i32, i32)) -> Vec<Color32> + Sync,
+    ) {
+        let Some(layer) = self.layers.get(layer_idx) else {
+            return;
+        };
+        let alpha_lock = layer.alpha_locked;
+        let ts = self.tile_size as i32;
+        let [bx0, by0, bx1, by1] = region.bounds;
+        region
+            .tiles
+            .par_iter()
+            .for_each(|((tx, ty), original, _, cell)| {
+                // A tile the layer doesn't have stays missing (`f` keeps
+                // transparent pixels transparent).
+                if cell.is_none() {
+                    return;
+                }
+                let (tx, ty) = (*tx, *ty);
+                let (lx0, ly0) = ((bx0 - tx * ts).max(0), (by0 - ty * ts).max(0));
+                let (lx1, ly1) = ((bx1 - tx * ts).min(ts), (by1 - ty * ts).min(ts));
+                let (w, h) = ((lx1 - lx0).max(0) as usize, (ly1 - ly0).max(0) as usize);
+                let mut out = original.to_vec();
+                if w > 0 && h > 0 && original.iter().any(|&p| p != Color32::TRANSPARENT) {
+                    let mut part = Vec::with_capacity(w * h);
+                    for ly in ly0..ly1 {
+                        let i = (ly * ts + lx0) as usize;
+                        part.extend_from_slice(&original[i..i + w]);
+                    }
+                    let new = f(&part, w, h, (tx * ts + lx0, ty * ts + ly0));
+                    for (row, ly) in (ly0..ly1).enumerate() {
+                        for (col, lx) in (lx0..lx1).enumerate() {
+                            let i = (ly * ts + lx) as usize;
+                            let old = original[i];
+                            let mut px = new[row * w + col];
+                            if let Some(cov) = coverage {
+                                px = mix(old, px, cov.value(tx * ts + lx, ty * ts + ly));
+                            }
+                            if alpha_lock {
+                                px = crate::canvas::blend::with_alpha_of(px, old.a());
+                            }
+                            out[i] = px;
+                        }
+                    }
+                }
+                self.put_region_tile(layer_idx, (tx, ty), cell, out);
+            });
+    }
+
+    /// Region tile `(tx, ty)` (`cell` its tile, if the layer had one) set to
+    /// `out`.
+    fn put_region_tile(
+        &self,
+        layer_idx: usize,
+        (tx, ty): (i32, i32),
+        cell: &Option<SharedCell>,
+        out: Vec<Color32>,
+    ) {
+        let empty = out.iter().all(|&p| p == Color32::TRANSPARENT);
+        match cell {
+            Some(cell) => {
+                let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                if cell.data().is_some_and(|now| *now != out) {
+                    cell.is_empty = empty;
+                    cell.set_data(Some(out));
+                }
+            }
+            // A tile the layer didn't have: made only if something shows
+            // there (and dropped again if an earlier run made it).
+            None if empty => self.clear_layer_tile(layer_idx, tx, ty),
+            None => {
+                if let Some(cell) = self.ensure_layer_tile(layer_idx, tx, ty) {
+                    let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
+                    cell.is_empty = false;
+                    cell.set_data(Some(out));
+                }
+            }
+        }
     }
 
     /// Put the layer's pixels in `region` back to its originals.
@@ -1066,10 +1262,15 @@ impl Canvas {
         region
             .tiles
             .par_iter()
-            .for_each(|(_, original, deep, cell)| {
+            .for_each(|(key, original, deep, cell)| {
+                let Some(cell) = cell else {
+                    // (Missing before: missing again.)
+                    self.clear_layer_tile(region.layer, key.0, key.1);
+                    return;
+                };
                 let mut cell = cell.lock().unwrap_or_else(|e| e.into_inner());
                 cell.is_empty = original.iter().all(|&p| p == Color32::TRANSPARENT);
-                cell.set_both(Some(original.clone()), deep.clone());
+                cell.set_shared(Some(Arc::clone(original)), deep.clone().map(Arc::new));
             });
     }
 
@@ -1087,8 +1288,12 @@ impl Canvas {
             .par_iter()
             .filter_map(|((tx, ty), original, deep, cell)| {
                 let (tx, ty) = (*tx, *ty);
+                // (A tile the layer didn't have may have been made since.)
+                let cell = cell
+                    .clone()
+                    .or_else(|| self.layer_tile_cell(layer_idx, tx, ty))?;
                 let cell = cell.lock().unwrap_or_else(|e| e.into_inner());
-                let changed = cell.data().is_some_and(|now| now != original)
+                let changed = cell.data().is_some_and(|now| **now != **original)
                     || (deep.is_some() && cell.deep() != deep.as_ref());
                 changed.then(|| TileSnapshot {
                     tx,
@@ -1103,7 +1308,7 @@ impl Canvas {
                         None if original.iter().all(|&p| p == Color32::TRANSPARENT) => {
                             transparent.clone()
                         }
-                        None => original.clone().into(),
+                        None => SnapshotPixels::Raw(Arc::clone(original)),
                     },
                 })
             })

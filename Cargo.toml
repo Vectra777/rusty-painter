@@ -230,6 +230,10 @@ required-features = ["bench"]
 name = "big_canvas_tools"
 required-features = ["bench"]
 
+[[example]]
+name = "io_cost"
+required-features = ["bench"]
+
 [[bench]]
 name = "app_bench"
 harness = false

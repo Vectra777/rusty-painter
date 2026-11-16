@@ -408,7 +408,11 @@ impl PainterApp {
             // The redraw notes the region in the step, so it's filed after.
             self.workspace.vector.session = Some(session);
             self.redraw_vector_boxes(idx, &boxes);
-            if let Some(session) = self.workspace.vector.session.take() {
+            if let Some(mut session) = self.workspace.vector.session.take() {
+                // Drawn wholly off the canvas, nothing shows to draw again,
+                // but the line is in the layer: still a step (a corner
+                // pixel stands for the region).
+                session.changed.get_or_insert([0, 0, 1, 1]);
                 self.push_vector_step(session, "Vector line");
             }
         } else if session.changed.is_some() {
@@ -1320,6 +1324,21 @@ mod tests {
             .vector
             .as_ref()
             .map_or(0, |v| v.len())
+    }
+
+    #[test]
+    fn a_line_drawn_wholly_off_the_canvas_is_still_an_undo_step() {
+        let mut app = app();
+        let steps = app.layer_state.history.stacks().0.len();
+        line(
+            &mut app,
+            Vec2::new(-300.0, -300.0),
+            Vec2::new(-200.0, -250.0),
+        );
+        assert_eq!(strokes(&app), 1, "it's in the layer");
+        assert_eq!(app.layer_state.history.stacks().0.len(), steps + 1);
+        app.apply_history(false);
+        assert_eq!(strokes(&app), 0, "and undone");
     }
 
     #[test]

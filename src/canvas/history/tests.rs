@@ -519,3 +519,175 @@ fn a_huge_newest_step_is_compressed_at_once() {
         SnapshotPixels::Compressed { .. }
     ));
 }
+
+/// A document step (a profile assigned, frames moved) keeps the layers as
+/// they were: the canvas painting on afterwards mustn't change them, and
+/// until it does they cost the budget nothing (they share its pixels).
+#[test]
+fn a_document_step_keeps_its_pixels_and_counts_only_what_the_canvas_changed() {
+    let red = vec![Color32::RED; 64 * 64];
+    let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+    canvas.set_layer_tile_data(1, 0, 0, red.clone());
+    let before = canvas.assign_profile(Default::default());
+    let mut history = History::new();
+    history.push_action(UndoAction {
+        tiles: Vec::new(),
+        selection: None,
+        transform: None,
+        layer_action: Some(LayerHistoryOp::Document(std::sync::Arc::new(
+            std::sync::Mutex::new(before),
+        ))),
+    });
+    assert_eq!(snapshot_bytes(&history.stacks().0[0]), 0);
+    // Painted over: the step now holds the red alone.
+    let blue = vec![Color32::BLUE; 64 * 64];
+    canvas.set_layer_tile_data(1, 0, 0, blue.clone());
+    assert_eq!(snapshot_bytes(&history.stacks().0[0]), 64 * 64 * 4);
+    let mut selection = SelectionManager::new();
+    let mut tool = Tool::Brush;
+    history.undo(&mut canvas, &mut selection, &mut tool);
+    assert_eq!(canvas.get_layer_tile_data(1, 0, 0), Some(red));
+    history.redo(&mut canvas, &mut selection, &mut tool);
+    assert_eq!(canvas.get_layer_tile_data(1, 0, 0), Some(blue));
+}
+
+fn whole_tile_action(data: SnapshotPixels) -> UndoAction {
+    UndoAction {
+        tiles: vec![TileSnapshot {
+            tx: 0,
+            ty: 0,
+            layer_id: LayerId(1),
+            x0: 0,
+            y0: 0,
+            width: 64,
+            height: 64,
+            data,
+        }],
+        selection: None,
+        transform: None,
+        layer_action: None,
+    }
+}
+
+/// Undo keeps the canvas's pixels in the step it moves to the redo
+/// stack: those past the next redo are compressed, and the redo stack
+/// only gets what the undo stack leaves of the budget.
+#[test]
+fn undone_steps_are_compressed_and_kept_in_budget() {
+    let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+    let mut history = History::new();
+    for i in 0..4u8 {
+        let pattern: Vec<Color32> = (0..64 * 64)
+            .map(|p| Color32::from_rgba_premultiplied(i, (p % 251) as u8, (p / 64) as u8, 255))
+            .collect();
+        history.push_action(whole_tile_action(
+            canvas
+                .get_layer_tile_data(1, 0, 0)
+                .unwrap_or_default()
+                .into(),
+        ));
+        canvas.set_layer_tile_data(1, 0, 0, pattern);
+    }
+    let mut selection = SelectionManager::new();
+    let mut tool = Tool::Brush;
+    for _ in 0..3 {
+        history.undo(&mut canvas, &mut selection, &mut tool);
+    }
+    let (_, redo) = history.stacks();
+    assert_eq!(redo.len(), 3);
+    assert!(matches!(redo[2].tiles[0].data, SnapshotPixels::Raw(_)));
+    for step in &redo[..2] {
+        assert!(matches!(
+            step.tiles[0].data,
+            SnapshotPixels::Compressed { .. }
+        ));
+    }
+    // Room for one step: the next redo stays, the others go.
+    let one = snapshot_bytes(&history.stacks().1[2]);
+    let undo: usize = history.stacks().0.iter().map(snapshot_bytes).sum();
+    history.keep_in_budget(undo + one);
+    assert_eq!(history.stacks().1.len(), 1);
+    assert_eq!(history.labels().1.len(), 1);
+    // ...and still redoes to what was there.
+    let expected = history.stacks().1[0].tiles[0].data.to_vec();
+    history.redo(&mut canvas, &mut selection, &mut tool);
+    assert_eq!(canvas.get_layer_tile_data(1, 0, 0), Some(expected));
+}
+
+/// Over budget after an undo, the oldest undo steps go before any step
+/// just undone: undoing three steps leaves three to redo.
+#[test]
+fn undo_over_budget_drops_old_undo_steps_not_redo_ones() {
+    let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+    let mut history = History::new();
+    for i in 0..6u8 {
+        let pattern: Vec<Color32> = (0..64 * 64)
+            .map(|p| Color32::from_rgba_premultiplied(i, (p % 251) as u8, (p / 64) as u8, 255))
+            .collect();
+        history.push_action(whole_tile_action(
+            canvas
+                .get_layer_tile_data(1, 0, 0)
+                .unwrap_or_default()
+                .into(),
+        ));
+        canvas.set_layer_tile_data(1, 0, 0, pattern);
+    }
+    let mut selection = SelectionManager::new();
+    let mut tool = Tool::Brush;
+    for _ in 0..3 {
+        history.undo(&mut canvas, &mut selection, &mut tool);
+    }
+    // Room for the redo steps and one undo step.
+    let redo: usize = history.stacks().1.iter().map(snapshot_bytes).sum();
+    let newest_undo = snapshot_bytes(history.stacks().0.last().unwrap());
+    history.keep_in_budget(redo + newest_undo);
+    assert_eq!(history.stacks().1.len(), 3);
+    assert_eq!(history.stacks().0.len(), 1);
+    assert_eq!(history.labels().0.len(), 1);
+}
+
+/// A whole tile undone back to transparent keeps no pixels (rather than
+/// 16 KiB of zeros), and redo brings its paint back.
+#[test]
+fn a_tile_undone_to_transparent_keeps_no_pixels() {
+    let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+    let mut history = History::new();
+    history.push_action(whole_tile_action(SnapshotPixels::transparent(64 * 64)));
+    canvas.set_layer_tile_data(1, 0, 0, vec![Color32::RED; 64 * 64]);
+    let mut selection = SelectionManager::new();
+    let mut tool = Tool::Brush;
+    history.undo(&mut canvas, &mut selection, &mut tool);
+    assert_eq!(canvas.get_layer_tile_data(1, 0, 0), None);
+    assert_eq!(canvas.layers[1].held_bytes(), 0);
+    history.redo(&mut canvas, &mut selection, &mut tool);
+    assert_eq!(
+        canvas.get_layer_tile_data(1, 0, 0),
+        Some(vec![Color32::RED; 64 * 64])
+    );
+}
+
+/// In a deeper document a whole tile goes back at full depth, and the
+/// one it replaces is kept at full depth for redo.
+#[test]
+fn a_whole_tile_undone_in_a_deeper_document_keeps_the_full_depth() {
+    let mut canvas = Canvas::new(64, 64, Color32::WHITE, 64);
+    canvas.convert_depth(Depth::U16);
+    let mut ramp = DeepTile::transparent(Depth::U16, 64 * 64).unwrap();
+    for i in 0..ramp.len() {
+        let v = (i % 64) as f32 / 64.0 * 0.01;
+        ramp.set_linear(i, [v, v, v, 1.0]);
+    }
+    let mut action = whole_tile_action(SnapshotPixels::Deep(ramp.clone()));
+    action.tiles[0].data.compress();
+    let mut history = History::new();
+    history.push_action(action);
+    let mut other = ramp.clone();
+    other.set_linear(0, [0.5, 0.0, 0.0, 1.0]);
+    canvas.set_layer_tile_deep(1, 0, 0, &other);
+    let mut selection = SelectionManager::new();
+    let mut tool = Tool::Brush;
+    history.undo(&mut canvas, &mut selection, &mut tool);
+    assert_eq!(canvas.get_layer_tile_deep(1, 0, 0), Some(ramp));
+    history.redo(&mut canvas, &mut selection, &mut tool);
+    assert_eq!(canvas.get_layer_tile_deep(1, 0, 0), Some(other));
+}

@@ -12,19 +12,58 @@ use eframe::egui::{self, Sense, Stroke};
 /// Smallest a tool button shrinks to on short screens before the strip
 /// takes another column (and, past three, scrolls).
 const MIN_TOOL_BUTTON: f32 = 28.0;
-const MIN_TOOL_BUTTON_TOUCH: f32 = 30.0;
+const MIN_TOOL_BUTTON_TOUCH: f32 = MIN_TOUCH_TARGET;
 const SEPARATOR_HEIGHT: f32 = 9.0;
 const ITEM_SPACING: f32 = 2.0;
 const MARGIN_Y: f32 = 6.0;
-/// The tool buttons (`tool_buttons`), the brush settings button and,
-/// desktop only, the presets one.
-const TOOLS: f32 = 16.0;
+/// The tool buttons (`tool_buttons`), all shown.
+const TOOLS: usize = 13;
 
-/// Columns and button side that fit every tool (and the colors) in
+/// Buttons on the strip that touch mode can leave off (Settings → Touch
+/// & pen): `(id kept in the settings, name shown)`. The brush and eraser
+/// always stay.
+pub(crate) const HIDEABLE: [(&str, &str); 11] = [
+    ("blend", "Smudge / Blur"),
+    ("select", "Selection"),
+    ("transform", "Transform / Animate"),
+    ("eyedropper", "Eyedropper"),
+    ("fill", "Fill"),
+    ("gradient", "Gradient"),
+    ("text", "Text"),
+    ("shapes", "Shapes"),
+    ("warp", "Pen / Liquify / Puppet"),
+    ("palette", "Palette"),
+    ("mirror", "Mirror painting"),
+];
+
+/// Touch mode: which tools to leave off the strip, as checkboxes.
+pub(crate) fn strip_tools_settings(ui: &mut egui::Ui, hidden: &mut Vec<String>) {
+    ui.label("Tools on the strip")
+        .on_hover_text("Leave off the tools you don't use: the others get bigger buttons");
+    ui.horizontal_wrapped(|ui| {
+        for (id, name) in HIDEABLE {
+            let mut on = !hidden.iter().any(|h| h == id);
+            if ui.checkbox(&mut on, name).changed() {
+                hidden.retain(|h| h != id);
+                if !on {
+                    hidden.push(id.to_string());
+                }
+            }
+        }
+    });
+}
+
+/// Whether the strip shows the button `id` (one of [`HIDEABLE`]'s).
+fn on_strip(app: &PainterApp, touch: bool, id: &str) -> bool {
+    !touch || !app.workspace.ui.hidden_tools.iter().any(|h| h == id)
+}
+
+/// Columns and button side that fit `tools` tool buttons (plus the brush
+/// settings button, the presets one on the desktop, and the colors) in
 /// `height`, if any: one column while it can, more on a short screen (a
 /// phone held sideways) rather than tools out of reach.
-fn fitting_layout(height: f32, touch: bool, preferred: f32) -> Option<(usize, f32)> {
-    let buttons = TOOLS + if touch { 1.0 } else { 2.0 };
+fn fitting_layout(height: f32, touch: bool, preferred: f32, tools: usize) -> Option<(usize, f32)> {
+    let buttons = tools as f32 + if touch { 1.0 } else { 2.0 };
     let min = if touch {
         MIN_TOOL_BUTTON_TOUCH
     } else {
@@ -51,8 +90,20 @@ fn fitting_layout(height: f32, touch: bool, preferred: f32) -> Option<(usize, f3
 }
 
 pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
+    // Before anything reads the modifiers this frame (the strip comes
+    // ahead of the panels and the canvas). Touch mode's keys only: out of
+    // it they aren't there to let go of.
+    if app.workspace.touch_mode {
+        crate::ui::quick_menu::apply_modifiers(ctx);
+    }
+    crate::ui::color_drop::tick(app, ctx);
     let m = metrics(ctx);
-    let fitting = fitting_layout(ctx.available_rect().height(), m.touch, m.tool_button);
+    let tools = TOOLS
+        - HIDEABLE
+            .iter()
+            .filter(|(id, _)| !on_strip(app, m.touch, id))
+            .count();
+    let fitting = fitting_layout(ctx.available_rect().height(), m.touch, m.tool_button, tools);
     // Too short even for the smallest buttons: keep them usable and scroll.
     let (cols, size) = fitting.unwrap_or((
         1,
@@ -156,6 +207,9 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
                     strip(ui);
                 });
             });
+        if shown <= 0.3 {
+            grab_tab(ctx, area, 1.0 - shown);
+        }
     } else {
         egui::SidePanel::left("toolbar")
             .exact_width(width)
@@ -172,6 +226,37 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
     if let Some(anchor) = anchors.shape {
         crate::ui::shape_menu::show(app, ctx, anchor);
     }
+    crate::ui::quick_menu::show(app, ctx);
+}
+
+/// Width of the band along the left edge that catches presses while the
+/// auto-hidden strip is away.
+const GRAB_WIDTH: f32 = 18.0;
+
+/// The auto-hidden strip away: a thin tab at the window's left edge, and
+/// a band along it that takes presses off the canvas. A press there brings
+/// the strip back (`layout::left_reveal` sees a press by the side) without
+/// painting a dot; fingers and most pens have no hover to bring it.
+fn grab_tab(ctx: &egui::Context, area: egui::Rect, opacity: f32) {
+    let band = egui::Rect::from_min_size(area.left_top(), egui::vec2(GRAB_WIDTH, area.height()));
+    egui::Area::new(egui::Id::new("toolbar_grab"))
+        .fixed_pos(band.min)
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(band.size(), Sense::click_and_drag());
+            let tab = egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 4.0, rect.center().y),
+                egui::vec2(5.0, 56.0),
+            );
+            let color = if response.hovered() {
+                TEXT_STRONG
+            } else {
+                TEXT_DIM
+            };
+            ui.painter()
+                .rect_filled(tab, 2.5, color.gamma_multiply(opacity));
+            response.on_hover_text("Show the tools");
+        });
 }
 
 /// Buttons that menus slide out from.
@@ -227,198 +312,237 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
         Some(Pick::Again) => app.workspace.show_left_panel = !app.workspace.show_left_panel,
         None => {}
     }
-    let smudge_active = matches!(app.active_tool, Tool::Smudge);
-    if tool_button(
-        ui,
-        app,
-        Icon::Smudge,
-        smudge_active,
-        "Smudge (S): smear paint with the brush's settings",
-    ) {
-        app.set_blend_tool(true);
-    }
-    let blur_active = matches!(app.active_tool, Tool::Blur);
-    if tool_button(
-        ui,
-        app,
-        Icon::Blur,
-        blur_active,
-        "Blur (S again): soften paint with the brush's settings",
-    ) {
-        app.set_blend_tool(false);
+    if on_strip(app, touch, "blend") {
+        // Smudge and Blur, one button.
+        let smudge_active = matches!(app.active_tool, Tool::Smudge);
+        let blur_active = matches!(app.active_tool, Tool::Blur);
+        let groups = &mut app.workspace.tool_groups;
+        if smudge_active || blur_active {
+            groups.blur = blur_active;
+        }
+        let members = [
+            Member::new(
+                Icon::Smudge,
+                "Smudge: smear paint with the brush's settings",
+                "S",
+                smudge_active,
+            ),
+            Member::new(
+                Icon::Blur,
+                "Blur: soften paint with the brush's settings",
+                "S again",
+                blur_active,
+            ),
+        ];
+        match group_button(ui, "blend", &members, groups.blur as usize, size, touch) {
+            Some(Pick::Tool(i)) => app.set_blend_tool(i == 0),
+            Some(Pick::Again) => app.workspace.show_left_panel = !app.workspace.show_left_panel,
+            None => {}
+        }
     }
     separator(ui, size);
 
     // One Select button: it shows the current type, and clicking it
     // slides out the menu to pick another type, the mode and more.
-    let select_active = matches!(app.active_tool, Tool::Select(_));
-    let response = icon_button(
-        ui,
-        Icon::SelectRect,
-        size,
-        select_active,
-        "Selection (M / L): click for types and modes",
-    );
-    more_dot(ui, response.rect, select_active);
-    if response.clicked() {
-        if !select_active {
-            app.set_select_tool(app.workspace.select_type);
+    let mut select_anchor = None;
+    if on_strip(app, touch, "select") {
+        let select_active = matches!(app.active_tool, Tool::Select(_));
+        let response = icon_button(
+            ui,
+            Icon::SelectRect,
+            size,
+            select_active,
+            "Selection (M / L): click for types and modes",
+        );
+        more_dot(ui, response.rect, select_active);
+        if response.clicked() {
+            if !select_active {
+                app.set_select_tool(app.workspace.select_type);
+            }
+            app.modal_state.select_menu_open = !app.modal_state.select_menu_open;
         }
-        app.modal_state.select_menu_open = !app.modal_state.select_menu_open;
+        select_anchor = Some(response.rect);
+        separator(ui, size);
     }
-    let select_anchor = Some(response.rect);
-    separator(ui, size);
 
     // Transform, and Animate (moving the layer over time).
-    let transform_active = matches!(app.active_tool, Tool::Transform(_));
-    let animate_active = matches!(app.active_tool, Tool::Animate);
-    let groups = &mut app.workspace.tool_groups;
-    if transform_active || animate_active {
-        groups.animate = animate_active;
-    }
-    let members = [
-        Member::new(
-            Icon::Transform,
-            "Transform: move, scale, turn or distort the drawing itself",
-            "V",
-            transform_active,
-        ),
-        Member::new(
-            Icon::Motion,
-            "Animate: move the layer over time, a key at each drag",
-            "A",
-            animate_active,
-        ),
-    ];
-    match group_button(
-        ui,
-        "transform",
-        &members,
-        groups.animate as usize,
-        size,
-        touch,
-    ) {
-        Some(Pick::Tool(0)) => app.set_transform_tool(),
-        Some(Pick::Tool(_)) => {
-            app.active_tool = Tool::Animate;
-            app.workspace.animation.show_timeline = true;
+    if on_strip(app, touch, "transform") {
+        let transform_active = matches!(app.active_tool, Tool::Transform(_));
+        let animate_active = matches!(app.active_tool, Tool::Animate);
+        let groups = &mut app.workspace.tool_groups;
+        if transform_active || animate_active {
+            groups.animate = animate_active;
         }
-        Some(Pick::Again) => app.workspace.show_left_panel = !app.workspace.show_left_panel,
-        None => {}
-    }
-    let picker_active = matches!(app.active_tool, Tool::Eyedropper);
-    if tool_button(
-        ui,
-        app,
-        Icon::Eyedropper,
-        picker_active,
-        "Eyedropper (I, or Alt+click)",
-    ) {
-        app.active_tool = Tool::Eyedropper;
-    }
-    let fill_active = matches!(app.active_tool, Tool::Fill) && !lasso_delete;
-    if tool_button(
-        ui,
-        app,
-        Icon::Bucket,
-        fill_active,
-        "Fill (G): bucket or enclose",
-    ) {
-        app.active_tool = Tool::Fill;
-        if app.workspace.fill.mode == FillMode::LassoDelete {
-            app.workspace.fill.mode = FillMode::Bucket;
+        let members = [
+            Member::new(
+                Icon::Transform,
+                "Transform: move, scale, turn or distort the drawing itself",
+                "V",
+                transform_active,
+            ),
+            Member::new(
+                Icon::Motion,
+                "Animate: move the layer over time, a key at each drag",
+                "A",
+                animate_active,
+            ),
+        ];
+        match group_button(
+            ui,
+            "transform",
+            &members,
+            groups.animate as usize,
+            size,
+            touch,
+        ) {
+            Some(Pick::Tool(0)) => app.set_transform_tool(),
+            Some(Pick::Tool(_)) => {
+                app.active_tool = Tool::Animate;
+                app.workspace.animation.show_timeline = true;
+            }
+            Some(Pick::Again) => app.workspace.show_left_panel = !app.workspace.show_left_panel,
+            None => {}
         }
     }
-    let gradient_active = matches!(app.active_tool, Tool::Gradient);
-    if tool_button(
-        ui,
-        app,
-        Icon::Gradient,
-        gradient_active,
-        "Gradient (Shift+G): linear, radial, reflected, angle",
-    ) {
-        app.active_tool = Tool::Gradient;
+    if on_strip(app, touch, "eyedropper") {
+        let picker_active = matches!(app.active_tool, Tool::Eyedropper);
+        if tool_button(
+            ui,
+            app,
+            Icon::Eyedropper,
+            picker_active,
+            "Eyedropper (I, or Alt+click)",
+        ) {
+            app.select_eyedropper();
+        }
     }
-    let text_active = matches!(app.active_tool, Tool::Text);
-    if tool_button(
-        ui,
-        app,
-        Icon::Text,
-        text_active,
-        "Text: click the canvas to type",
-    ) {
-        app.active_tool = Tool::Text;
+    if on_strip(app, touch, "fill") {
+        let fill_active = matches!(app.active_tool, Tool::Fill) && !lasso_delete;
+        if tool_button(
+            ui,
+            app,
+            Icon::Bucket,
+            fill_active,
+            "Fill (G): bucket or enclose",
+        ) {
+            app.active_tool = Tool::Fill;
+            if app.workspace.fill.mode == FillMode::LassoDelete {
+                app.workspace.fill.mode = FillMode::Bucket;
+            }
+        }
+    }
+    if on_strip(app, touch, "gradient") {
+        let gradient_active = matches!(app.active_tool, Tool::Gradient);
+        if tool_button(
+            ui,
+            app,
+            Icon::Gradient,
+            gradient_active,
+            "Gradient (Shift+G): linear, radial, reflected, angle",
+        ) {
+            app.active_tool = Tool::Gradient;
+        }
+    }
+    if on_strip(app, touch, "text") {
+        let text_active = matches!(app.active_tool, Tool::Text);
+        if tool_button(
+            ui,
+            app,
+            Icon::Text,
+            text_active,
+            "Text: click the canvas to type",
+        ) {
+            app.active_tool = Tool::Text;
+        }
     }
     // One Shape button: it shows the current shape; clicking it picks the
     // tool, and again opens the menu of shapes.
-    let shape_active = matches!(app.active_tool, Tool::Shape(_));
-    let kind = app.workspace.shapes.last_kind;
-    let response = icon_button(
-        ui,
-        crate::ui::shape_menu::icon_for(kind),
-        size,
-        shape_active,
-        "Shapes (U): line, rectangle, ellipse, polygon; click again for options",
-    );
-    more_dot(ui, response.rect, shape_active);
-    if response.clicked() {
-        if shape_active {
-            app.modal_state.shape_menu_open = !app.modal_state.shape_menu_open;
-        } else {
-            app.set_shape_tool(kind);
+    let mut shape_anchor = None;
+    if on_strip(app, touch, "shapes") {
+        let shape_active = matches!(app.active_tool, Tool::Shape(_));
+        let kind = app.workspace.shapes.last_kind;
+        let response = icon_button(
+            ui,
+            crate::ui::shape_menu::icon_for(kind),
+            size,
+            shape_active,
+            "Shapes (U): line, rectangle, ellipse, polygon; click again for options",
+        );
+        more_dot(ui, response.rect, shape_active);
+        if response.clicked() {
+            if shape_active {
+                app.modal_state.shape_menu_open = !app.modal_state.shape_menu_open;
+            } else {
+                app.set_shape_tool(kind);
+            }
+        }
+        shape_anchor = Some(response.rect);
+    }
+    // The Pen, Liquify and Puppet Warp (with Bones: its options switch
+    // between them), one button.
+    if on_strip(app, touch, "warp") {
+        let active = [
+            matches!(app.active_tool, Tool::Pen),
+            matches!(app.active_tool, Tool::Liquify),
+            matches!(app.active_tool, Tool::Puppet | Tool::Bone),
+        ];
+        let groups = &mut app.workspace.tool_groups;
+        if let Some(i) = active.iter().position(|&a| a) {
+            groups.warp = i;
+        }
+        let members = [
+            Member::new(
+                Icon::Pen,
+                "Pen: Bézier paths to select, fill or stroke",
+                "Shift+P",
+                active[0],
+            ),
+            Member::new(Icon::Liquify, "Liquify", "W", active[1]),
+            Member::new(
+                Icon::Pin,
+                "Puppet: bend the paint with pins, or rig it with bones",
+                "Shift+W",
+                active[2],
+            ),
+        ];
+        match group_button(ui, "warp", &members, groups.warp, size, touch) {
+            Some(Pick::Tool(0)) => app.active_tool = Tool::Pen,
+            Some(Pick::Tool(1)) => app.active_tool = Tool::Liquify,
+            Some(Pick::Tool(_)) => app.active_tool = Tool::Puppet,
+            Some(Pick::Again) => app.workspace.show_left_panel = !app.workspace.show_left_panel,
+            None => {}
         }
     }
-    let shape_anchor = Some(response.rect);
-    let pen_active = matches!(app.active_tool, Tool::Pen);
-    if tool_button(
-        ui,
-        app,
-        Icon::Pen,
-        pen_active,
-        "Pen (Shift+P): Bézier paths to select, fill or stroke",
-    ) {
-        app.active_tool = Tool::Pen;
-    }
-    let liquify_active = matches!(app.active_tool, Tool::Liquify);
-    if tool_button(ui, app, Icon::Liquify, liquify_active, "Liquify (W)") {
-        app.active_tool = Tool::Liquify;
-    }
-    // Puppet Warp and Bones share a button; its options switch between them.
-    let puppet_active = matches!(app.active_tool, Tool::Puppet | Tool::Bone);
-    if tool_button(
-        ui,
-        app,
-        Icon::Pin,
-        puppet_active,
-        "Puppet (Shift+W pins, Y bones): bend the paint with pins, or rig it with bones",
-    ) {
-        app.active_tool = Tool::Puppet;
-    }
     separator(ui, size);
-    let palette_open = app.workspace.palette.open;
-    if icon_button(
-        ui,
-        Icon::Palette,
-        size,
-        palette_open,
-        "Palette: extract colours, recolour a layer",
-    )
-    .clicked()
-    {
-        app.workspace.palette.open = !palette_open;
+    if on_strip(app, touch, "palette") {
+        let palette_open = app.workspace.palette.open;
+        if icon_button(
+            ui,
+            Icon::Palette,
+            size,
+            palette_open,
+            "Palette: extract colours, recolour a layer",
+        )
+        .clicked()
+        {
+            app.workspace.palette.open = !palette_open;
+        }
     }
-    let mirroring = app.workspace.symmetry.is_active();
-    let response = icon_button(
-        ui,
-        Icon::Symmetry,
-        size,
-        mirroring || app.modal_state.symmetry_menu_open,
-        "Mirror painting: axes, mandala",
-    );
-    if response.clicked() {
-        app.modal_state.symmetry_menu_open = !app.modal_state.symmetry_menu_open;
+    let mut symmetry_anchor = None;
+    if on_strip(app, touch, "mirror") {
+        let mirroring = app.workspace.symmetry.is_active();
+        let response = icon_button(
+            ui,
+            Icon::Symmetry,
+            size,
+            mirroring || app.modal_state.symmetry_menu_open,
+            "Mirror painting: axes, mandala",
+        );
+        if response.clicked() {
+            app.modal_state.symmetry_menu_open = !app.modal_state.symmetry_menu_open;
+        }
+        symmetry_anchor = Some(response.rect);
     }
-    let symmetry_anchor = Some(response.rect);
 
     Anchors {
         select: select_anchor,
@@ -621,6 +745,12 @@ fn color_pair(app: &mut PainterApp, ui: &mut egui::Ui, width: f32) {
         Sense::hover()
     };
     let primary_resp = ui.interact(primary, ui.id().with("primary_color"), primary_sense);
+    // Dragged onto the canvas: ColorDrop.
+    crate::ui::color_drop::drag_source(
+        ui,
+        &primary_resp,
+        app.brush_state.brush.brush_options.color,
+    );
 
     let painter = ui.painter();
     paint_swatch(painter, secondary, app.brush_state.secondary_color);

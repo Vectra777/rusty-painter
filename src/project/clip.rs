@@ -198,6 +198,7 @@ fn flattened(db: &rusqlite::Connection) -> Result<PsdDocument, String> {
         width: w,
         height: h,
         composite: layer.pixels.clone(),
+        notes: Vec::new(),
         layers: vec![layer],
     })
 }
@@ -217,6 +218,7 @@ fn pixel_layer(name: &str, rect: [i32; 4], pixels: Vec<Color32>) -> PsdLayer {
         position_locked: false,
         mask: None,
         vector: None,
+        fill: None,
     }
 }
 
@@ -267,6 +269,7 @@ fn layered(
         height: h,
         layers,
         composite: Vec::new(),
+        notes: Vec::new(),
     })
 }
 

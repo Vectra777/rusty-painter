@@ -5,6 +5,10 @@
 //! The same pen also reaches egui as pointer (or touch) events, which the
 //! canvas must then ignore: see [`TabletInput::pen_active`].
 
+// (Android's samples go through it; elsewhere it's only tested.)
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub mod predict;
+
 #[cfg(not(mobile))]
 use octotablet::{
     builder::Builder,
@@ -48,8 +52,9 @@ pub struct TabletSample {
     /// the platform says: samples batched into one frame keep their own
     /// times rather than all getting the frame's.
     pub time: Option<f64>,
-    /// Where the platform predicts the pen will be (iOS): drawn ahead of
-    /// the real samples and taken back, never kept.
+    /// Where the pen is predicted to be (iOS's own prediction; Android's
+    /// from [`predict::MotionPredictor`]): drawn ahead of the real samples
+    /// and taken back, never kept.
     pub predicted: bool,
     /// The pressure or tilt is an estimate; the measured values follow as
     /// a [`TabletUpdate`] with this index (iOS).
@@ -123,6 +128,15 @@ struct ToolState {
 
 #[cfg(not(mobile))]
 impl ToolState {
+    /// Out of range and not touching, whatever was last heard (see
+    /// [`TabletInput::reset`]).
+    fn lift(&mut self) {
+        self.down = false;
+        self.pending_down = false;
+        self.in_range = false;
+        self.unstamped.clear();
+    }
+
     /// Track one tool event, adding the contact samples it produces.
     fn apply(
         &mut self,
@@ -369,6 +383,10 @@ impl TabletInput {
         Vec::new()
     }
 
+    /// Predict where the pen goes next (Android only: the desktop's
+    /// tablets report fast enough not to lag).
+    pub fn set_prediction(&mut self, _on: bool) {}
+
     /// Whether a pen is near or on the tablet. Its input may then also
     /// arrive as pointer or touch events (Windows reports a pen as touches),
     /// which the canvas ignores in favor of these samples.
@@ -378,6 +396,16 @@ impl TabletInput {
             return true;
         }
         self.tools.values().any(|t| t.in_range || t.down)
+    }
+
+    /// The window lost the focus: a pen's lift may never arrive, which
+    /// left it "down" and the mouse ignored. Forget every contact.
+    pub fn reset(&mut self) {
+        #[cfg(winit_pen)]
+        {
+            self.winit.down = false;
+        }
+        self.tools.values_mut().for_each(ToolState::lift);
     }
 
     /// The pen also moves the mouse pointer (X11, Wayland), rather than
@@ -411,6 +439,13 @@ pub struct TabletInput {
     /// The stroke's pressure so far, smoothed, and when it was.
     pressure: f32,
     pressure_time: f64,
+    /// Where the pen goes next (Android predicts nothing itself), when
+    /// turned on in Settings.
+    predictor: Option<predict::MotionPredictor>,
+    /// Something was drawn ahead of the pen, and the frames since a sample
+    /// last came.
+    ahead_shown: bool,
+    quiet_frames: u32,
 }
 
 #[cfg(target_os = "android")]
@@ -420,7 +455,59 @@ impl TabletInput {
             down: false,
             pressure: 0.0,
             pressure_time: 0.0,
+            predictor: Some(Default::default()),
+            ahead_shown: false,
+            quiet_frames: 0,
         })
+    }
+
+    /// Predict where the pen goes next, drawn ahead of the stroke.
+    pub fn set_prediction(&mut self, on: bool) {
+        if on != self.predictor.is_some() {
+            self.predictor = on.then(Default::default);
+        }
+    }
+
+    /// The frame's real `samples` into the predictor, and where it says
+    /// the pen goes next (at most a frame, `horizon` seconds, ahead), as
+    /// predicted samples to add after them.
+    fn predicted(&mut self, samples: &[TabletSample], horizon: f64) -> Vec<TabletSample> {
+        let Some(predictor) = self.predictor.as_mut() else {
+            return Vec::new();
+        };
+        for s in samples {
+            match s.phase {
+                TabletPhase::Down | TabletPhase::Move => {
+                    if s.phase == TabletPhase::Down {
+                        predictor.reset();
+                    }
+                    predictor.update(s.pos, s.pressure, s.time.unwrap_or(0.0));
+                }
+                TabletPhase::Up | TabletPhase::Cancel => predictor.reset(),
+            }
+        }
+        if !self.down {
+            self.ahead_shown = false;
+            return Vec::new();
+        }
+        let Some(last) = samples.last() else {
+            // The pen went quiet while touching (held still): what was
+            // drawn ahead goes, once it's been quiet a couple of frames.
+            self.quiet_frames += 1;
+            if self.ahead_shown && self.quiet_frames >= 2 {
+                self.ahead_shown = false;
+                return (predictor.last().into_iter())
+                    .map(|p| predicted_sample(p, None, false))
+                    .collect();
+            }
+            return Vec::new();
+        };
+        self.quiet_frames = 0;
+        let ahead: Vec<TabletSample> = (predictor.predict(horizon).into_iter())
+            .map(|p| predicted_sample(p, last.tilt, last.is_eraser))
+            .collect();
+        self.ahead_shown |= !ahead.is_empty();
+        ahead
     }
 
     pub fn poll(&mut self, ctx: &eframe::egui::Context) -> Vec<TabletSample> {
@@ -469,6 +556,11 @@ impl TabletInput {
         if let Some(last) = samples.last() {
             self.down = matches!(last.phase, TabletPhase::Down | TabletPhase::Move);
         }
+        // About a frame ahead of the last sample.
+        let horizon = ctx.input(|i| i.predicted_dt).clamp(0.004, 0.05) as f64;
+        let ahead = self.predicted(&samples, horizon);
+        let mut samples = samples;
+        samples.extend(ahead);
         samples
     }
 
@@ -484,9 +576,35 @@ impl TabletInput {
         self.down
     }
 
+    /// The app lost the focus: the pen's lift may never arrive.
+    pub fn reset(&mut self) {
+        self.down = false;
+    }
+
     /// The pen is the mouse pointer.
     pub fn pen_is_pointer(&self) -> bool {
         true
+    }
+}
+
+/// A predicted sample as the pen's: moving, the lean as its last real one.
+#[cfg(target_os = "android")]
+fn predicted_sample(
+    p: predict::Predicted,
+    tilt: Option<[f32; 2]>,
+    is_eraser: bool,
+) -> TabletSample {
+    TabletSample {
+        pos: p.pos,
+        pressure: p.pressure,
+        tilt,
+        roll: None,
+        wheel: None,
+        is_eraser,
+        phase: TabletPhase::Move,
+        time: Some(p.time),
+        predicted: true,
+        awaiting: None,
     }
 }
 
@@ -546,6 +664,9 @@ impl TabletInput {
         samples
     }
 
+    /// Predict where the pen goes next: iOS predicts it itself.
+    pub fn set_prediction(&mut self, _on: bool) {}
+
     /// Measured values for samples sent with estimates, oldest first.
     pub fn poll_updates(&mut self, _ctx: &eframe::egui::Context) -> Vec<TabletUpdate> {
         winit::platform::ios::take_pen_updates()
@@ -561,6 +682,11 @@ impl TabletInput {
     /// hand holding it.
     pub fn pen_active(&self) -> bool {
         self.down
+    }
+
+    /// The app lost the focus: the Pencil's lift may never arrive.
+    pub fn reset(&mut self) {
+        self.down = false;
     }
 
     /// The Pencil is the pointer: egui-winit makes the first touch, the
@@ -590,6 +716,25 @@ mod tests {
             state.apply(event, 2.0, false, &mut out);
         }
         out.iter().map(|s| (s.phase, s.pos, s.pressure)).collect()
+    }
+
+    #[test]
+    fn a_pen_whose_lift_never_came_is_forgotten() {
+        let mut state = ToolState {
+            in_range: true,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        for event in [ToolEvent::Down, pose(10.0, 10.0, 0.5)] {
+            state.apply(&event, 1.0, false, &mut out);
+        }
+        assert!(state.down && state.in_range);
+        // The focus went; the Up and Out never come.
+        state.lift();
+        assert!(!state.down && !state.in_range, "the mouse isn't ignored");
+        out.clear();
+        state.apply(&pose(20.0, 10.0, 0.5), 1.0, false, &mut out);
+        assert!(out.is_empty(), "a later pose paints nothing");
     }
 
     #[test]

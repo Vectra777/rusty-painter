@@ -93,7 +93,7 @@ pub fn write_video(
     let frames = frames.map(|f| if format.has_alpha() { f } else { f.on_white() });
     match format {
         VideoFormat::Gif => write_gif(path, fps, loops, frames).map(|_| path.into()),
-        VideoFormat::Apng => write_apng(path, fps, loops, frames.collect()).map(|_| path.into()),
+        VideoFormat::Apng => write_apng(path, fps, loops, frames).map(|_| path.into()),
         VideoFormat::Mp4 | VideoFormat::WebM => {
             write_ffmpeg(path, format, fps, frames).map(|_| path.into())
         }
@@ -116,10 +116,11 @@ fn write_gif(
         Repeat::Finite(0)
     };
     encoder.set_repeat(repeat).map_err(|e| e.to_string())?;
-    let delay = image::Delay::from_numer_denom_ms(1000, fps);
+    let mut delays = gif_delays(fps);
     for f in frames {
         let img = image::RgbaImage::from_raw(f.width as u32, f.height as u32, f.rgba)
             .ok_or("Bad frame")?;
+        let delay = image::Delay::from_numer_denom_ms(delays.next().unwrap_or(2) * 10, 1);
         encoder
             .encode_frame(image::Frame::from_parts(img, 0, 0, delay))
             .map_err(|e| e.to_string())?;
@@ -127,8 +128,48 @@ fn write_gif(
     Ok(())
 }
 
-fn write_apng(path: &Path, fps: u32, loops: bool, frames: Vec<VideoFrame>) -> Result<(), String> {
-    let first = frames.first().ok_or("No frames")?;
+/// Each GIF frame's delay in hundredths of a second (all GIF can say) at
+/// `fps`: whole hundredths that keep to the true times on average (at 30
+/// fps 3, 4, 3, ...; one delay for all was 3, so 33 fps), and never under
+/// 2, which browsers play as 10.
+fn gif_delays(fps: u32) -> impl Iterator<Item = u32> {
+    let fps = fps.max(1) as u64;
+    let mut shown = 0u64;
+    (1u64..).map(move |i| {
+        let due = (i * 200 + fps) / (2 * fps); // i / fps s, rounded, in cs
+        let delay = due.saturating_sub(shown).max(2);
+        shown += delay;
+        delay as u32
+    })
+}
+
+/// Frames are written as they come when their number is known (an
+/// animation's): a long one at full size is too big to hold whole.
+fn write_apng(
+    path: &Path,
+    fps: u32,
+    loops: bool,
+    frames: impl Iterator<Item = VideoFrame>,
+) -> Result<(), String> {
+    match frames.size_hint() {
+        (n, Some(m)) if n == m => write_apng_frames(path, fps, loops, n, frames),
+        _ => {
+            let frames: Vec<VideoFrame> = frames.collect();
+            write_apng_frames(path, fps, loops, frames.len(), frames.into_iter())
+        }
+    }
+}
+
+/// `count` frames from `frames` as an animated PNG.
+fn write_apng_frames(
+    path: &Path,
+    fps: u32,
+    loops: bool,
+    count: usize,
+    frames: impl Iterator<Item = VideoFrame>,
+) -> Result<(), String> {
+    let mut frames = frames.peekable();
+    let first = frames.peek().ok_or("No frames")?;
     let (w, h) = (first.width as u32, first.height as u32);
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
@@ -136,11 +177,11 @@ fn write_apng(path: &Path, fps: u32, loops: bool, frames: Vec<VideoFrame>) -> Re
     encoder.set_depth(png::BitDepth::Eight);
     let err = |e: png::EncodingError| e.to_string();
     encoder
-        .set_animated(frames.len() as u32, if loops { 0 } else { 1 })
+        .set_animated(count as u32, if loops { 0 } else { 1 })
         .map_err(err)?;
     encoder.set_frame_delay(1, fps as u16).map_err(err)?;
     let mut writer = encoder.write_header().map_err(err)?;
-    for f in &frames {
+    for f in frames.take(count) {
         writer.write_image_data(&f.rgba).map_err(err)?;
     }
     writer.finish().map_err(err)
@@ -286,6 +327,47 @@ mod tests {
         assert_eq!((control.num_frames, control.num_plays), (3, 0));
         let _ = std::fs::remove_file(gif);
         let _ = std::fs::remove_file(apng);
+    }
+
+    #[test]
+    fn gif_delays_keep_the_frame_rate_on_average_and_never_go_under_two() {
+        let first = |fps: u32, n: usize| gif_delays(fps).take(n).collect::<Vec<_>>();
+        assert_eq!(first(30, 6), [3, 4, 3, 3, 4, 3], "30 fps, not 33");
+        assert_eq!(first(25, 3), [4, 4, 4]);
+        assert!(
+            first(60, 30).iter().all(|&d| d == 2),
+            "as fast as GIF plays"
+        );
+        assert_eq!(first(12, 3).iter().sum::<u32>(), 25);
+        // Into the file as they are.
+        use image::AnimationDecoder;
+        let gif = temp("30.gif");
+        write_video(&gif, VideoFormat::Gif, 30, true, frames(3)).unwrap();
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(
+            std::fs::File::open(&gif).unwrap(),
+        ))
+        .unwrap();
+        let ms: Vec<u32> = (decoder.into_frames().collect_frames().unwrap().iter())
+            .map(|f| {
+                let (n, d) = f.delay().numer_denom_ms();
+                n / d
+            })
+            .collect();
+        assert_eq!(ms, [30, 40, 30]);
+        let _ = std::fs::remove_file(gif);
+    }
+
+    #[test]
+    fn an_apng_streams_its_frames_when_their_number_is_known() {
+        // Both ways give the same file.
+        let (a, b) = (temp("known.png"), temp("unknown.png"));
+        write_video(&a, VideoFormat::Apng, 8, true, frames(4)).unwrap();
+        let unknown = frames(6).filter(|f| f.rgba[0] < 160);
+        assert_eq!(unknown.size_hint().1, Some(6));
+        write_video(&b, VideoFormat::Apng, 8, true, unknown).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
     }
 
     #[test]

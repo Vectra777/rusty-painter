@@ -54,6 +54,7 @@ fn flattened(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> 
             pixels.clone(),
         )],
         composite: pixels,
+        notes: Vec::new(),
     })
 }
 
@@ -89,6 +90,7 @@ fn pixel_layer(name: &str, rect: [i32; 4], pixels: Vec<Color32>) -> PsdLayer {
         position_locked: false,
         mask: None,
         vector: None,
+        fill: None,
     }
 }
 
@@ -124,7 +126,7 @@ fn layered(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
         skipped: false,
         depth: Depth::U8,
     };
-    let mut layers = Vec::new();
+    let (mut layers, mut notes) = (Vec::new(), Vec::new());
     if let Some(list) = child(image, "layers") {
         reader.list(list, &mut layers, 0)?;
     }
@@ -139,6 +141,13 @@ fn layered(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
         );
         flat.visible = false;
         layers.push(flat);
+        notes.push(
+            "Parts of the Krita document have no form here: its flattened picture was added \
+             as a hidden top layer"
+                .to_string(),
+        );
+    } else if reader.skipped {
+        notes.push("Parts of the Krita document have no form here and were left out".to_string());
     }
     if layers.is_empty() {
         return Err("The Krita document has no layers this can open".into());
@@ -159,6 +168,7 @@ fn layered(entries: &HashMap<String, Vec<u8>>) -> Result<PsdDocument, String> {
         height: h,
         layers,
         composite: Vec::new(),
+        notes,
     })
 }
 
@@ -223,7 +233,13 @@ impl Reader<'_> {
                 Some("shapelayer") => {
                     let l = common(PsdKind::Pixels);
                     match self.shape_layer(layer) {
-                        Some(vector) => {
+                        Some((vector, report)) => {
+                            // Text, pictures and effects the SVG import
+                            // left out or approximated: the flattened
+                            // picture keeps them.
+                            if report.message().is_some() {
+                                self.skipped = true;
+                            }
                             let (w, h) = self.size;
                             let full = [0, 0, w as i32, h as i32];
                             let pixels = crate::canvas::vector::render_region(vector.items(), full);
@@ -244,7 +260,13 @@ impl Reader<'_> {
 
     /// A vector layer's shapes, drawn at the document's size (Krita keeps
     /// them in points, its SVG's viewBox in them).
-    fn shape_layer(&self, layer: &Node) -> Option<crate::canvas::vector::VectorLayer> {
+    fn shape_layer(
+        &self,
+        layer: &Node,
+    ) -> Option<(
+        crate::canvas::vector::VectorLayer,
+        crate::project::svg_import::ImportReport,
+    )> {
         let filename = layer.attr("filename")?;
         let svg = self.file(&format!("{filename}.shapelayer/content.svg"))?;
         let text = String::from_utf8_lossy(svg);
@@ -252,7 +274,7 @@ impl Reader<'_> {
         let sized = crate::project::svg_import::with_size(&text, w, h);
         crate::project::svg_import::import_svg(&sized)
             .ok()
-            .map(|(layer, ..)| layer)
+            .map(|(layer, _, report)| (layer, report))
     }
 
     fn file(&self, name: &str) -> Option<&Vec<u8>> {
@@ -300,16 +322,28 @@ impl Reader<'_> {
         } else {
             [i32::MAX, i32::MAX, i32::MIN, i32::MIN]
         };
+        // Only what's on the canvas is kept (as a PSD's layers are), so tiles
+        // far apart, or far off it, can't ask for a huge buffer. (Saturating:
+        // a damaged file's coordinates can be anything.)
+        let origin = |t: &Tile| (t.x.saturating_add(offset.0), t.y.saturating_add(offset.1));
         for t in &tiles {
-            let (x, y) = (t.x + offset.0, t.y + offset.1);
-            rect = [
-                rect[0].min(x),
-                rect[1].min(y),
-                rect[2].max(x + t.w),
-                rect[3].max(y + t.h),
+            let (x, y) = origin(t);
+            let [x0, y0, x1, y1] = [
+                x.max(0),
+                y.max(0),
+                x.saturating_add(t.w).min(w),
+                y.saturating_add(t.h).min(h),
             ];
+            if x0 < x1 && y0 < y1 {
+                rect = [
+                    rect[0].min(x0),
+                    rect[1].min(y0),
+                    rect[2].max(x1),
+                    rect[3].max(y1),
+                ];
+            }
         }
-        if rect[0] >= rect[2] {
+        if rect[0] >= rect[2] || rect[1] >= rect[3] {
             return Ok(([0; 4], Vec::new(), None));
         }
         let rw = (rect[2] - rect[0]) as usize;
@@ -326,9 +360,22 @@ impl Reader<'_> {
         let mut deep = (channel != Channel::U8).then(|| vec![default; rw * rh]);
         for t in &tiles {
             let n = (t.w * t.h) as usize;
+            // Where the tile starts in `rect`, wide enough not to overflow.
+            let (ox, oy) = origin(t);
+            let (ox, oy) = (ox as i64 - rect[0] as i64, oy as i64 - rect[1] as i64);
+            if ox >= rw as i64
+                || oy >= rh as i64
+                || ox + (t.w as i64) <= 0
+                || oy + (t.h as i64) <= 0
+            {
+                continue;
+            }
             for ty in 0..t.h {
                 for tx in 0..t.w {
-                    let (x, y) = (t.x + offset.0 + tx - rect[0], t.y + offset.1 + ty - rect[1]);
+                    let (x, y) = (ox + tx as i64, oy + ty as i64);
+                    if x < 0 || y < 0 || x >= rw as i64 || y >= rh as i64 {
+                        continue;
+                    }
                     let i = (ty * t.w + tx) as usize;
                     let at = y as usize * rw + x as usize;
                     match &mut deep {
@@ -352,6 +399,13 @@ impl Reader<'_> {
             .children
             .iter()
             .find(|m| m.attr("nodetype") == Some("transparencymask"))?;
+        // A switched-off mask hides nothing (and is left out, as a
+        // Photoshop file's disabled one is).
+        if m.attr("visible") == Some("0") {
+            return None;
+        }
+        let at = |k: &str| m.attr(k).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+        let offset = (at("x"), at("y"));
         let data = self.file(m.attr("filename")?)?;
         let tiles = read_tiles(data, 1).ok()?;
         let (w, h) = (self.size.0, self.size.1);
@@ -364,7 +418,7 @@ impl Reader<'_> {
         for t in &tiles {
             for ty in 0..t.h {
                 for tx in 0..t.w {
-                    let (x, y) = (t.x + tx, t.y + ty);
+                    let (x, y) = (t.x + offset.0 + tx, t.y + offset.1 + ty);
                     if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
                         continue;
                     }
@@ -511,6 +565,12 @@ fn read_tiles(bytes: &[u8], pixel_size: usize) -> Result<Vec<Tile>, String> {
     };
     if size != pixel_size || tw == 0 || th == 0 || tw > 1024 || th > 1024 {
         return Err(bad("tile size"));
+    }
+    // Each tile takes a header line (`x,y,LZF,n`) and a byte of data at
+    // least: more than that many is a damaged count, not a reason to
+    // reserve room for billions.
+    if count > (bytes.len() - at) / 11 {
+        return Err(bad("tile count"));
     }
     let tile_bytes = tw * th * size;
     let mut tiles = Vec::with_capacity(count);
@@ -839,5 +899,113 @@ mod tests {
         entries.insert("maindoc.xml".into(), xml.into_bytes());
         let err = layered(&entries).err().expect("refused");
         assert!(err.contains("too large"), "{err}");
+    }
+
+    #[test]
+    fn a_huge_tile_count_is_refused_not_reserved() {
+        let header = format!(
+            "VERSION 2\nTILEWIDTH 64\nTILEHEIGHT 64\nPIXELSIZE 4\nDATA {}\n",
+            usize::MAX
+        );
+        assert!(read_tiles(header.as_bytes(), 4).is_err());
+        let header =
+            "VERSION 2\nTILEWIDTH 64\nTILEHEIGHT 64\nPIXELSIZE 4\nDATA 99999999\n0,0,LZF,1\n";
+        assert!(read_tiles(header.as_bytes(), 4).is_err());
+    }
+
+    /// A reader over `files` (in the layer folder) for a 100×100 image.
+    fn reader(files: Vec<(&str, Vec<u8>)>) -> HashMap<String, Vec<u8>> {
+        (files.into_iter())
+            .map(|(name, data)| (format!("img/layers/{name}"), data))
+            .collect()
+    }
+
+    #[test]
+    fn a_mask_keeps_its_offset_and_a_switched_off_one_is_left_out() {
+        // One black 64×64 mask tile at (0, 0), stored uncompressed.
+        let mut file =
+            b"VERSION 2\nTILEWIDTH 64\nTILEHEIGHT 64\nPIXELSIZE 1\nDATA 1\n0,0,LZF,4097\n".to_vec();
+        file.push(0);
+        file.extend(vec![0u8; 64 * 64]);
+        let entries = reader(vec![("m", file)]);
+        let r = Reader {
+            entries: &entries,
+            dir: "img/layers/".into(),
+            size: (100, 100),
+            skipped: false,
+            depth: Depth::U8,
+        };
+        let layer = |visible: &str| {
+            parse_xml(&format!(
+                r#"<layer><masks><mask nodetype="transparencymask" filename="m" x="10" y="5" visible="{visible}"/></masks></layer>"#
+            ))
+            .unwrap()
+        };
+        let on = layer("1");
+        let mask = r.mask(on.find("layer").unwrap()).expect("a mask");
+        assert_eq!(mask.data[0], 255, "moved off the corner");
+        assert_eq!(mask.data[5 * 100 + 10], 0, "its tile starts at its offset");
+        assert_eq!(mask.data[68 * 100 + 73], 0);
+        assert_eq!(mask.data[69 * 100 + 74], 255);
+        let off = layer("0");
+        assert!(r.mask(off.find("layer").unwrap()).is_none());
+    }
+
+    #[test]
+    fn far_apart_paint_tiles_are_cut_to_the_canvas_not_spanned() {
+        // Three red 64×64 tiles: on the canvas, a million pixels off it, and
+        // at the very edge of what a coordinate can say.
+        let tile = |x: i64, y: i64| {
+            let mut t = format!("{x},{y},LZF,{}\n", 64 * 64 * 4 + 1).into_bytes();
+            t.push(0);
+            // Krita's planar order: blue, green, red, alpha planes.
+            for plane in [0u8, 0, 255, 255] {
+                t.extend(vec![plane; 64 * 64]);
+            }
+            t
+        };
+        let mut file = b"VERSION 2\nTILEWIDTH 64\nTILEHEIGHT 64\nPIXELSIZE 4\nDATA 3\n".to_vec();
+        file.extend(tile(0, 0));
+        file.extend(tile(1_000_000, 1_000_000));
+        file.extend(tile(i32::MAX as i64 - 10, -(i32::MAX as i64)));
+        let entries = reader(vec![("p", file)]);
+        let mut r = Reader {
+            entries: &entries,
+            dir: "img/layers/".into(),
+            size: (100, 100),
+            skipped: false,
+            depth: Depth::U8,
+        };
+        let layer = parse_xml(r#"<layer filename="p" x="10" y="20"/>"#).unwrap();
+        let (rect, pixels, deep) = r.paint_layer(layer.find("layer").unwrap()).unwrap();
+        assert_eq!(rect, [10, 20, 74, 84], "the on-canvas tile's area only");
+        assert_eq!(pixels.len(), 64 * 64);
+        assert!(deep.is_none());
+        assert!(pixels.iter().all(|p| *p == Color32::RED));
+        // A layer with nothing on the canvas is empty, not an error.
+        let away = parse_xml(r#"<layer filename="p" x="-5000" y="0"/>"#).unwrap();
+        let (rect, pixels, _) = r.paint_layer(away.find("layer").unwrap()).unwrap();
+        assert_eq!((rect, pixels.len()), ([0; 4], 0));
+    }
+
+    #[test]
+    fn a_vector_layer_with_text_brings_the_flattened_picture() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="50" height="50" fill="red"/><text x="5" y="60">Hi</text></svg>"#;
+        let entries = reader(vec![("v.shapelayer/content.svg", svg.to_vec())]);
+        let mut r = Reader {
+            entries: &entries,
+            dir: "img/layers/".into(),
+            size: (100, 100),
+            skipped: false,
+            depth: Depth::U8,
+        };
+        let list =
+            parse_xml(r#"<layers><layer nodetype="shapelayer" filename="v" name="V"/></layers>"#)
+                .unwrap();
+        let mut out = Vec::new();
+        r.list(list.find("layers").unwrap(), &mut out, 0).unwrap();
+        assert_eq!(out.len(), 1, "the shapes still come");
+        assert!(out[0].vector.is_some());
+        assert!(r.skipped, "the text didn't: the picture is wanted");
     }
 }

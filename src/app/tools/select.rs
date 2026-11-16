@@ -10,12 +10,14 @@
 
 use crate::app::PainterApp;
 use crate::canvas::Canvas;
-use crate::canvas::fill::{self, ColorMatch, FillSettings};
+use crate::canvas::fill::{self, FillSettings};
 use crate::canvas::history::UndoAction;
 use crate::canvas::storage::SampleLayers;
 use crate::selection::magnetic::{self, LiveWire};
 use crate::selection::{SelectionMask, SelectionMode, SelectionShape, SelectionType};
 use eframe::egui::{self, Vec2};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// What the click tools look at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -86,6 +88,11 @@ struct LastPick {
     before: Option<SelectionShape>,
     /// What it selected, to tell whether the selection changed since.
     result: Option<SelectionShape>,
+    /// Not contiguous: what it measured, for re-runs.
+    distances: Option<Arc<PickDistances>>,
+    /// The document's version when measured: once painted on, a re-run
+    /// measures the picture again.
+    version: crate::app::autosave::Version,
 }
 
 /// Whether `a` is still the very selection `b` (not just an equal one).
@@ -95,6 +102,24 @@ fn same_selection(a: &Option<SelectionShape>, b: &Option<SelectionShape>) -> boo
         (Some(SelectionShape::Mask(a)), Some(SelectionShape::Mask(b))) => {
             std::sync::Arc::ptr_eq(a, b)
         }
+        (
+            Some(SelectionShape::Rectangle { start: a, end: b }),
+            Some(SelectionShape::Rectangle { start: c, end: d }),
+        ) => a == c && b == d,
+        (
+            Some(SelectionShape::Circle {
+                center: a,
+                radius: r,
+            }),
+            Some(SelectionShape::Circle {
+                center: b,
+                radius: q,
+            }),
+        ) => a == b && r == q,
+        (
+            Some(SelectionShape::Lasso { points: a, .. }),
+            Some(SelectionShape::Lasso { points: b, .. }),
+        ) => a == b,
         _ => false,
     }
 }
@@ -130,6 +155,9 @@ pub struct SelectToolState {
     /// The selection before the current drag, recorded when it ends.
     before: Option<Option<SelectionShape>>,
     last_pick: Option<LastPick>,
+    /// Counts picks asked for: a pick done on the worker is kept only if
+    /// no other was asked for since.
+    pick_generation: Arc<AtomicU64>,
     pub magnetic: Option<MagneticSession>,
     /// Select → Modify: the last radius used for each change.
     pub modify: ModifyRadii,
@@ -248,6 +276,14 @@ impl PainterApp {
     /// Forget the last wand/colour click (the selection changed otherwise).
     pub(crate) fn forget_last_pick(&mut self) {
         self.workspace.select.last_pick = None;
+    }
+
+    /// Drop the last pick's distances (2 bytes a canvas pixel): a re-run
+    /// then measures again.
+    pub(crate) fn drop_pick_distances(&mut self) {
+        if let Some(pick) = &mut self.workspace.select.last_pick {
+            pick.distances = None;
+        }
     }
 
     /// Press with the Select tool: start a drag, pick by colour, or place a
@@ -413,96 +449,124 @@ impl PainterApp {
 
     // --- Magic wand and colour range ---------------------------------------
 
+    /// The pick's source, or `None` (and a word to the user) when it's the
+    /// reference layers and there are none.
+    fn pick_source(&mut self, kind: SelectionType) -> Option<SampleLayers> {
+        let source = match kind {
+            SelectionType::ColorRange => self.workspace.select.color.source,
+            _ => self.workspace.select.wand.source,
+        };
+        let layers = match source {
+            SampleSource::Layer => SampleLayers::Layer(self.canvas.active_layer_idx),
+            SampleSource::AllVisible => SampleLayers::AllVisible,
+            SampleSource::Reference => SampleLayers::Reference,
+        };
+        if layers == SampleLayers::Reference && !self.canvas.has_reference_layer() {
+            self.export_state.message =
+                Some("No reference layer: mark one in the Layers panel".into());
+            return None;
+        }
+        Some(layers)
+    }
+
     fn select_pick(&mut self, pos: Vec2, kind: SelectionType, mode: SelectionMode) {
         self.select_cancel();
+        self.workspace.select.last_pick = None;
+        let Some(source) = self.pick_source(kind) else {
+            return;
+        };
         let before = self.selection_manager.current_shape.clone();
-        let mask = self.pick_mask(kind, pos);
-        self.selection_manager.apply_mask_or_nothing(mask, mode);
-        self.record_selection_change(before.clone());
-        self.workspace.select.last_pick = Some(LastPick {
-            kind,
-            pos,
-            mode,
-            before,
-            result: self.selection_manager.current_shape.clone(),
+        let version = self.doc_version();
+        self.run_pick(kind, pos, source, None, move |app, mask, distances| {
+            // (The selection changed some other way meanwhile: it stays.)
+            if !same_selection(&app.selection_manager.current_shape, &before) {
+                return;
+            }
+            // Painted on while measuring: re-runs measure again.
+            let distances = distances.filter(|_| app.doc_version() == version);
+            app.selection_manager.apply_mask_or_nothing(mask, mode);
+            app.record_selection_change(before.clone());
+            // (After the step it just pushed.)
+            let version = app.doc_version();
+            app.workspace.select.last_pick = Some(LastPick {
+                kind,
+                pos,
+                mode,
+                before,
+                result: app.selection_manager.current_shape.clone(),
+                distances,
+                version,
+            });
         });
     }
 
     /// Re-run the last wand/colour click with the current settings (they
-    /// changed), replacing its result; it stays one undo step.
+    /// changed), replacing its result; it stays one undo step. A slider
+    /// dragged asks every frame: each re-run is made on the worker, from
+    /// the click's distances when it has them, and only the latest is kept.
     pub(crate) fn rerun_last_pick(&mut self) {
-        let Some(mut pick) = self.workspace.select.last_pick.take() else {
+        let Some(pick) = self.workspace.select.last_pick.as_ref() else {
             return;
         };
         if !same_selection(&self.selection_manager.current_shape, &pick.result) {
+            self.workspace.select.last_pick = None;
             return;
         }
-        self.selection_manager.current_shape = pick.before.clone();
-        let mask = self.pick_mask(pick.kind, pick.pos);
-        self.selection_manager
-            .apply_mask_or_nothing(mask, pick.mode);
-        pick.result = self.selection_manager.current_shape.clone();
-        self.workspace.select.last_pick = Some(pick);
+        let (kind, pos) = (pick.kind, pick.pos);
+        let (distances, result) = (pick.distances.clone(), pick.result.clone());
+        // Painted on since: the distances are of the picture as it was.
+        let version = self.doc_version();
+        let distances = distances.filter(|_| pick.version == version);
+        let Some(source) = self.pick_source(kind) else {
+            return;
+        };
+        self.run_pick(kind, pos, source, distances, move |app, mask, distances| {
+            let Some(mut pick) = app.workspace.select.last_pick.take() else {
+                return;
+            };
+            // (The selection changed some other way meanwhile.)
+            if !same_selection(&app.selection_manager.current_shape, &result) {
+                return;
+            }
+            app.selection_manager.current_shape = pick.before.clone();
+            app.selection_manager.apply_mask_or_nothing(mask, pick.mode);
+            pick.result = app.selection_manager.current_shape.clone();
+            pick.distances = distances.filter(|_| app.doc_version() == version);
+            pick.version = version;
+            app.workspace.select.last_pick = Some(pick);
+        });
     }
 
-    fn sample_layer(&self, source: SampleSource) -> SampleLayers {
-        match source {
-            SampleSource::Layer => SampleLayers::Layer(self.canvas.active_layer_idx),
-            SampleSource::AllVisible => SampleLayers::AllVisible,
-            SampleSource::Reference => SampleLayers::Reference,
-        }
-    }
-
-    /// What a wand or colour-range click at `pos` selects.
-    fn pick_mask(&self, kind: SelectionType, pos: Vec2) -> Option<SelectionMask> {
-        let canvas = &self.canvas;
-        let (w, h) = (canvas.width(), canvas.height());
-        let (x, y) = (pos.x.floor() as i32, pos.y.floor() as i32);
-        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
-            return None;
-        }
-        let pool = &self.workspace.pool;
-        match kind {
-            SelectionType::Wand => {
-                let s = self.workspace.select.wand;
-                let source = self.sample_layer(s.source);
-                let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
-                let mask = pool.install(|| {
-                    if s.contiguous {
-                        let settings = FillSettings {
-                            tolerance: s.tolerance,
-                            gap: s.gap,
-                            expand: 0,
-                            antialias: s.antialias,
-                        };
-                        fill::bucket_fill(&reference, w, h, (x, y), &settings)
-                    } else {
-                        let target = canvas.render_sample(source, x, y, 1, 1)[0];
-                        let matching = ColorMatch::Channels {
-                            tolerance: s.tolerance,
-                        };
-                        fill::select_color(&reference, w, h, target, matching)
-                    }
-                })?;
-                if s.grow != 0 {
-                    pool.install(|| mask.grown(s.grow))
-                } else {
-                    Some(mask)
+    /// Work out a wand or colour-range click at `pos` on the worker, then
+    /// `apply` its mask, unless another pick was asked for since.
+    fn run_pick(
+        &mut self,
+        kind: SelectionType,
+        pos: Vec2,
+        source: SampleLayers,
+        distances: Option<Arc<PickDistances>>,
+        apply: impl FnOnce(&mut PainterApp, Option<SelectionMask>, Option<Arc<PickDistances>>)
+        + Send
+        + 'static,
+    ) {
+        let latest = Arc::clone(&self.workspace.select.pick_generation);
+        let mine = latest.fetch_add(1, Ordering::SeqCst) + 1;
+        let canvas = Arc::clone(&self.canvas);
+        let pool = Arc::clone(&self.workspace.pool);
+        let (wand, color) = (self.workspace.select.wand, self.workspace.select.color);
+        self.run_on_worker("Selecting…", move || {
+            if latest.load(Ordering::SeqCst) != mine {
+                return Box::new(|_: &mut PainterApp| {});
+            }
+            let (mask, distances) =
+                pool.install(|| pick_mask(&canvas, source, kind, pos, wand, color, distances));
+            drop(canvas);
+            Box::new(move |app: &mut PainterApp| {
+                if latest.load(Ordering::SeqCst) == mine {
+                    apply(app, mask, distances);
                 }
-            }
-            SelectionType::ColorRange => {
-                let s = self.workspace.select.color;
-                let source = self.sample_layer(s.source);
-                let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
-                let target = canvas.render_sample(source, x, y, 1, 1)[0];
-                let matching = ColorMatch::Perceptual {
-                    tolerance: s.tolerance,
-                    softness: s.softness,
-                };
-                pool.install(|| fill::select_color(&reference, w, h, target, matching))
-            }
-            _ => None,
-        }
+            })
+        });
     }
 
     // --- Magnetic lasso ----------------------------------------------------
@@ -770,12 +834,139 @@ pub(crate) fn draw_magnetic(
     }
 }
 
+/// A non-contiguous pick's distance from the clicked colour at every pixel
+/// of its source, made once per click: a settings change thresholds it
+/// again instead of compositing and converting the whole canvas anew. (It
+/// is the picture as it was when clicked.)
+pub(crate) struct PickDistances {
+    source: SampleLayers,
+    kind: SelectionType,
+    width: usize,
+    height: usize,
+    /// The wand's: the largest channel difference (0..=255). Colour
+    /// range's: the perceptual distance in hundredths of a percent.
+    values: Vec<u16>,
+}
+
+/// The largest channel difference between two pixels (the wand's measure).
+impl PickDistances {
+    /// Every pixel of `source`'s distance from `target`.
+    fn measure(
+        canvas: &Canvas,
+        source: SampleLayers,
+        kind: SelectionType,
+        target: eframe::egui::Color32,
+    ) -> Self {
+        use rayon::prelude::*;
+        const ROWS: usize = 64;
+        let (w, h) = (canvas.width(), canvas.height());
+        let target_lab = fill::lab_alpha(target);
+        let perceptual = kind == SelectionType::ColorRange;
+        let distance = |c: eframe::egui::Color32| -> u16 {
+            if !perceptual {
+                return fill::diff(c, target) as u16;
+            }
+            let d = fill::perceptual_distance(c, target_lab);
+            (d * 100.0).round().min(u16::MAX as f32) as u16
+        };
+        let mut values = vec![0u16; w * h];
+        values
+            .par_chunks_mut(w * ROWS)
+            .enumerate()
+            .for_each(|(i, strip)| {
+                let rows = strip.len() / w;
+                let pixels = canvas.render_sample(source, 0, (i * ROWS) as i32, w, rows);
+                // Pictures repeat colours: the last answer is often the
+                // next one's too.
+                let mut last = None;
+                for (out, &px) in strip.iter_mut().zip(&pixels) {
+                    *out = match last {
+                        Some((p, v)) if p == px => v,
+                        _ => {
+                            let v = distance(px);
+                            last = Some((px, v));
+                            v
+                        }
+                    };
+                }
+            });
+        Self {
+            source,
+            kind,
+            width: w,
+            height: h,
+            values,
+        }
+    }
+
+    /// What the settings select of it.
+    fn threshold(&self, wand: WandSettings, color: ColorRangeSettings) -> Option<SelectionMask> {
+        use rayon::prelude::*;
+        let coverage = |d: u16| -> u8 {
+            if self.kind != SelectionType::ColorRange {
+                return if d <= wand.tolerance as u16 { 255 } else { 0 };
+            }
+            fill::soft_coverage(d as f32 / 100.0, color.tolerance, color.softness)
+        };
+        let data: Vec<u8> = self.values.par_iter().map(|&d| coverage(d)).collect();
+        SelectionMask::new(0, 0, self.width, self.height, data).into_cropped()
+    }
+}
+
+/// What a wand or colour-range click at `pos` selects of `source`, and
+/// (not contiguous) the distances it came from, `distances` reused when
+/// they're this click's.
+fn pick_mask(
+    canvas: &Canvas,
+    source: SampleLayers,
+    kind: SelectionType,
+    pos: Vec2,
+    wand: WandSettings,
+    color: ColorRangeSettings,
+    distances: Option<Arc<PickDistances>>,
+) -> (Option<SelectionMask>, Option<Arc<PickDistances>>) {
+    let (w, h) = (canvas.width(), canvas.height());
+    let (x, y) = (pos.x.floor() as i32, pos.y.floor() as i32);
+    if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+        return (None, None);
+    }
+    let contiguous = kind == SelectionType::Wand && wand.contiguous;
+    if !matches!(kind, SelectionType::Wand | SelectionType::ColorRange) {
+        return (None, None);
+    }
+    let (mask, distances) = if contiguous {
+        let reference = |x, y, w, h| canvas.render_sample(source, x, y, w, h);
+        let settings = FillSettings {
+            tolerance: wand.tolerance,
+            gap: wand.gap,
+            expand: 0,
+            antialias: wand.antialias,
+        };
+        (fill::bucket_fill(&reference, w, h, (x, y), &settings), None)
+    } else {
+        let distances = distances
+            .filter(|d| d.source == source && d.kind == kind && (d.width, d.height) == (w, h))
+            .unwrap_or_else(|| {
+                let target = canvas.render_sample(source, x, y, 1, 1)[0];
+                Arc::new(PickDistances::measure(canvas, source, kind, target))
+            });
+        (distances.threshold(wand, color), Some(distances))
+    };
+    let mask = match mask {
+        Some(mask) if kind == SelectionType::Wand && wand.grow != 0 => mask.grown(wand.grow),
+        mask => mask,
+    };
+    (mask, distances)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::SampleSource;
     use crate::canvas::Canvas;
     use crate::project::tests::test_app_pub;
     use crate::selection::{SelectionMode, SelectionType};
     use eframe::egui::{Color32, Vec2};
+    use std::sync::Arc;
 
     fn app() -> crate::PainterApp {
         let mut app = test_app_pub(Canvas::new(128, 128, Color32::WHITE, 64));
@@ -873,6 +1064,61 @@ mod tests {
         assert_eq!(app.layer_state.history.stacks().0.len(), 1);
         app.apply_history(false);
         assert!(!app.selection_manager.has_selection());
+    }
+
+    #[test]
+    fn a_rerun_thresholds_the_clicks_distances_again_and_keeps_only_the_latest() {
+        let mut app = app_with_squares(&[(10, 10), (90, 90)]);
+        app.workspace.select.wand.contiguous = false;
+        app.select_press(
+            Vec2::new(15.0, 15.0),
+            SelectionType::Wand,
+            SelectionMode::Replace,
+        );
+        assert!(app.selection_manager.contains(Vec2::new(95.0, 95.0)));
+        let measured = |app: &crate::PainterApp| {
+            Arc::clone(
+                app.workspace
+                    .select
+                    .last_pick
+                    .as_ref()
+                    .unwrap()
+                    .distances
+                    .as_ref()
+                    .unwrap(),
+            )
+        };
+        let first = measured(&app);
+        // Two slider steps before the worker gets to them: the first is
+        // dropped, the second kept, both from the click's distances.
+        app.workspace.jobs.defer = true;
+        app.workspace.select.wand.tolerance = 255;
+        app.rerun_last_pick();
+        app.workspace.select.wand.tolerance = 10;
+        app.rerun_last_pick();
+        app.workspace.jobs.defer = false;
+        app.release_canvas();
+        assert!(app.selection_manager.contains(Vec2::new(95.0, 95.0)));
+        assert!(
+            !app.selection_manager.contains(Vec2::new(50.0, 50.0)),
+            "tolerance 10's"
+        );
+        assert!(Arc::ptr_eq(&first, &measured(&app)), "not measured again");
+        assert_eq!(app.layer_state.history.stacks().0.len(), 1);
+    }
+
+    #[test]
+    fn picking_from_missing_reference_layers_says_so() {
+        let mut app = app_with_squares(&[(10, 10)]);
+        app.workspace.select.color.source = SampleSource::Reference;
+        app.select_press(
+            Vec2::new(15.0, 15.0),
+            SelectionType::ColorRange,
+            SelectionMode::Replace,
+        );
+        assert!(!app.selection_manager.has_selection());
+        let message = app.export_state.message.clone().unwrap_or_default();
+        assert!(message.contains("No reference layer"), "{message}");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! and the per-tile buffers dabs accumulate into before being resolved
 //! onto the layer.
 
-use crate::brush_engine::brush::{Brush, BrushType, RibbonSeg, Target};
+use crate::brush_engine::brush::{Brush, BrushType, DabExtra, RibbonSeg, Target};
 use crate::brush_engine::brush_options::{BrushOptions, PixelBrushShape, TipOrder};
 use crate::brush_engine::dynamics::{
     DabSetting, DabVar, FAST_SPEED, PenBarrel, PenTilt, compose, direction, tip_orientation,
@@ -28,7 +28,11 @@ use std::sync::Mutex;
 /// coverage. Pixels are never re-quantized to 8 bits between dabs.
 #[derive(Clone)]
 pub(crate) struct StrokeBuffer {
-    pub original: Vec<Color32>,
+    /// The layer's tile itself, held from the stroke's first touch: its
+    /// pixels are resolved into it without looking it up (and locking the
+    /// layer's tile map) each time.
+    pub cell: std::sync::Arc<Mutex<crate::canvas::storage::TileCell>>,
+    pub original: crate::canvas::storage::SharedPixels,
     /// In a deeper document, the same pixels at full depth.
     pub original_deep: Option<crate::canvas::storage::DeepTile>,
     /// Impasto: the tile's heights before the stroke (`None` when it lays
@@ -59,6 +63,10 @@ pub(crate) struct StrokeBuffer {
     /// Watercolour edges from round dabs: how near a rim each pixel is,
     /// the deepest any dab reached (see [`crate::brush_engine::wet_edge::WetRim`]).
     pub rim: Option<Vec<f32>>,
+    /// The same for each tail segment's dabs: folded into `rim` when the
+    /// segment is kept, dropped with it when it's cleared (its dabs are
+    /// redrawn tapered, and their depth with them).
+    pub tail_rim: [Option<Vec<f32>>; 2],
     /// Painted but not resolved into the tile's pixels yet (see
     /// [`StrokeTiles::defer_resolve`]): each row's columns `[min, max]`.
     pub pending: Option<Vec<(usize, usize)>>,
@@ -102,6 +110,15 @@ pub struct StrokeTiles {
     /// Tiles painted while resolving was deferred whose live watercolour
     /// or burnt edges are still to be shown (with the next resolve).
     pub(crate) edges_due: HashSet<(usize, usize)>,
+    /// Tiles that may have rows left unresolved (see
+    /// [`StrokeBuffer::pending`]), so resolving them needn't look through
+    /// every buffer of the stroke.
+    pub(crate) pending_keys: HashSet<(usize, usize)>,
+    /// Small dabs' coverage, worked out once a stroke (see
+    /// [`crate::brush_engine::brush::SoftTip`]).
+    pub(crate) small_dabs: crate::brush_engine::brush::SmallDabs,
+    /// A bristle brush's hairs, laid out once a stroke.
+    pub(crate) hairs: Option<std::sync::Arc<Vec<crate::brush_engine::bristle::Hair>>>,
 }
 
 /// A dab as the brush would paint it, for a stroke that lays its dabs down
@@ -118,7 +135,7 @@ pub(crate) struct CollectedDab {
 /// saved.
 type SavedTile = (
     StrokeBuffer,
-    (Vec<Color32>, Option<DeepTile>),
+    (crate::canvas::storage::SharedPixels, Option<DeepTile>),
     Option<Vec<u16>>,
 );
 
@@ -157,7 +174,10 @@ impl StrokeTiles {
             if let Some(tile) = canvas.lock_tile(key.0, key.1) {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
                 if tile.data().is_some() {
-                    tile.set_both(Some(buffer.original.clone()), buffer.original_deep.clone());
+                    tile.set_shared(
+                        Some(std::sync::Arc::clone(&buffer.original)),
+                        buffer.original_deep.clone().map(std::sync::Arc::new),
+                    );
                     tile.is_empty = buffer.original.iter().all(|&p| p == Color32::TRANSPARENT);
                 }
             }
@@ -169,7 +189,11 @@ impl StrokeTiles {
             buffer.mask = None;
             buffer.mask_dirty = None;
             buffer.rim = None;
+            buffer.tail_rim = [None, None];
             buffer.damage = Some([0, 0, tile_size, tile_size]);
+            if buffer.pending.is_some() {
+                self.pending_keys.insert(key);
+            }
             self.dirty.insert(key);
         }
         self.tail_tiles = Default::default();
@@ -225,7 +249,10 @@ impl StrokeTiles {
             let pixels = (canvas.lock_tile(key.0, key.1))
                 .map(|t| {
                     let t = t.lock().unwrap_or_else(|e| e.into_inner());
-                    (t.data().cloned().unwrap_or_default(), t.deep().cloned())
+                    (
+                        t.shared_data().cloned().unwrap_or_default(),
+                        t.deep().cloned(),
+                    )
                 })
                 .unwrap_or_default();
             let heights = layer_heights(canvas).and_then(|m| m.tile((key.0 as i32, key.1 as i32)));
@@ -273,6 +300,7 @@ impl StrokeTiles {
                     buffer.mask = None;
                     buffer.mask_dirty = None;
                     buffer.rim = None;
+                    buffer.tail_rim = [None, None];
                     (buffer.original.clone(), buffer.original_deep.clone())
                 }
             };
@@ -281,10 +309,14 @@ impl StrokeTiles {
                 let mut tile = tile.lock().unwrap_or_else(|e| e.into_inner());
                 if tile.data().is_some_and(|data| data.len() == pixels.len()) {
                     tile.is_empty = pixels.iter().all(|&p| p == Color32::TRANSPARENT);
-                    tile.set_both(Some(pixels), deep);
+                    tile.set_shared(Some(pixels), deep.map(std::sync::Arc::new));
                 }
             }
             buffer.damage = Some([0, 0, tile_size, tile_size]);
+            // (A buffer saved with rows unresolved still has them.)
+            if buffer.pending.is_some() {
+                self.pending_keys.insert(key);
+            }
             self.dirty.insert(key);
         }
         self.tail_tiles = checkpoint.tail_tiles;
@@ -528,8 +560,10 @@ impl<'a> StrokeContext<'a> {
     }
 
     /// Show the paint a dual brush's mask has uncovered since last time.
-    fn resolve_mask(&mut self, brush: &Brush) {
-        brush.resolve_mask_changes(self.canvas, self.selection, self.stroke_tiles);
+    /// What a dual brush's mask uncovered, resolved with the stroke's next
+    /// dabs (or by [`Self::flush_resolves`]).
+    fn resolve_mask(&mut self) {
+        Brush::note_mask_changes(self.canvas, self.stroke_tiles);
     }
 
     /// Take the stroke's redrawable tail back off.
@@ -542,49 +576,86 @@ impl<'a> StrokeContext<'a> {
         brush.merge_tail(self.canvas, self.stroke_tiles, k);
     }
 
-    fn dabs(&mut self, brush: &mut Brush, centers: &[Vec2]) {
+    /// Dabs at `centers`, each bringing `extras` (one each) of its own.
+    fn dabs(&mut self, brush: &mut Brush, centers: &[Vec2], extras: &[DabExtra]) {
         if self.wrap {
-            let (mirrored, orients) = match self.symmetry {
+            let (mirrored, orients, sources) = match self.symmetry {
                 Some((symmetry, copies)) => {
-                    let (all, orients) = symmetry.expand(copies, centers);
-                    (all, Some(orients))
+                    let (all, orients, sources) = symmetry.expand_indexed(copies, centers);
+                    (all, Some(orients), sources)
                 }
-                None => (centers.to_vec(), None),
+                None => (centers.to_vec(), None, (0..centers.len()).collect()),
             };
-            let (all, _, orients) = self.wrapped(&mirrored, orients.as_deref(), brush.wrap_reach());
+            let (all, wrap_sources, orients) =
+                self.wrapped(&mirrored, orients.as_deref(), brush.wrap_reach());
+            let extras: Vec<DabExtra> = wrap_sources.iter().map(|&i| extras[sources[i]]).collect();
             brush.dabs_oriented(
                 self.pool,
                 self.canvas,
                 self.selection,
                 &all,
                 orients.as_deref(),
+                Some(&extras),
                 self.undo_action,
                 self.stroke_tiles,
             );
             return;
         }
         if let Some((symmetry, copies)) = self.symmetry {
-            let (centers, orients) = symmetry.expand(copies, centers);
+            let (centers, orients, sources) = symmetry.expand_indexed(copies, centers);
+            let extras: Vec<DabExtra> = sources.iter().map(|&i| extras[i]).collect();
             brush.dabs_oriented(
                 self.pool,
                 self.canvas,
                 self.selection,
                 &centers,
                 Some(&orients),
+                Some(&extras),
                 self.undo_action,
                 self.stroke_tiles,
             );
             return;
         }
-        brush.dabs(
+        brush.dabs_oriented(
             self.pool,
             self.canvas,
             self.selection,
             centers,
+            None,
+            Some(extras),
             self.undo_action,
             self.stroke_tiles,
         );
     }
+
+    /// Whether a batch's dabs can each bring what pressure makes of the
+    /// brush (see `PlacedDab::pressured`) and be painted together, as
+    /// painting them in runs of the same would: a plain dab brush's, with
+    /// no copies (mirrored or wrapped round, a batch's copies come after
+    /// all its dabs: in another order than run by run).
+    fn folds_pressure(&self, brush: &Brush) -> bool {
+        #[cfg(test)]
+        if !FOLD_PRESSURE.get() {
+            return false;
+        }
+        self.symmetry.is_none()
+            && !self.wrap
+            && matches!(brush.brush_type, BrushType::Soft | BrushType::Pixel)
+            && !brush.is_ribbon()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: whether pressure runs are painted together (see
+    /// `StrokeContext::folds_pressure`).
+    static FOLD_PRESSURE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Tests: paint pressure runs together (`fold`) or one batch each.
+#[cfg(test)]
+pub(crate) fn set_fold_pressure(fold: bool) {
+    FOLD_PRESSURE.set(fold);
 }
 
 /// A dab the stroke has placed: where, how far along the stroke, and the
@@ -601,6 +672,10 @@ struct Pending {
     /// Its variation, when it was worked out as it was placed (its size
     /// sets the space to the next dab).
     var: Option<DabVar>,
+    /// The spacing factor (pressure, inputs) the space after it was worked
+    /// out with: it lays what the dabs that space skips would (see
+    /// `Brush::spacing_stretch`).
+    spacing: f32,
 }
 
 /// What spaces dabs by their own size: the brush's unpressured `(diameter,
@@ -619,8 +694,13 @@ impl Sizing {
     fn spacing_at(&self, brush: &Brush, pressure: f32, var: &DabVar) -> f32 {
         let o = &brush.brush_options;
         let diameter = (self.original.0 * pressure_size_factor(o, pressure) * var.scale).max(0.5);
-        let factor = o.spacing_factor(pressure) * var.spacing;
+        let factor = self.factor(brush, pressure, var);
         o.painted_spacing(diameter, factor) * brush.spacing_stretch(diameter, factor)
+    }
+
+    /// The spacing factor [`Self::spacing_at`] spaces by.
+    fn factor(&self, brush: &Brush, pressure: f32, var: &DabVar) -> f32 {
+        brush.brush_options.spacing_factor(pressure) * var.spacing
     }
 }
 
@@ -918,6 +998,11 @@ impl StrokeState {
                 self.airbrush_due = Some(t + airbrush_interval(brush));
             }
             self.paint_pending(brush, original, from, p, context);
+            // What the dabs didn't resolve (a dual brush's mask uncovered
+            // more), unless it's left for later.
+            if !context.stroke_tiles.defer_resolve {
+                context.flush_resolves(brush);
+            }
             context.wet_edges_live(brush);
         }));
 
@@ -1003,6 +1088,7 @@ impl StrokeState {
                     along: self.travel,
                     dir: self.dir,
                     var: None,
+                    spacing: 1.0,
                 });
             }
             self.paint_pending(brush, original, p, p, context);
@@ -1298,7 +1384,7 @@ impl StrokeState {
             }
         }
         context.dabs_varied(&mut mask_brush, &points, &vars, Target::Mask);
-        context.resolve_mask(brush);
+        context.resolve_mask();
     }
 
     /// Paint the dabs queued in `self.pending`, their pressure blending from
@@ -1327,7 +1413,10 @@ impl StrokeState {
                         let pressure = from + (p - from) * d.t;
                         let var = match d.var {
                             Some(var) => var,
-                            None => self.dab_var(brush, d, pressure),
+                            None => DabVar {
+                                spaced: d.spacing,
+                                ..self.dab_var(brush, d, pressure)
+                            },
                         };
                         // An input drives the scatter: now it's known.
                         let pos = if defer {
@@ -1366,30 +1455,62 @@ impl StrokeState {
             }
             // Pressure blends along the segment, so a slow pen (or a big
             // pressure change between samples) doesn't paint visible steps.
-            // Dabs that look the same are painted together (see `run_key`).
-            let mut run = std::mem::take(&mut self.run);
-            let mut key = None;
-            let mut run_pressure = 0.0;
-            for d in &pending {
-                let q = from + (p - from) * d.t;
-                let k = run_key(brush, original, q);
-                if key != Some(k) {
-                    if key.is_some() && !run.is_empty() {
-                        apply_pressure(brush, original, run_pressure);
-                        context.dabs(brush, &run);
-                        run.clear();
-                    }
-                    key = Some(k);
-                    run_pressure = q;
+            // Dabs that look the same are painted together (see `run_key`):
+            // each run at its first dab's pressure.
+            let run_pressures: Vec<f32> = {
+                let mut key = None;
+                let mut run_pressure = 0.0;
+                (pending.iter())
+                    .map(|d| {
+                        let q = from + (p - from) * d.t;
+                        let k = run_key(brush, original, q);
+                        if key != Some(k) {
+                            key = Some(k);
+                            run_pressure = q;
+                        }
+                        run_pressure
+                    })
+                    .collect()
+            };
+            let runs = run_pressures.windows(2).filter(|w| w[0] != w[1]).count() + 1;
+            if runs > 1 && context.folds_pressure(brush) {
+                // All at once, each dab with its run's.
+                let o = &brush.brush_options;
+                let extras: Vec<DabExtra> = (pending.iter().zip(&run_pressures))
+                    .map(|(d, &q)| DabExtra {
+                        spacing: d.spacing,
+                        pressured: Some(pressured(o, original, q)),
+                    })
+                    .collect();
+                let centers: Vec<Vec2> = pending.iter().map(|d| d.pos).collect();
+                context.dabs(brush, &centers, &extras);
+                // (The brush as the last run left it.)
+                if let Some(&q) = run_pressures.last() {
+                    apply_pressure(brush, original, q);
                 }
-                run.push(d.pos);
+            } else {
+                let mut run = std::mem::take(&mut self.run);
+                let mut extras = Vec::new();
+                let mut start = 0;
+                while start < pending.len() {
+                    let q = run_pressures[start];
+                    let end = (run_pressures[start..].iter())
+                        .position(|&r| r != q)
+                        .map_or(pending.len(), |n| start + n);
+                    run.clear();
+                    run.extend(pending[start..end].iter().map(|d| d.pos));
+                    extras.clear();
+                    extras.extend(pending[start..end].iter().map(|d| DabExtra {
+                        spacing: d.spacing,
+                        pressured: None,
+                    }));
+                    apply_pressure(brush, original, q);
+                    context.dabs(brush, &run, &extras);
+                    start = end;
+                }
+                run.clear();
+                self.run = run;
             }
-            if key.is_some() && !run.is_empty() {
-                apply_pressure(brush, original, run_pressure);
-                context.dabs(brush, &run);
-            }
-            run.clear();
-            self.run = run;
             self.pending = pending;
             self.pending.clear();
         }
@@ -1616,6 +1737,7 @@ impl StrokeState {
             along: self.travel,
             dir: self.dir,
             var: None,
+            spacing: 1.0,
         };
         // A reading, not a dab: the dab count stays.
         let dabs = self.dabs;
@@ -1863,9 +1985,17 @@ impl StrokeState {
                         along: self.travel,
                         dir: self.dir,
                         var: None,
+                        spacing,
                     };
                     if sizing.per_dab {
-                        dab.var = Some(self.dab_var(brush, &dab, sizing.to));
+                        let var = self.dab_var(brush, &dab, sizing.to);
+                        dab.spacing = sizing.factor(brush, sizing.to, &var);
+                        dab.var = Some(DabVar {
+                            spaced: dab.spacing,
+                            ..var
+                        });
+                    } else if spaced_by_tip {
+                        dab.spacing = sizing.factor(brush, sizing.to, &DabVar::default());
                     }
                     self.pending.push(dab);
                     self.last_dab_size = size;
@@ -1942,6 +2072,7 @@ impl StrokeState {
                             along: self.travel + done,
                             dir,
                             var: None,
+                            spacing,
                         };
                         let pressure = sizing.from + (sizing.to - sizing.from) * dab.t;
                         self.last_dab_size =
@@ -1951,11 +2082,16 @@ impl StrokeState {
                             // inputs and all) spaces the next dab.
                             let var = self.dab_var(brush, &dab, pressure);
                             next = (sizing.spacing_at(brush, pressure, &var) * reach).max(0.5);
-                            dab.var = Some(var);
+                            dab.spacing = sizing.factor(brush, pressure, &var);
+                            dab.var = Some(DabVar {
+                                spaced: dab.spacing,
+                                ..var
+                            });
                         } else if spaced_by_tip {
                             // Its size by pressure spaces the next.
                             next = (sizing.spacing_at(brush, pressure, &DabVar::default()) * reach)
                                 .max(0.5);
+                            dab.spacing = sizing.factor(brush, pressure, &DabVar::default());
                         }
                         self.pending.push(dab);
                     }
@@ -1980,16 +2116,22 @@ impl StrokeState {
                     along: 0.0,
                     dir: None,
                     var: None,
+                    spacing,
                 };
                 // Its own size spaces the next, as for every dab.
                 if sizing.per_dab {
                     let var = self.dab_var(brush, &dab, sizing.to);
                     next = sizing.spacing_at(brush, sizing.to, &var).max(0.5);
-                    dab.var = Some(var);
+                    dab.spacing = sizing.factor(brush, sizing.to, &var);
+                    dab.var = Some(DabVar {
+                        spaced: dab.spacing,
+                        ..var
+                    });
                 } else if spaced_by_tip {
                     next = sizing
                         .spacing_at(brush, sizing.to, &DabVar::default())
                         .max(0.5);
+                    dab.spacing = sizing.factor(brush, sizing.to, &DabVar::default());
                 }
                 self.pending.push(dab);
             }
@@ -2058,6 +2200,7 @@ impl StrokeState {
                     t,
                     along: self.travel + t * length,
                     dir,
+                    spacing: 1.0,
                 });
 
                 if x == x1 && y == y1 {
@@ -2084,6 +2227,7 @@ impl StrokeState {
                 along: 0.0,
                 dir: None,
                 var: None,
+                spacing: 1.0,
             });
         }
         self.last_pos = Some(pos);
@@ -2187,20 +2331,43 @@ fn paint_plans(
     target: Target,
     context: &mut StrokeContext<'_>,
 ) {
+    // The runs: where each starts.
+    let mut starts = Vec::new();
     let mut start = 0;
     while start < plans.len() {
-        let pressure = plans[start].pressure;
-        let key = run_key(brush, original, pressure);
-        let end = plans[start..]
+        let key = run_key(brush, original, plans[start].pressure);
+        starts.push(start);
+        start = plans[start..]
             .iter()
             .position(|p| run_key(brush, original, p.pressure) != key)
             .map_or(plans.len(), |n| start + n);
-        apply_pressure(brush, original, pressure);
+    }
+    if starts.len() > 1 && context.folds_pressure(brush) {
+        // All at once, each dab with its run's.
+        let o = &brush.brush_options;
+        let mut vars: Vec<DabVar> = plans.iter().map(|p| p.var).collect();
+        for (k, &start) in starts.iter().enumerate() {
+            let end = starts.get(k + 1).copied().unwrap_or(plans.len());
+            let values = pressured(o, original, plans[start].pressure);
+            for var in &mut vars[start..end] {
+                var.pressured = Some(values);
+            }
+        }
+        let centers: Vec<Vec2> = plans.iter().map(|p| p.pos).collect();
+        context.dabs_varied(brush, &centers, &vars, target);
+        // (The brush as the last run left it.)
+        if let Some(&last) = starts.last() {
+            apply_pressure(brush, original, plans[last].pressure);
+        }
+        return;
+    }
+    for (k, &start) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).copied().unwrap_or(plans.len());
+        apply_pressure(brush, original, plans[start].pressure);
         let run = &plans[start..end];
         let centers: Vec<Vec2> = run.iter().map(|p| p.pos).collect();
         let vars: Vec<DabVar> = run.iter().map(|p| p.var).collect();
         context.dabs_varied(brush, &centers, &vars, target);
-        start = end;
     }
 }
 

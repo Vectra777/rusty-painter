@@ -205,7 +205,7 @@ impl PainterApp {
                 px
             })
             .collect();
-        let mut before: HashMap<(i32, i32), Vec<egui::Color32>> = HashMap::new();
+        let mut before: HashMap<(i32, i32), crate::canvas::storage::SharedPixels> = HashMap::new();
         self.canvas
             .write_layer_region(layer_idx, (hx, hy, hw, hh), &pixels, Some(&mut before));
         let ts = self.canvas.tile_size();

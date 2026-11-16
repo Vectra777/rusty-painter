@@ -438,6 +438,9 @@ pub(super) struct StoredLayerMeta {
     /// Its keyed motion; absent in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     motion: Option<crate::canvas::motion::Motion>,
+    /// A colorize mask's settings; absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    colorize: Option<crate::canvas::colorize::ColorizeSettings>,
 }
 
 impl From<&LayerMeta> for StoredLayerMeta {
@@ -467,6 +470,7 @@ impl From<&LayerMeta> for StoredLayerMeta {
             reference: meta.reference,
             anim: meta.anim,
             motion: meta.motion.as_deref().cloned(),
+            colorize: meta.colorize.as_ref().map(|c| c.settings),
         }
     }
 }
@@ -507,6 +511,8 @@ impl StoredLayerMeta {
             // comes back from a file as its last pixels.)
             rig: None,
             motion: self.motion.map(Box::new),
+            colorize: (self.colorize)
+                .map(|s| Box::new(crate::canvas::colorize::ColorizeLayer::new(s))),
         }
     }
 }

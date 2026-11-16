@@ -17,9 +17,22 @@ pub struct Picture {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<Color32>,
+    /// In a deeper document, the same pixels at full depth (premultiplied
+    /// linear light, 0..255): what's drawn from, so the bend keeps them.
+    pub deep: Option<Vec<[f32; 4]>>,
 }
 
 impl Picture {
+    /// Pixel `i`'s values, 0..255 (its full-depth ones, if it has them).
+    #[inline]
+    fn texel(&self, i: usize) -> [f32; 4] {
+        if let Some(deep) = &self.deep {
+            return deep[i];
+        }
+        let c = self.pixels[i];
+        [c.r() as f32, c.g() as f32, c.b() as f32, c.a() as f32]
+    }
+
     /// Bilinear, premultiplied, at canvas point `(x, y)` (transparent
     /// outside).
     fn sample(&self, x: f32, y: f32) -> [f32; 4] {
@@ -32,8 +45,7 @@ impl Picture {
             if px < 0 || py < 0 || px >= w || py >= h {
                 return [0.0; 4];
             }
-            let c = self.pixels[(py * w + px) as usize];
-            [c.r() as f32, c.g() as f32, c.b() as f32, c.a() as f32]
+            self.texel((py * w + px) as usize)
         };
         if fx == 0.0 && fy == 0.0 {
             return at(ix, iy);
@@ -41,10 +53,7 @@ impl Picture {
         if ix >= 0 && iy >= 0 && ix + 1 < w && iy + 1 < h {
             // All four inside: no edge checks.
             let i = (iy * w + ix) as usize;
-            let get = |i: usize| {
-                let c = self.pixels[i];
-                [c.r() as f32, c.g() as f32, c.b() as f32, c.a() as f32]
-            };
+            let get = |i: usize| self.texel(i);
             let (a, b, c, d) = (
                 get(i),
                 get(i + 1),
@@ -86,9 +95,40 @@ pub fn render(
     pos: &[[f32; 2]],
     order: &[u32],
     tile_size: usize,
-    (width, height): (usize, usize),
+    size: (usize, usize),
     step: usize,
 ) -> Vec<((i32, i32), Vec<Color32>)> {
+    render_values(picture, mesh, pos, order, tile_size, size, step)
+        .into_par_iter()
+        .map(|(key, px)| {
+            let data = px
+                .iter()
+                .map(|&[r, g, b, a]| {
+                    // (`as` saturates: rounded and clamped to 0..=255.)
+                    let q = |v: f32| (v + 0.5) as u8;
+                    Color32::from_rgba_premultiplied(q(r), q(g), q(b), q(a))
+                })
+                .collect();
+            (key, data)
+        })
+        .filter(|(_, data): &(_, Vec<Color32>)| data.iter().any(|p| p.a() > 0))
+        .collect()
+}
+
+/// A tile of [`render_values`]: its key and its pixels' values.
+pub type ValueTile = ((i32, i32), Vec<[f32; 4]>);
+
+/// [`render`] before rounding: each pixel's values (0..255, as the
+/// picture holds them; premultiplied linear light for a full-depth one).
+pub fn render_values(
+    picture: &Picture,
+    mesh: &PuppetMesh,
+    pos: &[[f32; 2]],
+    order: &[u32],
+    tile_size: usize,
+    (width, height): (usize, usize),
+    step: usize,
+) -> Vec<ValueTile> {
     let step = step.max(1);
     let ts = tile_size as i32;
     let (tw, th) = ((width as i32 + ts - 1) / ts, (height as i32 + ts - 1) / ts);
@@ -150,15 +190,7 @@ pub fn render(
                     }
                 }
             }
-            let data: Vec<Color32> = px
-                .iter()
-                .map(|&[r, g, b, a]| {
-                    // (`as` saturates: rounded and clamped to 0..=255.)
-                    let q = |v: f32| (v + 0.5) as u8;
-                    Color32::from_rgba_premultiplied(q(r), q(g), q(b), q(a))
-                })
-                .collect();
-            data.iter().any(|p| p.a() > 0).then_some(((tx, ty), data))
+            px.iter().any(|p| p[3] > 0.0).then_some(((tx, ty), px))
         })
         .collect()
 }
@@ -320,6 +352,7 @@ mod tests {
             width: w,
             height: h,
             pixels,
+            deep: None,
         };
         let mesh = PuppetMesh::from_paint([x0, y0, x0 + w as i32, y0 + h as i32], 7.0, |x, y| {
             pic.pixels[((y - y0) as usize) * w + (x - x0) as usize].a() > 0

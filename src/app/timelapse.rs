@@ -35,6 +35,8 @@ pub struct TimelapseState {
     /// Where the history stood at the last frame.
     last_version: Option<(u64, usize, usize)>,
     last_capture: Option<Instant>,
+    /// The next frame, being shrunk and compressed on another thread.
+    making: Option<std::thread::JoinHandle<Option<Frame>>>,
     /// The export running.
     pub task: Option<std::thread::JoinHandle<Result<String, String>>>,
 }
@@ -54,8 +56,9 @@ impl PainterApp {
                 .unwrap_or_else(|_| Err("The export stopped".into()));
             self.export_state.message = Some(result.unwrap_or_else(|e| e));
         }
+        self.timelapse_collect(false);
         let state = &self.workspace.timelapse;
-        if !state.recording || self.brush_state.is_drawing {
+        if !state.recording || self.brush_state.is_drawing || state.making.is_some() {
             return;
         }
         let version = self.doc_version();
@@ -67,26 +70,42 @@ impl PainterApp {
         self.timelapse_capture();
     }
 
+    /// Start a frame of the canvas as it is: shrunk and compressed on
+    /// another thread, from a copy of the canvas (its tiles shared, not
+    /// copied), so the frames go on meanwhile.
     fn timelapse_capture(&mut self) {
-        let img = self.canvas_thumbnail();
-        let [fw, fh] = img.size;
-        let raw: Vec<u8> = img
-            .pixels
-            .iter()
-            .flat_map(|&p| crate::canvas::blend::unmultiply(p))
-            .collect();
+        // One at a time, in order.
+        self.timelapse_collect(true);
         let version = self.doc_version();
+        let canvas = self.canvas.detached_copy();
+        let pool = self.workspace.pool.clone();
         let state = &mut self.workspace.timelapse;
         state.last_version = Some(version);
         state.last_capture = Some(Instant::now());
-        let Ok(rgba_zstd) = zstd::bulk::compress(&raw, 1) else {
+        let spawned = std::thread::Builder::new()
+            .name("timelapse".into())
+            .spawn(move || make_frame(&canvas, &pool));
+        match spawned {
+            Ok(making) => state.making = Some(making),
+            Err(err) => log::warn!("Time-lapse: couldn't start a frame: {err}"),
+        }
+        // Tests check the frames straight after.
+        if cfg!(test) {
+            self.timelapse_collect(true);
+        }
+    }
+
+    /// The frame being made, once it's done (or waiting for it, with
+    /// `wait`), added to the recording.
+    pub(crate) fn timelapse_collect(&mut self, wait: bool) {
+        let state = &mut self.workspace.timelapse;
+        let Some(making) = state.making.take_if(|m| wait || m.is_finished()) else {
             return;
         };
-        state.frames.push(Frame {
-            width: fw,
-            height: fh,
-            rgba_zstd,
-        });
+        let Ok(Some(frame)) = making.join() else {
+            return;
+        };
+        state.frames.push(frame);
         if state.frames.len() > MAX_FRAMES {
             // Keep every other frame (and always the newest).
             let last = state.frames.len() - 1;
@@ -97,41 +116,6 @@ impl PainterApp {
                 keep
             });
         }
-    }
-
-    /// The whole canvas shrunk by a power of two to at most about
-    /// [`FRAME_EDGE`] px, tile by tile in parallel through the zoomed-out
-    /// compositor (the same pixels the view shows at that zoom).
-    fn canvas_thumbnail(&self) -> ColorImage {
-        use rayon::prelude::*;
-        let c = &self.canvas;
-        let (w, h, ts) = (c.width(), c.height(), c.tile_size());
-        let block = w.max(h).div_ceil(FRAME_EDGE).next_power_of_two().min(ts);
-        let (fw, fh) = (w.div_ceil(block), h.div_ceil(block));
-        let tiles: Vec<(usize, usize)> = (0..h.div_ceil(ts))
-            .flat_map(|ty| (0..w.div_ceil(ts)).map(move |tx| (tx, ty)))
-            .collect();
-        let parts: Vec<ColorImage> = self.workspace.pool.install(|| {
-            tiles
-                .par_iter()
-                .map(|&(tx, ty)| {
-                    let rect = [0, 0, ts.min(w - tx * ts), ts.min(h - ty * ts)];
-                    let mut part = ColorImage::new([0, 0], Color32::TRANSPARENT);
-                    c.write_tile_rect_downsampled(tx, ty, rect, block, &mut part, None);
-                    part
-                })
-                .collect()
-        });
-        let mut img = ColorImage::new([fw, fh], Color32::TRANSPARENT);
-        let per_tile = ts / block;
-        for (&(tx, ty), part) in tiles.iter().zip(&parts) {
-            let [pw, ph] = part.size;
-            for row in 0..ph {
-                let dst = (ty * per_tile + row) * fw + tx * per_tile;
-                img.pixels[dst..dst + pw].copy_from_slice(&part.pixels[row * pw..(row + 1) * pw]);
-            }
-        }
-        img
     }
 
     /// Turn recording on or off. Turning it on starts from the canvas as
@@ -147,6 +131,8 @@ impl PainterApp {
 
     pub(crate) fn clear_timelapse(&mut self) {
         let state = &mut self.workspace.timelapse;
+        // (A frame on its way is dropped with the rest.)
+        state.making = None;
         state.frames.clear();
         state.last_version = None;
     }
@@ -159,12 +145,13 @@ impl PainterApp {
             self.workspace.timelapse.last_capture = None;
             self.timelapse_capture();
         }
+        self.timelapse_collect(true);
         let state = &mut self.workspace.timelapse;
         if state.frames.len() < 2 || state.task.is_some() {
             self.export_state.message = Some(if state.task.is_some() {
                 "A time-lapse export is already running".into()
             } else {
-                "Nothing recorded yet: turn on File → Record Time-lapse".into()
+                "Nothing recorded yet: turn on File → Time-lapse → Record".into()
             });
             return;
         }
@@ -187,6 +174,57 @@ impl PainterApp {
             Ok(format!("Time-lapse saved to {}", path.display()))
         }));
     }
+}
+
+/// A frame of `c`: shrunk, unmultiplied and compressed.
+fn make_frame(c: &crate::canvas::Canvas, pool: &rayon::ThreadPool) -> Option<Frame> {
+    let img = canvas_thumbnail(c, pool);
+    let [width, height] = img.size;
+    let raw: Vec<u8> = img
+        .pixels
+        .iter()
+        .flat_map(|&p| crate::canvas::blend::unmultiply(p))
+        .collect();
+    let rgba_zstd = zstd::bulk::compress(&raw, 1).ok()?;
+    Some(Frame {
+        width,
+        height,
+        rgba_zstd,
+    })
+}
+
+/// The whole canvas shrunk by a power of two to at most about
+/// [`FRAME_EDGE`] px, tile by tile in parallel through the zoomed-out
+/// compositor (the same pixels the view shows at that zoom).
+fn canvas_thumbnail(c: &crate::canvas::Canvas, pool: &rayon::ThreadPool) -> ColorImage {
+    use rayon::prelude::*;
+    let (w, h, ts) = (c.width(), c.height(), c.tile_size());
+    let block = w.max(h).div_ceil(FRAME_EDGE).next_power_of_two().min(ts);
+    let (fw, fh) = (w.div_ceil(block), h.div_ceil(block));
+    let tiles: Vec<(usize, usize)> = (0..h.div_ceil(ts))
+        .flat_map(|ty| (0..w.div_ceil(ts)).map(move |tx| (tx, ty)))
+        .collect();
+    let parts: Vec<ColorImage> = pool.install(|| {
+        tiles
+            .par_iter()
+            .map(|&(tx, ty)| {
+                let rect = [0, 0, ts.min(w - tx * ts), ts.min(h - ty * ts)];
+                let mut part = ColorImage::new([0, 0], Color32::TRANSPARENT);
+                c.write_tile_rect_downsampled(tx, ty, rect, block, &mut part, None);
+                part
+            })
+            .collect()
+    });
+    let mut img = ColorImage::new([fw, fh], Color32::TRANSPARENT);
+    let per_tile = ts / block;
+    for (&(tx, ty), part) in tiles.iter().zip(&parts) {
+        let [pw, ph] = part.size;
+        for row in 0..ph {
+            let dst = (ty * per_tile + row) * fw + tx * per_tile;
+            img.pixels[dst..dst + pw].copy_from_slice(&part.pixels[row * pw..(row + 1) * pw]);
+        }
+    }
+    img
 }
 
 /// The recording as a GIF (by `path`'s extension) or an MP4.
@@ -291,6 +329,53 @@ mod tests {
         assert_eq!(app.workspace.timelapse.frame_count(), 3);
         let f = &app.workspace.timelapse.frames[0];
         assert!(f.width <= super::FRAME_EDGE && f.height <= super::FRAME_EDGE);
+    }
+
+    /// Frames are made from a copy of the canvas now: the same pixels.
+    #[test]
+    fn a_frame_from_the_copy_is_the_canvas_frame() {
+        let mut app =
+            crate::project::tests::test_app_pub(Canvas::new(1000, 700, Color32::WHITE, 64));
+        let canvas = app.canvas_mut();
+        let id = canvas.add_layer();
+        let second = canvas.layer_index_of(id).unwrap();
+        for (i, (tx, ty)) in [(0, 0), (3, 2), (15, 10)].into_iter().enumerate() {
+            let c = Color32::from_rgba_premultiplied(40 * i as u8, 90, 20, 200);
+            canvas.set_layer_tile_data(1, tx, ty, vec![c; 64 * 64]);
+            canvas.set_layer_tile_data(second, tx + 1, ty, vec![Color32::BLUE; 64 * 64]);
+        }
+        canvas.layers[second].opacity = 0.5;
+        let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+        let live = super::canvas_thumbnail(&app.canvas, &pool);
+        let copy = super::canvas_thumbnail(&app.canvas.detached_copy(), &pool);
+        assert!(live.size == copy.size && live.pixels == copy.pixels);
+    }
+
+    #[test]
+    #[ignore = "timing; run with --release --ignored --nocapture"]
+    fn frame_cost_on_the_ui_thread() {
+        let app = crate::project::tests::test_app_pub(Canvas::new(4000, 4000, Color32::WHITE, 64));
+        for ty in 0..63 {
+            for tx in 0..63 {
+                let data = (0..64 * 64)
+                    .map(|i| Color32::from_gray(((i * 7 + tx * 13 + ty) % 256) as u8))
+                    .collect();
+                app.canvas.set_layer_tile_data(1, tx, ty, data);
+            }
+        }
+        let pool = &app.workspace.pool;
+        let runs = 10;
+        let t = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(super::make_frame(&app.canvas, pool));
+        }
+        let before = t.elapsed() / runs;
+        let t = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(app.canvas.detached_copy());
+        }
+        let after = t.elapsed() / runs;
+        println!("UI thread per frame: before {before:?} (whole frame), after {after:?} (copy)");
     }
 
     #[test]

@@ -732,3 +732,94 @@ fn every_preset_paints_the_same_after_a_trip_through_a_preset_file() {
         );
     }
 }
+
+#[test]
+fn pressure_spacing_lays_as_much_paint_as_the_spacing_it_gives() {
+    // A big tip at a tiny spacing: its dabs go further apart than asked,
+    // each laying what the skipped ones would. At half pressure, pressure
+    // spacing halves the spacing: as dense as half the spacing at full.
+    let make = |spacing: f32, by_pressure: bool| {
+        let mut b = Brush::new(120.0, 100.0, Color32::BLACK, spacing);
+        b.brush_options.pressure_size = false;
+        b.brush_options.flow = 4.0;
+        b.brush_options.pressure_spacing = by_pressure;
+        b
+    };
+    let points = line(64.0, 0.5);
+    let by_pressure = paint_pen(&mut make(1.0, true), &points, 0.5, None);
+    let halved = paint_pen(&mut make(0.5, false), &points, 0.5, None);
+    for x in [80, 128, 170] {
+        let (a, b) = (alpha(&by_pressure, x, 64), alpha(&halved, x, 64));
+        assert!(a.abs_diff(b) <= 3, "x {x}: {a} by pressure, {b} halved");
+    }
+}
+
+#[test]
+fn pressure_runs_painted_together_paint_as_one_batch_each() {
+    // A brush whose size, opacity and flow follow pressure (as Brush::new
+    // has them, not folded into inputs): its dabs come in runs of the same
+    // look, painted as one batch with each dab's own.
+    for wash in [false, true] {
+        let mut b = Brush::new(30.0, 60.0, Color32::from_rgb(160, 30, 40), 6.0);
+        b.brush_options.pressure_opacity = true;
+        b.brush_options.pressure_flow = true;
+        if wash {
+            b.brush_options.painting_mode = crate::brush_engine::brush_options::PaintingMode::Wash;
+        }
+        let run = |fold: bool| {
+            crate::brush_engine::stroke::set_fold_pressure(fold);
+            let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+            let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+            canvas.active_layer_idx = 1;
+            let mut undo = empty_undo();
+            let mut tiles = StrokeTiles::default();
+            let mut stroke = StrokeState::with_seed(1);
+            let mut brush = b.clone();
+            {
+                let mut ctx = StrokeContext::new(&pool, &canvas, None, &mut undo, &mut tiles);
+                for (p, pressure, t) in wavy() {
+                    stroke.add_sample(&mut brush, p, pressure, Some(t), &mut ctx);
+                }
+                stroke.finish(&mut brush, &mut ctx);
+            }
+            crate::brush_engine::stroke::set_fold_pressure(true);
+            (0..(W / 64) as i32)
+                .flat_map(|tx| (0..(H / 64) as i32).map(move |ty| (tx, ty)))
+                .map(|(tx, ty)| canvas.get_layer_tile_data(1, tx, ty))
+                .collect::<Vec<_>>()
+        };
+        assert!(run(true) == run(false), "wash {wash}");
+    }
+}
+
+#[test]
+fn a_stroke_leaves_the_tiles_outside_the_selection_alone() {
+    let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let mut canvas = Canvas::new(W, H, Color32::WHITE, 64);
+    canvas.active_layer_idx = 1;
+    let selection = crate::selection::SelectionManager::with_shape(Some(
+        crate::selection::SelectionShape::Rectangle {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, H as f32),
+        },
+    ));
+    let mut undo = empty_undo();
+    let mut tiles = StrokeTiles::default();
+    let mut stroke = StrokeState::with_seed(1);
+    let mut b = brush(BrushDynamics::default());
+    {
+        let mut ctx = StrokeContext::new(&pool, &canvas, Some(&selection), &mut undo, &mut tiles);
+        for &(p, t) in &line(64.0, 0.5) {
+            stroke.add_sample(&mut b, p, 1.0, Some(t), &mut ctx);
+        }
+        stroke.finish(&mut b, &mut ctx);
+    }
+    assert!(alpha(&canvas, 50, 64) > 200, "painted inside");
+    assert_eq!(alpha(&canvas, 150, 64), 0, "nothing outside");
+    // Only the tiles the selection reaches were taken for undo.
+    let columns: Vec<i32> = undo.tiles.iter().map(|t| t.tx).collect();
+    assert!(
+        !columns.is_empty() && columns.iter().all(|&tx| tx < 2),
+        "{columns:?}"
+    );
+}

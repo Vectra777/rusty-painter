@@ -7,7 +7,10 @@ use crate::canvas::storage::{LayerId, LayerKind};
 use crate::ui::bar_slider::BarSlider;
 use crate::ui::icons::{Icon, paint_icon};
 use crate::ui::style::*;
-use crate::ui::widgets::{draw_checkerboard, icon_button, icon_toggle, percent_of_unit};
+use crate::ui::widgets::{
+    context_menu_or_hold_where, draw_checkerboard, icon_button, icon_toggle, percent_of_unit,
+    why_disabled,
+};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -90,8 +93,15 @@ pub fn refresh_thumbnails(app: &mut PainterApp, ctx: &egui::Context) {
                 }
             }
         }
+        // A colorize mask: its result (with its hints, if shown).
+        let colorize = canvas.layers[idx].colorize.is_some();
         for (&(tx, ty), samples) in &by_tile {
-            let Some(cell) = canvas.lock_layer_tile_if_exists(idx, tx, ty) else {
+            let cell = if colorize {
+                canvas.shown_tile_cell(idx, tx as i32, ty as i32)
+            } else {
+                canvas.lock_layer_tile_if_exists(idx, tx, ty)
+            };
+            let Some(cell) = cell else {
                 continue;
             };
             let guard = cell.lock().unwrap_or_else(|e| e.into_inner());
@@ -316,6 +326,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     let mut paste_layers = false;
     let mut ungroup: Option<usize> = None;
     let mut pick_tag: Option<Color32> = None;
+    let mut comp_action: Option<CompAction> = None;
 
     // Header: counts and add/delete buttons.
     ui.horizontal(|ui| {
@@ -331,6 +342,12 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 .small()
                 .color(TEXT_DIM),
         );
+        ui.add_space(4.0);
+        let comps = ui.menu_button(RichText::new("Comps").small(), |ui| comps_menu(ui, app));
+        comps
+            .response
+            .on_hover_text("Layer comps: saved sets of which layers show, and how");
+        comp_action = comps.inner.flatten();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let can_delete = app.canvas.layers.len() > 1 && active_idx != 0;
             let delete = ui.add_enabled_ui(can_delete, |ui| {
@@ -342,9 +359,15 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     "Delete (with its mask / folder contents)",
                 )
             });
-            if delete.inner.clicked() && several {
+            let why = if app.canvas.layers.len() <= 1 {
+                "The only layer can't be deleted"
+            } else {
+                "The background can't be deleted (hide it, or make it transparent)"
+            };
+            let delete_clicked = why_disabled(delete.inner, can_delete, why).clicked();
+            if delete_clicked && several {
                 delete_picked = true;
-            } else if delete.inner.clicked() {
+            } else if delete_clicked {
                 to_delete = Some(active_idx);
             }
             let can_mask = active_owner != 0
@@ -362,7 +385,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     "Add layer mask (paint black to hide, white to show)",
                 )
             });
-            if mask.inner.clicked() {
+            let why = "Masks go on paint layers, not the background, folders or special layers";
+            if why_disabled(mask.inner, can_mask, why).clicked() {
                 add_mask = true;
             }
             if ui
@@ -811,26 +835,6 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 if row_response.secondary_clicked() && !is_active && !is_picked {
                     pick_click = Some((i, egui::Modifiers::NONE));
                 }
-                // A press held still on the row (finger or pen, any input
-                // mode) opens the same menu as a popup: egui's context menu
-                // closes again at once while the finger stays down.
-                let menu_id = ui.id().with(("layer_menu", id));
-                let held_since = ui.input(|inp| {
-                    let p = &inp.pointer;
-                    let still = p.primary_down()
-                        && p.press_origin().zip(p.interact_pos()).is_some_and(|(o, now)| {
-                            row.contains(o) && !opacity_rect.expand(6.0).contains(o) && o.distance(now) < 8.0
-                        });
-                    p.press_start_time().filter(|&t| still && inp.time - t > 0.5)
-                });
-                let press_key = menu_id.with("press");
-                if let Some(t) = held_since
-                    && ui.data(|d| d.get_temp::<f64>(press_key)) != Some(t)
-                {
-                    ui.data_mut(|d| d.insert_temp(press_key, t));
-                    app.layer_state.layer_dragging = None;
-                    ui.memory_mut(|mem| mem.open_popup(menu_id));
-                }
                 let layer_menu = |ui: &mut egui::Ui| {
                     if i != 0 {
                         let label = if is_picked {
@@ -933,7 +937,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         ui.close_menu();
                     }
                     let can_paste = app.workspace.clipboard.layers.is_some();
-                    if ui.add_enabled(can_paste, egui::Button::new("Paste layers")).clicked() {
+                    let paste = ui.add_enabled(can_paste, egui::Button::new("Paste layers"));
+                    if why_disabled(paste, can_paste, "Copy layers first").clicked() {
                         paste_layers = true;
                         ui.close_menu();
                     }
@@ -978,22 +983,24 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     } else {
                         let can_delete = app.canvas.layers.len() > 1 && i != 0;
                         let label = if is_group { "Delete folder and contents" } else { "Delete" };
-                        if ui.add_enabled(can_delete, egui::Button::new(label)).clicked() {
+                        let button = ui.add_enabled(can_delete, egui::Button::new(label));
+                        let why = "The background and the only layer stay";
+                        if why_disabled(button, can_delete, why).clicked() {
                             to_delete = Some(i);
                             ui.close_menu();
                         }
                     }
                 };
-                if ui.memory(|mem| mem.is_popup_open(menu_id)) {
-                    egui::popup_below_widget(
-                        ui,
-                        menu_id,
-                        &row_response,
-                        egui::PopupCloseBehavior::CloseOnClick,
-                        layer_menu,
-                    );
-                } else {
-                    row_response.context_menu(layer_menu);
+                // A press held still on the row (finger or pen, any input
+                // mode) opens it too, unless it starts on the opacity bar.
+                let hold = context_menu_or_hold_where(
+                    ui,
+                    &row_response,
+                    |o| row.contains(o) && !opacity_rect.expand(6.0).contains(o),
+                    layer_menu,
+                );
+                if hold.opened {
+                    app.layer_state.layer_dragging = None;
                 }
 
                 // The picked layers' opacities as a drag on one of them
@@ -1128,7 +1135,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         || rasterise_text.is_some()
         || rasterise_vector.is_some()
         || line_width.is_some()
-        || to_delete.is_some();
+        || to_delete.is_some()
+        || comp_action.is_some();
     let (picked, order) = if floating.is_some() && acted {
         let at = app.put_transform_down();
         for i in [
@@ -1317,12 +1325,114 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         needs_refresh = true;
     }
 
+    match comp_action {
+        Some(CompAction::Add(name)) => app.comp_add(&name),
+        Some(CompAction::Apply(i)) => app.comp_apply(i),
+        Some(CompAction::Update(i)) => app.comp_update(i),
+        Some(CompAction::Rename(i, name)) => app.comp_rename(i, &name),
+        Some(CompAction::Delete(i)) => app.comp_delete(i),
+        None => {}
+    }
+
     app.settings_record(ctx.input(|i| i.pointer.any_down()));
     if needs_refresh {
         app.mark_all_tiles_dirty();
         app.layer_state.thumbnails_dirty = true;
         ctx.request_repaint();
     }
+}
+
+/// What the Comps menu asked for (done after the rows, like the panel's
+/// other changes).
+enum CompAction {
+    Add(String),
+    Apply(usize),
+    Update(usize),
+    Rename(usize, String),
+    Delete(usize),
+}
+
+/// The Comps menu: the layer comps, and adding one of the layers as they
+/// are.
+fn comps_menu(ui: &mut egui::Ui, app: &PainterApp) -> Option<CompAction> {
+    let mut action = None;
+    ui.set_min_width(240.0);
+    let new_id = egui::Id::new("layer_comps_new_name");
+    let rename_id = egui::Id::new("layer_comps_renaming");
+    let mut new_name: String = ui.data(|d| d.get_temp(new_id)).unwrap_or_default();
+    let mut renaming: Option<(usize, String)> = ui.data(|d| d.get_temp(rename_id));
+    ui.horizontal(|ui| {
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut new_name)
+                .hint_text("New comp")
+                .desired_width(150.0),
+        );
+        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui
+            .button("Add")
+            .on_hover_text("Save every layer's visibility, opacity and blend mode as they are")
+            .clicked()
+            || enter
+        {
+            action = Some(CompAction::Add(std::mem::take(&mut new_name)));
+        }
+    });
+    let comps = &app.layer_state.comps.list;
+    if comps.is_empty() {
+        ui.label(
+            RichText::new("Show and hide layers for a version of the picture, then Add.")
+                .small()
+                .color(TEXT_DIM),
+        );
+    }
+    let m = metrics(ui.ctx());
+    for (i, comp) in comps.iter().enumerate() {
+        ui.horizontal(|ui| {
+            if let Some((at, name)) = renaming.as_mut().filter(|(at, _)| *at == i) {
+                let edit = ui.add(egui::TextEdit::singleline(name).desired_width(150.0));
+                edit.request_focus();
+                if edit.lost_focus() {
+                    if !ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
+                        action = Some(CompAction::Rename(*at, std::mem::take(name)));
+                    }
+                    renaming = None;
+                }
+                return;
+            }
+            if ui
+                .button(&comp.name)
+                .on_hover_text("Show this comp (one undo step)")
+                .clicked()
+            {
+                action = Some(CompAction::Apply(i));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icon_button(ui, Icon::Trash, m.header_button, false, "Delete this comp")
+                    .clicked()
+                {
+                    action = Some(CompAction::Delete(i));
+                }
+                if ui.small_button("Rename").clicked() {
+                    renaming = Some((i, comp.name.clone()));
+                }
+                if ui
+                    .small_button("Update")
+                    .on_hover_text("Take the layers as they are now")
+                    .clicked()
+                {
+                    action = Some(CompAction::Update(i));
+                }
+            });
+        });
+    }
+    ui.data_mut(|d| {
+        d.insert_temp(new_id, new_name);
+        match renaming {
+            Some(r) => d.insert_temp(rename_id, r),
+            None => d.remove::<(usize, String)>(rename_id),
+        }
+    });
+    action
 }
 
 /// Lock position, draft and reference toggles for entry `idx` (a layer or

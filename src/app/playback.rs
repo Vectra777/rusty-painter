@@ -52,7 +52,9 @@ impl PlaybackCache {
         self.frames.contains_key(&t)
     }
 
-    fn clear(&mut self, retired: &mut Vec<egui::TextureHandle>) {
+    /// Drop the frames (and stop the job making them); they're made again
+    /// when next wanted.
+    pub(crate) fn clear(&mut self, retired: &mut Vec<egui::TextureHandle>) {
         self.job = None;
         retired.extend(self.frames.drain().map(|(_, t)| t));
     }
@@ -235,8 +237,8 @@ mod tests {
     use crate::canvas::motion::Prop;
     use eframe::egui::{self, Color32};
 
-    #[test]
-    fn frames_are_made_in_the_background_and_played_from_memory() {
+    /// An animated app (frames 0..=3) playing.
+    fn animated_app() -> crate::PainterApp {
         let canvas = Canvas::new(64, 64, Color32::WHITE, 64);
         canvas.set_layer_tile_data(1, 0, 0, vec![Color32::RED; 64 * 64]);
         let mut app = crate::project::tests::test_app_pub(canvas);
@@ -247,7 +249,10 @@ mod tests {
         };
         app.motion_step(1, |m| m.set(Prop::Opacity, 3, [0.5, 0.0]));
         app.workspace.animation.playing = true;
-        let ctx = egui::Context::default();
+        app
+    }
+
+    fn fill_cache(app: &mut crate::PainterApp, ctx: &egui::Context) {
         for _ in 0..200 {
             let _ = ctx.run(Default::default(), |ctx| app.playback_cache_tick(ctx));
             if (0..=3).all(|t| app.workspace.animation.cache.has(t)) {
@@ -256,6 +261,30 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!((0..=3).all(|t| app.workspace.animation.cache.has(t)));
+    }
+
+    #[test]
+    fn low_memory_drops_the_played_frames() {
+        let mut app = animated_app();
+        // Its autosave goes somewhere harmless.
+        let dir = std::env::temp_dir().join(format!("rp-lowmem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.brush_state.brushes_path = dir.join("brushes");
+        let ctx = egui::Context::default();
+        fill_cache(&mut app, &ctx);
+        assert!(app.go_to_cached_frame(1));
+        app.release_memory();
+        assert!((0..=3).all(|t| !app.workspace.animation.cache.has(t)));
+        assert!(app.workspace.animation.cache.showing.is_none());
+        app.finish_autosave(true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn frames_are_made_in_the_background_and_played_from_memory() {
+        let mut app = animated_app();
+        let ctx = egui::Context::default();
+        fill_cache(&mut app, &ctx);
         assert!(app.go_to_cached_frame(2));
         assert_eq!(app.canvas.time, 2);
         app.leave_cached_frame();

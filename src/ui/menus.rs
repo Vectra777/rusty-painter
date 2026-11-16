@@ -6,6 +6,7 @@ use crate::app::input::keymap::Action;
 use crate::ui::bar_slider::BarSlider;
 use crate::ui::style::*;
 use crate::ui::widgets::bar_frame;
+use crate::ui::widgets::why_disabled;
 use eframe::egui::{self, Key, Modifiers, RichText};
 
 /// As printed on this keyboard (see [`crate::app::input::keyboard`]).
@@ -261,10 +262,13 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         open_export_dialog(app);
     }
     let animated = app.canvas.is_animated() || app.canvas.layers.iter().any(|l| l.rig.is_some());
-    if ui
-        .add_enabled_ui(animated, |ui| menu_item(ui, "Export Animation…", None))
-        .inner
-    {
+    let item = ui.add_enabled_ui(animated, |ui| menu_item(ui, "Export Animation…", None));
+    why_disabled(
+        item.response,
+        animated,
+        "Nothing moves yet: add frames on the timeline, or a rig",
+    );
+    if item.inner {
         crate::ui::timeline::pick_export(app);
     }
     #[cfg(not(mobile))]
@@ -293,18 +297,17 @@ fn file_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
             app.set_timelapse_recording(on);
         }
         let frames = app.workspace.timelapse.frame_count();
-        if ui
-            .add_enabled_ui(frames > 1, |ui| {
-                menu_item(ui, &format!("Export… ({frames} frames)"), None)
-            })
-            .inner
-        {
+        let item = ui.add_enabled_ui(frames > 1, |ui| {
+            menu_item(ui, &format!("Export… ({frames} frames)"), None)
+        });
+        let why = "Record at least two frames first (Record, above)";
+        why_disabled(item.response, frames > 1, why);
+        if item.inner {
             export_timelapse_dialog(app);
         }
-        if ui
-            .add_enabled_ui(frames > 0, |ui| menu_item(ui, "Clear", None))
-            .inner
-        {
+        let item = ui.add_enabled_ui(frames > 0, |ui| menu_item(ui, "Clear", None));
+        why_disabled(item.response, frames > 0, "Nothing recorded");
+        if item.inner {
             app.clear_timelapse();
         }
     });
@@ -372,8 +375,8 @@ fn edit_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.swap_colors();
     }
     ui.separator();
-    if menu_item(ui, "Clear Canvas (not undoable)", None) {
-        app.clear_canvas();
+    if menu_item(ui, "Clear Layer", None) {
+        app.clear_layer();
     }
 }
 
@@ -401,6 +404,9 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
             }
         }
     });
+    if menu_item(ui, "New Colorize Mask", None) {
+        app.add_colorize_mask();
+    }
     ui.menu_button("New Fill Layer", |ui| {
         if menu_item(ui, "Colour", None) {
             app.add_colour_fill_layer();
@@ -415,16 +421,14 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
             && l.adjustment.is_none()
             && l.style.fill.is_none()
     });
-    if ui
-        .add_enabled_ui(can_border, |ui| menu_item(ui, "Border…", None))
-        .inner
-    {
+    let item = ui.add_enabled_ui(can_border, |ui| menu_item(ui, "Border…", None));
+    why_disabled(item.response, can_border, "Only on a paint layer");
+    if item.inner {
         app.workspace.filter.border_editing = app.canvas.layer_id_at(app.canvas.active_layer_idx);
     }
-    if ui
-        .add_enabled_ui(can_border, |ui| menu_item(ui, "Gradient Overlay…", None))
-        .inner
-    {
+    let item = ui.add_enabled_ui(can_border, |ui| menu_item(ui, "Gradient Overlay…", None));
+    why_disabled(item.response, can_border, "Only on a paint layer");
+    if item.inner {
         app.workspace.filter.overlay_editing = app.canvas.layer_id_at(app.canvas.active_layer_idx);
     }
     let active = app.canvas.active_layer_idx;
@@ -446,6 +450,15 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     })
     .response
     .on_disabled_hover_text("For vector layers (Layer → New Vector Layer)");
+    ui.add_enabled_ui(app.is_colorize_layer(active), |ui| {
+        ui.menu_button("Colorize Mask", |ui| {
+            crate::app::tools::colorize::colorize_menu(app, ui);
+        })
+    })
+    .response
+    .on_disabled_hover_text(
+        "For colorize masks (Layer → New Colorize Mask, with the line-art layer selected)",
+    );
     let shown = app.canvas.layers.get(active).map(|l| l.shown_style());
     let lit = shown.as_ref().and_then(|s| s.impasto);
     // A lightness map (Krita's colour smudge with a lightness tip): no
@@ -565,10 +578,9 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.copy_layers();
     }
     let can_paste = app.workspace.clipboard.layers.is_some();
-    if ui
-        .add_enabled_ui(can_paste, |ui| menu_item(ui, "Paste Layers", None))
-        .inner
-    {
+    let item = ui.add_enabled_ui(can_paste, |ui| menu_item(ui, "Paste Layers", None));
+    why_disabled(item.response, can_paste, "Copy layers first");
+    if item.inner {
         app.paste_layers();
     }
     let row = app.active_row();
@@ -576,10 +588,9 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
         app.canvas.layers.get(row).is_some_and(|l| {
             l.kind == crate::canvas::storage::LayerKind::Group && l.anim.is_none()
         });
-    if ui
-        .add_enabled_ui(is_folder, |ui| menu_item(ui, "Ungroup", None))
-        .inner
-    {
+    let item = ui.add_enabled_ui(is_folder, |ui| menu_item(ui, "Ungroup", None));
+    why_disabled(item.response, is_folder, "Pick a folder first");
+    if item.inner {
         app.ungroup(row);
     }
     ui.separator();
@@ -595,10 +606,9 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     }
     let active = app.canvas.active_layer_idx;
     let is_text = app.is_text_layer(active);
-    if ui
-        .add_enabled_ui(is_text, |ui| menu_item(ui, "Rasterise Text", None))
-        .inner
-    {
+    let item = ui.add_enabled_ui(is_text, |ui| menu_item(ui, "Rasterise Text", None));
+    why_disabled(item.response, is_text, "Only on a text layer");
+    if item.inner {
         app.rasterise_text_layer(active);
     }
     ui.separator();
@@ -738,7 +748,7 @@ fn view_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
             "Hide side panels while painting",
         )
         .on_hover_text(
-            "The tools and brush panel fade away; bring the pen near the left edge to show them.",
+            "The tools and brush panel fade away while you paint; tap the tab at the left edge (or bring a hovering pen near it) to show them.",
         );
     }
     let stats = &mut app.workspace.frame_stats;

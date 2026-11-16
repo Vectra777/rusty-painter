@@ -75,6 +75,7 @@ impl eframe::App for PainterApp {
 
     /// Handle UI, input, painting updates, and tile uploads each frame.
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::app::settings::gpu_started();
         // Start-up: a step a frame behind the splash (none on the first
         // frame, so the window shows the splash at once).
         if self.workspace.loading.is_some() {
@@ -128,7 +129,7 @@ impl eframe::App for PainterApp {
             // (A document joined from here opens once it's come.)
             self.collab_tick();
             self.autosave_tick(ctx);
-            self.save_settings(false);
+            self.save_settings_when_due(false);
             // The pen's samples are the canvas's: taps on the library (the
             // pen is the pointer there) mustn't paint once a canvas opens.
             if let Some(tablet) = &mut self.tablet {
@@ -145,6 +146,7 @@ impl eframe::App for PainterApp {
             needs_repaint = true;
         }
 
+        self.colorize_tick(ctx);
         ui::layers::refresh_thumbnails(self, ctx);
         self.workspace.frame_stats.mark(Stage::Setup);
 
@@ -175,10 +177,14 @@ impl eframe::App for PainterApp {
                 self.viewport.canvas_area = Some(view.response.rect);
                 // Pen samples first: touch handling needs to know the pen is
                 // down to tell a resting palm from a finger.
+                let prediction = self.workspace.motion_prediction;
                 let (pen, predicted): (Vec<_>, Vec<_>) = self
                     .tablet
                     .as_mut()
-                    .map(|t| t.poll(ctx))
+                    .map(|t| {
+                        t.set_prediction(prediction);
+                        t.poll(ctx)
+                    })
                     .unwrap_or_default()
                     .into_iter()
                     .partition(|s| !s.predicted);
@@ -242,12 +248,10 @@ impl eframe::App for PainterApp {
                 let dragging = ctx.input(|i| i.pointer.any_down());
                 let screen = render::preview_view(self, &view, ui.clip_rect());
                 self.filter_update(dragging.then_some(&screen));
-                // Twirl / pinch / bloat keep working while the brush is held.
-                if self.liquify_is_holding() && self.workspace.liquify.mode.is_continuous() {
-                    let dt = ctx.input(|i| i.stable_dt).min(0.1);
-                    self.liquify_hold(dt);
-                    needs_repaint = true;
-                }
+                // Twirl / pinch / bloat keep working while the brush is held,
+                // and with Momentum it glides on after the pen lifts.
+                let dt = ctx.input(|i| i.stable_dt).min(0.1);
+                needs_repaint |= self.liquify_tick(dt);
                 // This frame's liquify dabs: into the layer, or zoomed out
                 // with the pen down, a screen-sized preview.
                 self.liquify_frame(&screen);
@@ -287,7 +291,7 @@ impl eframe::App for PainterApp {
                 if self.shader_tick(ctx, pointer) {
                     needs_repaint = true;
                 }
-                if self.wet_tick() {
+                if self.wet_tick(ctx) {
                     needs_repaint = true;
                 }
                 // Vector layers drawn in the background: what's done shows.
@@ -330,7 +334,7 @@ impl eframe::App for PainterApp {
         self.save_view_settings(ctx);
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.save_active_preset(pointer_down);
-        self.save_settings(pointer_down);
+        self.save_settings_when_due(pointer_down);
         if std::mem::take(&mut self.brush_state.library.dirty) {
             self.save_brush_library();
         }
@@ -356,6 +360,7 @@ impl PainterApp {
             crate::ui::theme::apply_style(ctx, touch);
             self.workspace.applied_style = Some(wanted);
         }
+        crate::ui::theme::apply_interface_size(ctx, &self.workspace.ui);
     }
 
     /// Finish a background export: report its result and progress.
@@ -693,11 +698,42 @@ impl PainterApp {
         std::time::Duration::from_secs_f32(ms / 1000.0)
     }
 
-    /// Clear every layer to white. Not undoable.
-    pub(crate) fn clear_canvas(&mut self) {
-        self.canvas_mut().clear(Color32::WHITE);
-        self.mark_all_tiles_dirty();
-        self.layer_state.thumbnails_dirty = true;
+    /// Clear the selected layer (or, with a selection, what's selected on
+    /// it) as one undo step: the Delete key's erase over all its paint. The
+    /// background colour stays as it is.
+    pub(crate) fn clear_layer(&mut self) {
+        if self.selection_manager.has_selection() {
+            self.delete_selection_contents();
+            return;
+        }
+        if crate::app::tools::transform::transform_running(self) {
+            crate::app::tools::transform::cancel_floating_layer(self);
+        }
+        let idx = self.canvas.active_layer_idx;
+        let ts = self.canvas.tile_size() as i32;
+        let (w, h) = (self.canvas.width() as i32, self.canvas.height() as i32);
+        // Only as far as it's painted: a mask of the whole of a big canvas
+        // is hundreds of megabytes.
+        let mut bounds: Option<[i32; 4]> = None;
+        for (tx, ty) in self.canvas.layer_tile_keys(idx) {
+            let [x0, y0, x1, y1] = bounds.unwrap_or([i32::MAX, i32::MAX, i32::MIN, i32::MIN]);
+            bounds = Some([
+                x0.min(tx * ts),
+                y0.min(ty * ts),
+                x1.max((tx + 1) * ts),
+                y1.max((ty + 1) * ts),
+            ]);
+        }
+        let Some([x0, y0, x1, y1]) = bounds else {
+            return;
+        };
+        let [x0, y0, x1, y1] = [x0.max(0), y0.max(0), x1.min(w), y1.min(h)];
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let (mw, mh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let mask = crate::selection::SelectionMask::new(x0, y0, mw, mh, vec![255; mw * mh]);
+        self.labelled("Clear Layer", |app| app.erase_under(mask, false));
     }
 
     /// Undo (or redo) the last action, once the strokes queued are painted
@@ -803,9 +839,11 @@ impl PainterApp {
         self.forget_last_pick();
         self.filter_cancel();
         self.text_commit();
-        // A running liquify or transform session becomes a normal step first,
-        // so undo takes it back and redo brings it again (cancelling it
-        // outright left nothing to redo).
+        // A running liquify, gradient or transform session becomes a normal
+        // step first, so undo takes it back and redo brings it again
+        // (cancelling it outright left nothing to redo; leaving a gradient
+        // running mixed it with the step undone under it).
+        self.gradient_commit();
         if self.layer_state.liquify.is_some() {
             self.liquify_commit();
         }

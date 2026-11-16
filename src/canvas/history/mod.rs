@@ -33,7 +33,9 @@ pub struct TileSnapshot {
 /// holds far more history.
 #[derive(Clone)]
 pub enum SnapshotPixels {
-    Raw(Vec<Color32>),
+    /// Shared with the tile when taken (the tile copies them on its next
+    /// write), so a snapshot of a tile about to change costs no copy.
+    Raw(crate::canvas::storage::SharedPixels),
     Compressed {
         bytes: Vec<u8>,
         len: usize,
@@ -51,6 +53,12 @@ pub enum SnapshotPixels {
 
 impl From<Vec<Color32>> for SnapshotPixels {
     fn from(pixels: Vec<Color32>) -> Self {
+        Self::Raw(pixels.into())
+    }
+}
+
+impl From<crate::canvas::storage::SharedPixels> for SnapshotPixels {
+    fn from(pixels: crate::canvas::storage::SharedPixels) -> Self {
         Self::Raw(pixels)
     }
 }
@@ -59,7 +67,7 @@ impl SnapshotPixels {
     /// `len` transparent pixels, compressed straight away (a few bytes, not
     /// 16 KiB a tile: what a big fill over empty canvas keeps for undo).
     pub fn transparent(len: usize) -> Self {
-        let mut pixels = Self::Raw(vec![Color32::TRANSPARENT; len]);
+        let mut pixels = Self::from(vec![Color32::TRANSPARENT; len]);
         pixels.compress();
         pixels
     }
@@ -82,7 +90,7 @@ impl SnapshotPixels {
     /// reject as an invalid snapshot rather than restoring garbage.
     pub fn to_vec(&self) -> Vec<Color32> {
         match self {
-            Self::Raw(pixels) => pixels.clone(),
+            Self::Raw(pixels) => pixels.to_vec(),
             Self::Compressed { bytes, len } => zstd::bulk::decompress(bytes, len * 4)
                 .map(|raw| {
                     raw.as_chunks::<4>()
@@ -174,6 +182,8 @@ pub struct LayerMeta {
     pub anim: Option<crate::canvas::storage::Anim>,
     pub rig: Option<Box<crate::canvas::rig::Rig>>,
     pub motion: Option<Box<crate::canvas::motion::Motion>>,
+    /// A colorize mask's settings (and its result as it was).
+    pub colorize: Option<Box<crate::canvas::colorize::ColorizeLayer>>,
 }
 
 /// A layer's settings as undo puts them back (not its name or pixels).
@@ -708,6 +718,25 @@ impl History {
         self.undo_labels.drain(..dropped);
     }
 
+    /// After an undo or redo: the step it moved holds the canvas's pixels
+    /// raw, so steps past the newest of each stack are compressed (as
+    /// pushing does). Over budget, the oldest undo steps go first (a step
+    /// just undone can hold far more than it did: a fill over empty canvas
+    /// keeps a few bytes to undo, the whole fill to redo), then the steps
+    /// furthest from being redone, the newest of each always kept.
+    fn keep_in_budget(&mut self, max_bytes: usize) {
+        compress_older_actions(&mut self.undo_stack);
+        compress_older_actions(&mut self.redo_stack);
+        let redo: usize = self.redo_stack.iter().map(snapshot_bytes).sum();
+        let dropped = trim_oldest(&mut self.undo_stack, max_bytes.saturating_sub(redo));
+        self.undo_labels
+            .drain(..dropped.min(self.undo_labels.len()));
+        let undo: usize = self.undo_stack.iter().map(snapshot_bytes).sum();
+        let dropped = trim_oldest(&mut self.redo_stack, max_bytes.saturating_sub(undo));
+        self.redo_labels
+            .drain(..dropped.min(self.redo_labels.len()));
+    }
+
     pub(crate) fn stacks(&self) -> (&[UndoAction], &[UndoAction]) {
         (&self.undo_stack, &self.redo_stack)
     }
@@ -763,6 +792,7 @@ impl History {
             self.redo_stack.push(action);
             let label = self.undo_labels.pop().unwrap_or_default();
             self.redo_labels.push(label);
+            self.keep_in_budget(max_undo_bytes());
             (tiles, layer_action)
         } else {
             (Vec::new(), None)
@@ -790,6 +820,7 @@ impl History {
             self.undo_stack.push(action);
             let label = self.redo_labels.pop().unwrap_or_default();
             self.undo_labels.push(label);
+            self.keep_in_budget(max_undo_bytes());
             (tiles, layer_action)
         } else {
             (Vec::new(), None)
@@ -1055,6 +1086,7 @@ impl History {
                 anim: None,
                 rig: None,
                 motion: None,
+                colorize: None,
             });
             canvas.insert_layer_with_meta(*index, *id, &meta);
         }
@@ -1220,6 +1252,14 @@ impl History {
             };
             if let Some(tile_arc) = canvas.ensure_layer_tile(layer_idx, snapshot.tx, snapshot.ty) {
                 let mut tile = tile_arc.lock().unwrap_or_else(|e| e.into_inner());
+                // A whole tile kept as it was: the tile takes the
+                // snapshot's pixels as a new buffer (nothing copied into a
+                // buffer it may share), and the snapshot keeps the tile's.
+                if (snapshot.x0, snapshot.y0) == (0, 0)
+                    && (snapshot.width, snapshot.height) == (tile_size, tile_size)
+                {
+                    return Self::swap_whole_tile(canvas, layer_idx, &mut tile, snapshot);
+                }
                 // A deeper document's tiles keep their deep pixels: the
                 // snapshot's go back at full depth (or widened, if it was
                 // taken at 8 bits), and the current ones are kept for redo.
@@ -1279,7 +1319,7 @@ impl History {
         // Tiles in parallel, unless a tile comes more than once (each
         // snapshot then goes back over the one before, in order).
         let mut seen = std::collections::HashSet::new();
-        if action
+        let changed = if action
             .tiles
             .iter()
             .all(|s| seen.insert((s.layer_id, s.tx, s.ty)))
@@ -1288,7 +1328,69 @@ impl History {
             action.tiles.par_iter_mut().filter_map(swap).collect()
         } else {
             action.tiles.iter_mut().filter_map(swap).collect()
+        };
+        // Tiles left without pixels (undone to transparent) go: a missing
+        // tile reads as transparent everywhere.
+        for snapshot in &action.tiles {
+            if let Some(idx) = canvas.layer_index_of(snapshot.layer_id) {
+                canvas.drop_tile_without_pixels(idx, snapshot.tx, snapshot.ty);
+            }
         }
+        changed
+    }
+}
+
+impl History {
+    /// [`Self::swap_state`] for a snapshot of a whole tile. A tile that
+    /// goes back to transparent on a layer whose missing tiles are
+    /// transparent keeps no pixels (16 KiB of zeros each, otherwise).
+    fn swap_whole_tile(
+        canvas: &Canvas,
+        layer_idx: usize,
+        tile: &mut crate::canvas::storage::TileCell,
+        snapshot: &mut TileSnapshot,
+    ) -> Option<(i32, i32)> {
+        use std::sync::Arc;
+        let depth = canvas.depth();
+        let len = snapshot.width * snapshot.height;
+        let stored: crate::canvas::storage::SharedPixels = match &snapshot.data {
+            SnapshotPixels::Raw(stored) => Arc::clone(stored),
+            other => Arc::new(other.to_vec()),
+        };
+        if stored.len() != len {
+            log::error!("Skipping undo snapshot that failed to decompress");
+            return None;
+        }
+        let stored_deep = (depth.is_deep())
+            .then(|| (snapshot.data.deep()).or_else(|| DeepTile::widen(depth, &stored)))
+            .flatten();
+        // What the tile holds now, kept (shared, not copied) for the other
+        // direction.
+        let current = tile.shared_data().cloned();
+        let current_deep = tile.shared_deep().cloned();
+        let transparent = stored.iter().all(|&p| p == Color32::TRANSPARENT);
+        if transparent && canvas.empty_tile_color(layer_idx) == Color32::TRANSPARENT {
+            tile.set_shared(None, None);
+        } else {
+            tile.set_shared(Some(stored), stored_deep.map(Arc::new));
+        }
+        tile.is_empty = transparent;
+        snapshot.data = if depth.is_deep() {
+            let deep = current_deep.map(Arc::unwrap_or_clone).or_else(|| {
+                let transparent = vec![Color32::TRANSPARENT; len];
+                DeepTile::widen(depth, current.as_deref().unwrap_or(&transparent))
+            });
+            match deep {
+                Some(deep) => SnapshotPixels::Deep(deep),
+                None => SnapshotPixels::transparent(len),
+            }
+        } else {
+            match current {
+                Some(current) => SnapshotPixels::Raw(current),
+                None => SnapshotPixels::transparent(len),
+            }
+        };
+        Some((snapshot.tx, snapshot.ty))
     }
 }
 

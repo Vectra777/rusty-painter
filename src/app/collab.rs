@@ -36,7 +36,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError, TrySendError, channel};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Vec2};
@@ -52,12 +52,22 @@ use crate::canvas::storage::{Depth, LayerId};
 
 /// The largest message taken (a whole document, as a project file).
 const MAX_FRAME: usize = 512 << 20;
+/// The largest message taken before the password is checked (a hello):
+/// a stranger mustn't make the host set aside room for a document.
+const MAX_HELLO: usize = 64 << 10;
+/// Messages queued for one connection: past that it isn't keeping up (or
+/// froze), and is sent the whole document once it catches up instead.
+const OUTBOX: usize = 1024;
+/// How long a write may wait for the other side to take it: a painter
+/// that long frozen (or gone without a word) is dropped.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 /// How often the host sends checksums of the tiles changed since.
 const HASH_EVERY: Duration = Duration::from_secs(3);
 /// How often a moving cursor is sent.
 const CURSOR_EVERY: Duration = Duration::from_millis(33);
-/// How long a connection thread waits for data before checking its outbox.
-const POLL: Duration = Duration::from_millis(10);
+/// How long a connection thread waits for data before checking its outbox
+/// (what it adds to a message's way out, at most).
+const POLL: Duration = Duration::from_millis(25);
 /// How long a connection may take to say who it is.
 const HANDSHAKE: Duration = Duration::from_secs(15);
 /// The name the certificate is made out to (the invite's fingerprint is
@@ -202,7 +212,7 @@ enum Net {
     Joined {
         id: u32,
         name: String,
-        tx: Sender<Arc<Vec<u8>>>,
+        tx: Outbox,
     },
     Msg {
         id: u32,
@@ -219,7 +229,73 @@ enum Net {
 
 struct Peer {
     id: u32,
-    tx: Sender<Arc<Vec<u8>>>,
+    tx: Outbox,
+    /// Its outbox filled up: what came since wasn't queued, so it gets
+    /// the whole document once it has room again.
+    behind: bool,
+}
+
+impl Peer {
+    fn send(&mut self, frame: Arc<Vec<u8>>) {
+        if !self.behind && !self.tx.send(frame) {
+            self.behind = true;
+        }
+    }
+}
+
+/// Where the app queues messages for a connection's thread to send, at
+/// most [`OUTBOX`] of them.
+#[derive(Clone)]
+struct Outbox {
+    tx: SyncSender<Arc<Vec<u8>>>,
+    /// Queued and not yet taken by the thread.
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Outbox {
+    fn new() -> (Self, OutboxRx) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(OUTBOX);
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Self {
+                tx,
+                queued: queued.clone(),
+            },
+            OutboxRx { rx, queued },
+        )
+    }
+
+    /// Queue `frame`; `false` if the outbox is full (it's dropped). A
+    /// connection that's gone takes anything (its end is reported apart).
+    fn send(&self, frame: Arc<Vec<u8>>) -> bool {
+        match self.tx.try_send(frame) {
+            Ok(()) => {
+                self.queued.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Disconnected(_)) => true,
+        }
+    }
+
+    /// Half empty again: room for the whole document and what follows.
+    fn caught_up(&self) -> bool {
+        self.queued.load(Ordering::Relaxed) < OUTBOX / 2
+    }
+}
+
+/// A connection thread's end of its [`Outbox`].
+struct OutboxRx {
+    rx: Receiver<Arc<Vec<u8>>>,
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl OutboxRx {
+    fn try_recv(&self) -> Result<Arc<Vec<u8>>, TryRecvError> {
+        let frame = self.rx.try_recv()?;
+        self.queued.fetch_sub(1, Ordering::Relaxed);
+        Ok(frame)
+    }
 }
 
 /// Another painter's cursor and the stroke they're painting.
@@ -332,13 +408,14 @@ fn frame(head: &Head, blob: &[u8]) -> Arc<Vec<u8>> {
     Arc::new(out)
 }
 
-/// The next whole message in `buf`, taken out of it.
-fn take_frame(buf: &mut Vec<u8>) -> Result<Option<(Head, Vec<u8>)>, String> {
+/// The next whole message in `buf`, taken out of it; one said to be over
+/// `max` bytes is an error (before any of it is read).
+fn take_frame(buf: &mut Vec<u8>, max: usize) -> Result<Option<(Head, Vec<u8>)>, String> {
     let Some(len) = buf.first_chunk::<4>() else {
         return Ok(None);
     };
     let total = u32::from_le_bytes(*len) as usize;
-    if !(4..=MAX_FRAME).contains(&total) {
+    if !(4..=max).contains(&total) {
         return Err("Bad message size".into());
     }
     if buf.len() < 4 + total {
@@ -701,9 +778,22 @@ fn client_config(fingerprint: [u8; 32]) -> Result<Arc<rustls::ClientConfig>, Str
 struct Link<T> {
     io: T,
     buf: Vec<u8>,
+    /// Where reads land (kept: a read every [`POLL`]).
+    chunk: Vec<u8>,
+    /// The largest message taken: small until the other side is let in.
+    max: usize,
 }
 
 impl<T: Read + Write> Link<T> {
+    fn new(io: T, max: usize) -> Self {
+        Self {
+            io,
+            buf: Vec::new(),
+            chunk: vec![0; 1 << 16],
+            max,
+        }
+    }
+
     fn send(&mut self, frame: &[u8]) -> std::io::Result<()> {
         self.io.write_all(frame)?;
         self.io.flush()
@@ -712,15 +802,14 @@ impl<T: Read + Write> Link<T> {
     /// The next whole message, or `None` if none came within the socket's
     /// read timeout.
     fn poll(&mut self) -> Result<Option<(Head, Vec<u8>)>, String> {
-        if let Some(msg) = take_frame(&mut self.buf)? {
+        if let Some(msg) = take_frame(&mut self.buf, self.max)? {
             return Ok(Some(msg));
         }
-        let mut chunk = vec![0; 1 << 16];
-        match self.io.read(&mut chunk) {
+        match self.io.read(&mut self.chunk) {
             Ok(0) => Err("Disconnected".into()),
             Ok(n) => {
-                self.buf.extend_from_slice(&chunk[..n]);
-                take_frame(&mut self.buf)
+                self.buf.extend_from_slice(&self.chunk[..n]);
+                take_frame(&mut self.buf, self.max)
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(None),
             Err(e) => Err(e.to_string()),
@@ -748,6 +837,11 @@ where
     tls.sock
         .set_read_timeout(Some(HANDSHAKE))
         .map_err(|e| e.to_string())?;
+    // (Writes too: a frozen peer's full buffers mustn't hold the thread
+    // for good. A write that times out drops the connection.)
+    tls.sock
+        .set_write_timeout(Some(WRITE_TIMEOUT))
+        .map_err(|e| e.to_string())?;
     while tls.conn.is_handshaking() {
         tls.conn
             .complete_io(&mut tls.sock)
@@ -774,7 +868,7 @@ struct Door {
 fn run_link<T: Read + Write>(
     mut link: Link<T>,
     id: u32,
-    out: &Receiver<Arc<Vec<u8>>>,
+    out: &OutboxRx,
     to_ui: &Sender<Net>,
     ctx: &egui::Context,
     stop: &AtomicBool,
@@ -816,10 +910,7 @@ fn let_in(stream: TcpStream, door: Door) {
         let conn = rustls::ServerConnection::new(door.config.clone()).map_err(|e| e.to_string())?;
         let mut tls = rustls::StreamOwned::new(conn, stream);
         handshake(&mut tls)?;
-        let mut link = Link {
-            io: tls,
-            buf: Vec::new(),
-        };
+        let mut link = Link::new(tls, MAX_HELLO);
         let (Head::Hello { name, password }, _) = link.wait(HANDSHAKE)? else {
             return Err("No hello".into());
         };
@@ -834,7 +925,8 @@ fn let_in(stream: TcpStream, door: Door) {
         }
         link.send(&frame(&Head::Welcome { you: id }, &[]))
             .map_err(|e| e.to_string())?;
-        let (tx, rx) = channel();
+        link.max = MAX_FRAME;
+        let (tx, rx) = Outbox::new();
         let name: String = name.chars().take(32).collect();
         let _ = door.to_ui.send(Net::Joined { id, name, tx });
         door.ctx.request_repaint();
@@ -1104,17 +1196,15 @@ impl Collab {
                     rustls::ClientConnection::new(config, name).map_err(|e| e.to_string())?;
                 let mut tls = rustls::StreamOwned::new(conn, sock);
                 handshake(&mut tls)?;
-                let mut link = Link {
-                    io: tls,
-                    buf: Vec::new(),
-                };
+                // (The host is who the invite's fingerprint says.)
+                let mut link = Link::new(tls, MAX_FRAME);
                 link.send(&hello).map_err(|e| e.to_string())?;
                 let you = match link.wait(HANDSHAKE)?.0 {
                     Head::Welcome { you } => you,
                     Head::Refused(why) => return Err(why),
                     _ => return Err("The host answered oddly".into()),
                 };
-                let (tx, out) = channel();
+                let (tx, out) = Outbox::new();
                 let _ = to_ui.send(Net::Joined {
                     id: 0,
                     name: String::new(),
@@ -1144,15 +1234,30 @@ impl Collab {
     }
 
     /// Send to everyone (a guest: to the host), but `except`.
-    fn broadcast(&self, frame: &Arc<Vec<u8>>, except: Option<u32>) {
-        for p in self.peers.iter().filter(|p| Some(p.id) != except) {
-            let _ = p.tx.send(frame.clone());
+    fn broadcast(&mut self, frame: &Arc<Vec<u8>>, except: Option<u32>) {
+        for p in self.peers.iter_mut().filter(|p| Some(p.id) != except) {
+            p.send(frame.clone());
         }
     }
 
-    fn send_to(&self, id: u32, frame: Arc<Vec<u8>>) {
-        if let Some(p) = self.peers.iter().find(|p| p.id == id) {
-            let _ = p.tx.send(frame);
+    fn send_to(&mut self, id: u32, frame: Arc<Vec<u8>>) {
+        if let Some(p) = self.peers.iter_mut().find(|p| p.id == id) {
+            p.send(frame);
+        }
+    }
+
+    /// Those whose outbox filled up and has room again start over from
+    /// the whole document: the host sends it, a guest asks the host for it.
+    fn catch_up(&mut self) {
+        for p in &mut self.peers {
+            if p.behind && p.tx.caught_up() {
+                p.behind = false;
+                if self.host {
+                    self.waiting.push(p.id);
+                } else {
+                    self.resync = true;
+                }
+            }
         }
     }
 
@@ -1193,7 +1298,7 @@ impl Collab {
         self.broadcast(&frame(&head, &blob), None);
     }
 
-    fn send_users(&self) {
+    fn send_users(&mut self) {
         self.broadcast(&frame(&Head::Users(self.users.clone()), &[]), None);
     }
 
@@ -1293,6 +1398,7 @@ impl PainterApp {
             return;
         };
         self.collab_network(&mut c);
+        c.catch_up();
         let here = self.collab_here(&c);
         if here {
             c.send_strokes();
@@ -1372,13 +1478,13 @@ impl PainterApp {
                 })
                 .collect();
             if !tiles.is_empty() {
-                for p in &c.peers {
+                for p in &mut c.peers {
                     let applied = c.applied.get(&p.id).copied().unwrap_or(0);
                     let head = Head::Hashes {
                         applied,
                         tiles: tiles.clone(),
                     };
-                    let _ = p.tx.send(frame(&head, &[]));
+                    p.send(frame(&head, &[]));
                 }
             }
         }
@@ -1389,7 +1495,11 @@ impl PainterApp {
         while let Ok(event) = c.rx.try_recv() {
             match event {
                 Net::Joined { id, name, tx } => {
-                    c.peers.push(Peer { id, tx });
+                    c.peers.push(Peer {
+                        id,
+                        tx,
+                        behind: false,
+                    });
                     if c.host {
                         c.users.push((id, name.clone()));
                         c.status = format!("{name} joined");
@@ -1604,7 +1714,7 @@ impl PainterApp {
 
     fn collab_broadcast_layers(
         &mut self,
-        c: &Collab,
+        c: &mut Collab,
         removed: Vec<u64>,
         redraw: Vec<(u64, [i32; 4])>,
         except: Option<u32>,
@@ -2078,18 +2188,60 @@ mod tests {
         let bigger = [TileHead { h: 32, ..at }, TileHead { h: 32, ..at }, at];
         assert!(decode_patches(&bigger, &blob).is_err());
         let mut buf = (u32::MAX).to_le_bytes().to_vec();
-        assert!(take_frame(&mut buf).is_err());
+        assert!(take_frame(&mut buf, MAX_FRAME).is_err());
+    }
+
+    #[test]
+    fn a_stranger_cant_announce_a_document_before_the_password() {
+        // 1 MB said to follow: fine once in, refused at the door at once.
+        let mut buf = (1u32 << 20).to_le_bytes().to_vec();
+        assert!(matches!(take_frame(&mut buf.clone(), MAX_FRAME), Ok(None)));
+        assert!(take_frame(&mut buf, MAX_HELLO).is_err());
+        let hello = Head::Hello {
+            name: "guest".into(),
+            password: "pw".into(),
+        };
+        let mut buf = frame(&hello, &[]).to_vec();
+        assert!(take_frame(&mut buf, MAX_HELLO).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_peer_that_cant_keep_up_is_sent_the_document_once_it_has_room() {
+        let (_tx, rx) = channel();
+        let mut c = Collab::new(true, "host", rx, Default::default());
+        let (tx, out) = Outbox::new();
+        c.peers.push(Peer {
+            id: 1,
+            tx,
+            behind: false,
+        });
+        let msg = frame(&Head::Resync, &[]);
+        for _ in 0..OUTBOX {
+            c.broadcast(&msg, None);
+        }
+        assert!(!c.peers[0].behind);
+        // Full: no more is queued.
+        c.broadcast(&msg, None);
+        assert!(c.peers[0].behind);
+        c.catch_up();
+        assert!(c.waiting.is_empty(), "not while it's still full");
+        for _ in 0..OUTBOX / 2 + 1 {
+            out.try_recv().unwrap();
+        }
+        c.catch_up();
+        assert_eq!(c.waiting, [1], "the whole document, next");
+        assert!(!c.peers[0].behind);
     }
 
     #[test]
     fn frames_and_invites_round_trip() {
         let mut buf = frame(&Head::Want(vec![(1, 2, 3)]), b"blob").to_vec();
         buf.extend_from_slice(&frame(&Head::Snapshot, &[]));
-        let (head, blob) = take_frame(&mut buf).unwrap().unwrap();
+        let (head, blob) = take_frame(&mut buf, MAX_FRAME).unwrap().unwrap();
         assert!(matches!(head, Head::Want(w) if w == [(1, 2, 3)]));
         assert_eq!(blob, b"blob");
         assert!(matches!(
-            take_frame(&mut buf).unwrap(),
+            take_frame(&mut buf, MAX_FRAME).unwrap(),
             Some((Head::Snapshot, _))
         ));
         assert!(buf.is_empty());
@@ -2290,6 +2442,9 @@ mod tests {
     #[test]
     fn on_another_tab_changes_wait_for_coming_back() {
         let (mut a, mut b) = session();
+        // (The tab left is autosaved: not into the working folder.)
+        let dir = std::env::temp_dir().join(format!("rp-collab-tab-{}", std::process::id()));
+        a.brush_state.brushes_path = dir.join("brushes");
         // The host opens another document: the session's goes to a tab.
         a.workspace.library.has_document = true;
         let painted = step(&a.canvas, &[(1, 1)], RED);
@@ -2310,6 +2465,7 @@ mod tests {
         pump(&mut a, &mut b, |a, _| {
             a.canvas.width() == 128 && get(&a.canvas, 2, 2) == BLUE
         });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2362,7 +2518,11 @@ mod tests {
             a.finish_stroke();
             a.settle_strokes();
             pump(a, b, |a, b| {
-                let tile = |app: &PainterApp| app.canvas.get_layer_tile_data(1, 0, 0);
+                // (A tile undone to transparent may be dropped: compared as shown.)
+                let tile = |app: &PainterApp| {
+                    (app.canvas.get_layer_tile_data(1, 0, 0))
+                        .filter(|t| t.iter().any(|p| p.a() > 0))
+                };
                 painted(a) && tile(a) == tile(b)
             });
         }
@@ -2435,7 +2595,10 @@ mod tests {
             a.add_stroke_point(Vec2::new(50.0, 22.0), 1.0);
             a.finish_stroke();
             a.settle_strokes();
-            let tile = |app: &PainterApp| app.canvas.get_layer_tile_data(1, 0, 0);
+            // (A tile undone to transparent may be dropped: compared as shown.)
+            let tile = |app: &PainterApp| {
+                (app.canvas.get_layer_tile_data(1, 0, 0)).filter(|t| t.iter().any(|p| p.a() > 0))
+            };
             pump(a, b, |a, b| tile(a).is_some() && tile(a) == tile(b));
             let left =
                 |app: &PainterApp| tile(app).map_or(0, |t| t.iter().filter(|p| p.a() > 0).count());
@@ -2456,7 +2619,10 @@ mod tests {
         let brush = &mut a.brush_state.brush;
         brush.brush_options.color = RED;
         brush.brush_options.diameter = 12.0;
-        let tile = |app: &PainterApp| app.canvas.get_layer_tile_data(1, 0, 0);
+        // (A tile undone to transparent may be dropped: compared as shown.)
+        let tile = |app: &PainterApp| {
+            (app.canvas.get_layer_tile_data(1, 0, 0)).filter(|t| t.iter().any(|p| p.a() > 0))
+        };
         let left =
             |app: &PainterApp| tile(app).map_or(0, |t| t.iter().filter(|p| p.a() > 0).count());
         for y in [20.0, 24.0] {

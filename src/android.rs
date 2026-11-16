@@ -63,137 +63,151 @@ pub struct PublishedFile {
     pub share_mime: Option<String>,
 }
 
+/// Run `f` with the JNI environment and the activity. Its local references
+/// are freed when it returns: the app's main thread stays attached to the
+/// JVM for good, so they'd otherwise pile up, call after call, until the
+/// JVM's table of them overflowed and ended the app.
 #[cfg(target_os = "android")]
 fn with_android_env<T>(
     f: impl FnOnce(&mut jni::JNIEnv<'_>, JObject<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
+    /// References a call may make before the JVM has to grow the frame.
+    const LOCAL_REFS: i32 = 64;
     let ctx = ndk_context::android_context();
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
     let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
     let activity = unsafe { JObject::from_raw(ctx.context() as jobject) };
-    let result = f(&mut env, activity);
-    // A failed call leaves its Java exception pending, which would abort the
-    // next JNI call: log it (which clears it).
-    if result.is_err() && env.exception_check().unwrap_or(false) {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
-    result
+    env.with_local_frame(LOCAL_REFS, |env| {
+        let result = f(env, activity);
+        // A failed call leaves its Java exception pending, which would
+        // abort the next JNI call: log it (which clears it).
+        if result.is_err() && env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        Ok::<_, jni::errors::Error>(result)
+    })
+    .unwrap_or_else(|e| Err(e.to_string()))
 }
 
+/// Where `publish_file` puts a file of this type: its kind for
+/// `SharedStorage.create` (pictures the gallery shows, videos, everything
+/// else in Downloads) and folder.
 #[cfg(target_os = "android")]
-fn put_string(
-    env: &mut jni::JNIEnv<'_>,
-    values: &JObject<'_>,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
-    let key = env.new_string(key).map_err(|e| e.to_string())?;
-    let value = env.new_string(value).map_err(|e| e.to_string())?;
-    env.call_method(
-        values,
-        "put",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
-        &[
-            JValue::Object(&JObject::from(key)),
-            JValue::Object(&JObject::from(value)),
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[cfg(target_os = "android")]
-fn uri_to_string(env: &mut jni::JNIEnv<'_>, uri: &JObject<'_>) -> Result<String, String> {
-    let uri_string = env
-        .call_method(uri, "toString", "()Ljava/lang/String;", &[])
-        .map_err(|e| e.to_string())?
-        .l()
-        .map_err(|e| e.to_string())?;
-    let uri_string = JString::from(uri_string);
-    env.get_string(&uri_string)
-        .map(|s| s.into())
-        .map_err(|e| e.to_string())
-}
-
-/// Where `publish_file` puts a file of this type, by MediaStore collection:
-/// pictures the gallery shows, videos, and everything else in Downloads.
-#[cfg(target_os = "android")]
-fn media_collection(mime: &str) -> (&'static str, &'static str) {
+fn media_collection(mime: &str) -> (i32, &'static str) {
     match mime {
-        m if m.starts_with("video/") => (
-            "android/provider/MediaStore$Video$Media",
-            "Movies/Rusty Painter",
-        ),
-        "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/tiff" => (
-            "android/provider/MediaStore$Images$Media",
-            "Pictures/Rusty Painter",
-        ),
-        _ => (
-            "android/provider/MediaStore$Downloads",
-            "Download/Rusty Painter",
-        ),
+        m if m.starts_with("video/") => (1, "Movies/Rusty Painter"),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/tiff" => {
+            (0, "Pictures/Rusty Painter")
+        }
+        _ => (2, "Download/Rusty Painter"),
     }
 }
 
 /// Move the file at `path` into the shared storage (Pictures, Movies or
-/// Download, under "Rusty Painter"), where other apps see it.
+/// Download, under "Rusty Painter"), where other apps see it. It's copied
+/// across a bit at a time (a long video is hundreds of MB), into a file
+/// other apps don't see until it's whole; if that fails, the copy goes and
+/// the file at `path` stays.
 #[cfg(target_os = "android")]
 pub fn publish_file(path: &std::path::Path, mime: &str) -> Result<PublishedFile, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read the export: {e}"))?;
+    let mut source =
+        std::fs::File::open(path).map_err(|e| format!("Couldn't read the export: {e}"))?;
     let file_name = path
         .file_name()
         .map_or_else(|| "export".into(), |n| n.to_string_lossy().into_owned());
-    let (collection_class, dir) = media_collection(mime);
-    let result = with_android_env(|env, activity| {
-        let resolver = content_resolver(env, &activity)?;
-        let values = env
-            .new_object("android/content/ContentValues", "()V", &[])
-            .map_err(jerr)?;
-        put_string(env, &values, "_display_name", &file_name)?;
-        put_string(env, &values, "mime_type", mime)?;
-        put_string(env, &values, "relative_path", dir)?;
-        let collection = env
-            .get_static_field(
-                collection_class,
-                "EXTERNAL_CONTENT_URI",
-                "Landroid/net/Uri;",
-            )
-            .and_then(|v| v.l())
-            .map_err(jerr)?;
+    let (kind, dir) = media_collection(mime);
+    let uri = with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "SharedStorage")?;
+        let args = [
+            env.new_string(&file_name),
+            env.new_string(mime),
+            env.new_string(dir),
+        ];
+        let [name, mime, dir] = args.map(|s| s.map(JObject::from));
         let uri = env
-            .call_method(
-                &resolver,
-                "insert",
-                "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
-                &[JValue::Object(&collection), JValue::Object(&values)],
+            .call_static_method(
+                class,
+                "create",
+                "(Landroid/content/Context;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[
+                    JValue::Object(&activity),
+                    JValue::Int(kind),
+                    JValue::Object(&name.map_err(jerr)?),
+                    JValue::Object(&mime.map_err(jerr)?),
+                    JValue::Object(&dir.map_err(jerr)?),
+                ],
             )
             .and_then(|v| v.l())
-            .map_err(jerr)?;
-        if uri.is_null() {
-            return Err("Android refused to create the file".to_string());
-        }
-        let out = env
-            .call_method(
-                &resolver,
-                "openOutputStream",
-                "(Landroid/net/Uri;)Ljava/io/OutputStream;",
-                &[JValue::Object(&uri)],
+            .map_err(|_| "Android refused to create the file".to_string())?;
+        env.get_string(&JString::from(uri))
+            .map(String::from)
+            .map_err(jerr)
+    })?;
+    let storage = |method: &str| {
+        with_android_env(|env, activity| {
+            let class = helper_class(env, &activity, "SharedStorage")?;
+            let juri = env.new_string(&uri).map_err(jerr)?;
+            env.call_static_method(
+                class,
+                method,
+                "(Landroid/content/Context;Ljava/lang/String;)V",
+                &[JValue::Object(&activity), JValue::Object(&juri)],
             )
-            .and_then(|v| v.l())
             .map_err(jerr)?;
-        let array = env.byte_array_from_slice(&bytes).map_err(jerr)?;
-        env.call_method(&out, "write", "([B)V", &[JValue::Object(&array)])
-            .map_err(jerr)?;
-        env.call_method(&out, "close", "()V", &[]).map_err(jerr)?;
-        Ok(PublishedFile {
-            message: format!("Saved to {dir}/{file_name}"),
-            share_uri: Some(uri_to_string(env, &uri)?),
-            share_mime: Some(mime.to_string()),
+            Ok(())
         })
+    };
+    let written = open_fd(&uri, "w").and_then(|mut out| {
+        std::io::copy(&mut source, &mut out)
+            .map_err(|e| format!("Couldn't save the export: {e}"))?;
+        drop(out);
+        storage("finish")
     });
-    let _ = std::fs::remove_file(path);
-    result
+    match written {
+        Ok(()) => {
+            let _ = std::fs::remove_file(path);
+            Ok(PublishedFile {
+                message: format!("Saved to {dir}/{file_name}"),
+                share_uri: Some(uri),
+                share_mime: Some(mime.to_string()),
+            })
+        }
+        Err(err) => {
+            let _ = storage("discard");
+            Err(err)
+        }
+    }
+}
+
+/// A file descriptor for content `uri`, opened by Android (`mode` "r",
+/// "w" or "wt"), as a file to read or write here, on any thread.
+#[cfg(target_os = "android")]
+fn open_fd(uri: &str, mode: &str) -> Result<std::fs::File, String> {
+    use std::os::fd::FromRawFd;
+    let fd = with_android_env(|env, activity| {
+        let class = picker_class(env, &activity)?;
+        let juri = env.new_string(uri).map_err(jerr)?;
+        let jmode = env.new_string(mode).map_err(jerr)?;
+        env.call_static_method(
+            class,
+            "openFd",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)I",
+            &[
+                JValue::Object(&activity),
+                JValue::Object(&juri),
+                JValue::Object(&jmode),
+            ],
+        )
+        .and_then(|v| v.i())
+        .map_err(|_| "Couldn't open the file".to_string())
+    })?;
+    if fd < 0 {
+        return Err("Couldn't open the file".to_string());
+    }
+    // SAFETY: `detachFd` handed the descriptor over: it's ours alone to
+    // use and close.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
 /// The app's cache folder, for files on their way to shared storage.
@@ -214,9 +228,41 @@ static HELPER_DEX: &[u8] = include_bytes!("../android/classes.dex");
 #[cfg(target_os = "android")]
 static HELPER_LOADER: std::sync::OnceLock<jni::objects::GlobalRef> = std::sync::OnceLock::new();
 
-/// Helper class `name` (like "FilePicker"), loaded from the embedded dex.
+/// The helper classes loaded so far, by name (a handful, kept for good).
 #[cfg(target_os = "android")]
-fn helper_class<'a>(
+static HELPER_CLASSES: std::sync::Mutex<Vec<(&'static str, &'static jni::objects::GlobalRef)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Helper class `name` (like "FilePicker"), loaded from the embedded dex
+/// the first time and kept (a class lookup on every call cost a few
+/// local references and a trip through the class loader).
+#[cfg(target_os = "android")]
+fn helper_class(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &JObject<'_>,
+    name: &'static str,
+) -> Result<&'static jni::objects::GlobalRef, String> {
+    let known = |classes: &[(&str, &'static jni::objects::GlobalRef)]| {
+        classes.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
+    };
+    if let Some(class) = HELPER_CLASSES.lock().ok().and_then(|c| known(&c)) {
+        return Ok(class);
+    }
+    let class = load_helper_class(env, activity, name)?;
+    let global = env.new_global_ref(class).map_err(jerr)?;
+    let mut classes = HELPER_CLASSES.lock().map_err(|e| e.to_string())?;
+    // (Another thread may have loaded it meanwhile.)
+    if let Some(class) = known(&classes) {
+        return Ok(class);
+    }
+    let global: &'static jni::objects::GlobalRef = Box::leak(Box::new(global));
+    classes.push((name, global));
+    Ok(global)
+}
+
+/// Load helper class `name` from the embedded dex.
+#[cfg(target_os = "android")]
+fn load_helper_class<'a>(
     env: &mut jni::JNIEnv<'a>,
     activity: &JObject<'_>,
     name: &str,
@@ -262,27 +308,40 @@ fn helper_class<'a>(
 }
 
 #[cfg(target_os = "android")]
-fn picker_class<'a>(
-    env: &mut jni::JNIEnv<'a>,
+fn picker_class(
+    env: &mut jni::JNIEnv<'_>,
     activity: &JObject<'_>,
-) -> Result<jni::objects::JClass<'a>, String> {
+) -> Result<&'static jni::objects::GlobalRef, String> {
     helper_class(env, activity, "FilePicker")
 }
 
-/// Back no longer ends the app (see `BackGuard.java`).
+/// Back no longer ends the app but reaches egui as Escape (see
+/// `BackGuard.java`), and low memory is heard of (`MemoryWatch.java`).
 #[cfg(target_os = "android")]
 pub fn guard_back() -> Result<(), String> {
     with_android_env(|env, activity| {
-        let class = helper_class(env, &activity, "BackGuard")?;
-        env.call_static_method(
-            &class,
-            "install",
-            "(Landroid/app/Activity;)V",
-            &[JValue::Object(&activity)],
-        )
-        .map_err(jerr)?;
+        for helper in ["BackGuard", "MemoryWatch"] {
+            let class = helper_class(env, &activity, helper)?;
+            env.call_static_method(
+                class,
+                "install",
+                "(Landroid/app/Activity;)V",
+                &[JValue::Object(&activity)],
+            )
+            .map_err(jerr)?;
+        }
         Ok(())
     })
+}
+
+/// Android said memory is running low (see `MemoryWatch.java`).
+#[cfg(target_os = "android")]
+static LOW_MEMORY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether memory ran low since last asked (polled once a frame).
+#[cfg(target_os = "android")]
+pub fn take_low_memory() -> bool {
+    LOW_MEMORY.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The text on the clipboard (what the camera copied from a QR code, say).
@@ -292,7 +351,7 @@ pub fn clipboard_text() -> Result<String, String> {
         let class = helper_class(env, &activity, "Clipboard")?;
         let text = env
             .call_static_method(
-                &class,
+                class,
                 "text",
                 "(Landroid/app/Activity;)Ljava/lang/String;",
                 &[JValue::Object(&activity)],
@@ -314,7 +373,7 @@ pub fn show_keyboard(on: bool) -> Result<(), String> {
     with_android_env(|env, activity| {
         let class = helper_class(env, &activity, "TextInput")?;
         env.call_static_method(
-            &class,
+            class,
             "show",
             "(Landroid/app/Activity;Z)V",
             &[JValue::Object(&activity), JValue::Bool(on.into())],
@@ -328,7 +387,8 @@ pub fn show_keyboard(on: bool) -> Result<(), String> {
 static KEYBOARD_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Once a frame: the keyboard shown while a text field has focus, and what
-/// was typed on it.
+/// was typed on it. Back (as Escape) comes whether or not the keyboard is
+/// up; typing that arrives with no text field wanting it is dropped.
 #[cfg(target_os = "android")]
 pub fn keyboard_input(wanted: bool) -> Vec<eframe::egui::Event> {
     use std::sync::atomic::Ordering;
@@ -337,12 +397,25 @@ pub fn keyboard_input(wanted: bool) -> Vec<eframe::egui::Event> {
     {
         log::error!("Keyboard: {err}");
     }
-    if wanted { typed() } else { Vec::new() }
+    let mut events = typed();
+    if !wanted {
+        events.retain(|e| {
+            matches!(
+                e,
+                eframe::egui::Event::Key {
+                    key: eframe::egui::Key::Escape,
+                    ..
+                }
+            )
+        });
+    }
+    events
 }
 
-/// What was typed on the soft keyboard since last asked.
+/// What was typed on the soft keyboard since last asked, Back pressed (as
+/// Escape), and whether memory ran low (see [`take_low_memory`]).
 #[cfg(target_os = "android")]
-pub fn typed() -> Vec<eframe::egui::Event> {
+fn typed() -> Vec<eframe::egui::Event> {
     use eframe::egui::{Event, Key, Modifiers};
     let key = |key, pressed| Event::Key {
         key,
@@ -356,24 +429,31 @@ pub fn typed() -> Vec<eframe::egui::Event> {
         let mut events = Vec::new();
         loop {
             let s = env
-                .call_static_method(&class, "poll", "()Ljava/lang/String;", &[])
+                .call_static_method(class, "poll", "()Ljava/lang/String;", &[])
                 .and_then(|v| v.l())
                 .map_err(jerr)?;
             if s.is_null() {
                 return Ok(events);
             }
-            let s: String = env.get_string(&JString::from(s)).map_err(jerr)?.into();
-            match s.split_at(1) {
-                ("t", text) => events.push(Event::Text(text.to_string())),
-                (code, _) => {
-                    let k = if code == "b" {
-                        Key::Backspace
-                    } else {
-                        Key::Enter
-                    };
-                    events.extend([key(k, true), key(k, false)]);
+            let s = JString::from(s);
+            let text: String = env.get_string(&s).map_err(jerr)?.into();
+            let _ = env.delete_local_ref(s);
+            let k = match text.split_at_checked(1) {
+                Some(("t", typed)) => {
+                    events.push(Event::Text(typed.to_string()));
+                    continue;
                 }
-            }
+                Some(("m", _)) => {
+                    LOW_MEMORY.store(true, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+                Some(("b", _)) => Key::Backspace,
+                Some(("d", _)) => Key::Delete,
+                Some(("x", _)) => Key::Escape,
+                Some(("e", _)) => Key::Enter,
+                _ => continue,
+            };
+            events.extend([key(k, true), key(k, false)]);
         }
     })
     .unwrap_or_default()
@@ -394,7 +474,7 @@ pub fn picker_open(mimes: &[&str], multiple: bool) -> Result<(), String> {
                 .map_err(jerr)?;
         }
         env.call_static_method(
-            &class,
+            class,
             "open",
             "(Landroid/app/Activity;[Ljava/lang/String;Z)V",
             &[
@@ -417,7 +497,7 @@ pub fn picker_create(mime: &str, name: &str) -> Result<(), String> {
         let mime = env.new_string(mime).map_err(jerr)?;
         let name = env.new_string(name).map_err(jerr)?;
         env.call_static_method(
-            &class,
+            class,
             "create",
             "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)V",
             &[
@@ -438,7 +518,7 @@ pub fn picker_poll() -> Option<Vec<String>> {
     with_android_env(|env, activity| {
         let class = picker_class(env, &activity)?;
         let array = env
-            .call_static_method(&class, "poll", "()[Ljava/lang/String;", &[])
+            .call_static_method(class, "poll", "()[Ljava/lang/String;", &[])
             .and_then(|v| v.l())
             .map_err(jerr)?;
         if array.is_null() {
@@ -459,58 +539,38 @@ pub fn picker_poll() -> Option<Vec<String>> {
     })
 }
 
-/// A picked file's name and contents.
+/// A picked file's name, and the file opened to read (on a job's thread:
+/// only opening it happens here).
 #[cfg(target_os = "android")]
-pub fn picker_read(uri: &str) -> Result<(String, Vec<u8>), String> {
-    with_android_env(|env, activity| {
+pub fn picker_read(uri: &str) -> Result<(String, crate::app::import::FileSource), String> {
+    let name = with_android_env(|env, activity| {
         let class = picker_class(env, &activity)?;
         let juri = env.new_string(uri).map_err(jerr)?;
         let name = env
             .call_static_method(
-                &class,
+                class,
                 "displayName",
                 "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
                 &[JValue::Object(&activity), JValue::Object(&juri)],
             )
             .and_then(|v| v.l())
             .map_err(jerr)?;
-        let name: String = env.get_string(&JString::from(name)).map_err(jerr)?.into();
-        let bytes = env
-            .call_static_method(
-                &class,
-                "read",
-                "(Landroid/content/Context;Ljava/lang/String;)[B",
-                &[JValue::Object(&activity), JValue::Object(&juri)],
-            )
-            .and_then(|v| v.l())
-            .map_err(|_| format!("Couldn't read {name}"))?;
-        let bytes = env
-            .convert_byte_array(jni::objects::JByteArray::from(bytes))
-            .map_err(jerr)?;
-        Ok((name, bytes))
-    })
+        env.get_string(&JString::from(name))
+            .map(String::from)
+            .map_err(jerr)
+    })?;
+    let file = open_fd(uri, "r").map_err(|_| format!("Couldn't read {name}"))?;
+    Ok((
+        name,
+        crate::app::import::FileSource::File(std::sync::Arc::new(file)),
+    ))
 }
 
-/// Write `bytes` into a file the picker created.
+/// A file the picker created, opened to write over (on a job's thread).
 #[cfg(target_os = "android")]
-pub fn picker_write(uri: &str, bytes: &[u8]) -> Result<(), String> {
-    with_android_env(|env, activity| {
-        let class = picker_class(env, &activity)?;
-        let juri = env.new_string(uri).map_err(jerr)?;
-        let array = env.byte_array_from_slice(bytes).map_err(jerr)?;
-        env.call_static_method(
-            &class,
-            "write",
-            "(Landroid/content/Context;Ljava/lang/String;[B)V",
-            &[
-                JValue::Object(&activity),
-                JValue::Object(&juri),
-                JValue::Object(&array),
-            ],
-        )
-        .map_err(|_| "Couldn't write the file".to_string())?;
-        Ok(())
-    })
+pub fn picker_open_file(uri: &str) -> Result<std::fs::File, String> {
+    // "wt": truncated, should the picked file already have content.
+    open_fd(uri, "wt")
 }
 
 #[cfg(target_os = "android")]
@@ -904,5 +964,114 @@ pub fn read_image(id: i64) -> Result<Vec<u8>, String> {
         }
         let _ = env.call_method(&stream, "close", "()V", &[]);
         Ok(out)
+    })
+}
+
+/// A picture the image decoders can't read but Android can (HEIC/HEIF,
+/// what most phone cameras save, or AVIF): decoded by `BitmapFactory`, in
+/// sRGB, not premultiplied.
+// Decoded at full size: a 48 MP HEIC is ~190 MB here; `inSampleSize` would
+// shrink it while decoding if that's ever too much.
+#[cfg(target_os = "android")]
+pub fn decode_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    let len = i32::try_from(bytes.len()).map_err(|_| "The image is too big".to_string())?;
+    with_android_env(|env, _activity| {
+        let options = env
+            .new_object("android/graphics/BitmapFactory$Options", "()V", &[])
+            .map_err(jerr)?;
+        env.set_field(&options, "inPremultiplied", "Z", JValue::Bool(0))
+            .map_err(jerr)?;
+        let config = env
+            .get_static_field(
+                "android/graphics/Bitmap$Config",
+                "ARGB_8888",
+                "Landroid/graphics/Bitmap$Config;",
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        env.set_field(
+            &options,
+            "inPreferredConfig",
+            "Landroid/graphics/Bitmap$Config;",
+            JValue::Object(&config),
+        )
+        .map_err(jerr)?;
+        // Converted to sRGB (a phone's HEIC is often Display P3), as the
+        // image decoders' pictures are before going into the document.
+        let named = env
+            .get_static_field(
+                "android/graphics/ColorSpace$Named",
+                "SRGB",
+                "Landroid/graphics/ColorSpace$Named;",
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        let srgb = env
+            .call_static_method(
+                "android/graphics/ColorSpace",
+                "get",
+                "(Landroid/graphics/ColorSpace$Named;)Landroid/graphics/ColorSpace;",
+                &[JValue::Object(&named)],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        env.set_field(
+            &options,
+            "inPreferredColorSpace",
+            "Landroid/graphics/ColorSpace;",
+            JValue::Object(&srgb),
+        )
+        .map_err(jerr)?;
+        let array = env.byte_array_from_slice(bytes).map_err(jerr)?;
+        let bitmap = env
+            .call_static_method(
+                "android/graphics/BitmapFactory",
+                "decodeByteArray",
+                "([BIILandroid/graphics/BitmapFactory$Options;)Landroid/graphics/Bitmap;",
+                &[
+                    JValue::Object(&array),
+                    JValue::Int(0),
+                    JValue::Int(len),
+                    JValue::Object(&options),
+                ],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        if bitmap.is_null() {
+            return Err("This kind of image can't be opened".to_string());
+        }
+        let int = |env: &mut jni::JNIEnv<'_>, name: &str| {
+            env.call_method(&bitmap, name, "()I", &[])
+                .and_then(|v| v.i())
+                .map_err(jerr)
+        };
+        let (w, h, row) = (
+            int(env, "getWidth")?,
+            int(env, "getHeight")?,
+            int(env, "getRowBytes")?,
+        );
+        let result = (|| {
+            // ARGB_8888 rows, tightly packed: R, G, B, A bytes.
+            if w <= 0 || h <= 0 || row != w * 4 {
+                return Err("The image decoded to an unexpected layout".to_string());
+            }
+            let mut pixels = vec![0u8; w as usize * h as usize * 4];
+            // Android writes straight into `pixels`.
+            let buffer = unsafe { env.new_direct_byte_buffer(pixels.as_mut_ptr(), pixels.len()) }
+                .map_err(jerr)?;
+            env.call_method(
+                &bitmap,
+                "copyPixelsToBuffer",
+                "(Ljava/nio/Buffer;)V",
+                &[JValue::Object(&buffer)],
+            )
+            .map_err(jerr)?;
+            image::RgbaImage::from_raw(w as u32, h as u32, pixels)
+                .ok_or_else(|| "The image decoded to an unexpected size".to_string())
+        })();
+        // Its pixels are native memory: freed now, not whenever Java's
+        // garbage collector runs.
+        let _ = env.call_method(&bitmap, "recycle", "()V", &[]);
+        result
     })
 }

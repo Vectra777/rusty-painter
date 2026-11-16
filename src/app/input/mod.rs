@@ -210,7 +210,7 @@ fn handle_pen_drag(
             transform::transform_drag(app, pos, keep_aspect);
         }
         Tool::Fill => app.fill_drag(pos),
-        Tool::Liquify => app.liquify_drag(pos),
+        Tool::Liquify => app.liquify_drag_with_pressure(pos, pressure),
         Tool::Puppet => app.puppet_drag(pos),
         Tool::Bone => app.bone_drag(pos),
         Tool::Smudge | Tool::Blur => app.blend_drag(pos, pressure),
@@ -356,17 +356,25 @@ fn handle_events(
 
 /// The window lost focus (Alt+Tab, another window clicked) mid-drag: the
 /// button's release may never arrive, and egui still thinks it's down.
-/// End whatever the press started, and stop panning and rotating.
-fn handle_focus_lost(app: &mut PainterApp) {
+/// End whatever the press started, and stop panning and rotating. The
+/// pen's and fingers' lifts may not come either: they're forgotten too
+/// (a pen left "down" kept the mouse ignored for good).
+pub(crate) fn handle_focus_lost(app: &mut PainterApp) {
     let viewport = &mut app.viewport;
     viewport.is_panning = false;
     viewport.is_rotating = false;
     viewport.last_pointer_pos = None;
     let pressed = std::mem::take(&mut viewport.is_primary_down);
     let pen = std::mem::take(&mut viewport.touch.pen_on_canvas);
+    viewport.touch.forget_contacts();
+    if let Some(tablet) = &mut app.tablet {
+        tablet.reset();
+    }
     if pressed || pen {
         handle_primary_release(app);
     }
+    // A finger held to pick: its lift won't come, so the tool comes back now.
+    app.end_hold_pick();
 }
 
 fn handle_mouse_button(
@@ -436,6 +444,7 @@ fn handle_primary_button(
 
     if pressed {
         // Mouse and finger input paint at full pressure.
+        mouse_sample(app);
         handle_primary_press(app, response, response.hovered(), canvas_pos, raw, 1.0);
     } else {
         handle_primary_release(app);
@@ -496,6 +505,10 @@ fn handle_primary_press(
     );
 
     match app.active_tool {
+        // Shift+click: a straight line on from where the last stroke ended.
+        Tool::Brush if response.ctx.input(|i| i.modifiers.shift) => {
+            app.stroke_line_from_last(raw, pressure)
+        }
         Tool::Brush => app.start_stroke_with_pressure(raw, pressure),
         Tool::Select(t) => {
             // Shift adds to the selection, Alt subtracts, for this drag.
@@ -512,7 +525,7 @@ fn handle_primary_press(
         Tool::Transform(_) => transform::transform_press(app, canvas_pos.0),
         Tool::Eyedropper => app.pick_color(canvas_pos.0),
         Tool::Fill => app.fill_press(canvas_pos.0),
-        Tool::Liquify => app.liquify_press(canvas_pos.0),
+        Tool::Liquify => app.liquify_press_with_pressure(canvas_pos.0, pressure),
         Tool::Puppet => {
             let m = response.ctx.input(|i| i.modifiers);
             app.puppet_press(canvas_pos.0, m.shift, m.alt);
@@ -546,7 +559,7 @@ fn handle_primary_press(
 }
 
 fn handle_primary_release(app: &mut PainterApp) {
-    app.workspace.eyedropper.before = None;
+    app.eyedropper_release();
     if app.guide_lines_release() || app.guides_release() {
         return;
     }
@@ -742,6 +755,7 @@ fn handle_tool_move(
         }
         Tool::Smudge | Tool::Blur => {
             if app.viewport.is_primary_down {
+                mouse_sample(app);
                 app.blend_drag(pos, 1.0);
                 ctx.request_repaint();
             }
@@ -765,13 +779,21 @@ fn handle_tool_move(
     }
 }
 
+/// A mouse or finger sample is coming (the pen has its own path): full
+/// pressure, no lean or barrel buttons, and this move's own time. Left at
+/// the last pen's (or an earlier move's), every sample had the same time
+/// and a stabilised smudge never moved past its first dab.
+pub(crate) fn mouse_sample(app: &mut PainterApp) {
+    let touch = &mut app.viewport.touch;
+    touch.pen_tilt = None;
+    touch.pen_time = touch.pointer_time;
+    touch.pen_awaiting = None;
+    touch.pen_barrel = Default::default();
+}
+
 /// `pos` is unclamped: off-canvas points keep the stroke's real path.
 fn handle_brush_move(app: &mut PainterApp, response: &egui::Response, pos: Vec2) {
-    // Mouse and finger input paint at full pressure (the pen has its own path).
-    app.viewport.touch.pen_tilt = None;
-    app.viewport.touch.pen_time = app.viewport.touch.pointer_time;
-    app.viewport.touch.pen_awaiting = None;
-    app.viewport.touch.pen_barrel = Default::default();
+    mouse_sample(app);
     if app.brush_state.is_drawing {
         app.add_stroke_point(pos, 1.0);
     } else if app.viewport.is_primary_down && !app.viewport.is_panning && response.hovered() {

@@ -209,23 +209,49 @@ impl SelectionMask {
         let pad = radius.max(0) + 1;
         let (w, h) = (self.w + 2 * pad as usize, self.h + 2 * pad as usize);
         let (x0, y0) = (self.x0 - pad, self.y0 - pad);
-        // Squared distance to the nearest pixel on the other side: selected
-        // when growing, unselected when shrinking.
+        // Distance to the nearest pixel on the other side: selected when
+        // growing, unselected when shrinking. Only whether it's within
+        // `radius` matters, so the distance down each column is kept as
+        // 16 bits, no further than `cap` (past the radius whatever it was);
+        // canvas-sized float buffers were most of a big selection's memory.
         let grow = radius > 0;
-        let far = ((w * w + h * h) as f32) * 4.0;
-        let mut dist: Vec<f32> = (0..w * h)
-            .into_par_iter()
-            .map(|i| {
-                let inside = self.value(x0 + (i % w) as i32, y0 + (i / w) as i32) >= 128;
-                if inside == grow { 0.0 } else { far }
-            })
-            .collect();
-        squared_distance_transform(&mut dist, w, h);
-        let reach = (radius as f32).powi(2);
-        let selected: Vec<bool> = dist
-            .par_iter()
-            .map(|&d| if grow { d <= reach } else { d > reach })
-            .collect();
+        let r = (radius.unsigned_abs() as usize).min(u16::MAX as usize - 1);
+        let cap = (r + 1) as u16;
+        let source = |x: usize, y: usize| (self.value(x0 + x as i32, y0 + y as i32) >= 128) == grow;
+        // Columns (each contiguous): the distance to the nearest source
+        // above or below, in two scans.
+        let mut down = vec![0u16; w * h];
+        down.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
+            let mut d = cap;
+            for (y, v) in col.iter_mut().enumerate() {
+                d = if source(x, y) {
+                    0
+                } else {
+                    d.saturating_add(1).min(cap)
+                };
+                *v = d;
+            }
+            let mut d = cap;
+            for v in col.iter_mut().rev() {
+                d = if *v == 0 {
+                    0
+                } else {
+                    d.saturating_add(1).min(cap)
+                };
+                *v = (*v).min(d);
+            }
+        });
+        // Rows: the nearest source anywhere (squared distances, exact).
+        let reach = (r as f32).powi(2);
+        let mut selected = vec![false; w * h];
+        selected.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            let mut dist: Vec<f32> = (0..w).map(|x| (down[x * h + y] as f32).powi(2)).collect();
+            transform_1d(&mut dist);
+            for (s, &d) in row.iter_mut().zip(&dist) {
+                *s = if grow { d <= reach } else { d > reach };
+            }
+        });
+        drop(down);
         // Soft edge: unselected pixels next to selected ones get partial
         // coverage.
         let data: Vec<u8> = (0..w * h)
@@ -257,45 +283,52 @@ impl SelectionMask {
         }
         let pad = radius as usize;
         let (w, h) = (self.w + 2 * pad, self.h + 2 * pad);
-        let mut buf = vec![0.0f32; w * h];
-        for y in 0..self.h {
-            let (src, dst) = (y * self.w, (y + pad) * w + pad);
-            for (d, &s) in buf[dst..dst + self.w]
-                .iter_mut()
-                .zip(&self.data[src..src + self.w])
-            {
-                *d = s as f32;
-            }
-        }
         // Three passes whose radii add up to `radius`, so the blur reaches
         // exactly that far.
         let r = radius as usize;
         let passes = [r.div_ceil(3), (r + 1) / 3, r / 3];
+        // Row `y` of the padded coverage, blurred along the row.
+        let blurred_row = |y: usize, row: &mut [f32], scratch: &mut Vec<f32>| {
+            row.fill(0.0);
+            if let Some(y) = y.checked_sub(pad).filter(|&y| y < self.h) {
+                let src = &self.data[y * self.w..(y + 1) * self.w];
+                for (d, &s) in row[pad..pad + self.w].iter_mut().zip(src) {
+                    *d = s as f32;
+                }
+            }
+            for &b in &passes {
+                box_blur_1d(row, b, scratch);
+            }
+        };
+        // A strip of rows at a time, from the rows `radius` either side of
+        // it (all the column blurs reach): the same sums as blurring whole
+        // columns, without two canvas-sized float buffers.
+        let strip = 128.max(r);
+        let mut data = vec![0u8; w * h];
         use rayon::prelude::*;
-        let mut t = vec![0.0f32; w * h];
-        buf.par_chunks_mut(w).for_each(|row| {
-            let mut scratch = Vec::with_capacity(w);
-            for &b in &passes {
-                box_blur_1d(row, b, &mut scratch);
-            }
-        });
-        // Columns through a transposed copy, so each is contiguous.
-        t.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
-            for (y, v) in col.iter_mut().enumerate() {
-                *v = buf[y * w + x];
-            }
-            let mut scratch = Vec::with_capacity(h);
-            for &b in &passes {
-                box_blur_1d(col, b, &mut scratch);
-            }
-        });
-        let data: Vec<u8> = (0..w * h)
-            .into_par_iter()
-            .map(|i| {
-                let (x, y) = (i % w, i / w);
-                (t[x * h + y] + 0.5).clamp(0.0, 255.0) as u8
-            })
-            .collect();
+        data.par_chunks_mut(w * strip)
+            .enumerate()
+            .for_each(|(k, out)| {
+                let (y0, y1) = (k * strip, (k * strip + strip).min(h));
+                let (a, b) = (y0.saturating_sub(r), (y1 + r).min(h));
+                let mut scratch = Vec::with_capacity(w.max(b - a));
+                let mut rows = vec![0.0f32; (b - a) * w];
+                for (i, row) in rows.chunks_mut(w).enumerate() {
+                    blurred_row(a + i, row, &mut scratch);
+                }
+                let mut col = vec![0.0f32; b - a];
+                for x in 0..w {
+                    for (i, v) in col.iter_mut().enumerate() {
+                        *v = rows[i * w + x];
+                    }
+                    for &p in &passes {
+                        box_blur_1d(&mut col, p, &mut scratch);
+                    }
+                    for y in y0..y1 {
+                        out[(y - y0) * w + x] = (col[y - a] + 0.5).clamp(0.0, 255.0) as u8;
+                    }
+                }
+            });
         Self::new(self.x0 - pad as i32, self.y0 - pad as i32, w, h, data).into_cropped()
     }
 
@@ -486,6 +519,7 @@ fn trace_outline(mask: &SelectionMask) -> Vec<Vec<Vec2>> {
 /// Exact squared Euclidean distance transform of `f` (0 at the feature
 /// pixels, large elsewhere), in place: Felzenszwalb & Huttenlocher's
 /// lower envelope of parabolas, columns then rows, each in parallel.
+#[cfg(test)]
 fn squared_distance_transform(f: &mut [f32], w: usize, h: usize) {
     use rayon::prelude::*;
     // Columns, through a transposed copy so each is contiguous.
@@ -568,6 +602,164 @@ fn transform_1d(f: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The canvas-sized float versions [`SelectionMask::grown`] and
+    /// [`SelectionMask::feathered`] replaced, to check they give the same.
+    impl SelectionMask {
+        /// The selection grown (`radius` > 0) or shrunk (< 0) by `radius`
+        /// pixels (exact round distances), with a soft one-pixel edge.
+        fn grown_reference(&self, radius: i32) -> Option<Self> {
+            if radius == 0 {
+                return Some(self.clone());
+            }
+            use rayon::prelude::*;
+            let pad = radius.max(0) + 1;
+            let (w, h) = (self.w + 2 * pad as usize, self.h + 2 * pad as usize);
+            let (x0, y0) = (self.x0 - pad, self.y0 - pad);
+            // Squared distance to the nearest pixel on the other side: selected
+            // when growing, unselected when shrinking.
+            let grow = radius > 0;
+            let far = ((w * w + h * h) as f32) * 4.0;
+            let mut dist: Vec<f32> = (0..w * h)
+                .into_par_iter()
+                .map(|i| {
+                    let inside = self.value(x0 + (i % w) as i32, y0 + (i / w) as i32) >= 128;
+                    if inside == grow { 0.0 } else { far }
+                })
+                .collect();
+            squared_distance_transform(&mut dist, w, h);
+            let reach = (radius as f32).powi(2);
+            let selected: Vec<bool> = dist
+                .par_iter()
+                .map(|&d| if grow { d <= reach } else { d > reach })
+                .collect();
+            // Soft edge: unselected pixels next to selected ones get partial
+            // coverage.
+            let data: Vec<u8> = (0..w * h)
+                .into_par_iter()
+                .map(|i| {
+                    if selected[i] {
+                        return 255;
+                    }
+                    let (x, y) = (i % w, i / w);
+                    let mut n = 0u32;
+                    for ny in y.saturating_sub(1)..(y + 2).min(h) {
+                        for nx in x.saturating_sub(1)..(x + 2).min(w) {
+                            n += selected[ny * w + nx] as u32;
+                        }
+                    }
+                    (n * 255 / 9) as u8
+                })
+                .collect();
+            Self::new(x0, y0, w, h, data).into_cropped()
+        }
+
+        /// The selection with its edge blurred over `radius` pixels either side:
+        /// pixels further than that from the edge keep their coverage, those
+        /// nearer fade from selected to unselected (three box blurs, close to a
+        /// Gaussian). `None` if nothing is left selected.
+        fn feathered_reference(&self, radius: u32) -> Option<Self> {
+            if radius == 0 {
+                return self.cropped();
+            }
+            let pad = radius as usize;
+            let (w, h) = (self.w + 2 * pad, self.h + 2 * pad);
+            let mut buf = vec![0.0f32; w * h];
+            for y in 0..self.h {
+                let (src, dst) = (y * self.w, (y + pad) * w + pad);
+                for (d, &s) in buf[dst..dst + self.w]
+                    .iter_mut()
+                    .zip(&self.data[src..src + self.w])
+                {
+                    *d = s as f32;
+                }
+            }
+            // Three passes whose radii add up to `radius`, so the blur reaches
+            // exactly that far.
+            let r = radius as usize;
+            let passes = [r.div_ceil(3), (r + 1) / 3, r / 3];
+            use rayon::prelude::*;
+            let mut t = vec![0.0f32; w * h];
+            buf.par_chunks_mut(w).for_each(|row| {
+                let mut scratch = Vec::with_capacity(w);
+                for &b in &passes {
+                    box_blur_1d(row, b, &mut scratch);
+                }
+            });
+            // Columns through a transposed copy, so each is contiguous.
+            t.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
+                for (y, v) in col.iter_mut().enumerate() {
+                    *v = buf[y * w + x];
+                }
+                let mut scratch = Vec::with_capacity(h);
+                for &b in &passes {
+                    box_blur_1d(col, b, &mut scratch);
+                }
+            });
+            let data: Vec<u8> = (0..w * h)
+                .into_par_iter()
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    (t[x * h + y] + 0.5).clamp(0.0, 255.0) as u8
+                })
+                .collect();
+            Self::new(self.x0 - pad as i32, self.y0 - pad as i32, w, h, data).into_cropped()
+        }
+    }
+
+    /// A random blobby mask (a few soft discs and some noise).
+    fn blobs(w: usize, h: usize, seed: u32) -> SelectionMask {
+        let mut s = seed;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s
+        };
+        let discs: Vec<(f32, f32, f32)> = (0..4)
+            .map(|_| {
+                let x = (next() % w as u32) as f32;
+                let y = (next() % h as u32) as f32;
+                (x, y, 3.0 + (next() % 20) as f32)
+            })
+            .collect();
+        let data = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let d = discs
+                    .iter()
+                    .map(|&(cx, cy, r)| ((x - cx).hypot(y - cy) - r).max(0.0))
+                    .fold(f32::INFINITY, f32::min);
+                let noise = (next() % 40) as f32;
+                (255.0 - d * 60.0 - noise).clamp(0.0, 255.0) as u8
+            })
+            .collect();
+        SelectionMask::new(3, -2, w, h, data)
+    }
+
+    #[test]
+    fn grow_shrink_and_feather_match_the_canvas_sized_versions() {
+        for seed in 1..4 {
+            let mask = blobs(150, 300, seed * 7919);
+            for radius in [1, 2, 5, 17, 40] {
+                for r in [radius, -radius] {
+                    let (a, b) = (mask.grown(r), mask.grown_reference(r));
+                    assert_eq!(a.is_some(), b.is_some(), "grown({r})");
+                    if let (Some(a), Some(b)) = (a, b) {
+                        assert_eq!((a.x0, a.y0, a.w, a.h), (b.x0, b.y0, b.w, b.h));
+                        assert!(a.data == b.data, "grown({r}), seed {seed}");
+                    }
+                }
+                let (a, b) = (
+                    mask.feathered(radius as u32),
+                    mask.feathered_reference(radius as u32),
+                );
+                let (a, b) = (a.unwrap(), b.unwrap());
+                assert_eq!((a.x0, a.y0, a.w, a.h), (b.x0, b.y0, b.w, b.h));
+                assert!(a.data == b.data, "feathered({radius}), seed {seed}");
+            }
+        }
+    }
 
     #[test]
     fn distance_transform_is_exact() {
