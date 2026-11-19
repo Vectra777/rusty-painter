@@ -149,6 +149,7 @@ impl PainterApp {
         }
         let mut canvas = self.canvas.shared_copy();
         canvas.onion.enabled = false;
+        let mut figures = self.figure_animator();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         let stop = Arc::clone(&cancel);
@@ -158,6 +159,9 @@ impl PainterApp {
                     return;
                 }
                 canvas.set_time(t);
+                if let Some(figures) = &mut figures {
+                    figures.bake(&canvas);
+                }
                 let mut image = ColorImage::new([0, 0], Color32::TRANSPARENT);
                 canvas.write_region_to_color_image(0, 0, w, h, &mut image, step);
                 if tx.send((t, image)).is_err() {
@@ -187,6 +191,7 @@ impl PainterApp {
     pub(crate) fn leave_cached_frame(&mut self) {
         if self.workspace.animation.cache.showing.take().is_some() {
             self.canvas_mut().refresh_time();
+            self.figures_follow_time();
             self.mark_all_tiles_dirty();
             self.layer_state.thumbnails_dirty = true;
         }

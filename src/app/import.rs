@@ -226,6 +226,9 @@ impl PainterApp {
             {
                 // Palette files become palettes.
                 self.import_palette_in_background(file.name.clone(), source);
+            } else if extension("glb") || extension("gltf") {
+                // 3D models: into the figure layer.
+                self.import_figure_model_in_background(file.name.clone(), source);
             } else if extension("grd") {
                 // Photoshop gradients join the gradient tool's.
                 self.import_gradients_in_background(file.name.clone(), source);

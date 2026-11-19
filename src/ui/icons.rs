@@ -73,11 +73,12 @@ pub(crate) enum Icon {
     SelectInvert,
     Deselect,
     Crop,
+    Figure,
 }
 
 impl Icon {
     #[cfg(test)]
-    pub(crate) const ALL: [Icon; 58] = [
+    pub(crate) const ALL: [Icon; 59] = [
         Icon::Brush,
         Icon::Eraser,
         Icon::SelectRect,
@@ -136,6 +137,7 @@ impl Icon {
         Icon::SelectInvert,
         Icon::Deselect,
         Icon::Crop,
+        Icon::Figure,
     ];
 
     /// Its Phosphor icon's SVG.
@@ -185,6 +187,7 @@ impl Icon {
             Icon::ShapeEllipse => phosphor!("circle"),
             Icon::ShapeCurve => phosphor!("bezier-curve"),
             Icon::Pen => phosphor!("pen-nib"),
+            Icon::Figure => phosphor!("person-simple"),
             Icon::Ruler => phosphor!("ruler"),
             Icon::Gradient => phosphor!("gradient"),
             Icon::Text => phosphor!("text-t"),

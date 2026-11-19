@@ -39,3 +39,22 @@ detector until it's enlarged.
   **Folder** holding **Inside** (blue at alpha 128, (150, 35), 130×20,
   multiply, across the edge tile), white background; with its composite and
   thumbnail. Opened by `src/project/procreate.rs`.
+
+- `figure-tiny.gltf`: a three-joint skinned glTF (two triangles, one morph
+  target named **Wide**) made by `scripts/make_figure_fixture.py`, its
+  buffer inline. Its joints are listed child first and named as Mixamo
+  names them (`mixamorig:Hips`, `mixamorig:Spine`, `mixamorig:LeftArm`)
+  under an `Armature` node that raises them by 1. Opened by
+  `src/canvas/figure/model.rs`.
+
+- `hand-photo.jpg`: the back of a left hand, fingers to the right, on a
+  white table, 320×240: "Linke-hand.jpg" by MartinThoma on Wikimedia Commons
+  (CC0, <https://commons.wikimedia.org/wiki/File:Linke-hand.jpg>), scaled
+  down. The Hand Scanner's models run on it (`src/pose_track/hand.rs`).
+
+- `body-photo.jpg`: a man standing in a doorway facing the camera, hands
+  on his hips (elbows out), head to feet, 320×479: "Indian man standing in
+  doorway (Unsplash).jpg" by Abhas Mishra on Wikimedia Commons (CC0,
+  <https://commons.wikimedia.org/wiki/File:Indian_man_standing_in_doorway_(Unsplash).jpg>),
+  scaled down. The body models run on it (`src/pose_track/body.rs`), and
+  Pose from Photo poses a figure from it (`src/app/hand_scanner.rs`).

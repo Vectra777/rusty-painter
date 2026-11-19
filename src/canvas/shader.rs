@@ -460,7 +460,8 @@ pub fn compile(source: &str) -> Result<ShaderProgram, Vec<ShaderError>> {
     })
 }
 
-/// One step of the on-screen composite when shader layers show live.
+/// One step of the on-screen composite when shader layers (and 3D figure
+/// layers, which show live the same way) show live.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LiveStep {
     /// Run `run` of [`LiveLayout::runs`]: layers composited on the CPU,
@@ -474,9 +475,16 @@ pub enum LiveStep {
         blend: LayerBlend,
         opacity: f32,
     },
+    /// A 3D figure layer's scene rendered, blended on likewise.
+    Figure {
+        id: LayerId,
+        blend: LayerBlend,
+        opacity: f32,
+    },
 }
 
-/// How the stack splits around the visible shader layers, bottom to top.
+/// How the stack splits around the visible live layers (shader and 3D
+/// figure layers), bottom to top.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveLayout {
     /// Per run, which entries (by index) it shows; the rest are hidden in
@@ -495,40 +503,45 @@ pub enum LiveStatus {
     Live(LiveLayout),
 }
 
-/// A visible shader layer: shows and has something to show.
-fn shows_shader(canvas: &Canvas, i: usize) -> bool {
+/// A visible live layer (a shader or 3D figure layer, drawn on the GPU):
+/// shows and has something to show.
+fn shows_live(canvas: &Canvas, i: usize) -> bool {
     let l = &canvas.layers[i];
-    l.shader.is_some() && l.kind == LayerKind::Paint && l.visible && l.opacity > 0.0
+    (l.shader.is_some() || l.figure.is_some())
+        && l.kind == LayerKind::Paint
+        && l.visible
+        && l.opacity > 0.0
 }
 
-/// Split the stack at the visible shader layers. The layers above one are
-/// composited in runs on their own (over transparency) and blended over
-/// it, which gives the same picture as long as nothing is clipped to the
-/// shader layer and no adjustment layer is above it.
+/// Split the stack at the visible live layers (shader and 3D figure
+/// layers). The layers above one are composited in runs on their own (over
+/// transparency) and blended over it, which gives the same picture as long
+/// as nothing is clipped to the live layer and no adjustment layer is above
+/// it.
 pub fn live_layout(canvas: &Canvas) -> LiveStatus {
     let layers = &canvas.layers;
     let shaders: Vec<usize> = (0..layers.len())
-        .filter(|&i| shows_shader(canvas, i))
+        .filter(|&i| shows_live(canvas, i))
         .collect();
     let Some(&first) = shaders.first() else {
         return LiveStatus::None;
     };
     if shaders.iter().any(|&i| layers[i].parent.is_some()) {
-        return LiveStatus::Unsupported("a shader layer is inside a folder");
+        return LiveStatus::Unsupported("a shader or 3D layer is inside a folder");
     }
     let shader_ids: Vec<LayerId> = shaders.iter().map(|&i| layers[i].id).collect();
     if layers
         .iter()
         .any(|l| matches!(l.kind, LayerKind::Mask { owner } if shader_ids.contains(&owner)))
     {
-        return LiveStatus::Unsupported("a shader layer has a mask");
+        return LiveStatus::Unsupported("a shader or 3D layer has a mask");
     }
     if shaders.iter().any(|&i| layers[i].clipped) {
-        return LiveStatus::Unsupported("a shader layer is clipped");
+        return LiveStatus::Unsupported("a shader or 3D layer is clipped");
     }
     // A border is drawn around the layer's pixels, on the CPU.
     if shaders.iter().any(|&i| !layers[i].shown_style().is_plain()) {
-        return LiveStatus::Unsupported("a shader layer has a border");
+        return LiveStatus::Unsupported("a shader or 3D layer has a border");
     }
     let top_level: Vec<usize> = (0..layers.len())
         .filter(|&i| {
@@ -545,19 +558,19 @@ pub fn live_layout(canvas: &Canvas) -> LiveStatus {
     let mut base_is_shader = true;
     for &i in top_level.iter().filter(|&&i| i > first) {
         let l = &layers[i];
-        if shows_shader(canvas, i) {
+        if shows_live(canvas, i) {
             base_is_shader = true;
             continue;
         }
         if l.clipped {
             if base_is_shader && l.visible {
-                return LiveStatus::Unsupported("a layer is clipped to a shader layer");
+                return LiveStatus::Unsupported("a layer is clipped to a shader or 3D layer");
             }
         } else {
             base_is_shader = false;
         }
         if l.visible && l.adjustment.is_some() {
-            return LiveStatus::Unsupported("an adjustment layer is above a shader layer");
+            return LiveStatus::Unsupported("an adjustment layer is above a shader or 3D layer");
         }
     }
     let stacks = |blend: LayerBlend| matches!(blend, LayerBlend::Normal | LayerBlend::Dissolve);
@@ -583,13 +596,21 @@ pub fn live_layout(canvas: &Canvas) -> LiveStatus {
     };
     for &i in &top_level {
         let l = &layers[i];
-        if shows_shader(canvas, i) {
+        if shows_live(canvas, i) {
             flush(&mut current, current_blend, &mut runs, &mut steps);
             current_blend = LayerBlend::Normal;
-            steps.push(LiveStep::Shader {
-                id: l.id,
-                blend: l.blend,
-                opacity: l.opacity,
+            steps.push(if l.figure.is_some() {
+                LiveStep::Figure {
+                    id: l.id,
+                    blend: l.blend,
+                    opacity: l.opacity,
+                }
+            } else {
+                LiveStep::Shader {
+                    id: l.id,
+                    blend: l.blend,
+                    opacity: l.opacity,
+                }
             });
             continue;
         }
@@ -748,7 +769,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 LiveStep::Run { blend, .. } => Some(*blend),
-                LiveStep::Shader { .. } => None,
+                LiveStep::Shader { .. } | LiveStep::Figure { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -796,6 +817,29 @@ mod tests {
             panic!("expected a live layout");
         };
         assert_eq!(layout.runs, vec![vec![true, true, false]]);
+    }
+
+    #[test]
+    fn figure_layers_split_the_stack_like_shader_layers() {
+        let mut canvas = canvas_with(4);
+        canvas.layers[1].figure = Some(Box::new(crate::canvas::figure::FigureLayer::mannequin()));
+        canvas.layers[2].shader = Some(Box::new(ShaderLayer::new(PLASMA)));
+        let LiveStatus::Live(layout) = live_layout(&canvas) else {
+            panic!("expected a live layout");
+        };
+        assert!(matches!(layout.steps[1], LiveStep::Figure { .. }));
+        assert!(matches!(layout.steps[2], LiveStep::Shader { .. }));
+        assert_eq!(
+            layout.runs,
+            vec![
+                vec![true, false, false, false],
+                vec![false, false, false, true]
+            ]
+        );
+        // In a folder, it shows as its baked pixels.
+        let folder = canvas.insert_new_layer(4, "F".into(), LayerKind::Group, None);
+        canvas.layers[1].parent = Some(folder);
+        assert!(matches!(live_layout(&canvas), LiveStatus::Unsupported(_)));
     }
 
     #[test]

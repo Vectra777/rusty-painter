@@ -603,6 +603,7 @@ impl PainterApp {
         crate::app::tools::vector::draw_line_edit(self, ui.painter(), &map);
         crate::app::tools::puppet::draw_puppet(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::bone::draw_bones(self, ui.painter(), &|p| map.to_screen(p));
+        crate::app::tools::figure::draw_figure(self, ui.painter(), &|p| map.to_screen(p));
         crate::app::tools::blend::draw_clone_source(self, ui.painter(), &|p| map.to_screen(p));
         // A hand over the guide handles: they can be dragged.
         if let Some(canvas) = self.viewport.cursor_canvas
@@ -681,6 +682,7 @@ impl PainterApp {
         ui::view_aids_menu::guides_window(self, ctx);
         ui::reference_window::reference_window(self, ctx);
         ui::navigator::navigator_window(self, ctx);
+        ui::hand_scanner::hand_scanner_window(self, ctx);
         ui::shader_editor::shader_editors(self, ctx);
         ui::collab_window::collab_window(self, ctx);
     }

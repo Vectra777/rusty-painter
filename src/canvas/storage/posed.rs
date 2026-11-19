@@ -177,8 +177,10 @@ impl Canvas {
                 continue;
             };
             any = true;
-            let same =
-                layer.posed_as() == Some(pose) && layer.rig.is_none() && layer.shader.is_none();
+            let same = layer.posed_as() == Some(pose)
+                && layer.rig.is_none()
+                && layer.shader.is_none()
+                && layer.figure.is_none();
             if fresh || !same {
                 let map = self.posed_tiles(i, &pose, None);
                 layer.set_posed(Some(Posed { map, pose }));

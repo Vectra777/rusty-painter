@@ -397,6 +397,9 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     if menu_item(ui, "New Vector Layer", None) {
         app.add_vector_layer();
     }
+    if menu_item(ui, "New 3D Figure", None) {
+        app.add_figure_layer();
+    }
     ui.menu_button("New Adjustment Layer", |ui| {
         for filter in crate::canvas::filters::Filter::adjustments() {
             if menu_item(ui, filter.name(), None) {
@@ -610,6 +613,12 @@ fn layer_menu(app: &mut PainterApp, ui: &mut egui::Ui) {
     why_disabled(item.response, is_text, "Only on a text layer");
     if item.inner {
         app.rasterise_text_layer(active);
+    }
+    let is_figure = (app.canvas.layers.get(active)).is_some_and(|l| l.figure.is_some());
+    let item = ui.add_enabled_ui(is_figure, |ui| menu_item(ui, "Rasterise 3D Figure", None));
+    why_disabled(item.response, is_figure, "Only on a 3D figure layer");
+    if item.inner {
+        app.rasterise_figure_layer(active);
     }
     ui.separator();
     let merge_label = if several {

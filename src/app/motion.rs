@@ -523,7 +523,7 @@ mod tests {
             m.set(Prop::Position, 2, [64.0, 0.0]);
         });
         let frames: Vec<_> =
-            crate::app::animation::animation_frames(app.canvas.detached_copy()).collect();
+            crate::app::animation::animation_frames(app.canvas.detached_copy(), None).collect();
         let at = |f: usize, x: usize| frames[f].rgba[(10 * 128 + x) * 4..][..4].to_vec();
         assert_eq!(at(0, 10), [255, 0, 0, 255]);
         assert_eq!(at(0, 100), [255, 255, 255, 255]);

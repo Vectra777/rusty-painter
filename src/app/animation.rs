@@ -82,6 +82,7 @@ impl PainterApp {
             self.mark_all_tiles_dirty();
             self.layer_state.thumbnails_dirty = true;
         }
+        self.figures_follow_time();
     }
 
     /// Once a frame: playback moves on at the timeline's rate; a finished
@@ -465,24 +466,30 @@ impl PainterApp {
         }
         self.bake_shader_layers();
         let canvas = self.canvas.detached_copy();
+        let figures = self.figure_animator();
         self.workspace.animation.format = Some(format);
         self.export_state.message = Some("Exporting the animation…".into());
         self.workspace.animation.task = Some(std::thread::spawn(move || {
             let timeline = canvas.timeline;
-            let frames = animation_frames(canvas);
+            let frames = animation_frames(canvas, figures);
             let to = crate::project::video::write_video(&path, format, timeline.fps, true, frames)?;
             Ok(format!("Animation saved to {}", to.display()))
         }));
     }
 }
 
-/// The timeline's frames of `canvas`, each flattened (unmultiplied RGBA).
+/// The timeline's frames of `canvas`, each flattened (unmultiplied RGBA),
+/// its keyed figures baked at each frame by `figures`.
 pub(crate) fn animation_frames(
     mut canvas: crate::canvas::Canvas,
+    mut figures: Option<crate::app::figure::FigureAnimator>,
 ) -> impl Iterator<Item = VideoFrame> {
     let timeline = canvas.timeline;
     (timeline.start..=timeline.end).map(move |t| {
         canvas.set_time(t);
+        if let Some(figures) = &mut figures {
+            figures.bake(&canvas);
+        }
         let img = canvas.flatten_final();
         let rgba = (img.pixels.iter())
             .flat_map(|&p| crate::canvas::blend::unmultiply(p))
@@ -657,7 +664,7 @@ mod tests {
         };
         app.go_to_frame(2);
         app.add_drawing(false);
-        let frames: Vec<_> = super::animation_frames(app.canvas.detached_copy()).collect();
+        let frames: Vec<_> = super::animation_frames(app.canvas.detached_copy(), None).collect();
         assert_eq!(frames.len(), 4);
         assert_eq!(&frames[0].rgba[..4], &[255, 0, 0, 255]);
         assert_eq!(

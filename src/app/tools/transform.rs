@@ -177,6 +177,7 @@ fn moving_with(app: &PainterApp) -> Vec<crate::canvas::storage::LayerId> {
                 && l.text.is_none()
                 && l.vector.is_none()
                 && l.shader.is_none()
+                && l.figure.is_none()
                 && l.adjustment.is_none()
                 && l.style.fill.is_none()
         })

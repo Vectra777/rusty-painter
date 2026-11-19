@@ -74,6 +74,17 @@ i_overlay = "=8.1.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
 ring = "0.17"
+# 3D figure layers: their maths (glam) and models read from glTF / GLB
+# (gltf, without its image and file loading: the app reads the buffers).
+# Both MIT / Apache-2.0.
+glam = "0.30"
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extras"] }
+# Hand Scanner and Pose from Camera / Photo (feature `pose-capture`):
+# MediaPipe's hand and body (BlazePose) models run with tract, pure-Rust
+# ONNX inference (MIT / Apache-2.0).
+tract-onnx = { version = "0.23", default-features = false, optional = true }
+# Their models, downloaded on first use when they weren't shipped (MIT / Apache-2.0).
+ureq = { version = "3", optional = true }
 
 [dev-dependencies]
 pollster = "0.4"
@@ -101,6 +112,16 @@ winit = { version = "0.30.12", default-features = false, features = [
     "wayland-dlopen",
     "wayland-csd-adwaita",
 ] }
+
+# The camera window's webcam (Hand Scanner, Pose from Camera; feature
+# `pose-capture`): V4L2 on Linux, Media Foundation on Windows (Apache-2.0).
+# Without its MJPEG decoder (C, through mozjpeg): the app decodes MJPEG
+# with `image`.
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-v4l"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"], optional = true }
 
 # iOS: the patched winit's Pencil samples, and UIKit (document picker,
 # Photos picker, share sheet) at the objc2 versions winit already uses.
@@ -146,8 +167,10 @@ winresource = "0.1"
 [package.metadata.android]
 package = "io.vectra.rustypainter"
 build_targets = ["aarch64-linux-android"]
-# APK assets: the default brush pack (default-v1/), put here by the release
-# build; empty otherwise (scripts/build-android.sh creates it).
+# APK assets: the default brush pack (default-v1/), the realistic figures
+# (figures-v1/) and the hand and body tracking models (pose-models-v1/),
+# put here by the release build or scripts/build-android.sh (which creates
+# it; empty without the packs).
 assets = "target/android-assets"
 # Launcher icons (scripts/make-icons.sh).
 resources = "android/res"
@@ -180,6 +203,15 @@ max_sdk_version = 32
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
 
+# The Hand Scanner (asked for when it opens); devices without a camera
+# install the app too.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.CAMERA"
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.camera.any"
+required = false
+
 [package.metadata.android.sdk]
 min_sdk_version = 29
 target_sdk_version = 36
@@ -200,6 +232,8 @@ target_sdk_version = 36
 
 [patch.crates-io]
 winit = { path = "vendor-winit" }
+# Textures freed after the frame is submitted (see its src/winit.rs).
+egui-wgpu = { path = "vendor-egui-wgpu" }
 
 [profile.release]
 opt-level = 2
@@ -212,11 +246,13 @@ opt-level = 2
 opt-level = 1
 
 [features]
-default = ["sut-import"]
+default = ["sut-import", "pose-capture"]
 # Exposes `bench_api` for `benches/app_bench.rs`; off in normal builds.
 bench = []
 # Importing Clip Studio Paint brushes (.sut, SQLite: builds SQLite from C).
 sut-import = ["dep:rusqlite"]
+# Posing figures from the camera: hand tracking (tract) and the camera.
+pose-capture = ["dep:tract-onnx", "dep:nokhwa", "dep:ureq"]
 
 [[example]]
 name = "profile_presets"

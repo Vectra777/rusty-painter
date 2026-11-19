@@ -115,6 +115,9 @@ pub struct Layer {
     /// A shader layer: its pixels are this shader's output (the tiles
     /// hold its last baked frame).
     pub shader: Option<Box<crate::canvas::shader::ShaderLayer>>,
+    /// A 3D figure layer: its pixels are this scene rendered (the tiles
+    /// hold its last baked render).
+    pub figure: Option<Box<crate::canvas::figure::FigureLayer>>,
     /// Can't be moved or transformed.
     pub position_locked: bool,
     /// A draft: shown, but left out of export, merging and "all layers"
@@ -183,6 +186,9 @@ pub struct CanvasLayerSnapshot {
     /// A shader layer: its pixels are this shader's output (the tiles
     /// hold its last baked frame).
     pub shader: Option<Box<crate::canvas::shader::ShaderLayer>>,
+    /// A 3D figure layer: its pixels are this scene rendered (the tiles
+    /// hold its last baked render).
+    pub figure: Option<Box<crate::canvas::figure::FigureLayer>>,
     pub position_locked: bool,
     pub draft: bool,
     pub reference: bool,
@@ -275,6 +281,7 @@ impl Layer {
             height: self.height.clone(),
             wet: None,
             shader: self.shader.clone(),
+            figure: self.figure.clone(),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
@@ -333,6 +340,7 @@ impl Layer {
             height: None,
             wet: None,
             shader: None,
+            figure: None,
             position_locked: false,
             draft: false,
             reference: false,
@@ -391,6 +399,7 @@ impl Layer {
             vector: self.vector.clone(),
             height: self.height.clone(),
             shader: self.shader.clone(),
+            figure: self.figure.clone(),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,
@@ -433,6 +442,7 @@ impl Layer {
             height: snapshot.height,
             wet: None,
             shader: snapshot.shader,
+            figure: snapshot.figure,
             position_locked: snapshot.position_locked,
             draft: snapshot.draft,
             reference: snapshot.reference,
@@ -785,6 +795,7 @@ impl Canvas {
         layer.vector = meta.vector.clone();
         layer.height = meta.height.clone();
         layer.shader = meta.shader.clone();
+        layer.figure = meta.figure.clone();
         layer.position_locked = meta.position_locked;
         layer.draft = meta.draft;
         layer.reference = meta.reference;
@@ -849,6 +860,7 @@ impl Canvas {
             vector: layer.vector.clone(),
             height: layer.height.clone(),
             shader: layer.shader.clone(),
+            figure: layer.figure.clone(),
             position_locked: layer.position_locked,
             draft: layer.draft,
             reference: layer.reference,

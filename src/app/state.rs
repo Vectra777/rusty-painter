@@ -695,6 +695,8 @@ pub struct WorkspaceState {
     pub text: crate::app::tools::text::TextToolState,
     /// Shader layers: compiled shaders, clocks, editor windows.
     pub shaders: crate::app::shader_ops::ShaderState,
+    /// 3D figure layers: the Figure tool, edit gestures, what's baked.
+    pub figure: crate::app::figure::FigureState,
     /// Hold a stroke still to turn it into a clean shape.
     pub quickshape: crate::app::tools::quickshape::QuickShapeState,
     /// Android's image picker (the photo library).
@@ -811,6 +813,7 @@ impl WorkspaceState {
             collab_form: Default::default(),
             text: Default::default(),
             shaders: Default::default(),
+            figure: Default::default(),
             quickshape: Default::default(),
             retired_textures: Vec::new(),
             frame_stats: Default::default(),

@@ -18,6 +18,7 @@
 //!   converting the document's profile.
 //! - [`animation`]: frames, playback, drawings and exporting animations.
 //! - [`rig`]: rig layers, importing animations and videos.
+//! - [`figure`]: 3D figure layers (adding, editing, baking).
 //! - [`comps`]: layer comps (named snapshots of the layers' visibility).
 //! - [`settings`]: preferences and tool options kept between sessions.
 //! - [`autosave`]: autosave and recovering unsaved work after a crash.
@@ -37,8 +38,10 @@ pub(crate) mod comps;
 #[cfg(not(target_os = "android"))]
 pub(crate) mod dev_shot;
 pub(crate) mod document;
+pub(crate) mod figure;
 pub(crate) mod files;
 pub(crate) mod frame_stats;
+pub(crate) mod hand_scanner;
 pub(crate) mod import;
 pub(crate) mod init;
 pub(crate) mod input;

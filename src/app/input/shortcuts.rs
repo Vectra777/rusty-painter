@@ -240,6 +240,8 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     let liquify = on(Action::Liquify);
     let puppet = on(Action::PuppetWarp);
     let bone = on(Action::BoneTool);
+    let figure = on(Action::FigureTool);
+    let hand_scanner = on(Action::HandScanner);
     let blend = on(Action::Blend);
     let swap = on(Action::SwapColors);
     let panels = on(Action::TogglePanels);
@@ -259,6 +261,14 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
 
     if undo || redo {
         app.apply_history(redo);
+        repaint = true;
+    }
+    if hand_scanner {
+        if app.workspace.figure.scanner.open {
+            app.close_hand_scanner();
+        } else {
+            app.open_hand_scanner();
+        }
         repaint = true;
     }
     if history {
@@ -403,6 +413,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
     {
         // Delete is for the selected bone (never the layer).
         repaint |= app.bone_remove_selected();
+    } else if delete && app.figure_tool_active() && app.figure_delete_selected() {
+        // Delete is for the selected figure or prop (never the layer).
+        repaint = true;
     } else if delete && app.workspace.select.magnetic.is_some() {
         app.magnetic_undo_anchor();
         repaint = true;
@@ -564,6 +577,9 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
         if bone {
             app.active_tool = Tool::Bone;
         }
+        if figure {
+            app.active_tool = Tool::Figure;
+        }
         if blend {
             // S again switches smudge / blur.
             let smudge = !matches!(app.active_tool, Tool::Smudge);
@@ -579,6 +595,7 @@ pub(crate) fn handle_shortcuts(app: &mut PainterApp, ctx: &egui::Context) -> boo
             || liquify
             || puppet
             || bone
+            || figure
             || blend;
     }
 

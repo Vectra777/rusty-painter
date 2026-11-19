@@ -59,6 +59,7 @@ impl Layer {
         layer.vector = None;
         layer.height = None;
         layer.shader = None;
+        layer.figure = None;
         layer.colorize = None;
         layer
     }

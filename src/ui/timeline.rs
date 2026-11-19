@@ -779,12 +779,18 @@ fn blocks(frames: &[(u32, usize)], end: u32) -> Vec<(u32, u32, usize)> {
 /// The frames with keys on row `row` (every property's on a layer's own
 /// row), as the drag under way would leave them.
 fn row_keys(app: &PainterApp, view: &TimelineView, row: &Row) -> Vec<u32> {
-    let Some(motion) = app.canvas.layers[row.idx].motion.as_deref() else {
-        return Vec::new();
-    };
-    let mut keys = match row.prop {
-        Some(p) => motion.key_frames(p),
-        None => motion.all_key_frames(),
+    let motion = app.canvas.layers[row.idx].motion.as_deref();
+    let mut keys = match (row.prop, motion) {
+        (Some(p), Some(m)) => m.key_frames(p),
+        (Some(_), None) => return Vec::new(),
+        // A layer's own row: a figure layer's pose keys too.
+        (None, m) => {
+            let mut all = m.map_or_else(Vec::new, |m| m.all_key_frames());
+            all.extend(app.figure_key_frames(row.idx));
+            all.sort_unstable();
+            all.dedup();
+            all
+        }
     };
     if let Some(Drag::Key {
         layer,
@@ -809,11 +815,27 @@ fn row_keys(app: &PainterApp, view: &TimelineView, row: &Row) -> Vec<u32> {
 /// The curve of `row`'s key at frame `t` (a layer's own row: its first
 /// property keyed there).
 fn key_curve(app: &PainterApp, row: &Row, t: u32) -> Option<Curve> {
-    let motion = app.canvas.layers[row.idx].motion.as_deref()?;
+    let figure = || {
+        row.prop
+            .is_none()
+            .then(|| app.figure_key_at(row.idx, t))
+            .flatten()
+    };
+    let Some(motion) = app.canvas.layers[row.idx].motion.as_deref() else {
+        return figure();
+    };
     let props: Vec<Prop> = row.prop.map_or(Prop::ALL.to_vec(), |p| vec![p]);
     props
         .into_iter()
         .find_map(|p| motion.key_at(p, t).map(|k| k.curve))
+        .or_else(figure)
+}
+
+/// Whether layer `i` has motion keys at frame `t` (of `prop`, or any).
+fn motion_keyed(app: &PainterApp, i: usize, prop: Option<Prop>, t: u32) -> bool {
+    let props: Vec<Prop> = prop.map_or(Prop::ALL.to_vec(), |p| vec![p]);
+    (app.canvas.layers[i].motion.as_deref())
+        .is_some_and(|m| props.iter().any(|&p| m.key_at(p, t).is_some()))
 }
 
 /// Go to frame `t` on layer `id`, selecting it (an animated layer: its
@@ -1319,18 +1341,23 @@ fn body(app: &mut PainterApp, ui: &mut egui::Ui, view: &mut TimelineView, rect: 
                     to,
                 }) if layer == r.id && to != from => {
                     let idx = r.idx;
-                    app.motion_step(idx, |m| {
-                        let props: Vec<Prop> = prop.map_or(Prop::ALL.to_vec(), |p| vec![p]);
-                        // All of them or none: no key lands on another.
-                        if props
-                            .iter()
-                            .all(|&p| m.key_at(p, from).is_none() || m.key_at(p, to).is_none())
-                        {
-                            for p in props {
-                                m.move_key(p, from, to);
+                    if motion_keyed(app, idx, prop, from) {
+                        app.motion_step(idx, |m| {
+                            let props: Vec<Prop> = prop.map_or(Prop::ALL.to_vec(), |p| vec![p]);
+                            // All of them or none: no key lands on another.
+                            if props
+                                .iter()
+                                .all(|&p| m.key_at(p, from).is_none() || m.key_at(p, to).is_none())
+                            {
+                                for p in props {
+                                    m.move_key(p, from, to);
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
+                    if prop.is_none() {
+                        app.figure_move_key(idx, from, to);
+                    }
                     view.picked = Some((layer, prop, to));
                     app.go_to_frame(to);
                 }
@@ -2158,13 +2185,19 @@ fn frame_menu(
         view.open.insert(r.id);
         ui.close_menu();
     }
-    let keyed_here =
-        (app.canvas.layers[r.idx].motion.as_ref()).is_some_and(|m| m.all_key_frames().contains(&t));
+    let motion_here = motion_keyed(app, r.idx, None, t);
+    let figure_here = app.figure_key_at(r.idx, t).is_some();
     if ui
-        .add_enabled(keyed_here, egui::Button::new("Remove the keys here"))
+        .add_enabled(
+            motion_here || figure_here,
+            egui::Button::new("Remove the keys here"),
+        )
         .clicked()
     {
-        app.remove_keys_at(r.idx, t);
+        if motion_here {
+            app.remove_keys_at(r.idx, t);
+        }
+        app.figure_remove_key_at(r.idx, t);
         ui.close_menu();
     }
 }
@@ -2180,11 +2213,16 @@ fn key_menu(app: &mut PainterApp, ui: &mut egui::Ui, r: &Row, prop: Option<Prop>
             .clicked()
         {
             let props: Vec<Prop> = prop.map_or(Prop::ALL.to_vec(), |p| vec![p]);
-            app.motion_step(r.idx, |m| {
-                for p in props {
-                    m.set_curve(p, k, ease.curve());
-                }
-            });
+            if motion_keyed(app, r.idx, prop, k) {
+                app.motion_step(r.idx, |m| {
+                    for p in props {
+                        m.set_curve(p, k, ease.curve());
+                    }
+                });
+            }
+            if prop.is_none() {
+                app.figure_set_key_curve(r.idx, k, ease.curve());
+            }
             ui.close_menu();
         }
     }
@@ -2192,7 +2230,12 @@ fn key_menu(app: &mut PainterApp, ui: &mut egui::Ui, r: &Row, prop: Option<Prop>
     if ui.button("Remove").clicked() {
         match prop {
             Some(p) => app.remove_key(r.idx, p, k),
-            None => app.remove_keys_at(r.idx, k),
+            None => {
+                if motion_keyed(app, r.idx, None, k) {
+                    app.remove_keys_at(r.idx, k);
+                }
+                app.figure_remove_key_at(r.idx, k);
+            }
         }
         ui.close_menu();
     }

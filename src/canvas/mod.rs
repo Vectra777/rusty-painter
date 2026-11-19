@@ -8,6 +8,7 @@ pub mod color;
 pub mod color_profile;
 pub mod colorize;
 pub mod effects;
+pub mod figure;
 pub mod fill;
 #[cfg(test)]
 mod filter_quality;

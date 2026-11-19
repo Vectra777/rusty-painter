@@ -523,6 +523,57 @@ fn a_shader_layer_keeps_its_shader_through_undo_and_redo() {
 }
 
 #[test]
+fn a_figure_layer_keeps_its_scene_through_undo_and_redo() {
+    let mut app = app();
+    let idx = app.add_figure_layer().unwrap();
+    let id = app.canvas.layers[idx].id;
+    app.figure_edit("Orbit camera", |f| f.camera.orbit(0.4, 0.0));
+    app.figure_edit_done();
+    let scene = |app: &PainterApp| {
+        (app.canvas.layer_index_of(id))
+            .and_then(|i| app.canvas.layers[i].figure.as_deref().cloned())
+    };
+    let posed = scene(&app).unwrap();
+    assert!(
+        app.canvas.layers[idx].locked,
+        "no painting on a figure layer"
+    );
+    // Removed and brought back: still the same scene.
+    app.remove_layer(idx);
+    assert_eq!(scene(&app), None);
+    app.apply_history(false);
+    assert_eq!(scene(&app).as_ref(), Some(&posed));
+    // The camera move undone, then the layer's creation; and redone.
+    app.apply_history(false);
+    assert_ne!(scene(&app).as_ref(), Some(&posed));
+    assert!(scene(&app).is_some());
+    app.apply_history(false);
+    assert_eq!(scene(&app), None);
+    app.apply_history(true);
+    app.apply_history(true);
+    assert_eq!(scene(&app).as_ref(), Some(&posed));
+    // Duplicated: the copy has the scene too, and is locked.
+    let idx = app.canvas.layer_index_of(id).unwrap();
+    app.canvas_mut().active_layer_idx = idx;
+    app.duplicate_layer();
+    let copy = &app.canvas.layers[app.canvas.active_layer_idx];
+    assert_ne!(copy.id, id);
+    assert!(copy.locked);
+    assert_eq!(copy.figure.as_deref(), Some(&posed));
+}
+
+#[test]
+fn editing_a_figure_is_unsaved_work() {
+    let mut app = app();
+    app.add_figure_layer().unwrap();
+    app.mark_saved();
+    assert!(!app.has_unsaved_work());
+    app.figure_edit("Zoom camera", |f| f.camera.dolly(0.8));
+    app.figure_edit_done();
+    assert!(app.has_unsaved_work());
+}
+
+#[test]
 fn editing_a_shader_is_unsaved_work() {
     let mut app = app();
     let (name, source) = crate::canvas::shader::TEMPLATES[0];

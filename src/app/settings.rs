@@ -107,6 +107,8 @@ pub struct AppSettings {
     gpu_backend: GpuBackend,
     /// The undo history's memory budget, in MiB.
     undo_memory_mb: usize,
+    /// The camera window's camera (Hand Scanner, Pose from Camera), by name.
+    hand_scanner_camera: Option<String>,
 }
 
 /// Which GPU the app asks for. On a machine with one kind only, either
@@ -420,6 +422,7 @@ impl AppSettings {
             gpu: ws.gpu,
             gpu_backend: gpu_backend(),
             undo_memory_mb: crate::canvas::history::max_undo_mb(),
+            hand_scanner_camera: ws.figure.scanner.camera_name.clone(),
         }
     }
 
@@ -527,6 +530,7 @@ impl AppSettings {
         app.workspace.gpu = self.gpu;
         set_gpu_backend(self.gpu_backend);
         crate::canvas::history::set_max_undo_mb(self.undo_memory_mb);
+        app.workspace.figure.scanner.camera_name = self.hand_scanner_camera;
     }
 }
 

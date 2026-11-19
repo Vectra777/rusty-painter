@@ -1530,6 +1530,7 @@ mod tests {
                     blend: *blend,
                     opacity: *opacity,
                 },
+                LiveStep::Figure { .. } => unreachable!("no figure layer here"),
             })
             .collect();
         let plan = ComposePlan {

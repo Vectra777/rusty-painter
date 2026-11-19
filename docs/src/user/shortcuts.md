@@ -42,7 +42,12 @@ The defaults, with QWERTY names:
 | `V`, `T` | Transform |
 | `W` / `Shift+W` | Liquify / puppet warp |
 | `Y` | Bones |
+| `Shift+Y` | 3D figure |
 | `Shift+P` | Pen (paths) |
+
+The Hand Scanner (posing a 3D figure's hand from the camera) has no key of
+its own: give it one in Settings → Shortcuts. Pose from Camera and Pose from
+Photo are in the Figure tool's Pose menu.
 
 ## Edit
 
@@ -58,7 +63,7 @@ The defaults, with QWERTY names:
 | `Ctrl+Alt+E` / `Ctrl+Shift+E` | Merge down / merge visible |
 | `Ctrl+A` / `Ctrl+D`, `Esc` | Select all / deselect |
 | `Ctrl+Shift+I` | Invert selection |
-| `Delete` | Erase the selected pixels |
+| `Delete` | Erase the selected pixels (with the Figure tool: delete the selected figure or prop) |
 | `Shift+F5` | Content-aware fill |
 | `Enter` / `Esc` | Apply / cancel a transform |
 

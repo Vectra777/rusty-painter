@@ -21,6 +21,18 @@ if [ -d brushes ]; then
   mkdir -p "$PACKS"
   cp -R brushes/. "$PACKS/"
 fi
+# The realistic figures likewise.
+if [ -d figures ]; then
+  FIGURES="${XDG_DATA_HOME:-$HOME/.local/share}/rusty-painter/figures"
+  mkdir -p "$FIGURES"
+  cp -R figures/. "$FIGURES/"
+fi
+# And the hand and body tracking models.
+if [ -d pose-models ]; then
+  MODELS="${XDG_DATA_HOME:-$HOME/.local/share}/rusty-painter/pose-models"
+  mkdir -p "$MODELS"
+  cp -R pose-models/. "$MODELS/"
+fi
 install -m 644 rusty-painter.png "$ICONS/io.vectra.rustypainter.png"
 # The full path, in case ~/.local/bin isn't on the menu's PATH.
 sed "s|^Exec=rusty-painter|Exec=$BIN|" io.vectra.rustypainter.desktop > "$APPS/io.vectra.rustypainter.desktop"

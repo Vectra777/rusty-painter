@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "id": "figures-v1",
+  "models": [
+    {
+      "id": "male",
+      "name": "Male",
+      "file": "male.glb",
+      "kind": "body",
+      "licence": "CC0-1.0",
+      "source": "MakeHuman / MPFB 2 assets (base mesh, targets, game_engine rig and weights), https://github.com/makehumancommunity/mpfb2 at 9de0707; built by scripts/make_figure_pack.py"
+    },
+    {
+      "id": "female",
+      "name": "Female",
+      "file": "female.glb",
+      "kind": "body",
+      "licence": "CC0-1.0",
+      "source": "MakeHuman / MPFB 2 assets (base mesh, targets, game_engine rig and weights), https://github.com/makehumancommunity/mpfb2 at 9de0707; built by scripts/make_figure_pack.py"
+    },
+    {
+      "id": "child",
+      "name": "Child",
+      "file": "child.glb",
+      "kind": "body",
+      "licence": "CC0-1.0",
+      "source": "MakeHuman / MPFB 2 assets (base mesh, targets, game_engine rig and weights), https://github.com/makehumancommunity/mpfb2 at 9de0707; built by scripts/make_figure_pack.py"
+    },
+    {
+      "id": "hand-left",
+      "name": "Left hand",
+      "file": "hand-left.glb",
+      "kind": "hand",
+      "licence": "CC0-1.0",
+      "source": "MakeHuman / MPFB 2 assets (base mesh, targets, game_engine rig and weights), https://github.com/makehumancommunity/mpfb2 at 9de0707; built by scripts/make_figure_pack.py"
+    },
+    {
+      "id": "hand-right",
+      "name": "Right hand",
+      "file": "hand-right.glb",
+      "kind": "hand",
+      "licence": "CC0-1.0",
+      "source": "MakeHuman / MPFB 2 assets (base mesh, targets, game_engine rig and weights), https://github.com/makehumancommunity/mpfb2 at 9de0707; built by scripts/make_figure_pack.py"
+    }
+  ],
+  "content": "1f3512cf"
+}

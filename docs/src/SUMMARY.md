@@ -12,6 +12,7 @@
 - [Colour](user/colour.md)
 - [Layers](user/layers.md)
     - [Colorize mask](user/colorize.md)
+    - [3D figures](user/figures.md)
 - [Selections](user/selection.md)
 - [Transforms](user/transform.md)
 - [Filters](user/filters.md)

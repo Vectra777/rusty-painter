@@ -693,6 +693,10 @@ struct StoredLayer {
     /// A shader layer's shader; absent in older files (and on other layers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shader: Option<crate::canvas::shader::ShaderLayer>,
+    /// A 3D figure layer's scene and the models it brought in; absent on
+    /// other layers (and in older files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    figure: Option<StoredFigure>,
     /// A colorize mask's settings (its tiles are the hints; the result is
     /// made again on load); absent in older files (and on other layers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -927,6 +931,100 @@ impl StoredRig {
     }
 }
 
+/// A figure layer as saved: its scene, and the files of the models kept
+/// in the document as blobs (each once, however many figures use it).
+#[derive(Serialize, Deserialize)]
+struct StoredFigure {
+    figure: crate::canvas::figure::FigureLayer,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    models: Vec<StoredFigureModel>,
+    /// The poses of the figures made from the figure pack, by canonical
+    /// joint (by index in the scene; None for the others): opened where
+    /// the pack isn't installed, they show as the mannequin in that pose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    poses: Vec<Option<crate::canvas::figure::presets::Pose>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredFigureModel {
+    /// The figures (by index in the scene) that are this model.
+    figures: Vec<usize>,
+    data_zstd: StoredBlob,
+}
+
+impl StoredFigure {
+    fn from_figure(
+        figure: &crate::canvas::figure::FigureLayer,
+        blobs: &mut Vec<u8>,
+    ) -> Result<Self, String> {
+        use crate::canvas::figure::{EmbeddedModel, ModelRef};
+        let mut kept: Vec<(std::sync::Arc<EmbeddedModel>, Vec<usize>)> = Vec::new();
+        for (i, f) in figure.scene.iter().enumerate() {
+            if let ModelRef::Embedded(e) = &f.model {
+                match kept.iter_mut().find(|(k, _)| std::sync::Arc::ptr_eq(k, e)) {
+                    Some((_, figures)) => figures.push(i),
+                    None => kept.push((e.clone(), vec![i])),
+                }
+            }
+        }
+        let raws: Vec<Vec<u8>> = kept.iter().map(|(e, _)| e.data.clone()).collect();
+        let stored = push_blobs(blobs, &raws)?;
+        let poses: Vec<_> = (figure.scene.iter())
+            .map(|f| f.model.is_from_pack().then(|| f.human_pose()).flatten())
+            .collect();
+        Ok(Self {
+            figure: figure.clone(),
+            models: (kept.into_iter().zip(stored))
+                .map(|((_, figures), data_zstd)| StoredFigureModel { figures, data_zstd })
+                .collect(),
+            poses: if poses.iter().any(Option::is_some) {
+                poses
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    fn into_figure(self, blobs: &[u8]) -> Result<crate::canvas::figure::FigureLayer, String> {
+        use crate::canvas::figure::{EmbeddedModel, ModelRef};
+        let mut figure = self.figure;
+        for model in self.models {
+            let data = read_blob(blobs, &model.data_zstd)?;
+            let mut shared: Option<std::sync::Arc<EmbeddedModel>> = None;
+            for i in model.figures {
+                let f = figure
+                    .scene
+                    .get_mut(i)
+                    .ok_or("A figure's model is missing")?;
+                let name = f.model.name().to_string();
+                let e = shared
+                    .get_or_insert_with(|| {
+                        std::sync::Arc::new(EmbeddedModel::new(name, data.clone()))
+                    })
+                    .clone();
+                f.model = ModelRef::Embedded(e);
+            }
+        }
+        for (i, f) in figure.scene.iter_mut().enumerate() {
+            if f.model.is_from_pack()
+                && let Err(err) = f.model.resolve()
+            {
+                log::warn!("{} shown as the mannequin: {err}", f.model.name());
+                f.fall_back_to_mannequin(self.poses.get(i).and_then(Option::as_ref));
+                // Its keys turned the missing model's joints: they hold
+                // the mannequin's pose instead.
+                for key in &mut figure.keys {
+                    if let Some(k) = key.value.figures.get_mut(i) {
+                        k.pose.clone_from(&f.pose);
+                        k.morphs.clear();
+                    }
+                }
+            }
+        }
+        Ok(figure)
+    }
+}
+
 fn default_expanded() -> bool {
     true
 }
@@ -953,6 +1051,10 @@ impl StoredLayer {
             text: convert::StoredText::from_layer(layer.text.as_deref()),
             vector: layer.vector.as_deref().cloned(),
             shader: layer.shader.map(|s| *s),
+            figure: match &layer.figure {
+                Some(figure) => Some(StoredFigure::from_figure(figure, blobs)?),
+                None => None,
+            },
             colorize: layer.colorize.map(|c| c.settings),
             heights: match &layer.height {
                 Some(map) => {
@@ -1055,6 +1157,10 @@ impl StoredLayer {
                 None => None,
             },
             shader: self.shader.map(Box::new),
+            figure: match self.figure {
+                Some(figure) => Some(Box::new(figure.into_figure(blobs)?)),
+                None => None,
+            },
             colorize: (self.colorize)
                 .map(|s| Box::new(crate::canvas::colorize::ColorizeLayer::new(s))),
             position_locked: self.position_locked,

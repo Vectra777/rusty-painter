@@ -41,6 +41,20 @@ if [[ -f "$ROOT/assets/brush-pack/default-v1/brushes.rpbrush" ]] &&
   rm -rf "$ROOT/target/android-assets/default-v1"
   cp -R "$ROOT/assets/brush-pack/." "$ROOT/target/android-assets/"
 fi
+# The realistic figures likewise (as figures-v1/, the app's name for them).
+if [[ -f "$ROOT/assets/figure-pack/v1/male.glb" ]] &&
+  [[ "$(head -c 4 "$ROOT/assets/figure-pack/v1/male.glb")" == "glTF" ]]; then
+  rm -rf "$ROOT/target/android-assets/figures-v1"
+  cp -R "$ROOT/assets/figure-pack/v1" "$ROOT/target/android-assets/figures-v1"
+fi
+# The hand and body tracking models likewise (as pose-models-v1/);
+# NO_POSE_MODELS=1 leaves them out (~24 MB): the app downloads them the
+# first time hand or body tracking is used.
+rm -rf "$ROOT/target/android-assets/pose-models-v1"
+if [[ -z "${NO_POSE_MODELS:-}" ]] && [[ -f "$ROOT/assets/pose-models/v1/hand_landmark.onnx" ]] &&
+  ! head -c 40 "$ROOT/assets/pose-models/v1/hand_landmark.onnx" | grep -q '^version https://git-lfs'; then
+  cp -R "$ROOT/assets/pose-models/v1" "$ROOT/target/android-assets/pose-models-v1"
+fi
 
 # 16 KB pages (see .cargo/config.toml, whose flags cargo-apk replaces).
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-Wl,-z,max-page-size=16384"

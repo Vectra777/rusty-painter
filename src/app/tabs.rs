@@ -165,6 +165,7 @@ impl PainterApp {
         // Compiled shaders and baked frames are per layer id, which the
         // other document reuses.
         ws.shaders.forget_document();
+        ws.figure.forget_document();
         // ponytail: one set of GPU atlases, uploaded again for the tab
         // shown; per-document atlases if switching big documents drags.
         let (w, h) = (self.canvas.width(), self.canvas.height());

@@ -106,6 +106,7 @@ fn qualifies(app: &PainterApp, i: usize) -> bool {
         && l.adjustment.is_none()
         && l.style.is_plain()
         && l.shader.is_none()
+        && l.figure.is_none()
         && l.height.is_none()
         && l.wet.is_none()
         && l.anim.is_none()

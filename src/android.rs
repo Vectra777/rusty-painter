@@ -17,14 +17,46 @@ pub static APP: std::sync::OnceLock<winit::platform::android::activity::AndroidA
 #[cfg(target_os = "android")]
 pub fn extract_pack(dest: &std::path::Path) -> Result<(), String> {
     use crate::brush_engine::pack::{Manifest, PACK_ID};
+    extract_assets(PACK_ID, dest, |manifest| {
+        Ok(vec![
+            serde_json::from_slice::<Manifest>(manifest)
+                .map_err(|e| e.to_string())?
+                .file,
+        ])
+    })
+}
+
+/// Copy the realistic figures (the figure pack) out of the APK's assets
+/// into `dest`, as [`extract_pack`] does the brushes.
+#[cfg(target_os = "android")]
+pub fn extract_figure_pack(dest: &std::path::Path) -> Result<(), String> {
+    use crate::canvas::figure::pack::{Manifest, PACK_ID};
+    extract_assets(PACK_ID, dest, |manifest| {
+        Ok(serde_json::from_slice::<Manifest>(manifest)
+            .map_err(|e| e.to_string())?
+            .models
+            .into_iter()
+            .map(|m| m.file)
+            .collect())
+    })
+}
+
+/// Copy the APK's asset folder `dir` into `dest`: its `manifest.json` and
+/// the files `files` reads from that manifest, unless they're there already
+/// (the same manifest, written last, and files of the same sizes).
+#[cfg(target_os = "android")]
+fn extract_assets(
+    dir: &str,
+    dest: &std::path::Path,
+    files: impl FnOnce(&[u8]) -> Result<Vec<String>, String>,
+) -> Result<(), String> {
     use std::io::Read;
     let Some(app) = APP.get() else {
         return Ok(());
     };
     let assets = app.asset_manager();
     let asset = |name: &str| {
-        let path =
-            std::ffi::CString::new(format!("{PACK_ID}/{name}")).map_err(|e| e.to_string())?;
+        let path = std::ffi::CString::new(format!("{dir}/{name}")).map_err(|e| e.to_string())?;
         assets
             .open(&path)
             .ok_or_else(|| format!("{name} isn't in the APK"))
@@ -36,24 +68,49 @@ pub fn extract_pack(dest: &std::path::Path) -> Result<(), String> {
     source
         .read_to_end(&mut manifest)
         .map_err(|e| e.to_string())?;
-    let file = serde_json::from_slice::<Manifest>(&manifest)
-        .map_err(|e| e.to_string())?
-        .file;
-    // (The size too: a pack whose manifest didn't change with it.)
-    let size = asset(&file)?.length() as u64;
+    let files = files(&manifest)?;
+    if files
+        .iter()
+        .any(|f| std::path::Path::new(f).components().count() != 1)
+    {
+        return Err("Invalid asset file name".into());
+    }
+    // (The sizes too: a pack whose manifest didn't change with it.)
+    let mut sizes = Vec::with_capacity(files.len());
+    for file in &files {
+        sizes.push(asset(file)?.length() as u64);
+    }
     if std::fs::read(dest.join("manifest.json")).ok().as_deref() == Some(&manifest[..])
-        && std::fs::metadata(dest.join(&file)).is_ok_and(|m| m.len() == size)
+        && (files.iter().zip(&sizes))
+            .all(|(f, &size)| std::fs::metadata(dest.join(f)).is_ok_and(|m| m.len() == size))
     {
         return Ok(());
     }
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(dest.join("manifest.json"));
-    let part = dest.join(format!("{file}.part"));
-    let mut out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-    std::io::copy(&mut asset(&file)?, &mut out).map_err(|e| e.to_string())?;
-    out.sync_all().map_err(|e| e.to_string())?;
-    std::fs::rename(&part, dest.join(&file)).map_err(|e| e.to_string())?;
+    for file in &files {
+        let part = dest.join(format!("{file}.part"));
+        let mut out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+        std::io::copy(&mut asset(file)?, &mut out).map_err(|e| e.to_string())?;
+        out.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&part, dest.join(file)).map_err(|e| e.to_string())?;
+    }
     crate::project::write_atomically(&dest.join("manifest.json"), &manifest)
+}
+
+/// Copy the hand and body tracking models out of the APK's assets into `dest`, as
+/// [`extract_pack`] does the brushes.
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn extract_pose_models(dest: &std::path::Path) -> Result<(), String> {
+    use crate::pose_track::{Manifest, PACK_ID};
+    extract_assets(PACK_ID, dest, |manifest| {
+        Ok(serde_json::from_slice::<Manifest>(manifest)
+            .map_err(|e| e.to_string())?
+            .models
+            .into_iter()
+            .map(|m| m.file)
+            .collect())
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1073,5 +1130,159 @@ pub fn decode_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
         // garbage collector runs.
         let _ = env.call_method(&bitmap, "recycle", "()V", &[]);
         result
+    })
+}
+
+/// The cameras (see `CameraFeed.java`), front ones first: each one's id
+/// and a name to show.
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn camera_list() -> Result<Vec<(String, String)>, String> {
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "CameraFeed")?;
+        let array = env
+            .call_static_method(
+                class,
+                "list",
+                "(Landroid/app/Activity;)[Ljava/lang/String;",
+                &[JValue::Object(&activity)],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        let array = jni::objects::JObjectArray::from(array);
+        let n = env.get_array_length(&array).map_err(jerr)?;
+        let mut out = Vec::new();
+        for i in 0..n {
+            let s = JString::from(env.get_object_array_element(&array, i).map_err(jerr)?);
+            let entry: String = env.get_string(&s).map_err(jerr)?.into();
+            if let Some((id, name)) = entry.split_once('\n') {
+                out.push((id.to_string(), name.to_string()));
+            }
+        }
+        Ok(out)
+    })
+}
+
+/// Camera `id` started at about `width` × `height`: its frame buffer (kept
+/// alive by the reference), mapped, and its size in bytes.
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn camera_start(
+    id: &str,
+    width: i32,
+    height: i32,
+) -> Result<(jni::objects::GlobalRef, *mut u8, usize), String> {
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "CameraFeed")?;
+        let id = env.new_string(id).map_err(jerr)?;
+        let buffer = env
+            .call_static_method(
+                class,
+                "start",
+                "(Landroid/app/Activity;Ljava/lang/String;II)Ljava/nio/ByteBuffer;",
+                &[
+                    JValue::Object(&activity),
+                    JValue::Object(&JObject::from(id)),
+                    JValue::Int(width),
+                    JValue::Int(height),
+                ],
+            )
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        let buffer = jni::objects::JByteBuffer::from(buffer);
+        let address = env.get_direct_buffer_address(&buffer).map_err(jerr)?;
+        let capacity = env.get_direct_buffer_capacity(&buffer).map_err(jerr)?;
+        let global = env.new_global_ref(&buffer).map_err(jerr)?;
+        Ok((global, address, capacity))
+    })
+}
+
+/// The newest frame's number if newer than `last` (the buffer is then the
+/// Rust side's until [`camera_end`]), else -1.
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn camera_begin(last: i64) -> Result<i64, String> {
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "CameraFeed")?;
+        env.call_static_method(class, "begin", "(J)J", &[JValue::Long(last)])
+            .and_then(|v| v.j())
+            .map_err(jerr)
+    })
+}
+
+/// Done reading the frame buffer.
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn camera_end() -> Result<(), String> {
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "CameraFeed")?;
+        env.call_static_method(class, "end", "()V", &[])
+            .map_err(jerr)?;
+        Ok(())
+    })
+}
+
+/// Why the camera stopped by itself, if it did.
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn camera_error() -> Option<String> {
+    with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "CameraFeed")?;
+        let error = env
+            .call_static_method(class, "error", "()Ljava/lang/String;", &[])
+            .and_then(|v| v.l())
+            .map_err(jerr)?;
+        if error.is_null() {
+            return Ok(None);
+        }
+        env.get_string(&JString::from(error))
+            .map(|s| Some(String::from(s)))
+            .map_err(jerr)
+    })
+    .ok()
+    .flatten()
+}
+
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn camera_stop() {
+    let stopped = with_android_env(|env, activity| {
+        let class = helper_class(env, &activity, "CameraFeed")?;
+        env.call_static_method(class, "stop", "()V", &[])
+            .map_err(jerr)?;
+        Ok(())
+    });
+    if let Err(err) = stopped {
+        log::warn!("Couldn't stop the camera: {err}");
+    }
+}
+
+/// Whether the app may use the camera.
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn has_camera_access() -> bool {
+    with_android_env(|env, activity| {
+        let name = env.new_string("android.permission.CAMERA").map_err(jerr)?;
+        let granted = env
+            .call_method(
+                &activity,
+                "checkSelfPermission",
+                "(Ljava/lang/String;)I",
+                &[JValue::Object(&JObject::from(name))],
+            )
+            .and_then(|v| v.i())
+            .map_err(jerr)?;
+        Ok(granted == 0)
+    })
+    .unwrap_or(false)
+}
+
+/// Show the system prompt for the camera. The answer isn't reported back;
+/// poll [`has_camera_access`].
+#[cfg(all(target_os = "android", feature = "pose-capture"))]
+pub fn request_camera_access() -> Result<(), String> {
+    with_android_env(|env, activity| {
+        let array = string_array(env, &["android.permission.CAMERA"])?;
+        env.call_method(
+            &activity,
+            "requestPermissions",
+            "([Ljava/lang/String;I)V",
+            &[JValue::Object(&array), JValue::Int(8)],
+        )
+        .map_err(jerr)?;
+        Ok(())
     })
 }

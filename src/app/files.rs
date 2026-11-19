@@ -35,6 +35,11 @@ pub(crate) enum OpenFor {
     /// A picture for the reference window (iOS, as [`OpenFor::Image`]).
     #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     Reference,
+    /// A glTF / GLB model for the selected 3D figure layer (a figure or a
+    /// prop).
+    FigureModel,
+    /// A photo to pose the selected figure from (Pose from Photo).
+    PosePhoto,
 }
 
 /// What a picked ICC profile is for.
@@ -82,9 +87,11 @@ impl OpenFor {
             | OpenFor::Image
             | OpenFor::Reference
             | OpenFor::Textures
-            | OpenFor::Paper => ("Images", vec!["png", "jpg", "jpeg", "bmp", "tif", "tiff"]),
+            | OpenFor::Paper
+            | OpenFor::PosePhoto => ("Images", vec!["png", "jpg", "jpeg", "bmp", "tif", "tiff"]),
             OpenFor::Profile(_) => ("ICC profiles", vec!["icc", "icm"]),
             OpenFor::Gradients => ("Photoshop gradients", vec!["grd"]),
+            OpenFor::FigureModel => ("3D models (glTF)", vec!["glb", "gltf"]),
             OpenFor::PaletteFiles => (
                 "Palettes",
                 crate::project::palette_files::EXTENSIONS.to_vec(),
@@ -101,7 +108,8 @@ impl OpenFor {
             | OpenFor::Image
             | OpenFor::Reference
             | OpenFor::Textures
-            | OpenFor::Paper => &["image/*"],
+            | OpenFor::Paper
+            | OpenFor::PosePhoto => &["image/*"],
             _ => &["*/*"],
         }
     }
@@ -270,6 +278,8 @@ impl PainterApp {
             }
             OpenFor::Brushes => self.import_brushes_in_background(name, source),
             OpenFor::Gradients => self.import_gradients_in_background(name, source),
+            OpenFor::FigureModel => self.import_figure_model_in_background(name, source),
+            OpenFor::PosePhoto => self.pose_photo_in_background(name, source),
             OpenFor::PaletteFiles => self.import_palette_in_background(name, source),
             OpenFor::Palette => {
                 let stem = std::path::Path::new(&name)

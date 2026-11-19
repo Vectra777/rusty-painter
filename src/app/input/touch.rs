@@ -10,6 +10,13 @@
 //! - one finger held still on the canvas picks a colour (a temporary
 //!   Eyedropper) until it lifts, if Settings says so.
 //!
+//! A tool can own the fingers instead ([`tool_wants_multitouch`]): with the
+//! Figure tool on a 3D figure layer, two fingers orbit, pinch to dolly and
+//! twist to roll the figure's camera (the view stays), one finger is the
+//! tool's (posing, or orbiting from empty space), and the held two- and
+//! three-finger gestures are off while it has them (a quick tap still
+//! undoes or redoes).
+//!
 //! egui also turns the first finger into pointer events, which the regular
 //! input handler would paint with; [`TouchState::suppress_pointer`] tells it
 //! when those events belong to a gesture instead.
@@ -29,6 +36,12 @@ use std::time::{Duration, Instant};
 /// paints (it would cut into other tools' drags).
 fn hold_pick_tool(tool: Tool) -> bool {
     matches!(tool, Tool::Brush | Tool::Smudge | Tool::Blur)
+}
+
+/// Whether the active tool takes touch gestures for itself: the Figure
+/// tool over a figure layer, whose camera they move.
+pub(crate) fn tool_wants_multitouch(app: &PainterApp) -> bool {
+    app.figure_tool_active()
 }
 
 /// A multi-finger touch shorter than this (seconds), that barely moved, is
@@ -133,6 +146,8 @@ struct Gesture {
     /// What holding it still has done: undos run (two fingers), the
     /// QuickMenu opened (three). A gesture that did something isn't a tap.
     held: u32,
+    /// The active tool owns it (see [`tool_wants_multitouch`]).
+    tool: bool,
 }
 
 /// How many undos two fingers held still for `held` seconds have earned.
@@ -261,6 +276,7 @@ impl PainterApp {
                 info.start_pos = None;
                 info.state = TransformState::None;
             }
+            Tool::Figure => self.figure_cancel_drag(),
             _ => {}
         }
         self.viewport.is_primary_down = false;
@@ -363,11 +379,14 @@ pub(crate) fn handle_touch(
                 if touch.touches.len() >= 2 {
                     touch.hold = None;
                     if touch.gesture.is_none() {
+                        let tool = tool_wants_multitouch(app);
+                        let touch = &mut app.viewport.touch;
                         touch.gesture = Some(Gesture {
                             start: now,
                             max_touches: touch.touches.len(),
                             travel: 0.0,
                             held: 0,
+                            tool,
                         });
                         gesture_this_frame = true;
                         app.end_hold_pick();
@@ -396,7 +415,8 @@ pub(crate) fn handle_touch(
                     continue;
                 }
                 let single = touch.touches.len() == 1 && touch.gesture.is_none();
-                if single && !app.workspace.finger_painting {
+                // (A tool that owns the fingers has the one finger too.)
+                if single && !app.workspace.finger_painting && !tool_wants_multitouch(app) {
                     // One finger pans when only the pen paints.
                     app.viewport.offset += delta;
                     app.workspace.auto_fit = false;
@@ -430,6 +450,9 @@ pub(crate) fn handle_touch(
                 if touch.touches.is_empty()
                     && let Some(g) = touch.gesture.take()
                 {
+                    if g.tool {
+                        app.figure_touch_end();
+                    }
                     let quick = now - g.start < TAP_MAX_DURATION;
                     if quick
                         && g.travel < TAP_MAX_TRAVEL
@@ -459,14 +482,19 @@ pub(crate) fn handle_touch(
             .fold(egui::Vec2::ZERO, |sum, p| sum + p.to_vec2())
             / touches.len().max(1) as f32;
         let anchor = anchor.to_pos2();
-        if (mt.zoom_delta - 1.0).abs() > f32::EPSILON {
-            app.zoom_about(anchor, area.min, app.viewport.zoom * mt.zoom_delta);
+        let tool = app.viewport.touch.gesture.as_ref().is_some_and(|g| g.tool);
+        if tool {
+            app.figure_touch(mt.translation_delta, mt.zoom_delta, mt.rotation_delta);
+        } else {
+            if (mt.zoom_delta - 1.0).abs() > f32::EPSILON {
+                app.zoom_about(anchor, area.min, app.viewport.zoom * mt.zoom_delta);
+            }
+            app.viewport.offset += mt.translation_delta;
+            if mt.rotation_delta.abs() > f32::EPSILON {
+                app.rotate_about(anchor, area.min, mt.rotation_delta);
+            }
+            app.workspace.auto_fit = false;
         }
-        app.viewport.offset += mt.translation_delta;
-        if mt.rotation_delta.abs() > f32::EPSILON {
-            app.rotate_about(anchor, area.min, mt.rotation_delta);
-        }
-        app.workspace.auto_fit = false;
         if let Some(g) = &mut app.viewport.touch.gesture {
             g.travel += mt.translation_delta.length()
                 + (mt.zoom_delta - 1.0).abs() * 200.0
@@ -483,6 +511,7 @@ pub(crate) fn handle_touch(
         _ => {}
     }
 
+    let tool_fingers = tool_wants_multitouch(app);
     let touch = &mut app.viewport.touch;
     // egui's pointer follows the first finger, which may be an ignored palm.
     touch.suppress_pointer = gesture_this_frame
@@ -490,7 +519,7 @@ pub(crate) fn handle_touch(
         || touch.picking.is_some()
         || was_picking
         || !touch.ignored.is_empty()
-        || (touch.finger_down() && !app.workspace.finger_painting);
+        || (touch.finger_down() && !app.workspace.finger_painting && !tool_fingers);
     repaint || tap.is_some()
 }
 
@@ -500,6 +529,11 @@ fn held_gestures(app: &mut PainterApp, ctx: &egui::Context, now: f64, area: egui
     let touch = &mut app.viewport.touch;
     let fingers = touch.touches.len();
     let wake = |secs: f64| ctx.request_repaint_after(Duration::from_secs_f64(secs.max(0.0)));
+    // Holding still is how a tool's gesture starts (a pinch about to
+    // begin): no held gestures while a tool owns them.
+    if touch.gesture.as_ref().is_some_and(|g| g.tool) {
+        return false;
+    }
     if let Some(g) = &mut touch.gesture
         && g.travel < TAP_MAX_TRAVEL
         && fingers == g.max_touches
@@ -594,6 +628,7 @@ mod tests {
             max_touches: 2,
             travel: 0.0,
             held: 0,
+            tool: false,
         });
         touch.ignored.insert(3);
         touch.pen_active = true;
@@ -881,5 +916,115 @@ mod tests {
             redo,
             "not a redo tap"
         );
+    }
+
+    /// A figure layer with the Figure tool, an undo step on it already.
+    fn figure_app() -> crate::PainterApp {
+        let mut app = test_app_pub(Canvas::new(300, 400, Color32::WHITE, TILE));
+        app.add_figure_layer().unwrap();
+        assert!(super::tool_wants_multitouch(&app));
+        app
+    }
+
+    #[test]
+    fn two_fingers_move_the_figure_camera_not_the_view() {
+        let mut app = figure_app();
+        let ctx = egui::Context::default();
+        let (zoom, offset, rotation) = (
+            app.viewport.zoom,
+            app.viewport.offset,
+            app.viewport.rotation,
+        );
+        let camera = app.active_figure().unwrap().camera;
+        let steps = undo_len(&app);
+        touch_frame(&mut app, &ctx, vec![], 0.0);
+        let (a, b) = (egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0));
+        // (egui starts its multi-touch gesture where its pointer is, which
+        // backends move to the first finger.)
+        touch_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(a),
+                finger(1, Start, a),
+                finger(2, Start, b),
+            ],
+            0.1,
+        );
+        // Spread apart (a pinch out) and moved together to the right.
+        for k in 1..=5 {
+            let d = 10.0 * k as f32;
+            touch_frame(
+                &mut app,
+                &ctx,
+                vec![
+                    finger(1, Move, a + egui::vec2(0.0, 0.0)),
+                    finger(2, Move, b + egui::vec2(d + d, 0.0)),
+                ],
+                0.1 + 0.02 * k as f64,
+            );
+        }
+        let moved = app.active_figure().unwrap().camera;
+        assert!(moved.distance < camera.distance, "pinching out dollies in");
+        assert!(moved.yaw != camera.yaw, "moving the fingers orbits");
+        assert_eq!(
+            (
+                app.viewport.zoom,
+                app.viewport.offset,
+                app.viewport.rotation
+            ),
+            (zoom, offset, rotation),
+            "the view stays"
+        );
+        touch_frame(
+            &mut app,
+            &ctx,
+            vec![finger(1, End, a), finger(2, End, b)],
+            0.4,
+        );
+        // One undo step for the gesture, which takes it all back.
+        assert_eq!(undo_len(&app), steps + 1);
+        app.apply_history(false);
+        assert_eq!(app.active_figure().unwrap().camera, camera);
+    }
+
+    #[test]
+    fn a_tool_gesture_held_still_does_not_undo_and_one_finger_is_the_tools() {
+        let mut app = figure_app();
+        app.figure_edit("Orbit camera", |f| f.camera.orbit(0.3, 0.0));
+        app.figure_edit_done();
+        let steps = undo_len(&app);
+        let ctx = egui::Context::default();
+        let (a, b) = (egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0));
+        touch_frame(&mut app, &ctx, vec![], 0.0);
+        touch_frame(
+            &mut app,
+            &ctx,
+            vec![finger(1, Start, a), finger(2, Start, b)],
+            0.1,
+        );
+        touch_frame(&mut app, &ctx, vec![], 0.1 + super::HOLD_UNDO_DELAY * 3.0);
+        assert_eq!(undo_len(&app), steps, "held still: no undo");
+        touch_frame(
+            &mut app,
+            &ctx,
+            vec![finger(1, End, a), finger(2, End, b)],
+            2.0,
+        );
+        // One finger: its pointer events are the tool's (not a view pan).
+        let offset = app.viewport.offset;
+        touch_frame(&mut app, &ctx, vec![finger(3, Start, a)], 3.0);
+        touch_frame(
+            &mut app,
+            &ctx,
+            vec![finger(3, Move, a + egui::vec2(40.0, 0.0))],
+            3.1,
+        );
+        assert!(!app.viewport.touch.suppress_pointer);
+        assert_eq!(app.viewport.offset, offset);
+        touch_frame(&mut app, &ctx, vec![finger(3, End, a)], 3.2);
+        // With another tool the fingers are the view's again.
+        app.active_tool = crate::app::tools::Tool::Brush;
+        assert!(!super::tool_wants_multitouch(&app));
     }
 }

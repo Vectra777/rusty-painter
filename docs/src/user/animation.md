@@ -26,6 +26,11 @@ File → Import Animation brings in Spine (JSON with its atlas or loose pictures
 
 Puppet Warp on a rig layer pins a part and keys the bend at the frame showing, so a pose at frame 1 and another at frame 12 make the frames between (eased per key). Rig layers have onion skins.
 
+## 3D figures
+
+A 3D figure layer's poses are keyed at frames with **Key pose** and ease
+between keys; see [3D figures](figures.md#animating-poses).
+
 ## Video in
 
 File → Import Video as Frames brings a video (through ffmpeg), GIF, animated PNG or WebP in as an animated layer, a drawing a frame: the way in for Moho or Alight Motion work, through what they export.

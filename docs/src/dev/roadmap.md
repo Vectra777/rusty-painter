@@ -72,6 +72,16 @@ Known limits of what's in:
 - [ ] The tint's colour isn't keyed (only how far towards it).
 - [ ] Cached playback frames are at most 1600 pixels across and 1 GB in all.
 
+### 3D figures (C)
+
+Clip Studio's 3D drawing figures are in: posable mannequins, realistic CC0 humans and hands, imported glTF models and props, IK by dragging on the canvas with pins and joint limits, presets and a hand pad, body shapes, line art, hands and bodies posed from the camera or a photo (on-device models), pose keys eased on the timeline, the camera matched to a perspective assistant, and rasterising. Still missing or rough:
+
+- [ ] Poses recorded from Live capture as keys; the camera and the look keyed over time.
+- [ ] Clip Studio's 3D objects and backgrounds (rooms, furniture, a library of props), materials and textures on imported models, and shadows cast on the ground.
+- [ ] Lens shift: matching a two-point assistant whose centre of vision is far from the canvas's middle can't make the uprights parallel.
+- [ ] A figure in a folder, masked or clipped shows as its last render, made again on each change, rather than live.
+- [ ] Not yet tried on real hardware beyond a desktop: camera capture on an Android tablet (the emulator can't run the app), touch orbiting on a tablet, and posing speed on a mid-range tablet.
+
 ### Comics (C leads, I has most)
 
 - Panel borders that divide frames, speed-line and focus-line rulers, speech balloons, screentone layers (a Halftone filter exists), bleed and trim guides, multi-page projects.

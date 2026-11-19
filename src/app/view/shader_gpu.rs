@@ -37,6 +37,12 @@ pub enum ComposeStep {
         blend: LayerBlend,
         opacity: f32,
     },
+    /// Render a 3D figure layer's scene and blend it on.
+    Figure {
+        frame: Arc<crate::canvas::figure::RenderFrame>,
+        blend: LayerBlend,
+        opacity: f32,
+    },
 }
 
 /// This frame's live composite.
@@ -459,6 +465,8 @@ pub struct ShaderGpu {
     result: Option<wgpu::BindGroup>,
     /// Which accumulator holds it.
     result_index: usize,
+    /// 3D figure layers' renderer.
+    figures: super::figure_gpu::FigureGpu,
 }
 
 fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
@@ -710,7 +718,13 @@ impl ShaderGpu {
             targets: None,
             result: None,
             result_index: 0,
+            figures: super::figure_gpu::FigureGpu::new(device),
         }
+    }
+
+    /// The 3D figure layers' renderer (for baking them).
+    pub fn figures_mut(&mut self) -> &mut super::figure_gpu::FigureGpu {
+        &mut self.figures
     }
 
     /// The pipeline for `program` rendering to `format`, created if needed.
@@ -873,14 +887,29 @@ impl ShaderGpu {
             .iter()
             .filter_map(|s| match s {
                 ComposeStep::Shader { id, .. } => Some(*id),
-                ComposeStep::Run { .. } => None,
+                ComposeStep::Run { .. } | ComposeStep::Figure { .. } => None,
             })
             .collect();
         self.users.retain(|(id, _), _| showing.contains(id));
-        // Pipelines first: creating them needs `&mut self`.
+        let models: Vec<u64> = (plan.steps.iter())
+            .filter_map(|s| match s {
+                ComposeStep::Figure { frame, .. } => Some(frame),
+                _ => None,
+            })
+            .flat_map(|frame| frame.instances.iter().map(|i| i.model.uid))
+            .collect();
+        self.figures.retain_models(&models);
+        // Pipelines (and figures' meshes) first: making them needs `&mut
+        // self`.
         for step in &plan.steps {
-            if let ComposeStep::Shader { id, program, .. } = step {
-                self.user_pipeline(device, *id, program, format);
+            match step {
+                ComposeStep::Shader { id, program, .. } => {
+                    self.user_pipeline(device, *id, program, format);
+                }
+                ComposeStep::Figure { frame, .. } => {
+                    self.figures.prepare(device, frame, size, format);
+                }
+                ComposeStep::Run { .. } => {}
             }
         }
         let Some(targets) = self.targets.as_ref() else {
@@ -943,6 +972,24 @@ impl ShaderGpu {
                         pass.set_bind_group(0, &group, &[]);
                         pass.draw(0..3, 0..1);
                     }
+                    current = self.blend_on(device, encoder, plan, current, *blend, *opacity);
+                }
+                ComposeStep::Figure {
+                    frame,
+                    blend,
+                    opacity,
+                } => {
+                    let [w, h] = [plan.frame.resolution[0], plan.frame.resolution[1]];
+                    let to_u = &plan.frame.to_channel_x;
+                    let to_v = &plan.frame.to_channel_y;
+                    let map = super::figure_gpu::ndc_map(
+                        [to_u[0], to_u[1], to_u[2]],
+                        [to_v[0], to_v[1], to_v[2]],
+                        w,
+                        h,
+                    );
+                    self.figures
+                        .draw(device, encoder, frame, map, &targets.views[2], plan.gamma);
                     current = self.blend_on(device, encoder, plan, current, *blend, *opacity);
                 }
             }

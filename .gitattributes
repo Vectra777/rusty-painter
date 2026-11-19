@@ -1,2 +1,6 @@
 # The default brush pack: hundreds of MB, kept in Git LFS.
 assets/brush-pack/**/*.rpbrush filter=lfs diff=lfs merge=lfs -text
+# The realistic figures (assets/figure-pack): their models, in Git LFS too.
+assets/figure-pack/**/*.glb filter=lfs diff=lfs merge=lfs -text
+# The hand tracking models (assets/pose-models), in Git LFS too.
+assets/pose-models/**/*.onnx filter=lfs diff=lfs merge=lfs -text

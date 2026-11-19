@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "pose-models-v1",
+  "models": [
+    {
+      "file": "palm_detection.onnx",
+      "licence": "Apache-2.0",
+      "source": "MediaPipe's palm detector (google/mediapipe Hands, February 2023) as ONNX from OpenCV's model zoo: https://huggingface.co/opencv/palm_detection_mediapipe/resolve/main/palm_detection_mediapipe_2023feb.onnx",
+      "sha256": "78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c"
+    },
+    {
+      "file": "hand_landmark.onnx",
+      "licence": "Apache-2.0",
+      "source": "MediaPipe's hand landmark model (google/mediapipe Hands, February 2023) as ONNX from OpenCV's model zoo: https://huggingface.co/opencv/handpose_estimation_mediapipe/resolve/main/handpose_estimation_mediapipe_2023feb.onnx",
+      "sha256": "db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c"
+    },
+    {
+      "file": "pose_detection.onnx",
+      "licence": "Apache-2.0",
+      "source": "MediaPipe's pose detector (google/mediapipe Pose, BlazePose) as ONNX from OpenCV's model zoo (March 2023): https://huggingface.co/opencv/person_detection_mediapipe/resolve/main/person_detection_mediapipe_2023mar.onnx",
+      "sha256": "47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f"
+    },
+    {
+      "file": "pose_landmark.onnx",
+      "licence": "Apache-2.0",
+      "source": "MediaPipe's full-body pose landmark model (google/mediapipe Pose, BlazePose full) as ONNX from OpenCV's model zoo (March 2023): https://huggingface.co/opencv/pose_estimation_mediapipe/resolve/main/pose_estimation_mediapipe_2023mar.onnx",
+      "sha256": "9d89c599319a18fb7d2e28451a883476164543182bafca5f09eb2cf767ed2f3f"
+    }
+  ],
+  "content": "658b8e8e"
+}

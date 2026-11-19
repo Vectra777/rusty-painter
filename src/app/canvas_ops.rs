@@ -174,6 +174,7 @@ impl PainterApp {
         self.recreate_render_cache(width, height);
         // Shader state is per layer id, which the new document reuses.
         self.workspace.shaders.forget_document();
+        self.workspace.figure.forget_document();
         // 4. Selection and view.
         self.selection_manager.clear_selection();
         self.selection_manager.canvas_size = [width, height];

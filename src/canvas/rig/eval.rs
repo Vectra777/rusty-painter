@@ -66,6 +66,19 @@ impl<const N: usize> Lerp for [f32; N] {
     }
 }
 
+/// A turn: the shorter way round between the two (spherically, so it
+/// turns at an even rate).
+impl Lerp for glam::Quat {
+    fn lerp(&self, other: &Self, t: f32) -> Self {
+        let other = if self.dot(*other) < 0.0 {
+            -*other
+        } else {
+            *other
+        };
+        self.slerp(other, t).normalize()
+    }
+}
+
 impl Lerp for Vec<[f32; 2]> {
     fn lerp(&self, other: &Self, t: f32) -> Self {
         (0..self.len().max(other.len()))
@@ -399,6 +412,37 @@ mod tests {
         let eased = ease(Curve::Bezier([0.42, 0.0, 0.58, 1.0]), 0.25);
         assert!(eased < 0.2 && eased > 0.05, "{eased}");
         assert!((ease(Curve::Bezier([0.42, 0.0, 0.58, 1.0]), 0.5) - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn quaternion_keys_ease_the_shorter_way_round() {
+        use glam::Quat;
+        let a = Quat::from_rotation_y(0.0);
+        // 350° is -10°: halfway is -5°, not 175°.
+        let b = -Quat::from_rotation_y(350f32.to_radians());
+        let keys = vec![
+            Key {
+                time: 0.0,
+                value: a,
+                curve: Curve::Linear,
+            },
+            Key {
+                time: 10.0,
+                value: b,
+                curve: Curve::Bezier([0.42, 0.0, 0.58, 1.0]),
+            },
+        ];
+        let mid = sample(&keys, 5.0).unwrap();
+        assert!(mid.angle_between(Quat::from_rotation_y(-5f32.to_radians())) < 1e-4);
+        // Even turning: a quarter of the time, a quarter of the turn.
+        let quarter = sample(&keys, 2.5).unwrap();
+        assert!(quarter.angle_between(Quat::from_rotation_y(-2.5f32.to_radians())) < 1e-4);
+        assert!((sample(&keys, 20.0).unwrap().length() - 1.0).abs() < 1e-5);
+        // Eased by the first key's curve.
+        let mut eased = keys.clone();
+        eased[0].curve = Curve::Bezier([0.42, 0.0, 0.58, 1.0]);
+        let slow = sample(&eased, 2.5).unwrap().angle_between(a);
+        assert!(slow < 2.5f32.to_radians() * 0.8, "{slow}");
     }
 
     #[test]

@@ -1,12 +1,14 @@
 //! Showing the canvas: GPU atlases of composited tiles ([`gpu_canvas`]),
 //! which tiles to re-composite and upload each frame ([`render`]), and the
 //! canvas <-> screen mapping (zoom, pan, rotation, flip; [`viewport`]).
-//! Shader layers showing live are composited on the GPU ([`shader_gpu`]).
+//! Shader layers showing live are composited on the GPU ([`shader_gpu`]),
+//! 3D figure layers rendered into that composite ([`figure_gpu`]).
 //! Viewing aids over it: the grid, guide lines and snapping ([`aids`]);
 //! the canvas shown in grey or in values to judge it ([`check`]).
 pub(crate) mod aids;
 pub(crate) mod brush_cursor;
 pub(crate) mod check;
+pub(crate) mod figure_gpu;
 pub(crate) mod gpu_canvas;
 pub(crate) mod grid;
 pub(crate) mod guide_lines;

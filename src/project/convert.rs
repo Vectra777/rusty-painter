@@ -427,6 +427,12 @@ pub(super) struct StoredLayerMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     heights: Option<Vec<(i32, i32, Vec<u16>)>>,
     shader: Option<crate::canvas::shader::ShaderLayer>,
+    /// A 3D figure layer's scene, when the app's own models are all it
+    /// uses (a model brought in from a file isn't kept in history
+    /// entries: such a layer comes back from a file as its last pixels);
+    /// absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    figure: Option<crate::canvas::figure::FigureLayer>,
     position_locked: bool,
     #[serde(default)]
     draft: bool,
@@ -465,6 +471,9 @@ impl From<&LayerMeta> for StoredLayerMeta {
                     .collect()
             }),
             shader: meta.shader.as_deref().cloned(),
+            figure: (meta.figure.as_deref())
+                .filter(|f| f.is_self_contained())
+                .cloned(),
             position_locked: meta.position_locked,
             draft: meta.draft,
             reference: meta.reference,
@@ -503,6 +512,7 @@ impl StoredLayerMeta {
                 Box::new(map)
             }),
             shader: self.shader.map(Box::new),
+            figure: self.figure.map(Box::new),
             position_locked: self.position_locked,
             draft: self.draft,
             reference: self.reference,

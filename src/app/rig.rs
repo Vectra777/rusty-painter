@@ -159,6 +159,7 @@ impl PainterApp {
                 && l.rig.is_none()
                 && l.adjustment.is_none()
                 && l.shader.is_none()
+                && l.figure.is_none()
                 && l.anim.is_none()
                 && l.motion.is_none()
         });

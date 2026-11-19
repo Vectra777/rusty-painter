@@ -19,6 +19,8 @@ pub struct UiPrefs {
     /// Tools taken off the tool strip (their names, as the strip's
     /// `HIDEABLE` list has them).
     pub hidden_tools: Vec<String>,
+    /// Columns of the tool strip: 1, or 2 when pulled wider by its grip.
+    pub toolbar_columns: u8,
     /// The QuickMenu's six slots, clockwise from the top: keymap action
     /// ids (`Action::id`), `None` for an empty slot.
     pub quick_menu: [Option<String>; 6],
@@ -32,6 +34,7 @@ impl Default for UiPrefs {
             interface_size: 1.0,
             hints_seen: false,
             hidden_tools: Vec::new(),
+            toolbar_columns: 1,
             quick_menu: [
                 slot("undo"),
                 slot("redo"),

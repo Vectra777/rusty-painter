@@ -355,6 +355,7 @@ impl PainterApp {
         );
         let text = source.text.clone();
         let shader = source.shader.clone();
+        let figure = source.figure.clone();
         let vector = source.vector.clone();
         let (position_locked, draft, reference) =
             (source.position_locked, source.draft, source.reference);
@@ -376,6 +377,9 @@ impl PainterApp {
             layer.blend = blend;
             layer.text = text;
             layer.shader = shader;
+            // A figure's pixels come from its scene: no painting on it.
+            layer.locked |= figure.is_some();
+            layer.figure = figure;
             layer.vector = vector;
             layer.position_locked = position_locked;
             layer.draft = draft;

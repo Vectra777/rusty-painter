@@ -7,6 +7,7 @@ pub(crate) mod blend;
 pub(crate) mod bone;
 pub(crate) mod colorize;
 pub(crate) mod eyedropper;
+pub(crate) mod figure;
 pub(crate) mod fill;
 pub(crate) mod filter;
 pub(crate) mod gradient;
@@ -70,6 +71,8 @@ pub enum Tool {
     Bone,
     /// Bézier paths, as Photoshop's Pen: to select, fill or stroke.
     Pen,
+    /// Pose a 3D figure layer's figure and frame it with its camera.
+    Figure,
 }
 
 impl Tool {
@@ -95,6 +98,7 @@ impl Tool {
             Tool::Puppet => "Puppet Warp",
             Tool::Bone => "Bones",
             Tool::Pen => "Path",
+            Tool::Figure => "3D Figure",
         }
     }
 }

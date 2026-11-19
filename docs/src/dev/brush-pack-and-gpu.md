@@ -45,6 +45,71 @@ Streaks, Cloud, Blotch, Pattern, Plain), scale (Fine, Medium, Coarse) and
 tone (Light, Dark), such as "Paper Medium Dark 4". Identical grains share a
 name. The five built-in grains keep their names.
 
+## The figure pack
+
+The realistic 3D figures (male, female, child, left and right hand) are a
+second pack, `assets/figure-pack/v1`: a `.glb` per model (Git LFS, about
+3 MB in all), a `manifest.json` listing them (id, name, file, kind, licence,
+source) with `content`, the CRC-32 of the model files one after the other
+in the manifest's order (a test keeps it in step), and `LICENSE.md`.
+`src/canvas/figure/pack.rs` finds it as the brush pack is found: the data
+folder's `figures/v1` (Android unpacks the APK's `figures-v1/` there first
+when its manifest or a file's size changed), then `figures/v1` beside the
+program, then, in debug builds, the repository's. A checkout without LFS
+has only pointers there: the app then behaves as if the pack were missing
+(the mannequin alone), and the tests that need the models skip. Releases
+copy it beside the program (`release.yml`), into the APK
+(`build-android.sh`, `release.yml`), and `install.sh` into the data folder.
+
+The models are made, reproducibly, from MakeHuman's CC0 assets:
+`scripts/make_figure_pack.sh` clones MPFB 2 at a fixed commit, installs it
+into a throwaway Blender profile and runs `scripts/make_figure_pack.py` in
+Blender, which builds each figure from MakeHuman's macro sliders, rigs it
+with MPFB's `game_engine` skeleton (Unreal names, 53 joints with three in
+each finger), re-bases it from MakeHuman's rest pose to the T-pose the app
+assumes (arms level, palms down, fingers straight, the thumb as the
+mannequin holds it), makes the body-shape morph targets from the same
+sliders moved (build only, so the skeleton still fits), and writes the
+`.glb` files and the manifest. Each body is MakeHuman's base mesh as it is
+(about 13,500 vertices, 27,000 triangles, no decimation needed); picking
+one with the pointer takes about 0.2 ms on the CPU.
+
+## The hand and body tracking models
+
+The Hand Scanner's and Pose from Camera / Photo's models are a third pack,
+`assets/pose-models/v1`: MediaPipe's palm detector and hand landmark model
+(Apache-2.0, February 2023) and its BlazePose pose detector and full-body
+landmark model (Apache-2.0, March 2023), all as ONNX from OpenCV's model
+zoo (`palm_detection.onnx`, 3.7 MB, `hand_landmark.onnx`, 3.9 MB,
+`pose_detection.onnx`, 12 MB, `pose_landmark.onnx`, 5.3 MB; Git LFS), a
+`manifest.json` (file, licence,
+source URL and SHA-256 of each, and `content`, their CRC-32, kept in step
+by a test) and the Apache `LICENSE`. `src/pose_track/mod.rs` finds them as
+the figure pack is found (the data folder's `pose-models/v1`, Android's
+APK `pose-models-v1/` unpacked there first; `pose-models/v1` beside the
+program; the repository's in debug builds) and loads them with tract once,
+when the camera window (or a photo) first needs them. The releases ship them as they ship the
+figures. Without them the camera window says the models aren't installed,
+and the tests that run them skip.
+
+Body tracking (`src/pose_track/body.rs`) runs the detector on the whole
+picture (224 px, letterboxed), crops a square round the hips turned
+upright from its alignment points, and reads 33 landmarks (pixels, metres
+round the hips, visibility) from it at 256 px; the next frame's crop comes
+from the model's own alignment points, so the detector runs only when the
+body is lost. With hands asked for, each wrist's crop (from the wrist and
+knuckle landmarks) goes to the hand landmark model, then follows the hand
+frame to frame. `canvas::figure::retarget::retarget_body` turns the metric
+landmarks into canonical joint turns. On this desktop (release build, one
+thread) the detector takes about 22 ms and the landmarks 27 ms; each hand
+16 ms more.
+
+All of it (the models, `src/pose_track`, the camera in `src/capture`) is
+behind the cargo feature `pose-capture`, on by default. The desktop camera
+is nokhwa's (V4L2 on Linux, whose bindings need libclang to build; Media
+Foundation on Windows); Android's is `CameraFeed.java` (Camera2), and
+macOS and iOS have no camera yet.
+
 ## Organizing brushes
 
 The presets window uses a single scrollable column. A dropdown at the top

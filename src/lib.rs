@@ -17,8 +17,12 @@ mod app;
 pub mod bench_api;
 pub mod brush_engine;
 pub mod canvas;
+#[cfg(feature = "pose-capture")]
+mod capture;
 #[cfg(test)]
 mod fuzz;
+#[cfg(feature = "pose-capture")]
+mod pose_track;
 pub(crate) mod project;
 pub mod selection;
 #[cfg(not(target_os = "android"))]
@@ -171,14 +175,25 @@ pub fn android_main(app: AndroidApp) {
         log::error!("Back: {err}");
     }
     let options = android_native_options(app);
-    let _ = eframe::run_native(
-        APP_NAME,
-        options,
-        Box::new(|cc| {
-            ui::theme::apply_global_style(&cc.egui_ctx);
-            Ok(Box::new(PainterApp::new(cc)))
-        }),
-    );
+    // (Unwind-safe enough: nothing is used after a panic but the abort.)
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        eframe::run_native(
+            APP_NAME,
+            options,
+            Box::new(|cc| {
+                ui::theme::apply_global_style(&cc.egui_ctx);
+                Ok(Box::new(PainterApp::new(cc)))
+            }),
+        )
+    }));
+    if ran.is_err() {
+        // A panic here ended the event loop. Left to android-activity, the
+        // thread just ends, and the next pause (a picker opening, Home)
+        // waits on it forever: the app froze until Android killed it as
+        // not responding. End it now; the autosave is offered on the next
+        // start.
+        std::process::abort();
+    }
     // The activity ended and everything is saved: end the process too, so
     // opening the app again starts it fresh (android-activity can't start a
     // second activity in the same process).

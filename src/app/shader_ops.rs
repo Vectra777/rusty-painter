@@ -268,7 +268,9 @@ impl PainterApp {
             }
         }
         shaders.frame = shaders.frame.wrapping_add(1);
-        let has_layers = !layers.is_empty();
+        let has_figures =
+            (self.canvas.layers.iter()).any(|l| l.figure.is_some() && l.kind == LayerKind::Paint);
+        let has_layers = !layers.is_empty() || has_figures;
 
         let status = if shaders.gpu.is_none() {
             if !has_layers {
@@ -305,6 +307,7 @@ impl PainterApp {
             cache.texture_generation = cache.texture_generation.wrapping_add(1);
             self.mark_all_tiles_dirty();
         }
+        self.figure_tick(live.is_some());
         if live.is_none() && has_layers {
             self.bake_for_screen();
         } else if live.is_some() && !self.brush_state.is_drawing {
@@ -398,9 +401,10 @@ impl PainterApp {
         Some((program.hash, time.to_bits()))
     }
 
-    /// Bake every shader layer's current frame into its pixels (before
-    /// export, saving and merging).
+    /// Bake every shader layer's current frame, and every 3D figure layer's
+    /// scene, into its pixels (before export, saving and merging).
     pub(crate) fn bake_shader_layers(&mut self) {
+        self.bake_figure_layers();
         let indices: Vec<usize> = (0..self.canvas.layers.len())
             .filter(|&i| self.is_shader_layer(i))
             .collect();
@@ -473,22 +477,16 @@ impl PainterApp {
                 &below.pixels,
             )?
         };
-        let ts = self.canvas.tile_size();
-        for ty in 0..h.div_ceil(ts) {
-            for tx in 0..w.div_ceil(ts) {
-                let mut data = vec![egui::Color32::TRANSPARENT; ts * ts];
-                for row in 0..ts.min(h - ty * ts) {
-                    let src = (ty * ts + row) * w + tx * ts;
-                    let n = ts.min(w - tx * ts);
-                    data[row * ts..row * ts + n].copy_from_slice(&pixels[src..src + n]);
-                }
-                self.canvas
-                    .set_layer_tile_data(idx, tx as i32, ty as i32, data);
-            }
-        }
+        self.write_layer_pixels(idx, &pixels);
         self.workspace.shaders.baked.insert(id, key);
-        self.layer_state.thumbnails_dirty = true;
         Ok(())
+    }
+
+    /// Set layer `idx`'s pixels to `pixels` (the whole canvas, row by row,
+    /// as baked by the GPU), tile by tile.
+    pub(crate) fn write_layer_pixels(&mut self, idx: usize, pixels: &[egui::Color32]) {
+        write_canvas_pixels(&self.canvas, idx, pixels, false);
+        self.layer_state.thumbnails_dirty = true;
     }
 
     /// This frame's live composite, for the canvas paint callback.
@@ -517,6 +515,11 @@ impl PainterApp {
                         opacity: *opacity,
                     })
                 }
+                shader::LiveStep::Figure { id, blend, opacity } => Some(ComposeStep::Figure {
+                    frame: Arc::new(self.figure_render_frame(*id)?),
+                    blend: *blend,
+                    opacity: *opacity,
+                }),
             })
             .collect()
     }
@@ -529,6 +532,36 @@ impl PainterApp {
             mouse: self.workspace.shaders.mouse_uniform(h),
             date: date_uniform(),
             ..Default::default()
+        }
+    }
+}
+
+/// Write a whole canvas's `pixels` (row by row) into layer `idx`'s tiles;
+/// `fresh` makes new tiles rather than writing into the old ones (which a
+/// canvas made by `Canvas::shared_copy` shares with the document).
+pub(crate) fn write_canvas_pixels(
+    canvas: &crate::canvas::Canvas,
+    idx: usize,
+    pixels: &[egui::Color32],
+    fresh: bool,
+) {
+    let (w, h) = (canvas.width(), canvas.height());
+    if pixels.len() != w * h {
+        return;
+    }
+    let ts = canvas.tile_size();
+    for ty in 0..h.div_ceil(ts) {
+        for tx in 0..w.div_ceil(ts) {
+            let mut data = vec![egui::Color32::TRANSPARENT; ts * ts];
+            for row in 0..ts.min(h - ty * ts) {
+                let src = (ty * ts + row) * w + tx * ts;
+                let n = ts.min(w - tx * ts);
+                data[row * ts..row * ts + n].copy_from_slice(&pixels[src..src + n]);
+            }
+            if fresh {
+                canvas.clear_layer_tile(idx, tx as i32, ty as i32);
+            }
+            canvas.set_layer_tile_data(idx, tx as i32, ty as i32, data);
         }
     }
 }

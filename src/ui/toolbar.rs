@@ -10,19 +10,22 @@ use crate::ui::widgets::{icon_button, paint_swatch};
 use eframe::egui::{self, Sense, Stroke};
 
 /// Smallest a tool button shrinks to on short screens before the strip
-/// takes another column (and, past three, scrolls).
-const MIN_TOOL_BUTTON: f32 = 28.0;
-const MIN_TOOL_BUTTON_TOUCH: f32 = MIN_TOUCH_TARGET;
+/// scrolls, and how much bigger than usual it grows on tall ones.
+const MIN_TOOL_BUTTON: f32 = 26.0;
+const MAX_GROWTH: f32 = 1.25;
+/// Width of the grip on the strip's right edge that pulls it to two
+/// columns and back.
+const GRIP_WIDTH: f32 = 10.0;
 const SEPARATOR_HEIGHT: f32 = 9.0;
 const ITEM_SPACING: f32 = 2.0;
 const MARGIN_Y: f32 = 6.0;
 /// The tool buttons (`tool_buttons`), all shown.
-const TOOLS: usize = 13;
+const TOOLS: usize = 14;
 
 /// Buttons on the strip that touch mode can leave off (Settings → Touch
 /// & pen): `(id kept in the settings, name shown)`. The brush and eraser
 /// always stay.
-pub(crate) const HIDEABLE: [(&str, &str); 11] = [
+pub(crate) const HIDEABLE: [(&str, &str); 12] = [
     ("blend", "Smudge / Blur"),
     ("select", "Selection"),
     ("transform", "Transform / Animate"),
@@ -32,6 +35,7 @@ pub(crate) const HIDEABLE: [(&str, &str); 11] = [
     ("text", "Text"),
     ("shapes", "Shapes"),
     ("warp", "Pen / Liquify / Puppet"),
+    ("figure", "3D Figure"),
     ("palette", "Palette"),
     ("mirror", "Mirror painting"),
 ];
@@ -58,35 +62,34 @@ fn on_strip(app: &PainterApp, touch: bool, id: &str) -> bool {
     !touch || !app.workspace.ui.hidden_tools.iter().any(|h| h == id)
 }
 
-/// Columns and button side that fit `tools` tool buttons (plus the brush
-/// settings button, the presets one on the desktop, and the colors) in
-/// `height`, if any: one column while it can, more on a short screen (a
-/// phone held sideways) rather than tools out of reach.
-fn fitting_layout(height: f32, touch: bool, preferred: f32, tools: usize) -> Option<(usize, f32)> {
+/// Button side that fits `tools` tool buttons (plus the brush settings
+/// button, the presets one on the desktop, and the colors) in `height` in
+/// `cols` columns (1 or 2): the usual `preferred` size grown or shrunk to
+/// fill the height, within [`MIN_TOOL_BUTTON`] and [`MAX_GROWTH`]×.
+/// `None` when even the smallest don't fit.
+fn fitting_size(
+    height: f32,
+    touch: bool,
+    preferred: f32,
+    tools: usize,
+    cols: usize,
+) -> Option<f32> {
     let buttons = tools as f32 + if touch { 1.0 } else { 2.0 };
-    let min = if touch {
-        MIN_TOOL_BUTTON_TOUCH
-    } else {
-        MIN_TOOL_BUTTON
-    };
     // The color pair is about 1.22 buttons tall.
-    let one = {
+    let size = if cols == 1 {
         let separators = 3.0;
         let fixed = 2.0 * MARGIN_Y
             + separators * SEPARATOR_HEIGHT
             + (buttons + separators + 1.0) * ITEM_SPACING;
-        ((height - fixed) / (buttons + 1.22)).floor().min(preferred)
-    };
-    if one >= min {
-        return Some((1, one));
-    }
-    // Several columns: no separators, the settings buttons in the grid.
-    (2..=3).find_map(|cols| {
+        (height - fixed) / (buttons + 1.22)
+    } else {
+        // No separators, the settings buttons in the grid.
         let rows = (buttons / cols as f32).ceil();
         let fixed = 2.0 * MARGIN_Y + (rows + 1.0) * ITEM_SPACING;
-        let size = ((height - fixed) / (rows + 1.22)).floor().min(preferred);
-        (size >= min).then_some((cols, size))
-    })
+        (height - fixed) / (rows + 1.22)
+    };
+    let size = size.floor().min((preferred * MAX_GROWTH).floor());
+    (size >= MIN_TOOL_BUTTON).then_some(size)
 }
 
 pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
@@ -103,22 +106,26 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
             .iter()
             .filter(|(id, _)| !on_strip(app, m.touch, id))
             .count();
-    let fitting = fitting_layout(ctx.available_rect().height(), m.touch, m.tool_button, tools);
-    // Too short even for the smallest buttons: keep them usable and scroll.
-    let (cols, size) = fitting.unwrap_or((
-        1,
-        if m.touch {
-            MIN_TOOL_BUTTON_TOUCH
-        } else {
-            MIN_TOOL_BUTTON
-        },
-    ));
+    let height = ctx.available_rect().height();
+    let cols = app.workspace.ui.toolbar_columns.clamp(1, 2) as usize;
+    let fitting = fitting_size(height, m.touch, m.tool_button, tools, cols);
+    // Two columns too short even for the smallest buttons: one, scrolling.
+    let (cols, size) = match fitting {
+        Some(size) => (cols, size),
+        None => (1, MIN_TOOL_BUTTON),
+    };
     let mut anchors = Anchors::default();
     let grid = cols as f32 * size + (cols - 1) as f32 * ITEM_SPACING;
-    let width = grid + m.toolbar_width - m.tool_button;
+    // The grip takes the right margin.
+    let width = grid + 5.0 + GRIP_WIDTH;
     let frame = egui::Frame::none()
         .fill(BG_PANEL)
-        .inner_margin(egui::Margin::symmetric(5.0, MARGIN_Y));
+        .inner_margin(egui::Margin {
+            left: 5.0,
+            right: GRIP_WIDTH,
+            top: MARGIN_Y,
+            bottom: MARGIN_Y,
+        });
     let area = ctx.available_rect();
     let overlay = m.touch && app.workspace.autohide_panels;
     let shown = if overlay {
@@ -130,6 +137,7 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
     };
     let (offset, _) = crate::app::layout::left_slide(app, ctx, width);
     let mut strip = |ui: &mut egui::Ui| {
+        grip(app, ui, size, cols);
         ui.spacing_mut().item_spacing = egui::vec2(0.0, ITEM_SPACING);
         if cols > 1 {
             // Rows of tools, wrapping (separators drop out of a wrapping
@@ -202,7 +210,7 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
             .show(ctx, |ui| {
                 ui.set_opacity(shown);
                 frame.show(ui, |ui| {
-                    ui.set_width(width - 10.0);
+                    ui.set_width(width - frame.inner_margin.sum().x);
                     ui.set_height(area.height() - 2.0 * MARGIN_Y);
                     strip(ui);
                 });
@@ -227,6 +235,52 @@ pub fn toolbar(app: &mut PainterApp, ctx: &egui::Context) {
         crate::ui::shape_menu::show(app, ctx, anchor);
     }
     crate::ui::quick_menu::show(app, ctx);
+}
+
+/// The grip along the strip's right edge: dragged right, the strip takes
+/// a second column; dragged left, it goes back to one (a click toggles).
+fn grip(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, cols: usize) {
+    let inner = ui.max_rect();
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(inner.right(), inner.top() - MARGIN_Y),
+        egui::pos2(inner.right() + GRIP_WIDTH, inner.bottom() + MARGIN_Y),
+    );
+    let id = ui.id().with("toolbar_grip");
+    let response = ui.interact(rect, id, Sense::click_and_drag());
+    let pulled = id.with("pulled");
+    let mut dx = ui.data(|d| d.get_temp::<f32>(pulled)).unwrap_or(0.0);
+    dx += response.drag_delta().x;
+    // Half a button's pull switches, so the strip follows the finger.
+    let want = if dx > size / 2.0 {
+        Some(2)
+    } else if dx < -size / 2.0 {
+        Some(1)
+    } else if response.clicked() {
+        Some(3 - cols as u8)
+    } else {
+        None
+    };
+    if let Some(want) = want {
+        if want as usize != cols {
+            app.workspace.ui.toolbar_columns = want;
+        }
+        dx = 0.0;
+    }
+    if !response.dragged() {
+        dx = 0.0;
+    }
+    ui.data_mut(|d| d.insert_temp(pulled, dx));
+    let active = response.hovered() || response.dragged();
+    let pill = egui::Rect::from_center_size(rect.center(), egui::vec2(4.0, 40.0));
+    ui.painter()
+        .rect_filled(pill, 2.0, if active { TEXT_STRONG } else { TEXT_DIM });
+    response
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+        .on_hover_text(if cols == 1 {
+            "Drag right for two columns of tools"
+        } else {
+            "Drag left for one column of tools"
+        });
 }
 
 /// Width of the band along the left edge that catches presses while the
@@ -513,6 +567,18 @@ fn tool_buttons(app: &mut PainterApp, ui: &mut egui::Ui, size: f32, touch: bool)
             None => {}
         }
     }
+    if on_strip(app, touch, "figure") {
+        let figure_active = matches!(app.active_tool, Tool::Figure);
+        if tool_button(
+            ui,
+            app,
+            Icon::Figure,
+            figure_active,
+            "3D Figure (Shift+Y): pose a 3D figure layer and frame it",
+        ) {
+            app.active_tool = Tool::Figure;
+        }
+    }
     separator(ui, size);
     if on_strip(app, touch, "palette") {
         let palette_open = app.workspace.palette.open;
@@ -796,6 +862,20 @@ fn color_pair(app: &mut PainterApp, ui: &mut egui::Ui, width: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_buttons_fit_the_height() {
+        // Tall: one column grows, but no more than MAX_GROWTH.
+        assert_eq!(fitting_size(3000.0, true, 48.0, TOOLS, 1), Some(60.0));
+        // Shorter: one column shrinks below the usual size rather than
+        // taking a second column.
+        let one = fitting_size(800.0, true, 48.0, TOOLS, 1).unwrap();
+        assert!((MIN_TOOL_BUTTON..48.0).contains(&one), "{one}");
+        // Two columns fit bigger buttons in the same height.
+        assert!(fitting_size(800.0, true, 48.0, TOOLS, 2).unwrap() > one);
+        // Too short for even the smallest: None (the strip scrolls).
+        assert_eq!(fitting_size(300.0, true, 48.0, TOOLS, 1), None);
+    }
 
     fn button(at: egui::Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton {

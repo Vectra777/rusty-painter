@@ -884,6 +884,161 @@ fn strokes_wandering_off_canvas_never_panic_the_worker() {
 }
 
 #[test]
+fn project_round_trips_figure_layers() {
+    use crate::canvas::figure::{EmbeddedModel, FigureInstance, FigureLayer, ModelRef};
+    use std::sync::Arc;
+    let mut canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
+    let mut figure = FigureLayer::mannequin();
+    figure.scene[0].set_joint_pose(4, glam::Quat::from_rotation_x(0.7));
+    figure.camera.orbit(0.5, 0.1);
+    figure.style = crate::canvas::figure::RenderStyle::Toon;
+    // Pose keys, eased.
+    figure.key_pose(0);
+    figure.scene[0].set_joint_pose(4, glam::Quat::from_rotation_x(-0.3));
+    figure.key_pose(12);
+    figure.set_key_curve(0, crate::canvas::rig::Curve::Stepped);
+    // A model brought in from a file, standing twice: kept once.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/figure-tiny.gltf");
+    let file = std::fs::read(path).unwrap();
+    let model = ModelRef::Embedded(Arc::new(EmbeddedModel::new("tiny", file.clone())));
+    figure.scene.push(FigureInstance::new(model.clone()));
+    figure.scene.push(FigureInstance::new(model));
+    canvas.layers[1].figure = Some(Box::new(figure.clone()));
+    let encoded = encode_project(&test_app(canvas, vec![History::new(), History::new()])).unwrap();
+    let loaded = decode_project(&encoded).unwrap();
+    let back = loaded.canvas.layers[1].figure.as_deref().unwrap();
+    assert_eq!(back, &figure);
+    assert_eq!(back.key_frames(), vec![0, 12]);
+    assert_eq!(loaded.canvas.layers[0].figure, None);
+    let (ModelRef::Embedded(a), ModelRef::Embedded(b)) =
+        (&back.scene[1].model, &back.scene[2].model)
+    else {
+        panic!("embedded models");
+    };
+    assert!(Arc::ptr_eq(a, b), "one model, shared again");
+    assert_eq!(a.data, file);
+    assert_eq!(back.scene[1].model.resolve().unwrap().skeleton.len(), 3);
+}
+
+#[test]
+fn project_saves_a_realistic_figure_by_its_id() {
+    use crate::canvas::figure::presets::BODY_PRESETS;
+    use crate::canvas::figure::{FigureInstance, FigureLayer, ModelRef, pack};
+    if pack::installed().is_none() {
+        eprintln!("the figure pack's models aren't pulled from Git LFS; skipping");
+        return;
+    }
+    let model_ref = ModelRef::Bundled("female".into());
+    let model = model_ref.resolve().unwrap();
+    let mut figure = FigureLayer::mannequin();
+    let mut female = FigureInstance::new(model_ref);
+    let sitting = BODY_PRESETS.iter().find(|p| p.name == "Sitting").unwrap();
+    sitting
+        .pose()
+        .apply(&model.skeleton, &mut female.pose, |_| true, true);
+    female.morphs = vec![0.0, 0.5];
+    female.position = [0.8, 0.0, 0.0];
+    figure.scene.push(female);
+    let mut canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
+    canvas.layers[1].figure = Some(Box::new(figure.clone()));
+    let encoded = encode_project(&test_app(canvas, vec![History::new(), History::new()])).unwrap();
+    // By its id: the model (a megabyte) isn't in the file.
+    assert!(encoded.len() < 300_000, "{}", encoded.len());
+    let loaded = decode_project(&encoded).unwrap();
+    let back = loaded.canvas.layers[1].figure.as_deref().unwrap();
+    assert_eq!(back, &figure);
+    assert_eq!(back.scene[1].model.name(), "Female");
+}
+
+#[test]
+fn a_realistic_figure_opened_without_the_pack_is_the_mannequin_in_its_pose() {
+    use crate::canvas::figure::presets::BODY_PRESETS;
+    use crate::canvas::figure::skeleton::{HumanJoint, Side};
+    use crate::canvas::figure::{FigureInstance, FigureLayer, ModelRef, mannequin, pack};
+    // A model the pack doesn't have, saved without a pose: standing.
+    let mut figure = FigureLayer::mannequin();
+    let mut gone = FigureInstance::new(ModelRef::Bundled("giant".into()));
+    gone.position = [1.0, 0.0, 0.0];
+    gone.morphs = vec![1.0];
+    gone.pinned = vec![3];
+    figure.scene.push(gone);
+    let mut blobs = Vec::new();
+    let stored = StoredFigure::from_figure(&figure, &mut blobs).unwrap();
+    let back = stored.into_figure(&blobs).unwrap();
+    assert_eq!(
+        back.scene[0], figure.scene[0],
+        "the mannequin stays as it was"
+    );
+    let fallen = &back.scene[1];
+    assert_eq!(fallen.model, ModelRef::mannequin());
+    assert_eq!(fallen.pose, mannequin::standing_pose());
+    assert_eq!(fallen.position, [1.0, 0.0, 0.0]);
+    assert!(fallen.morphs.is_empty() && fallen.pinned.is_empty());
+
+    // One of the pack's, saved where it was installed and opened where
+    // it isn't: posed as it was.
+    if pack::installed().is_none() {
+        eprintln!("the figure pack's models aren't pulled from Git LFS; skipping the rest");
+        return;
+    }
+    let model_ref = ModelRef::Bundled("male".into());
+    let model = model_ref.resolve().unwrap();
+    let mut male = FigureInstance::new(model_ref);
+    let reaching = BODY_PRESETS.iter().find(|p| p.name == "Reaching").unwrap();
+    reaching
+        .pose()
+        .apply(&model.skeleton, &mut male.pose, |_| true, true);
+    let figure = FigureLayer {
+        scene: vec![male.clone()],
+        ..FigureLayer::mannequin()
+    };
+    let mut blobs = Vec::new();
+    let mut stored = StoredFigure::from_figure(&figure, &mut blobs).unwrap();
+    stored.figure.scene[0].model = ModelRef::Bundled("male-from-a-newer-pack".into());
+    let back = stored.into_figure(&blobs).unwrap();
+    let fallen = &back.scene[0];
+    assert_eq!(fallen.model, ModelRef::mannequin());
+    let want = male.human_pose().unwrap();
+    let got = fallen.human_pose().unwrap();
+    for side in [Side::Left, Side::Right] {
+        for h in [HumanJoint::UpperArm(side), HumanJoint::LowerArm(side)] {
+            let (a, b) = (want.get(h), got.get(h));
+            let same = match (a, b) {
+                (Some(a), Some(b)) => a.dot(b).abs() > 0.999,
+                (None, None) => true,
+                _ => false,
+            };
+            assert!(same, "{h:?}: {a:?} vs {b:?}");
+        }
+    }
+}
+
+#[test]
+fn a_removed_figure_layer_comes_back_from_a_saved_history() {
+    use crate::canvas::figure::FigureLayer;
+    let canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);
+    let mut app = test_app(canvas, vec![History::new(), History::new()]);
+    let idx = app.add_figure_layer().unwrap();
+    let mut figure = FigureLayer::mannequin();
+    figure.camera.dolly(0.5);
+    app.canvas_mut().layers[idx].figure = Some(Box::new(figure.clone()));
+    app.remove_layer(idx);
+    assert!(app.canvas.layers.iter().all(|l| l.figure.is_none()));
+    let mut loaded = decode_project(&encode_project(&app).unwrap()).unwrap();
+    let mut selection = crate::selection::SelectionManager::new();
+    let mut tool = crate::app::tools::Tool::Brush;
+    loaded
+        .history
+        .undo(&mut loaded.canvas, &mut selection, &mut tool);
+    let back = loaded
+        .canvas
+        .layers
+        .iter()
+        .find_map(|l| l.figure.as_deref());
+    assert_eq!(back, Some(&figure));
+}
+
+#[test]
 fn project_round_trips_shader_layers() {
     use crate::canvas::shader::ShaderLayer;
     let mut canvas = Canvas::new(TILE_SIZE, TILE_SIZE, Color32::WHITE, TILE_SIZE);

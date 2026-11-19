@@ -32,6 +32,8 @@ pub enum Action {
     Liquify,
     PuppetWarp,
     BoneTool,
+    FigureTool,
+    HandScanner,
     Blend,
     // Brush & colour
     SmallerBrush,
@@ -322,6 +324,20 @@ pub const ACTIONS: &[ActionInfo] = &[
         "Bones (draw and pose a rig's bones)",
         "Tools",
         &[b!(NONE, Y)],
+    ),
+    info(
+        Action::FigureTool,
+        "figure_tool",
+        "3D Figure (pose and frame a 3D figure layer)",
+        "Tools",
+        &[b!(SHIFT, Y)],
+    ),
+    info(
+        Action::HandScanner,
+        "hand_scanner",
+        "Hand Scanner (pose a figure's hand from the camera)",
+        "Tools",
+        &[],
     ),
     info(
         Action::Blend,

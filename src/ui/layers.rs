@@ -297,8 +297,11 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
     let mut edit_text: Option<usize> = None;
     let mut edit_shader: Option<LayerId> = None;
     let mut add_shader = false;
+    let mut add_figure = false;
+    let mut pose_figure = false;
     let mut rasterise_text: Option<usize> = None;
     let mut rasterise_vector: Option<usize> = None;
+    let mut rasterise_figure: Option<usize> = None;
     let mut line_width: Option<usize> = None;
     let mut active_idx = app.canvas.active_layer_idx;
     let mut needs_refresh = false;
@@ -398,6 +401,16 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 .clicked()
             {
                 add_shader = true;
+            }
+            if ui
+                .add_sized(
+                    [m.header_button, m.header_button],
+                    egui::Button::new(RichText::new("3D").strong()).frame(false),
+                )
+                .on_hover_text("New 3D figure layer: a posable mannequin to draw over")
+                .clicked()
+            {
+                add_figure = true;
             }
             if icon_button(ui, Icon::Folder, m.header_button, false, "New folder").clicked() {
                 add_folder = true;
@@ -558,6 +571,7 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                 let is_text = current.text.is_some();
                 let is_vector = current.vector.is_some();
                 let is_shader = current.shader.is_some();
+                let is_figure = current.figure.is_some();
                 let (id, kind, parent, expanded, blend) = (
                     current.id,
                     current.kind,
@@ -719,6 +733,10 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                                 ui.label(RichText::new("fx").strong().color(accent()))
                                     .on_hover_text("Shader layer: double-click to edit its shader");
                             }
+                            if is_figure {
+                                ui.label(RichText::new("3D").strong().color(accent()))
+                                    .on_hover_text("3D figure layer: double-click to pose it");
+                            }
                             ui.add(egui::Label::new(text).truncate());
                             if blend != LayerBlend::Normal {
                                 ui.label(RichText::new(blend.label()).small().color(accent()));
@@ -803,6 +821,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                         app.workspace.filter.fill_editing = Some(id);
                     } else if is_shader {
                         edit_shader = Some(id);
+                    } else if is_figure {
+                        pose_figure = true;
                     } else if is_text {
                         edit_text = Some(i);
                     } else {
@@ -909,6 +929,15 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
                     }
                     if is_vector && ui.button("Rasterise vector layer").clicked() {
                         rasterise_vector = Some(i);
+                        ui.close_menu();
+                    }
+                    if is_figure
+                        && ui
+                            .button("Rasterise 3D figure")
+                            .on_hover_text("A plain pixel layer of the figures as they show now")
+                            .clicked()
+                    {
+                        rasterise_figure = Some(i);
                         ui.close_menu();
                     }
                     if is_picked {
@@ -1119,6 +1148,8 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         || add_folder
         || add_mask
         || add_shader
+        || add_figure
+        || pose_figure
         || group_picked
         || merge_picked
         || merge_down.is_some()
@@ -1307,12 +1338,22 @@ pub fn layers_panel(ctx: &egui::Context, ui: &mut egui::Ui, app: &mut PainterApp
         let (name, source) = crate::canvas::shader::TEMPLATES[0];
         app.add_shader_layer(name, source);
     }
+    if add_figure {
+        app.add_figure_layer();
+    }
+    if pose_figure {
+        app.active_tool = crate::app::tools::Tool::Figure;
+    }
     if let Some(idx) = rasterise_text {
         app.rasterise_text_layer(idx);
         needs_refresh = true;
     }
     if let Some(idx) = rasterise_vector {
         app.rasterise_vector_layer(idx);
+        needs_refresh = true;
+    }
+    if let Some(idx) = rasterise_figure {
+        app.rasterise_figure_layer(idx);
         needs_refresh = true;
     }
     if let Some(idx) = line_width {

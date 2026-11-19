@@ -45,6 +45,7 @@ fn options_row(app: &mut PainterApp, ui: &mut egui::Ui) {
         Tool::Shape(kind) => shape_options(app, ui, kind),
         Tool::Gradient => gradient_options(app, ui, true),
         Tool::Pen => pen_options(app, ui),
+        Tool::Figure => crate::ui::figure_panel::figure_options(app, ui),
         Tool::VectorEdit => {
             use crate::app::tools::vector_correct::CorrectMode;
             tool_title(ui, "Edit Vectors");

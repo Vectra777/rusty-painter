@@ -228,6 +228,7 @@ fn handle_pen_drag(
         }
         Tool::Animate => app.animate_drag(raw, ctx.input(|i| i.modifiers.shift)),
         Tool::Pen => app.pen_drag(raw, pen_keys(ctx)),
+        Tool::Figure => app.figure_drag(raw),
     }
 }
 
@@ -408,6 +409,10 @@ fn handle_mouse_button(
             app.viewport.is_panning = pressed && response.hovered();
             app.radial_right_button(pos, pressed, response.hovered());
         }
+        // With the Figure tool over a figure layer, the middle button
+        // orbits its camera instead.
+        egui::PointerButton::Middle
+            if (response.hovered() || !pressed) && app.figure_middle(raw, pressed) => {}
         egui::PointerButton::Middle => {
             app.viewport.is_rotating = pressed && response.hovered();
         }
@@ -472,6 +477,7 @@ fn handle_primary_press(
             | Tool::Text
             | Tool::VectorEdit
             | Tool::Animate
+            | Tool::Figure
     );
     if app.viewport.is_panning || !over {
         return;
@@ -555,6 +561,14 @@ fn handle_primary_press(
         }
         Tool::Animate => app.animate_press(raw, response.ctx.input(|i| i.modifiers.alt)),
         Tool::Pen => app.pen_press(raw, pen_keys(&response.ctx)),
+        Tool::Figure => {
+            let m = response.ctx.input(|i| i.modifiers);
+            let mods = crate::app::tools::figure::FigureMods {
+                shift: m.shift,
+                alt: m.alt,
+            };
+            app.figure_press(raw, mods);
+        }
     }
 }
 
@@ -582,6 +596,7 @@ fn handle_primary_release(app: &mut PainterApp) {
         Tool::VectorEdit => app.line_edit_release(),
         Tool::Animate => app.animate_release(),
         Tool::Pen => app.pen_release(),
+        Tool::Figure => app.figure_release(),
     }
 }
 
@@ -684,6 +699,16 @@ fn handle_pointer_move(
                 app.line_edit_drag(raw);
                 ctx.request_repaint();
             }
+        } else if matches!(app.active_tool, Tool::Figure) {
+            // Orbits and turns go on past the canvas's edge.
+            let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
+            if app.figure_dragging() {
+                app.figure_drag(raw);
+                ctx.request_repaint();
+            } else if !app.viewport.is_primary_down && app.figure_hover(raw) {
+                // The part under the pointer lights up.
+                ctx.request_repaint();
+            }
         } else if matches!(app.active_tool, Tool::Animate) {
             if app.viewport.is_primary_down {
                 let raw = app.screen_to_canvas_raw(pos, placement.origin, placement.center);
@@ -775,7 +800,8 @@ fn handle_tool_move(
         | Tool::Text
         | Tool::VectorEdit
         | Tool::Animate
-        | Tool::Pen => {}
+        | Tool::Pen
+        | Tool::Figure => {}
     }
 }
 
@@ -822,6 +848,11 @@ fn handle_mouse_wheel(
             egui::MouseWheelUnit::Line => delta.y,
             egui::MouseWheelUnit::Page => delta.y * 10.0,
         };
+        // The Figure tool moves its camera (Ctrl+wheel zooms the view).
+        if !ctx.input(|i| i.modifiers.command) && app.figure_wheel(scroll) {
+            ctx.request_repaint();
+            return;
+        }
         let factor = (1.0 - scroll * 0.1).clamp(0.5, 2.0);
         let anchor = ctx
             .input(|i| i.pointer.hover_pos())
